@@ -722,8 +722,10 @@ export async function testHttpEndpoints(): Promise<TestResult> {
           assert(key in world, `falta ${key} en /api/world`);
         }
         assert(JSON.stringify(world).length > 5_000, 'el mundo debería tener contenido');
+        // /api/* desconocido sigue siendo 404: ahí no hay consola que servir,
+        // y devolver el index para una llamada de API escondería el error.
         const missing = await fetch(`http://127.0.0.1:${hub.port}/api/nope`);
-        assert(missing.status === 404, 'ruta desconocida devuelve 404');
+        assert(missing.status === 404, 'ruta de api desconocida devuelve 404');
         return ok(name, `world de ${(JSON.stringify(world).length / 1024).toFixed(0)} KB, health completo`);
       } finally { fleet.stop(); }
     });

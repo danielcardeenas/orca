@@ -216,6 +216,12 @@ const MIME: Record<string, string> = {
 
 function serveStatic(pathname: string, res: ServerResponse): boolean {
   if (!DIST_DIR) return false;
+  /*
+   * /api es de la API, siempre. Devolver el index para una llamada de API que
+   * no existe convierte un error de cliente —una ruta mal escrita, un cliente
+   * viejo— en un misterio: el fetch recibe 200 y un HTML donde esperaba JSON.
+   */
+  if (pathname === '/api' || pathname.startsWith('/api/')) return false;
 
   // Normaliza y confina: `..` en la url no puede salir de dist/, pase lo que
   // pase con la codificación.

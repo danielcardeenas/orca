@@ -64,7 +64,21 @@ export interface WorldHooks {
 
 /** Ids peligrosos para un `Record<string, T>` plano. */
 const BAD_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
-const ID_RE = /^[\w.:@/+-]{1,200}$/;
+
+/**
+ * Charset de ids.
+ *
+ * El `#` está aquí porque el collector nombra a los subagentes
+ * `<sesión>#<agente>`. Sin él, TODO subagente se rechazaba en silencio y el
+ * grafo de linaje —ver qué agente lanzó a cuál, que es media razón de existir
+ * de la consola— nunca llegaba a la pantalla. Fallaba callado porque el aviso
+ * no incluía el id, así que no había forma de saber qué se estaba perdiendo.
+ *
+ * Ni `protocol.ts` ni `types.ts` fijan este charset; hasta que lo hagan, esta
+ * lista es el contrato de facto y ampliarla es más barato que renombrar ids en
+ * el productor.
+ */
+const ID_RE = /^[\w.:@/+#-]{1,200}$/;
 
 export function validId(v: unknown): v is string {
   return typeof v === 'string' && ID_RE.test(v) && !BAD_KEYS.has(v);
@@ -555,7 +569,15 @@ export class World {
     } catch (err) {
       this.stats.framesRejected += 1;
       // Un frame malo es un hecho de seguridad, no una excepción del hub.
-      this.log('frame rechazado', frame?.t, err instanceof Error ? err.message : err);
+      // Con el id delante: un rechazo sin él es un fallo indepurable, que es
+      // exactamente cómo se perdieron los subagentes durante días.
+      const culprit = (frame as { id?: unknown; agent?: { id?: unknown } } | undefined);
+      const idHint = typeof culprit?.id === 'string' ? culprit.id
+        : typeof culprit?.agent?.id === 'string' ? culprit.agent.id
+          : null;
+      this.log('frame rechazado', frame?.t,
+        err instanceof Error ? err.message : err,
+        idHint ? `id=${JSON.stringify(idHint)}` : '');
     } finally {
       this.flushOut();
     }

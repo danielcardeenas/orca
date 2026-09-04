@@ -1,0 +1,7 @@
+node_modules/
+dist/
+# Los frames del arnés visual se regeneran con `npm run visual`; son grandes y
+# cambian en cada corrida, así que no viven en el repo.
+test/shots/
+*.log
+.DS_Store

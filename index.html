@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0a0d" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>ORCA · Fleet Console</title>
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/tiny5.woff2" crossorigin />
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/geist-mono.woff2" crossorigin />
+  </head>
+  <body>
+    <!--
+      ORCA DIRECTION CONTRACT
+      THESIS: A containment console for a fleet of coding agents. The operator
+      watches a system that is already running, and the only thing allowed to
+      demand attention is an agent that needs a human.
+      OWN-WORLD: Near-black bezel #0b0a0d, one lime #c0f94a for live, one red
+      #ff2a12 for breach, amber #f5a524 for waiting-on-human. Tiny5 pixel type,
+      unsmoothed. Gold crosshairs left, blue right. CRT scanlines over all.
+      Every rectangle is an instrument; nothing is a marketing card.
+      REFUSES: dashboards that look like SaaS, cards with drop shadows,
+      rounded friendly chrome, colour used decoratively.
+    -->
+    <div id="app"></div>
+
+    <!-- Full-field CRT treatment, above everything but the cursor. -->
+    <div class="fx-scan" aria-hidden="true"></div>
+    <div class="fx-vignette" aria-hidden="true"></div>
+    <div class="fx-grain" aria-hidden="true"></div>
+    <div class="fx-flash" data-alarm-flash aria-hidden="true"></div>
+    <div class="cursor" data-cursor aria-hidden="true"></div>
+
+    <script type="module" src="/src/ui/main.ts"></script>
+  </body>
+</html>

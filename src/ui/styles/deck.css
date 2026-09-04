@@ -1,0 +1,158 @@
+/*
+ * Deck: the 2D agent grid.
+ *
+ * A tile is an instrument face. It has a hard 1px edge, a state colour that
+ * lives on the left edge, and no shadow — depth in this world comes from the
+ * bezel and the scanlines, never from a card floating over a page.
+ */
+
+.deck { position: absolute; inset: 0; display: grid; grid-template-rows: 38px 1fr; }
+
+.deck__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 18px; border-bottom: 1px solid var(--line-soft);
+}
+.deck__filters { display: flex; border: 1px solid var(--line); }
+.dfilter {
+  background: transparent; border: 0; color: var(--ink-dimmer);
+  padding: 4px 12px; font-family: 'Tiny5', monospace;
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+}
+.dfilter.is-on { background: var(--lime); color: #111; }
+.dfilter:not(.is-on):hover { color: var(--ink-mid); }
+
+.deck__grid {
+  padding: 14px 18px 22px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 10px;
+  align-content: start;
+}
+.deck__empty {
+  position: absolute; inset: 38px 0 0; display: grid; place-items: center;
+  color: var(--ink-faint); pointer-events: none;
+}
+
+/* ── The agent tile ───────────────────────────────────────────────── */
+
+.atile {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto auto 3px auto;
+  gap: 7px;
+  padding: 10px 12px 9px;
+  background: var(--screen);
+  border: 1px solid var(--line-soft);
+  /* The state colour rides the left edge — scannable down a whole column. */
+  border-left: 2px solid var(--st-idle);
+  border-radius: 2px;
+  min-height: 118px;
+  transform-origin: center;
+}
+.atile:hover { border-color: var(--line); background: #14131a; }
+
+.atile__top { display: flex; align-items: baseline; gap: 8px; }
+.atile__spacer { flex: 1; }
+.atile__call {
+  font-size: 15px; letter-spacing: 0.1em; color: var(--ink-bright); line-height: 1;
+}
+.atile__proj {
+  font-size: 9px; padding: 2px 5px; background: var(--tile);
+  color: var(--ink-dim); border-radius: 1px;
+}
+.atile__state { font-size: 9px; color: var(--ink-dimmer); }
+
+.atile__title {
+  font-size: 11px; line-height: 1.3; color: var(--ink-mid);
+  margin: 0;
+  /* Two lines max: a title that needs three is a title nobody reads. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.atile__tool {
+  display: flex; align-items: baseline; gap: 7px; min-width: 0;
+  padding-top: 1px;
+}
+.atile__tool[hidden] { display: none; }
+.atile__toolname {
+  font-size: 9px; color: var(--lime); flex: 0 0 auto;
+}
+.atile__tooldetail {
+  font-size: 10px; color: var(--ink-dimmer);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+
+/* Activity: a travelling band, not a progress fill. It reports that work is
+   happening and how fast — never how close it is to done. */
+.atile__act { height: 3px; background: #1c1f26; overflow: hidden; }
+.atile__act i {
+  display: block; height: 100%; width: 34%;
+  background: var(--st-idle);
+  transform: translateX(-100%);
+}
+.atile__act.is-live i {
+  animation: act-sweep var(--act-dur, 1.6s) linear infinite;
+}
+@keyframes act-sweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(320%); }
+}
+
+.atile__foot {
+  display: flex; align-items: baseline; gap: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.atile__foot .px { font-size: 9px; color: var(--ink-faint); }
+.atile__lineage { color: var(--ink-dimmer) !important; }
+.atile__tps { color: var(--lime) !important; }
+
+/* ── State treatments ─────────────────────────────────────────────── */
+
+.atile[data-state="working"]  { border-left-color: var(--st-working); }
+.atile[data-state="working"]  .atile__act i { background: var(--st-working); }
+.atile[data-state="working"]  .atile__state { color: var(--lime); }
+
+.atile[data-state="thinking"] { border-left-color: var(--st-thinking); }
+.atile[data-state="thinking"] .atile__act i { background: var(--st-thinking); }
+
+.atile[data-state="booting"]  { border-left-color: var(--st-booting); }
+.atile[data-state="idle"]     { border-left-color: var(--st-idle); }
+
+.atile[data-state="done"] { border-left-color: var(--st-done); opacity: 0.5; }
+.atile[data-state="dead"] {
+  border-left-color: var(--st-dead);
+  background: #150a09;
+  opacity: 0.72;
+}
+.atile[data-state="dead"] .atile__state { color: var(--red); }
+
+/* Blocked is the loud one. The tile inverts to amber and breathes. This is
+   the only element in the console permitted to animate for attention. */
+.atile[data-state="blocked"] {
+  background: var(--amber);
+  border-color: var(--amber);
+  border-left-color: #111;
+  animation: block-breathe 2.2s ease-in-out infinite;
+}
+.atile[data-state="blocked"] .atile__call,
+.atile[data-state="blocked"] .atile__title,
+.atile[data-state="blocked"] .atile__state,
+.atile[data-state="blocked"] .atile__toolname,
+.atile[data-state="blocked"] .atile__tooldetail,
+.atile[data-state="blocked"] .atile__foot .px { color: #111 !important; }
+.atile[data-state="blocked"] .atile__proj { background: #111; color: var(--amber); }
+.atile[data-state="blocked"] .atile__act { background: rgba(0,0,0,0.25); }
+@keyframes block-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245,165,36,0); }
+  50%      { box-shadow: 0 0 26px -4px rgba(245,165,36,0.75); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atile[data-state="blocked"] { animation: none; box-shadow: 0 0 20px -6px var(--amber); }
+  .atile__act.is-live i { animation: none; transform: translateX(0); width: 100%; opacity: 0.5; }
+}
+
+@media (max-width: 940px) {
+  .deck__grid { grid-template-columns: 1fr; padding: 10px 12px 18px; }
+}

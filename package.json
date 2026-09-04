@@ -1,0 +1,37 @@
+{
+  "name": "orca-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ORCA \u2014 Orchestration & Reconnaissance Console for Agents. A containment console for watching and commanding fleets of coding agents.",
+  "scripts": {
+    "dev": "concurrently -n orca,collector,ui -c magenta,cyan,green \"npm:dev:orca\" \"npm:dev:collector\" \"npm:dev:ui\"",
+    "dev:ui": "vite",
+    "dev:hub": "tsx watch src/hub/server.ts",
+    "dev:collector": "tsx watch src/collector/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/run.ts",
+    "test:watch": "tsx watch test/run.ts",
+    "mock": "tsx test/fake-collector.ts",
+    "dev:orca": "tsx watch src/orca.ts",
+    "start": "tsx src/orca.ts",
+    "visual": "tsx test/visual.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.123.0",
+    "gsap": "^3.14.2",
+    "three": "^0.185.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/three": "^0.185.4",
+    "@types/ws": "^8.5.13",
+    "concurrently": "^9.1.0",
+    "playwright": "^1.62.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}

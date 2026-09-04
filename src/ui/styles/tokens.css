@@ -1,0 +1,339 @@
+/*
+ * ORCA design tokens — extracted verbatim from the Axolots /system boot
+ * sequence. Every value here is lifted from that comp, not re-invented.
+ *
+ * WORLD: a containment console. Near-black bezel, one lime that means "live",
+ * one red that means "breach". Tiny5 pixel type, no antialiasing, gold and
+ * blue corner crosshairs, chromatic split on titles, CRT scanlines over
+ * everything. Every rectangle is an instrument, never a marketing card.
+ */
+
+@font-face {
+  font-family: 'Tiny5';
+  src: url('/fonts/tiny5.woff2') format('woff2');
+  font-weight: 400;
+  font-display: block; /* block, not swap: a fallback flash breaks the pixel grid */
+}
+@font-face {
+  font-family: 'Jersey 10';
+  src: url('/fonts/jersey10.woff2') format('woff2');
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/geist-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  /* ── Ground ─────────────────────────────────────────────────────── */
+  --bezel: #0b0a0d;      /* the page itself, outside the instrument */
+  --shell: #141318;      /* the instrument housing */
+  --screen: #121116;     /* the glass */
+  --screen-in: #17161c;  /* a panel recessed into the glass */
+
+  /* ── Signal ─────────────────────────────────────────────────────── */
+  --lime: #c0f94a;       /* live, online, confirmed. The only accent. */
+  --lime-line: rgba(173, 246, 120, 0.95);
+  --lime-glow: rgba(192, 249, 74, 0.45);
+  --red: #ff2a12;        /* breach only. Never decoration. */
+  --red-deep: #2a0504;
+  --red-glow: rgba(255, 42, 18, 0.65);
+  --amber: #f5a524;      /* waiting on a human — between lime and red */
+  --amber-glow: rgba(245, 165, 36, 0.45);
+
+  /* ── Type ───────────────────────────────────────────────────────── */
+  --ink: #e8e8ea;
+  --ink-bright: #f2f4f0;
+  --ink-mid: #c5cad3;
+  --ink-dim: #8b9088;
+  --ink-dimmer: #6a7068;
+  --ink-faint: #4a4e48;
+
+  /* ── Structure ──────────────────────────────────────────────────── */
+  --line: #2a2e38;       /* instrument borders */
+  --line-soft: #22252d;
+  --tile: #252a38;       /* an inactive instrument tile */
+  --pill-off: #3a3a40;
+
+  /* ── Crosshairs: gold left, blue right. Always both. ────────────── */
+  --xhair-gold: #c4a06a;
+  --xhair-blue: #6a8cff;
+
+  /* ── Agent state colours. The scene and the deck share these. ───── */
+  --st-booting: #6a8cff;
+  --st-thinking: #8fb8ff;
+  --st-working: #c0f94a;
+  --st-blocked: #f5a524;
+  --st-idle: #6e736c;
+  --st-done: #4a4e48;
+  --st-dead: #ff2a12;
+
+  /* ── Geometry ───────────────────────────────────────────────────── */
+  --r-shell: 28px;
+  --r-screen: 18px;
+  --r-panel: 10px;
+  --r-chip: 3px;
+  --track: 0.14em;       /* the letter-spacing that makes Tiny5 read */
+
+  /* ── Motion. Named so timings stay consistent across modules. ───── */
+  --t-snap: 0.12s;       /* instant state flips */
+  --t-quick: 0.28s;      /* a panel appearing */
+  --t-move: 0.55s;       /* a wipe or a fill */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-inout: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --z-scene3d: 1;
+  --z-deck: 10;
+  --z-hud: 20;
+  --z-overlay: 40;
+  --z-rain: 60;
+  --z-flash: 70;
+  --z-grain: 78;
+  --z-vignette: 79;
+  --z-scan: 80;
+  --z-cursor: 95;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bezel);
+  color: var(--ink);
+  font-family: 'Tiny5', 'Jersey 10', monospace;
+  /* Pixel type must not be smoothed or the whole world turns to mush. */
+  -webkit-font-smoothing: none;
+  -moz-osx-font-smoothing: unset;
+  user-select: none;
+  cursor: none;
+}
+body a, body button, body input, body textarea { cursor: none; }
+::selection { background: var(--lime); color: #111; }
+
+/* Inputs are the one place a real caret is worth breaking the world for. */
+input, textarea { cursor: text !important; }
+
+/* ── Pixel type scale ─────────────────────────────────────────────── */
+
+.px {
+  font-family: 'Tiny5', monospace;
+  font-weight: 400;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+  margin: 0;
+  line-height: 1.15;
+}
+.px--tiny   { font-size: 10px; letter-spacing: 0.16em; color: var(--ink-dim); }
+.px--dim    { font-size: 11px; color: #5c6058; }
+.px--sm     { font-size: 12px; letter-spacing: 0.15em; }
+.px--md     { font-size: 14px; letter-spacing: 0.14em; color: var(--ink-mid); }
+.px--card   { font-size: 18px; color: var(--ink-bright); letter-spacing: 0.12em; line-height: 1.05; }
+.px--title  { font-size: clamp(22px, 3.4vw, 36px); color: #c8ccc4; letter-spacing: 0.28em; }
+.px--cta    { font-size: clamp(14px, 1.6vw, 20px); letter-spacing: 0.22em; color: inherit; }
+.px--banner { font-size: clamp(18px, 3vw, 32px); letter-spacing: 0.22em; color: inherit; }
+.px--huge   { font-size: clamp(42px, 8vw, 84px); color: var(--lime); letter-spacing: 0.18em; }
+
+/* Machine-readable text — logs, code, commands — steps out of pixel type. */
+.mono {
+  font-family: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+  text-transform: none;
+}
+
+/* Chromatic split. The comp puts this only on titles and scrambled text. */
+.chroma {
+  text-shadow: 1px 0 0 rgba(255, 60, 80, 0.45), -1px 0 0 rgba(60, 180, 255, 0.45);
+}
+
+/* ── Full-field CRT treatment ─────────────────────────────────────── */
+
+.fx-scan {
+  pointer-events: none; position: fixed; inset: 0; z-index: var(--z-scan);
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0,0,0,0) 0 2px,
+    rgba(0,0,0,0.18) 2px 3px
+  );
+  mix-blend-mode: multiply;
+  opacity: 0.55;
+}
+.fx-vignette {
+  pointer-events: none; position: fixed; inset: 0; z-index: var(--z-vignette);
+  box-shadow: inset 0 0 120px 40px var(--bezel);
+}
+.fx-grain {
+  pointer-events: none; position: fixed; inset: 0; z-index: var(--z-grain); opacity: 0.04;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80'><filter id='n'><feTurbulence baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.55'/></svg>");
+}
+.fx-flash {
+  pointer-events: none; position: fixed; inset: 0; z-index: var(--z-flash);
+  background: var(--lime); opacity: 0;
+}
+
+.cursor {
+  position: fixed; z-index: var(--z-cursor);
+  width: 8px; height: 8px; background: #f3f3f4;
+  pointer-events: none; mix-blend-mode: difference;
+  transform: translate(-50%, -50%);
+}
+/* Over a live agent the cursor opens into a reticle. */
+.cursor.is-target {
+  width: 22px; height: 22px; background: transparent;
+  border: 1.5px solid #f3f3f4; mix-blend-mode: normal;
+}
+
+/* ── Corner crosshairs. Gold on the left, blue on the right. ──────── */
+
+.xhair {
+  position: absolute; width: 22px; height: 22px; z-index: 3; pointer-events: none;
+}
+.xhair::before, .xhair::after { content: ''; position: absolute; background: currentColor; }
+.xhair::before { width: 100%; height: 1.5px; top: 50%; left: 0; }
+.xhair::after  { height: 100%; width: 1.5px; left: 50%; top: 0; }
+.xhair--tl { top: 18px; left: 22px;  color: var(--xhair-gold); }
+.xhair--bl { bottom: 18px; left: 22px; color: var(--xhair-gold); }
+.xhair--tr { top: 18px; right: 22px;  color: var(--xhair-blue); }
+.xhair--br { bottom: 18px; right: 22px; color: var(--xhair-blue); }
+
+/* A small plus used inside instrument panels. */
+.plus {
+  position: absolute; width: 10px; height: 10px; color: #6a7380; pointer-events: none;
+}
+.plus::before, .plus::after { content: ''; position: absolute; background: currentColor; }
+.plus::before { width: 100%; height: 1.5px; top: 50%; }
+.plus::after  { height: 100%; width: 1.5px; left: 50%; }
+
+/* ── The instrument shell ─────────────────────────────────────────── */
+
+.shell {
+  position: absolute; inset: 4.5% 5.5%;
+  background: var(--shell);
+  border-radius: var(--r-shell);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04), 0 0 0 1px rgba(0,0,0,0.6);
+}
+.shell__notch {
+  position: absolute; top: 12%; bottom: 12%; width: 18px; background: var(--bezel);
+}
+.shell__notch--l { left: -10px;  border-radius: 0 10px 10px 0; }
+.shell__notch--r { right: -10px; border-radius: 10px 0 0 10px; }
+.shell__screen {
+  position: absolute; inset: 18px 22px;
+  background: var(--screen);
+  border-radius: var(--r-screen);
+  overflow: hidden;
+}
+
+/* ── Instrument primitives ────────────────────────────────────────── */
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 14px;
+  position: relative;
+  background: transparent;
+}
+
+/* The notched tile. This clip-path is the signature shape of the world —
+   a rectangle with a bite taken out of its right edge. Do not smooth it. */
+.tile {
+  position: relative; border: 0; padding: 0; margin: 0;
+  color: var(--ink-mid); background: var(--tile);
+  font-family: 'Tiny5', monospace; font-size: 11px; letter-spacing: 0.12em;
+  text-align: left;
+  clip-path: polygon(
+    0 0, 100% 0, 100% 30%,
+    82% 30%, 82% 36%, 70% 36%, 70% 64%, 82% 64%, 82% 70%,
+    100% 70%, 100% 100%, 0 100%
+  );
+}
+.tile.is-on {
+  background: var(--lime); color: #111;
+  box-shadow: 0 0 16px var(--lime-glow);
+}
+.tile.is-alert {
+  background: var(--amber); color: #111;
+  box-shadow: 0 0 16px var(--amber-glow);
+}
+.tile.is-dead { background: var(--red); color: #1a0000; }
+
+.status {
+  align-self: start;
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em;
+  padding: 4px 10px; border-radius: 4px;
+  background: var(--pill-off); color: #c8c8cc;
+  text-transform: uppercase;
+}
+.status.is-on    { background: var(--lime);  color: #111; }
+.status.is-alert { background: var(--amber); color: #111; }
+.status.is-dead  { background: var(--red);   color: #1a0000; }
+
+/* The lime slab: a row that inverts to lime with black text. Used for the
+   primary action and for anything the console is certain about. */
+.slab {
+  background: var(--lime); color: #111;
+  border: 0; border-radius: var(--r-panel);
+  display: grid; place-items: center;
+  box-shadow: 0 0 28px rgba(192,249,74,0.35);
+}
+.slab .px { color: #111; }
+.slab:hover { filter: brightness(1.06); }
+.slab.is-off { background: var(--pill-off); color: #d2d2d6; box-shadow: none; }
+.slab.is-off .px { color: #d2d2d6; }
+
+/* The ALGN row: black bar on lime, lime text, zipper fill. */
+.algn-row {
+  display: grid; grid-template-columns: 7.5rem 1fr 7.5rem; gap: 8px; align-items: center;
+  background: #111; color: var(--lime);
+  padding: 7px 10px; margin: 5px 0; border-radius: var(--r-chip);
+  width: 100%;
+}
+.algn-row .px { color: var(--lime); }
+.algn-row .px:last-child { text-align: right; }
+.algn-bar { height: 16px; position: relative; overflow: hidden; }
+.algn-zip { display: block; height: 100%; width: 100%; transform: scaleX(0); transform-origin: center; }
+.algn-zip svg { display: block; width: 100%; height: 100%; }
+
+/* The warning triangle from the breach banner. */
+.warn {
+  width: 22px; height: 20px; display: inline-block; position: relative;
+  background: var(--red);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.warn::after {
+  content: '!'; position: absolute; left: 50%; top: 55%; transform: translate(-50%, -50%);
+  color: #1a0000; font-family: 'Tiny5', monospace; font-size: 11px;
+}
+
+/* Scrolling banner track, as used by SIGNAL DETECTED and SYS BREACH. */
+.marquee { overflow: hidden; }
+.marquee__track { display: flex; width: max-content; }
+
+/* A recessed scroll region that keeps the instrument feel. */
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+.scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 0; }
+.scroll::-webkit-scrollbar-thumb:hover { background: #3a4150; }
+
+.hidden { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-scan { display: none; }
+}

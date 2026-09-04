@@ -1,0 +1,227 @@
+/*
+ * Cajón de detalle de agente. Se desliza sobre la consola sin taparla del todo:
+ * el velo deja ver que la flota sigue ahí detrás. Cada sección es un
+ * instrumento con su línea de 1px; nada de tarjetas.
+ */
+
+.drw {
+  position: fixed; inset: 0;
+  z-index: var(--z-overlay);
+  display: grid;
+  grid-template-columns: 1fr auto;
+}
+.drw[hidden] { display: none; }
+
+.drw__veil {
+  grid-area: 1 / 1 / 2 / 3;
+  background: rgba(6, 6, 8, 0.72);
+}
+
+.drw__panel {
+  grid-area: 1 / 2 / 2 / 3;
+  position: relative;
+  width: min(560px, 92vw);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+  background: var(--screen);
+  border-left: 1px solid var(--line);
+  box-shadow: -1px 0 0 rgba(0, 0, 0, 0.6);
+}
+.drw__panel:focus-visible { outline: 1px solid var(--lime); outline-offset: -2px; }
+
+/* ── Cabecera ─────────────────────────────────────────────────────── */
+
+.drw__head {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 6px;
+}
+.drw__ident { display: grid; grid-template-columns: auto auto 1fr; align-items: center; gap: 10px; }
+.drw__x {
+  justify-self: end;
+  background: transparent; border: 1px solid var(--line); border-radius: 2px;
+  color: var(--ink-dim); width: 24px; height: 24px; line-height: 1;
+  font-family: 'Geist Mono', monospace; font-size: 13px;
+}
+.drw__x:hover { border-color: var(--red); color: var(--red); }
+.drw__x:focus-visible { outline: 1px solid var(--lime); outline-offset: 1px; }
+
+.drw__title { color: var(--ink-mid); overflow-wrap: anywhere; }
+.drw__where { color: var(--ink-dimmer); }
+
+.drw__lineage { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.drw__lineage[hidden] { display: none; }
+.drw__sep { color: var(--ink-faint); }
+.drw__crumb {
+  background: transparent; border: 0; padding: 0;
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em;
+  color: var(--ink-dim); text-transform: uppercase;
+}
+button.drw__crumb:hover { color: var(--lime); }
+.drw__crumb.is-self { color: var(--ink-bright); }
+.drw__crumb:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+
+/* Pill de estado con el color de cada AgentState. */
+.status.st-booting  { background: var(--st-booting);  color: #06070c; }
+.status.st-thinking { background: var(--st-thinking); color: #06070c; }
+.status.st-working  { background: var(--st-working);  color: #111; }
+.status.st-blocked  { background: var(--st-blocked);  color: #111; }
+.status.st-idle     { background: var(--st-idle);     color: #111; }
+.status.st-done     { background: var(--st-done);     color: #c8ccc4; }
+.status.st-dead     { background: var(--st-dead);     color: #1a0000; }
+
+/* ── Cuerpo ───────────────────────────────────────────────────────── */
+
+.drw__body { padding: 14px 16px 18px; display: grid; gap: 14px; align-content: start; }
+
+.sec { display: grid; gap: 5px; }
+.sec[hidden] { display: none; }
+.sec__label { color: var(--ink-dimmer); }
+.sec__body {
+  color: var(--ink-mid); white-space: pre-wrap; overflow-wrap: anywhere;
+  border-left: 1px solid var(--line); padding-left: 9px;
+}
+.sec__more {
+  justify-self: start; background: transparent; border: 0; padding: 0;
+  color: var(--ink-dimmer); text-transform: uppercase;
+}
+.sec__more:hover { color: var(--lime); }
+.sec__more[hidden] { display: none; }
+
+/* ── Bloqueo: lo único ámbar del cajón ────────────────────────────── */
+
+.blk {
+  border: 1px solid var(--amber);
+  border-left-width: 2px;
+  border-radius: 2px;
+  padding: 10px 12px;
+  display: grid; gap: 8px;
+  background: rgba(245, 165, 36, 0.05);
+}
+.blk[hidden] { display: none; }
+.blk__top { display: flex; justify-content: space-between; gap: 12px; }
+.blk__top .px { color: var(--amber); }
+.blk__age { font-variant-numeric: tabular-nums; }
+.blk__sum { color: var(--ink); overflow-wrap: anywhere; }
+.blk__acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.blk__form { display: grid; grid-template-columns: 1fr auto; gap: 6px; width: 100%; }
+.blk__note { color: var(--ink-dim); }
+
+/* ── Trabajo en curso ─────────────────────────────────────────────── */
+
+.work { border: 1px solid var(--line); border-radius: 2px; padding: 10px 12px; display: grid; gap: 7px; }
+.work[hidden] { display: none; }
+.work__top { display: flex; align-items: baseline; gap: 10px; }
+.work__top .px--tiny { color: var(--ink-dimmer); }
+.work__tool { color: var(--lime); }
+.work__detail { color: var(--ink-dim); overflow-wrap: anywhere; }
+
+/* Barra de actividad: un patrón que se mueve. No es un progreso — nadie sabe
+   cuánto falta — sólo dice que el proceso está vivo. */
+.actbar { height: 6px; background: #1c1f26; overflow: hidden; }
+.actbar i {
+  display: block; height: 100%; width: 100%;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--lime) 0 8px,
+    transparent 8px 22px
+  );
+  opacity: 0.75;
+  animation: actbar-run 1.1s linear infinite;
+}
+@keyframes actbar-run { from { transform: translateX(0); } to { transform: translateX(22px); } }
+
+/* ── Métricas ─────────────────────────────────────────────────────── */
+
+.mets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+.met {
+  display: grid; gap: 3px; padding: 8px 9px;
+  border: 1px solid var(--line-soft);
+  margin: 0 -1px -1px 0; /* bordes colapsados: una rejilla de instrumentos */
+}
+.met__n {
+  font-family: 'Tiny5', monospace; font-size: 15px; letter-spacing: 0.06em;
+  color: var(--ink-bright); font-variant-numeric: tabular-nums; line-height: 1;
+}
+.met__k { color: var(--ink-dimmer); }
+
+/* ── Hijos ────────────────────────────────────────────────────────── */
+
+.kids { display: grid; gap: 5px; }
+.kids[hidden] { display: none; }
+.kids__list { display: grid; gap: 2px; }
+.kid {
+  display: grid; grid-template-columns: 34px 8px 1fr; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  background: transparent; border: 1px solid var(--line-soft); border-radius: 2px;
+  padding: 6px 8px;
+}
+.kid:hover { background: rgba(255, 255, 255, 0.03); border-color: var(--line); }
+.kid:focus-visible { outline: 1px solid var(--lime); outline-offset: 1px; }
+.kid__cs { color: var(--ink-mid); }
+.kid__st { width: 8px; height: 8px; display: block; background: var(--st-idle); }
+.kid__st.st-booting  { background: var(--st-booting); }
+.kid__st.st-thinking { background: var(--st-thinking); }
+.kid__st.st-working  { background: var(--st-working); }
+.kid__st.st-blocked  { background: var(--st-blocked); }
+.kid__st.st-idle     { background: var(--st-idle); }
+.kid__st.st-done     { background: var(--st-done); }
+.kid__st.st-dead     { background: var(--st-dead); }
+.kid__title {
+  color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── Logs ─────────────────────────────────────────────────────────── */
+
+.logs { display: grid; gap: 5px; }
+.logs[hidden] { display: none; }
+.logs__out {
+  margin: 0; max-height: 260px; overflow: auto;
+  background: var(--screen-in); border: 1px solid var(--line);
+  padding: 9px 10px; color: var(--ink-mid);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* ── Pie ──────────────────────────────────────────────────────────── */
+
+.drw__foot {
+  border-top: 1px solid var(--line);
+  padding: 10px 16px 12px;
+  display: grid; gap: 8px;
+}
+.drw__say { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+.drw__sayin {
+  background: var(--screen-in); border: 1px solid var(--line); border-radius: 2px;
+  color: var(--ink); padding: 7px 8px; min-width: 0;
+}
+.drw__sayin::placeholder { color: var(--ink-faint); }
+.drw__ops { display: flex; gap: 6px; }
+
+.op {
+  background: transparent; border: 1px solid var(--line); border-radius: 2px;
+  color: var(--ink-dim); padding: 6px 10px; text-transform: uppercase;
+}
+.op:hover { color: var(--ink-bright); border-color: var(--ink-faint); }
+.op:focus-visible, .drw__sayin:focus-visible { outline: 1px solid var(--lime); outline-offset: 1px; }
+.op--go:hover { color: var(--lime); border-color: var(--lime); }
+.op--say { border-color: var(--line); }
+.op--stop:hover { color: var(--red); border-color: var(--red); }
+/* Armado: el botón se convierte en la advertencia, no un modal encima. */
+.op--stop.is-armed {
+  background: var(--red); border-color: var(--red); color: #1a0000;
+  animation: stop-arm 0.6s steps(2) infinite;
+}
+@keyframes stop-arm { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.72; } }
+
+@media (max-width: 940px) {
+  /* En teléfono el cajón ES la pantalla. */
+  .drw__panel { width: 100vw; }
+  .mets { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .actbar i, .op--stop.is-armed { animation: none; }
+}

@@ -1,0 +1,207 @@
+/*
+ * CEO panel. Un instrumento de conversación: la caja no tiene sombra, no tiene
+ * radio, no tiene relleno decorativo. Sólo la línea de 1px de var(--line) y la
+ * jerarquía de tipo — Tiny5 para lo que etiqueta, Geist Mono para lo que se lee.
+ */
+
+/* El contenedor que main.ts reserva para el CEO. Sin min-height:0 la
+   conversación empujaría la cola de interrupciones fuera de la columna. */
+.side__ceo { min-height: 0; }
+
+.ceo {
+  position: relative;   /* ancla del estado vacío, que flota sobre el log */
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── Cabecera ─────────────────────────────────────────────────────── */
+
+.ceo__head {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 9px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ceo__title { color: var(--ink-bright); }
+.ceo__count { text-align: right; color: var(--ink-dimmer); white-space: nowrap; }
+.ceo__count.has-block { color: var(--amber); }
+
+/* ── Log ──────────────────────────────────────────────────────────── */
+
+.ceo__log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  min-height: 0;
+  overflow-anchor: none; /* el pegado al fondo lo decidimos nosotros, no el navegador */
+}
+
+.msg { display: flex; flex-direction: column; gap: 5px; max-width: 94%; }
+.msg__body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg__relay[hidden] { display: none; }
+
+/* Humano: a la derecha, hundido en el vidrio. */
+.msg--human {
+  align-self: flex-end;
+  align-items: flex-end;
+  background: var(--screen-in);
+  border: 1px solid var(--line-soft);
+  border-radius: 2px;
+  padding: 7px 9px;
+}
+.msg--human .msg__body { color: var(--ink); text-align: left; }
+
+/* CEO: a la izquierda, con la barra lima que significa "vivo". */
+.msg--ceo {
+  align-self: flex-start;
+  border-left: 2px solid var(--lime);
+  padding: 2px 0 2px 9px;
+}
+.msg--ceo .msg__body { color: var(--ink-mid); }
+
+/* Relevo de una escalación: deja de ser lima y pasa a ámbar — espera a un humano. */
+.msg--ceo.is-relay { border-left-color: var(--amber); }
+.msg--ceo.is-relay .msg__relay { color: var(--amber); }
+
+/* Sistema: una nota de la consola, centrada y apagada. */
+.msg--system {
+  align-self: center;
+  align-items: center;
+  max-width: 100%;
+}
+.msg--system .msg__body { color: var(--ink-faint); text-align: center; letter-spacing: 0.14em; }
+
+/* Cursor de bloque. steps(2): parpadea, no se desvanece. */
+.msg__caret {
+  display: inline-block;
+  width: 6px; height: 11px;
+  margin-left: 2px;
+  vertical-align: -1px;
+  background: var(--lime);
+  animation: ceo-caret 0.9s steps(2) infinite;
+}
+@keyframes ceo-caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+/* ── Acciones del CEO ─────────────────────────────────────────────── */
+
+.acts { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+.acts[hidden] { display: none; }
+
+.act {
+  display: grid;
+  grid-template-columns: 7px auto 1fr;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 2px;
+}
+.act__led { width: 7px; height: 7px; background: var(--ink-faint); display: block; }
+.act[data-st="ok"] .act__led { background: var(--lime); }
+.act[data-st="error"] .act__led { background: var(--red); }
+.act[data-st="running"] .act__led {
+  background: var(--amber);
+  animation: act-run 0.7s steps(2) infinite;
+}
+@keyframes act-run { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.25; } }
+
+.act[data-st="error"] { border-color: rgba(255, 42, 18, 0.35); }
+.act__name { color: var(--ink-dim); white-space: nowrap; }
+.act__sum {
+  color: var(--ink-dimmer);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.acts__more {
+  align-self: flex-start;
+  background: transparent;
+  border: 0;
+  padding: 3px 0 0;
+  color: var(--ink-dimmer);
+  text-transform: uppercase;
+}
+.acts__more:hover { color: var(--lime); }
+
+/* ── Pensando: tres cuadros que se encienden en secuencia ─────────── */
+
+.think { display: flex; gap: 5px; align-self: flex-start; padding: 4px 0 4px 11px; }
+.think i {
+  display: block; width: 7px; height: 7px;
+  background: var(--ink-faint);
+  animation: think-step 1.05s steps(1) infinite;
+}
+.think i:nth-child(2) { animation-delay: 0.35s; }
+.think i:nth-child(3) { animation-delay: 0.7s; }
+@keyframes think-step {
+  0%, 33% { background: var(--lime); }
+  34%, 100% { background: var(--ink-faint); }
+}
+
+/* ── Composer ─────────────────────────────────────────────────────── */
+
+.ceo__composer {
+  display: grid;
+  grid-template-columns: 1fr 74px;
+  gap: 8px;
+  align-items: stretch;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.ceo__ta {
+  resize: none;
+  min-height: 30px;
+  max-height: 87px; /* 5 líneas: ver MAX_COMPOSER_PX en ceo.ts */
+  padding: 7px 8px;
+  color: var(--ink);
+  background: var(--screen-in);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  overflow-y: auto;
+}
+.ceo__ta::placeholder { color: var(--ink-faint); }
+.ceo__ta:focus-visible,
+.ceo__send:focus-visible,
+.acts__more:focus-visible {
+  /* El cursor es custom: el foco tiene que verse igual sin él. */
+  outline: 1px solid var(--lime);
+  outline-offset: 1px;
+}
+.ceo__ta:disabled { background: transparent; color: var(--ink-faint); }
+
+.ceo__send { border-radius: 2px; }
+.ceo__send:disabled { pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .msg__caret, .act[data-st="running"] .act__led, .think i { animation: none; }
+  .think i:first-child { background: var(--lime); }
+}
+
+/* ── Empty state ──────────────────────────────────────────────────────
+   A blank panel teaches the operator nothing. This one says what the CEO is
+   for and hands over three questions worth asking on day one. */
+
+.ceo__blank {
+  position: absolute; inset: 30px 0 auto;
+  padding: 22px 16px;
+  display: grid; gap: 12px; align-content: start;
+  pointer-events: auto;
+}
+.ceo__blank .px { color: var(--ink-faint); }
+.ceo__blankbody {
+  margin: 0; font-size: 10.5px; line-height: 1.5; color: var(--ink-dimmer);
+  border-left: 1px solid var(--line); padding-left: 10px;
+}
+.ceo__seeds { display: grid; gap: 5px; }
+.ceo__seed {
+  background: transparent; border: 1px solid var(--line);
+  padding: 8px 10px; border-radius: 2px; text-align: left;
+}
+.ceo__seed:hover { border-color: var(--lime); }
+.ceo__seed:hover .px { color: var(--lime); }
+.ceo__seed .px { color: var(--ink-dimmer); font-size: 9px; }

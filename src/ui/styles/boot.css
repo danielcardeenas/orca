@@ -1,0 +1,221 @@
+/*
+ * Boot sequence styles. Lifted from the /system comp's scene layout so the
+ * POST grid, the load bar, the handshake glyphs, the check square, the align
+ * deck and the ALGN staircase all read exactly as they do there.
+ */
+
+.boot {
+  position: fixed; inset: 0; z-index: var(--z-overlay);
+  background: var(--bezel);
+  overflow: hidden;
+}
+
+.boot-scene { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
+.boot-scene--fill { inset: 0; }
+.boot-scene--center { display: grid; place-items: center; }
+.boot-scene--post { z-index: 5; padding: 6vh 7vw; }
+.boot-scene--logo { z-index: 6; display: grid; place-items: center; align-content: center; gap: 42px; }
+.boot-scene--algn { z-index: 12; display: grid; place-items: center; }
+
+/* ── POST ─────────────────────────────────────────────────────────── */
+
+.post { display: grid; grid-template-columns: 180px 1fr; gap: 36px; height: 100%; }
+.post__left { display: flex; flex-direction: column; gap: 18px; }
+.post__stat, .post__log { padding-top: 4px; }
+.post__stat { color: #3ecf7a; }
+.post__log { color: #c8d4c4; white-space: pre; overflow: hidden; }
+.post__log div, .post__stat div { min-height: 1.15em; }
+
+/* ── Wordmark + load bar ──────────────────────────────────────────── */
+
+.logo-hi { filter: drop-shadow(0 0 18px rgba(255,255,255,0.35)); }
+.loadbar {
+  width: min(360px, 46vw); height: 28px;
+  border: 2px solid rgba(255,255,255,0.85);
+  /* The comp splits this border into warm and cool fringes. */
+  box-shadow: 1px 0 0 rgba(80,160,255,0.7), -1px 0 0 rgba(255,140,60,0.55),
+              0 0 18px rgba(255,255,255,0.2);
+  position: relative; overflow: hidden;
+}
+.loadbar__fill {
+  display: block; position: absolute; inset: 2px auto 2px 2px; width: calc(100% - 4px);
+  background: #f4f6f8; transform: scaleX(0); transform-origin: left center;
+  box-shadow: 0 0 12px rgba(255,255,255,0.55);
+}
+
+/* ── Shell furniture ──────────────────────────────────────────────── */
+
+.boot-shell { position: absolute; inset: 0; z-index: 8; }
+.boot-tele {
+  position: absolute; top: 14px; right: 22px; z-index: 4;
+  color: var(--ink-dimmer); max-width: 36ch; text-align: right;
+  white-space: nowrap; overflow: hidden;
+}
+.boot-stamp {
+  position: absolute; bottom: 12px; left: 16px; z-index: 4;
+  color: var(--ink-faint); line-height: 1.3;
+}
+
+/* ── Handshake ────────────────────────────────────────────────────── */
+
+[data-pass-title] {
+  position: absolute; left: 50%; top: 32%; transform: translateX(-50%); white-space: nowrap;
+}
+.pass {
+  position: absolute; left: 50%; top: 52%; transform: translate(-50%, -50%);
+  display: flex; gap: 10px; align-items: center; padding: 14px 18px;
+  border-radius: 16px; overflow: hidden;
+}
+.pass__wipe {
+  position: absolute; top: 4px; bottom: 4px; left: 4px; right: 4px;
+  background: var(--lime); border-radius: 12px;
+  box-shadow: 0 0 24px var(--lime-glow); z-index: 3; transform: scaleX(0);
+}
+.glyph {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 3px;
+  width: 28px; height: 28px; position: relative; z-index: 2;
+}
+.glyph i {
+  display: block; background: #f5f7f2;
+  box-shadow: 0 0 10px rgba(255,255,255,0.55);
+}
+
+/* ── Check ────────────────────────────────────────────────────────── */
+
+.check {
+  width: min(42vh, 46vw); aspect-ratio: 1;
+  background: var(--lime); border-radius: 18px; position: relative;
+  box-shadow: 0 0 40px var(--lime-glow);
+}
+.check__plus { position: absolute; width: 18px; height: 18px; color: #111; }
+.check__plus::before, .check__plus::after { content: ''; position: absolute; background: currentColor; }
+.check__plus::before { width: 100%; height: 2px; top: 50%; }
+.check__plus::after  { height: 100%; width: 2px; left: 50%; }
+.check__plus--tl { top: 14px; left: 14px; }
+.check__plus--tr { top: 14px; right: 14px; }
+.check__plus--bl { bottom: 14px; left: 14px; }
+.check__plus--br { bottom: 14px; right: 14px; }
+.check__grid {
+  position: absolute; inset: 22%;
+  display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: repeat(7, 1fr); gap: 4%;
+}
+.check__px { background: #111; }
+
+/* ── Align deck ───────────────────────────────────────────────────── */
+
+.align {
+  position: absolute; inset: 40px 36px 96px;
+  display: grid;
+  grid-template-columns: minmax(180px, 24%) minmax(110px, 16%) 1fr minmax(80px, 13%);
+  gap: 16px; align-items: start;
+}
+.align-cta {
+  position: absolute; left: 36px; right: 36px; bottom: 28px; height: 58px;
+}
+.radar-col { display: flex; flex-direction: column; gap: 16px; }
+.radar-card { display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 16px; }
+.radar-card__meta { color: var(--ink-dimmer); }
+.sig { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+.sig__bar {
+  background: var(--lime); color: #111; padding: 6px 8px; border-radius: var(--r-chip);
+  box-shadow: 0 0 16px rgba(192,249,74,0.35);
+}
+.sig__bar .px { color: #111; }
+.sig__wave { width: 100%; height: 36px; display: block; }
+
+.tree-wrap {
+  position: relative; align-self: center; height: min(250px, 40vh);
+  border: 1px solid var(--line); padding: 10px 6px 8px;
+}
+.tree-wrap__plus { top: 8px; left: 8px; }
+.tree { width: 100%; height: calc(100% - 22px); overflow: visible; display: block; }
+[data-node-on] { opacity: 0; }
+.tree-codes {
+  position: absolute; right: 8px; bottom: 6px; color: var(--ink-dim);
+  line-height: 1.2; text-align: right;
+}
+
+.tiles {
+  display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(4, 1fr);
+  gap: 8px; align-self: center; justify-self: center;
+  height: min(260px, 42vh);
+  /* The notch in .tile is a percentage clip-path, so a stretched tile turns a
+     subtle bite into a wedge. Keeping the block square keeps the shape right. */
+  aspect-ratio: 1;
+  width: 100%; max-width: min(260px, 42vh);
+}
+.tiles .tile span { position: absolute; top: 6px; left: 8px; }
+
+.charset {
+  margin: 0; color: #e8ece4; font-family: 'Tiny5', monospace;
+  font-size: clamp(20px, 2.6vw, 30px); line-height: 1.08;
+  letter-spacing: var(--track); white-space: pre;
+  border-left: 1px solid #2a2e28; padding: 8px 0 8px 14px;
+  align-self: stretch;
+}
+
+/* ── ALGN staircase modal ─────────────────────────────────────────── */
+
+.algn {
+  width: min(680px, 78%);
+  background: var(--lime); color: #111; border-radius: 16px;
+  padding: 18px 18px 16px; box-shadow: 0 0 48px rgba(192,249,74,0.4);
+  overflow: hidden;
+}
+.algn__head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin-bottom: 10px;
+}
+.algn__badge {
+  display: grid; place-items: center; background: #111;
+  padding: 6px 8px; border-radius: 4px; min-width: 52px;
+}
+.algn__badge canvas { display: block; }
+.px--modal { font-size: 15px; color: #111; letter-spacing: 0.18em; }
+
+/* ── Radar + signal banner ────────────────────────────────────────── */
+
+.radar { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+.boot-marquee { width: min(860px, 92%); }
+.sigboard {
+  display: flex; align-items: center; gap: 8px; margin-right: 28px;
+  filter: drop-shadow(0 0 16px var(--lime-glow));
+}
+.sigboard__half {
+  display: grid; grid-template-columns: repeat(5, 30px); grid-template-rows: repeat(5, 30px);
+  gap: 8px; position: relative;
+  width: calc(5 * 30px + 4 * 8px); height: calc(5 * 30px + 4 * 8px);
+  overflow: hidden;
+}
+.sigboard__sq {
+  background: var(--lime); border-radius: 4px;
+  box-shadow: 0 0 10px rgba(192,249,74,0.35);
+}
+.sigboard__txt {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: #111; z-index: 1; letter-spacing: 0.12em; white-space: nowrap;
+  font-size: 13px; overflow: hidden;
+}
+.sigboard__mid {
+  display: flex; flex-direction: column; justify-content: center; gap: 14px; padding: 0 4px;
+}
+.sigboard__mid i { display: block; width: 18px; height: 8px; background: var(--lime); border-radius: 1px; }
+
+.boot-skip {
+  position: fixed; top: 18px; right: 22px; z-index: 90;
+  background: transparent; border: 0; color: var(--ink-dimmer); padding: 6px 10px;
+}
+.boot-skip:hover { color: var(--lime); }
+
+@media (max-width: 900px) {
+  .post { grid-template-columns: 1fr; }
+  .post__log { font-size: 9px; }
+  .align { grid-template-columns: 1fr; inset: 24px 14px 72px; overflow: hidden; }
+  .charset, .tree-wrap { display: none; }
+  .tiles { height: 200px; }
+  .align-cta { height: 48px; left: 14px; right: 14px; bottom: 16px; }
+  .shell { inset: 2% 2.5%; border-radius: 16px; }
+  .shell__notch { display: none; }
+  .glyph { width: 18px; height: 18px; }
+}

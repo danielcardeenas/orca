@@ -106,8 +106,11 @@
 .align {
   position: absolute; inset: 40px 36px 96px;
   display: grid;
-  grid-template-columns: minmax(180px, 24%) minmax(110px, 16%) 1fr minmax(80px, 13%);
-  gap: 16px; align-items: start;
+  /* La columna de tiles se dimensiona por su contenido, no a 1fr: a 1600px un
+     1fr dejaba el bloque cuadrado nadando en un tercio de pantalla vacío. El
+     aire sobrante se reparte con una columna elástica antes del charset. */
+  grid-template-columns: minmax(180px, 22%) minmax(110px, 15%) auto 1fr minmax(70px, 11%);
+  gap: 16px; align-items: center;
 }
 .align-cta {
   position: absolute; left: 36px; right: 36px; bottom: 28px; height: 58px;
@@ -124,7 +127,7 @@
 .sig__wave { width: 100%; height: 36px; display: block; }
 
 .tree-wrap {
-  position: relative; align-self: center; height: min(250px, 40vh);
+  position: relative; align-self: center; height: min(320px, 48vh);
   border: 1px solid var(--line); padding: 10px 6px 8px;
 }
 .tree-wrap__plus { top: 8px; left: 8px; }
@@ -137,16 +140,16 @@
 
 .tiles {
   display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(4, 1fr);
-  gap: 8px; align-self: center; justify-self: center;
-  height: min(260px, 42vh);
+  gap: 10px; align-self: center; justify-self: start;
   /* The notch in .tile is a percentage clip-path, so a stretched tile turns a
      subtle bite into a wedge. Keeping the block square keeps the shape right. */
   aspect-ratio: 1;
-  width: 100%; max-width: min(260px, 42vh);
+  height: min(400px, 58vh);
 }
 .tiles .tile span { position: absolute; top: 6px; left: 8px; }
 
 .charset {
+  grid-column: 5;
   margin: 0; color: #e8ece4; font-family: 'Tiny5', monospace;
   font-size: clamp(20px, 2.6vw, 30px); line-height: 1.08;
   letter-spacing: var(--track); white-space: pre;

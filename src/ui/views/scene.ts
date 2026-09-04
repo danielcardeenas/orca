@@ -88,9 +88,22 @@ const FRAG = /* glsl */ `
   }
 `;
 
+/**
+ * Anillo de alarma en el suelo, bajo un agente bloqueado.
+ *
+ * El listón que se detiene ya es señal, pero la quietud sólo se lee si estás
+ * mirando esa parte de la escena. Un anillo que late en el suelo se ve desde
+ * cualquier ángulo y a cualquier distancia, que es la promesa entera de esta
+ * vista: saber qué te necesita sin acercarte.
+ */
+const RING_GEO = new THREE.RingGeometry(0.55, 0.72, 48);
+RING_GEO.rotateX(-Math.PI / 2);
+
 interface Ribbon {
   mesh: THREE.Mesh;
   mat: THREE.ShaderMaterial;
+  /** Presente sólo mientras el agente está bloqueado. */
+  ring: THREE.Mesh | null;
   /** Current animated values, eased toward the targets each frame. */
   amp: number; ampTarget: number;
   speed: number; speedTarget: number;
@@ -235,6 +248,7 @@ export function mountScene(el: HTMLElement): SceneHandle {
 
     r = {
       mesh, mat,
+      ring: null,
       amp: 0, ampTarget: 0,
       speed: 1, speedTarget: 1,
       pulse: 0, pulseTarget: 0,
@@ -285,6 +299,7 @@ export function mountScene(el: HTMLElement): SceneHandle {
           0,
           g.position.z + Math.sin(ang) * rr,
         );
+        r.ring?.position.copy(r.mesh.position).setY(0.02);
       });
     });
 
@@ -345,6 +360,21 @@ export function mountScene(el: HTMLElement): SceneHandle {
       const w = 0.42 + Math.min(0.85, Math.sqrt(agent.metrics.costUSD) * 0.26);
       r.mesh.scale.x = w;
       r.fadeTarget = agent.state === 'dead' ? 0.5 : 1;
+
+      const wantsRing = agent.state === 'blocked';
+      if (wantsRing && !r.ring) {
+        const ring = new THREE.Mesh(RING_GEO, new THREE.MeshBasicMaterial({
+          color: 0xf5a524, transparent: true, opacity: 0.9,
+          side: THREE.DoubleSide, depthWrite: false,
+        }));
+        ring.position.copy(r.mesh.position).setY(0.02);
+        scene.add(ring);
+        r.ring = ring;
+      } else if (!wantsRing && r.ring) {
+        scene.remove(r.ring);
+        (r.ring.material as THREE.Material).dispose();
+        r.ring = null;
+      }
     }
 
     for (const [id, r] of ribbons) {
@@ -355,6 +385,10 @@ export function mountScene(el: HTMLElement): SceneHandle {
       if (r.fade < 0.02) {
         scene.remove(r.mesh);
         r.mat.dispose();
+        if (r.ring) {
+          scene.remove(r.ring);
+          (r.ring.material as THREE.Material).dispose();
+        }
         ribbons.delete(id);
       }
     }
@@ -477,6 +511,16 @@ export function mountScene(el: HTMLElement): SceneHandle {
       (r.mat.uniforms.uColor!.value as THREE.Color).copy(r.color);
       // Ribbons always face the camera's heading so their travel stays visible.
       r.mesh.rotation.y = yaw + Math.PI / 2;
+
+      if (r.ring) {
+        // Un latido lento y amplio: se lee de lejos y no compite con el
+        // movimiento de los agentes que sí están trabajando.
+        const beat = 0.5 + 0.5 * Math.sin(clock.t * 2.1);
+        r.ring.position.copy(r.mesh.position).setY(0.02);
+        const sc = 1 + beat * 0.55;
+        r.ring.scale.set(sc, 1, sc);
+        (r.ring.material as THREE.MeshBasicMaterial).opacity = 0.28 + beat * 0.55;
+      }
     }
 
     // Hover readout.

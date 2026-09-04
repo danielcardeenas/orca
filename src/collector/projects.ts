@@ -28,6 +28,27 @@ export interface ProjectRecord {
   gitCheckedAt: number;
 }
 
+
+/**
+ * Dobla el slug de un worktree sobre el de su proyecto.
+ *
+ * `claude --bg` corre la sesión dentro de un git worktree bajo
+ * `<proyecto>/.claude/worktrees/<nombre>/`, y ese directorio produce su propio
+ * slug. Sin esto, cada agente en background aparecía como un proyecto nuevo:
+ * un operador con cinco agentes de fondo veía su flota partirse en
+ * "axolots", "axolots--claude-worktrees-fix-a", "axolots--claude-worktrees-…".
+ * Son el mismo repo y el mismo trabajo; pertenecen a la misma isla.
+ *
+ * El worktree sigue siendo visible como el `cwd` real del agente; lo que se
+ * corrige es a qué proyecto se le atribuye.
+ */
+const WORKTREE_MARK = '--claude-worktrees-';
+
+export function foldWorktreeSlug(slug: string): string {
+  const at = slug.indexOf(WORKTREE_MARK);
+  return at > 0 ? slug.slice(0, at) : slug;
+}
+
 export class ProjectRegistry {
   private readonly machineId: string;
   private byId = new Map<string, ProjectRecord>();
@@ -56,7 +77,10 @@ export class ProjectRegistry {
    * Asegura que exista el proyecto del slug. `cwdHint` viene del transcript y
    * gana siempre sobre la sonda: si el agente dice dónde corre, ahí corre.
    */
-  ensure(slug: string, cwdHint?: string | null): Project {
+  ensure(rawSlug: string, cwdHint?: string | null): Project {
+    // Un worktree de una sesión background pertenece a su proyecto, no a uno
+    // propio. Ver foldWorktreeSlug.
+    const slug = foldWorktreeSlug(rawSlug);
     const id = this.idForSlug(slug);
     const hint = matchesSlug(cwdHint, slug) ? cwdHint : null;
     const existing = this.byId.get(id);

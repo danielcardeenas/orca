@@ -12,7 +12,8 @@
  *     inyección de comandos por más comillas que traiga el prompt.
  *  3. Todo id se valida contra el estado real antes de tocar nada. Un hub
  *     comprometido no puede nombrar una sesión que no existe ni un proyecto
- *     fuera del home del usuario.
+ *     que el collector no haya descubierto en ~/.claude/projects, y nunca una
+ *     ruta de sistema.
  *  4. Las credenciales sólo entran al env del hijo, y sólo las del proyecto.
  */
 
@@ -63,6 +64,28 @@ export interface CommandResult {
   data?: unknown;
 }
 
+/**
+ * Rutas donde nunca se lanza nada, pase lo que pase. El resto de la defensa es
+ * que la ruta tiene que venir de un proyecto que el collector DESCUBRIÓ en
+ * ~/.claude/projects — es decir, un sitio donde el propio usuario ya corrió
+ * Claude Code. Esa procedencia es mejor garantía que un prefijo de $HOME:
+ * exigir el home dejaba fuera los repos de un VPS en /srv o /opt sin añadir
+ * seguridad real, porque un hub comprometido sólo puede nombrar rutas que ya
+ * tienen sesiones.
+ */
+const FORBIDDEN_ROOTS = ['/etc', '/usr', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys', '/var/log'];
+
+function launchable(cwd: string): { ok: true } | { ok: false; why: string } {
+  const resolved = path.resolve(cwd);
+  if (resolved === '/') return { ok: false, why: 'la raíz del sistema no es un proyecto' };
+  for (const root of FORBIDDEN_ROOTS) {
+    if (resolved === root || resolved.startsWith(root + path.sep)) {
+      return { ok: false, why: `ruta de sistema, no se lanza nada ahí: ${resolved}` };
+    }
+  }
+  return { ok: true };
+}
+
 export class CommandRunner {
   private readonly deps: CommandDeps;
   private readonly bin: string | null;
@@ -111,9 +134,8 @@ export class CommandRunner {
     if (!project) return { ok: false, detail: `proyecto desconocido: ${cmd.projectId}` };
 
     const cwd = path.resolve(project.path);
-    if (!isInside(home(), cwd)) {
-      return { ok: false, detail: `ruta fuera del home del usuario: ${cwd}` };
-    }
+    const allowed = launchable(cwd);
+    if (!allowed.ok) return { ok: false, detail: allowed.why };
     if (!isDir(cwd)) return { ok: false, detail: `la ruta del proyecto no existe: ${cwd}` };
     if (typeof cmd.prompt !== 'string' || cmd.prompt.trim().length === 0) {
       return { ok: false, detail: 'prompt vacío' };
@@ -137,7 +159,15 @@ export class CommandRunner {
     }
     const name = oneLine(cmd.mission, 60);
     if (name) args.push('--name', name);
-    args.push('-p', cmd.prompt);
+
+    /*
+     * El prompt va POSICIONAL con --bg y con -p sin él. No es cosmético: el CLI
+     * rechaza la combinación en seco —"--bg and --print conflict: --print never
+     * starts the interactive session that `claude agents` attaches to"— así que
+     * con -p todo spawn en background fallaba antes de arrancar.
+     */
+    if (cmd.background) args.push(cmd.prompt);
+    else args.push('-p', cmd.prompt);
 
     const env = {
       ...process.env,
@@ -146,7 +176,7 @@ export class CommandRunner {
       ORCA_PARENT_ID: cmd.parentId ?? '',
     };
 
-    const res = await run(this.bin, args, { cwd, env, timeoutMs: 60_000 });
+    const res = await run(this.bin, args, { cwd, env, timeoutMs: 60_000, detach: true });
     if (!res.ok) return { ok: false, detail: res.detail };
 
     const shortId = extractShortId(res.stdout);
@@ -176,8 +206,9 @@ export class CommandRunner {
 
     // No hay `claude say`. Continuar la sesión en background con un prompt nuevo
     // ES el canal de entrada de texto que el CLI ofrece hoy.
-    const res = await run(this.bin, ['--bg', '--resume', a.sessionId, '-p', cmd.text], {
-      cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000,
+    // Prompt posicional: con --bg, -p es un error del CLI (ver spawn()).
+    const res = await run(this.bin, ['--bg', '--resume', a.sessionId, cmd.text], {
+      cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000, detach: true,
     });
     return res.ok
       ? { ok: true, detail: oneLine(res.stdout, 200) }
@@ -192,7 +223,7 @@ export class CommandRunner {
     const cwd = await this.cwdOf(a);
     if (!cwd.ok) return cwd.res;
     const res = await run(this.bin, ['--bg', '--resume', a.sessionId], {
-      cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000,
+      cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000, detach: true,
     });
     return res.ok
       ? { ok: true, detail: oneLine(res.stdout, 200) }
@@ -233,7 +264,9 @@ export class CommandRunner {
     });
     if (!res.ok) return { ok: false, detail: res.detail };
     const wanted = Math.max(1, Math.min(2000, Math.floor(cmd.lines) || 200));
-    const lines = res.stdout.split('\n').slice(-wanted);
+    // Sin limpiar, treinta lineas utiles llegan como cien kilobytes de escapes
+    // de terminal y fotogramas de spinner.
+    const lines = stripAnsi(res.stdout).split('\n').slice(-wanted);
     return { ok: true, data: { lines } };
   }
 
@@ -301,9 +334,8 @@ export class CommandRunner {
     const project = this.deps.projects.get(a.projectId);
     if (!project) return { ok: false, res: { ok: false, detail: 'proyecto desconocido' } };
     const cwd = path.resolve(project.path);
-    if (!isInside(home(), cwd)) {
-      return { ok: false, res: { ok: false, detail: `ruta fuera del home: ${cwd}` } };
-    }
+    const allowed = launchable(cwd);
+    if (!allowed.ok) return { ok: false, res: { ok: false, detail: allowed.why } };
     if (!isDir(cwd)) {
       return { ok: false, res: { ok: false, detail: `la ruta no existe: ${cwd}` } };
     }
@@ -317,6 +349,8 @@ interface RunOpts {
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
+  /** El hijo debe sobrevivir al collector (agentes en background). */
+  detach?: boolean;
 }
 
 interface RunResult { ok: boolean; stdout: string; stderr: string; detail: string; }
@@ -333,6 +367,17 @@ function run(bin: string, args: string[], opts: RunOpts): Promise<RunResult> {
         shell: false,          // ← la línea que hace segura a toda esta clase
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
+        /*
+         * Un agente en background tiene que sobrevivir al collector. Sin
+         * detached hereda su grupo de procesos, así que reiniciar el collector
+         * —o pararlo con Ctrl-C, que manda la señal a todo el grupo— se llevaba
+         * por delante a todos los agentes que hubiera lanzado. Eso vacía de
+         * sentido la palabra "background".
+         *
+         * Sólo para los comandos que lanzan trabajo; una consulta corta como
+         * `claude agents` no lo necesita y detachearla complicaría su limpieza.
+         */
+        detached: opts.detach === true,
       });
     } catch (err) {
       done({ ok: false, stdout: '', stderr: '', detail: errText(err) });
@@ -351,6 +396,8 @@ function run(bin: string, args: string[], opts: RunOpts): Promise<RunResult> {
       done({ ok: false, stdout, stderr, detail: `timeout tras ${opts.timeoutMs}ms` });
     }, opts.timeoutMs);
     timer.unref?.();
+    // Que el proceso del collector pueda terminar sin esperar al hijo.
+    if (opts.detach) child.unref();
     child.on('error', (err) => {
       clearTimeout(timer);
       done({ ok: false, stdout, stderr, detail: errText(err) });
@@ -400,6 +447,37 @@ function isDir(p: string): boolean {
  * porque es salida humana: buscamos el último token hexadecimal aislado, que es
  * la forma que tienen los ids en ~/.claude/jobs (p.ej. "e065a5f6").
  */
+/**
+ * Quita las secuencias de escape de un volcado de terminal.
+ *
+ * `claude logs` devuelve exactamente lo que se pintó en la pantalla: colores,
+ * saltos de cursor y cientos de fotogramas de un spinner. Sin limpiarlo, un
+ * `logs` de treinta líneas llega a la consola como cien kilobytes de basura
+ * ilegible. Esto deja el texto que un humano querría leer.
+ */
+export function stripAnsi(text: string): string {
+  return text
+    // CSI, OSC y escapes de un solo carácter
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b[@-Z\\-_]/g, '')
+    // Retornos de carro que sólo existían para repintar la misma línea
+    .replace(/\r(?!\n)/g, '\n')
+    /*
+     * Se descartan las líneas sin una sola letra ni dígito. El residuo de un
+     * repintado de terminal —spinners, reglas, marcos— no tiene palabras, y
+     * doscientos glifos de spinner colapsan en una única línea larguísima que
+     * un filtro por longitud deja pasar. "Contiene algo legible" es el criterio
+     * correcto, y conserva una línea de sólo puntuación si alguna vez importa
+     * (no lo hace: nunca es salida de un agente).
+     */
+    .split('\n')
+    .filter((l) => /[\p{L}\p{N}]/u.test(l))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function extractShortId(stdout: string): string | null {
   const tokens = stdout.match(/\b[0-9a-f]{8}\b/g);
   if (tokens && tokens.length > 0) return tokens[tokens.length - 1]!;

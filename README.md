@@ -97,6 +97,11 @@ Two honest caveats, both properties of Claude Code rather than of ORCA:
   the block and tells you which agent and which machine; you answer in its
   terminal. `Command.permit` is in the protocol waiting for the day the CLI
   supports it.
+- **A background agent works inside a git worktree.** `claude --bg` runs the
+  session in `<project>/.claude/worktrees/<name>/`, which has its own transcript
+  slug. ORCA folds those back onto the parent project — without that, five
+  background agents fragment one repo into six phantom projects on the deck.
+  The worktree is still visible as the agent's real working directory.
 
 Only sessions touched inside the fleet window count — 24h by default,
 `ORCA_FLEET_WINDOW_MS` to change it. Without that filter the console loads every

@@ -81,8 +81,17 @@ async function main() {
     }
   }
   console.log('');
-  console.log(`[orca] console: run \`npx vite\` and open http://127.0.0.1:4478/`);
-  console.log(`[orca] collector: run \`npx tsx src/collector/index.ts\` on each machine`);
+  // Bajo `npm run dev` el collector y Vite ya los arrancó concurrently; repetir
+  // las instrucciones ahí sólo confunde a quien ya hizo lo correcto.
+  if (process.env['npm_lifecycle_event'] === 'dev:orca') {
+    console.log('[orca] console → http://127.0.0.1:4478/');
+    console.log('[orca] the collector for this machine is already running alongside.');
+    console.log('[orca] on any OTHER machine: npx tsx src/collector/index.ts');
+  } else {
+    console.log('[orca] console:   npx vite   → http://127.0.0.1:4478/');
+    console.log('[orca] collector: npx tsx src/collector/index.ts   (on each machine)');
+    console.log('[orca] or all three at once:  npm run dev');
+  }
 
   const bye = async () => {
     console.log('\n[orca] shutting down');

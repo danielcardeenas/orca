@@ -24,6 +24,21 @@ import * as THREE from 'three';
 import type { Agent, AgentState } from '../../shared/types.ts';
 import { store } from '../store.ts';
 
+/**
+ * Cuántos listones caben en una plataforma antes de dejar de ser legible.
+ *
+ * Un proyecto con 59 sesiones del día produce un amasijo donde no se distingue
+ * nada. Se muestran los más relevantes —lo que necesita a una persona primero,
+ * luego lo que está corriendo— y el resto se cuenta bajo la etiqueta. La
+ * escena responde "qué está pasando", no "qué ha pasado nunca".
+ */
+const MAX_RIBBONS_PER_PROJECT = 12;
+
+/** Orden de relevancia dentro de una plataforma. */
+const SCENE_RANK: Record<AgentState, number> = {
+  blocked: 0, working: 1, thinking: 2, booting: 3, idle: 4, dead: 5, done: 6,
+};
+
 const COLORS: Record<AgentState, number> = {
   booting: 0x6a8cff,
   thinking: 0x8fb8ff,
@@ -267,9 +282,13 @@ export function mountScene(el: HTMLElement): SceneHandle {
      the operator's spatial memory of where a project sits has to survive a new
      project appearing. */
 
+  /** Qué agentes tiene sitio cada proyecto, decidido en layout(). */
+  const shown = new Map<string, Set<string>>();
+
   function layout() {
     const projects = store.activeProjects();
     const seenP = new Set<string>();
+    shown.clear();
 
     projects.forEach((p, i) => {
       seenP.add(p.id);
@@ -278,17 +297,28 @@ export function mountScene(el: HTMLElement): SceneHandle {
       const rad = 4.6 * Math.sqrt(i + 0.6);
       g.position.set(Math.cos(a) * rad, 0, Math.sin(a) * rad);
 
+      // Agents ring their platform, ordered so blocked ones face the camera's
+      // default heading. Stable slots: an agent does not move once placed.
+      const all = store.agentsOf(p.id).filter((x) => x.state !== 'done');
+      all.sort((a, b) => {
+        if (SCENE_RANK[a.state] !== SCENE_RANK[b.state]) {
+          return SCENE_RANK[a.state] - SCENE_RANK[b.state];
+        }
+        return b.updatedAt - a.updatedAt;
+      });
+      const agents = all.slice(0, MAX_RIBBONS_PER_PROJECT);
+      shown.set(p.id, new Set(agents.map((a) => a.id)));
+
+      const hidden = all.length - agents.length;
       const label = g.userData.label as THREE.Sprite | undefined;
-      if (label && g.userData.code !== p.code) {
-        g.userData.code = p.code;
+      const wantLabel = hidden > 0 ? `${p.code} +${hidden}` : p.code;
+      if (label && g.userData.shownLabel !== wantLabel) {
+        g.userData.shownLabel = wantLabel;
         (label.material as THREE.SpriteMaterial).map?.dispose();
-        (label.material as THREE.SpriteMaterial).map = makeLabelTexture(p.code);
+        (label.material as THREE.SpriteMaterial).map = makeLabelTexture(wantLabel);
         (label.material as THREE.SpriteMaterial).needsUpdate = true;
       }
 
-      // Agents ring their platform, ordered so blocked ones face the camera's
-      // default heading. Stable slots: an agent does not move once placed.
-      const agents = store.agentsOf(p.id).filter((x) => x.state !== 'done');
       const n = Math.max(1, agents.length);
       agents.forEach((agent, j) => {
         const r = ribbonFor(agent);
@@ -318,6 +348,9 @@ export function mountScene(el: HTMLElement): SceneHandle {
     const seen = new Set<string>();
     for (const agent of Object.values(store.world.agents)) {
       if (agent.state === 'done') continue;
+      // layout() decide quién cabe; retarget no puede inventar listones para
+      // los que quedaron fuera o la plataforma volvería a saturarse.
+      if (!shown.get(agent.projectId)?.has(agent.id)) continue;
       seen.add(agent.id);
       const r = ribbonFor(agent);
       r.state = agent.state;
@@ -353,13 +386,25 @@ export function mountScene(el: HTMLElement): SceneHandle {
           break;
       }
 
-      // Height reads uptime, width reads spend. Both grow straight, never pump.
+      /*
+       * La altura lee el uptime, el ancho el gasto. Ambos crecen recto, nunca
+       * bombean.
+       *
+       * Pero un `idle` de seis horas es tan alto como el agente que está
+       * trabajando ahora, y la escena acababa dominada por losas grises de
+       * sesiones terminadas hace rato. El peso visual sigue a la actividad: lo
+       * inactivo se agacha.
+       */
       const mins = agent.uptimeMs / 60000;
+      const full = 1.4 + Math.min(3.4, Math.log2(1 + mins) * 0.9);
       r.heightTarget = agent.state === 'dead' ? 0.35
-        : 1.4 + Math.min(3.4, Math.log2(1 + mins) * 0.9);
+        : agent.state === 'idle' ? Math.min(1.5, full * 0.4)
+          : full;
       const w = 0.42 + Math.min(0.85, Math.sqrt(agent.metrics.costUSD) * 0.26);
       r.mesh.scale.x = w;
-      r.fadeTarget = agent.state === 'dead' ? 0.5 : 1;
+      r.fadeTarget = agent.state === 'dead' ? 0.5
+        : agent.state === 'idle' ? 0.45
+          : 1;
 
       const wantsRing = agent.state === 'blocked';
       if (wantsRing && !r.ring) {

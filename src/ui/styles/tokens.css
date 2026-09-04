@@ -332,6 +332,14 @@ input, textarea { cursor: text !important; }
 .scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 0; }
 .scroll::-webkit-scrollbar-thumb:hover { background: #3a4150; }
 
+/*
+ * `hidden` es un atributo, no una clase, y su `display: none` de user-agent
+ * pierde contra cualquier regla que fije display. Media consola usa `el.hidden`
+ * para ocultar cosas, así que sin esto un estado vacío se queda pintado encima
+ * del contenido real.
+ */
+[hidden] { display: none !important; }
+
 .hidden { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {

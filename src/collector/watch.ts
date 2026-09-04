@@ -60,8 +60,8 @@ export interface WatchOptions {
   root?: string;
   pollMs?: number;
   rescanMs?: number;
-  /** Bytes de cola leídos al arrancar, por escalones. */
-  bootstrapSteps?: number[];
+  /** Bytes de cola leídos al arrancar, de una sola lectura. */
+  bootstrapBytes?: number;
   /** Tope de bytes leídos por archivo y por tick, para no bloquear el loop. */
   maxReadBytes?: number;
   /** Tope del rastreo hacia atrás de marcadores (cost-state, ai-title). */
@@ -88,13 +88,18 @@ interface FileState {
   bootstrapped: boolean;
 }
 
-const DEFAULT_STEPS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
+/**
+ * Cola leída por archivo al arrancar. 1MB son ~1500 líneas de transcript real:
+ * de sobra para título, últimos turnos y la tool en curso. Con 539 transcripts
+ * en esta máquina, cada MB extra son 539MB de I/O antes de ver la flota.
+ */
+const DEFAULT_BOOTSTRAP_BYTES = 1024 * 1024;
 
 export class TranscriptWatcher {
   private readonly root: string;
   private readonly pollMs: number;
   private readonly rescanMs: number;
-  private readonly steps: number[];
+  private readonly bootstrapBytes: number;
   private readonly maxRead: number;
   private readonly deepScanBytes: number;
   private readonly deepScanMaxAgeMs: number;
@@ -115,7 +120,7 @@ export class TranscriptWatcher {
     this.root = opts.root ?? claudeProjectsDir();
     this.pollMs = opts.pollMs ?? 1500;
     this.rescanMs = opts.rescanMs ?? 6000;
-    this.steps = opts.bootstrapSteps ?? DEFAULT_STEPS;
+    this.bootstrapBytes = opts.bootstrapBytes ?? DEFAULT_BOOTSTRAP_BYTES;
     this.maxRead = opts.maxReadBytes ?? 4 * 1024 * 1024;
     this.deepScanBytes = opts.deepScanBytes ?? 16 * 1024 * 1024;
     this.deepScanMaxAgeMs = opts.deepScanMaxAgeMs ?? 14 * 24 * 3600_000;
@@ -204,7 +209,7 @@ export class TranscriptWatcher {
      * y perderlo a medianoche sería peor que cargarlo de más.
      */
     const keep = async (ref: TranscriptRef): Promise<void> => {
-      if (cutoff === 0 || this.files.has(ref.key)) { out.push(ref); return; }
+      if (cutoff === 0 || this.files.has(ref.path)) { out.push(ref); return; }
       const stat = await guardAsync(SCOPE, `stat ${ref.key}`, () => fsp.stat(ref.path), null);
       if (!stat) return;
       if (stat.mtimeMs < cutoff) { skipped++; return; }
@@ -317,12 +322,13 @@ export class TranscriptWatcher {
    * completa: en un archivo de 83MB leemos como mucho 4MB.
    */
   private async bootstrap(st: FileState, size: number): Promise<void> {
-    let lines: Record<string, unknown>[] = [];
-    for (const step of this.steps) {
-      const want = Math.min(step, size);
-      lines = await this.readTail(st.ref.path, size, want);
-      if (this.enoughForState(lines) || want >= size) break;
-    }
+    // UNA sola lectura. La versión anterior escalaba 256KB → 1MB → 4MB buscando
+    // un cost-state, lo que en la práctica leía 5.25MB por archivo (2.8GB en
+    // total aquí) y retrasaba minutos el primer cuadro de la flota. Ahora el
+    // cost-state lo rescata el rastreo de fondo, y esta lectura sólo tiene que
+    // dar el estado reciente.
+    const want = Math.min(this.bootstrapBytes, size);
+    const lines = await this.readTail(st.ref.path, size, want);
     st.offset = size;
     st.partial = '';
     st.bootstrapped = true;
@@ -332,12 +338,11 @@ export class TranscriptWatcher {
     // de MB hacia atrás en los 132 archivos grandes de esta máquina no puede
     // retrasar el momento en que el collector empieza a ver la flota. Llega
     // como un segundo batch, y el deriver lo aplica igual.
-    const read = Math.min(this.steps[this.steps.length - 1] ?? 0, size);
-    if (read < size && this.recent(st.mtimeMs)) {
+    if (want < size && this.recent(st.mtimeMs)) {
       const missing = ['cost-state', 'ai-title']
         .filter((t) => !lines.some((l) => l['type'] === t));
       if (missing.length > 0) {
-        this.deepQueue.push({ st, upTo: size - read, types: missing });
+        this.deepQueue.push({ st, upTo: size - want, types: missing });
         void this.drainDeepQueue();
       }
     }
@@ -418,18 +423,6 @@ export class TranscriptWatcher {
     } finally {
       await fh.close().catch(() => { /* ya cerrado */ });
     }
-  }
-
-  /** ¿La cola leída alcanza para título + costo + al menos un turno? */
-  private enoughForState(lines: Record<string, unknown>[]): boolean {
-    let cost = false, title = false, assistant = false;
-    for (const l of lines) {
-      const t = l['type'];
-      if (t === 'cost-state') cost = true;
-      else if (t === 'ai-title') title = true;
-      else if (t === 'assistant') assistant = true;
-    }
-    return cost && assistant && (title || lines.length > 400);
   }
 
   private async readTail(

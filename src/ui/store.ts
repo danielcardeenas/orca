@@ -146,6 +146,23 @@ export class Store {
     if (wasBlocked !== isBlocked) out.push({ agentId: id, on: isBlocked });
   }
 
+  /**
+   * Inserta una escalación local sin tocar `rev`.
+   *
+   * Existe sólo para el arnés visual, que necesita fotografiar el tratamiento
+   * ámbar y el breach a demanda. Es una afordancia de prueba deliberada: la
+   * alternativa —que el arnés escribiera en el mundo y adelantara el rev— hacía
+   * que la consola detectara un hueco de protocolo, pidiera resync y perdiera
+   * la tarjeta a mitad de captura, produciendo fotogramas que mentían sobre la
+   * UI real.
+   *
+   * No la use nada del producto. La consola sólo muta por parches del hub.
+   */
+  injectForTest(esc: Escalation): void {
+    this.world.escalations[esc.id] = esc;
+    this.emit({ k: 'escalations', ids: [esc.id] });
+  }
+
   pushCeo(m: CeoMessage) {
     const i = this.world.ceo.messages.findIndex((x) => x.id === m.id);
     if (i >= 0) this.world.ceo.messages[i] = m;

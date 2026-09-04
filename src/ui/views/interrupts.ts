@@ -17,8 +17,17 @@ import type { Agent, Escalation } from '../../shared/types.ts';
 import { store } from '../store.ts';
 import { hub } from '../net/client.ts';
 
-/** A blocking question unanswered this long escalates to the full-field alarm. */
-const BREACH_AFTER_MS = 90_000;
+/**
+ * A blocking question unanswered this long escalates to the full-field alarm.
+ *
+ * Overridable with `?breachAfter=<ms>` so the visual harness can photograph the
+ * alarm without waiting a minute and a half. It is a timing knob, not a way to
+ * fake the state: the question still has to be real, blocking, and unanswered.
+ */
+const BREACH_AFTER_MS = (() => {
+  const v = Number(new URL(location.href).searchParams.get('breachAfter'));
+  return Number.isFinite(v) && v > 0 ? v : 90_000;
+})();
 
 export function mountInterrupts(el: HTMLElement) {
   el.innerHTML = `
@@ -50,6 +59,17 @@ export function mountInterrupts(el: HTMLElement) {
     const pending = store.pending();
     const seen = new Set<string>();
 
+    /*
+     * Barrido de salientes. La animación de salida quita el nodo en su
+     * onComplete, pero un onComplete puede no llegar nunca: GSAP lo descarta si
+     * algo mata el tween, y el resultado era una tarjeta vacía tapada por su
+     * propio barrido lima, encallada arriba de la cola. Un repintado posterior
+     * es un momento seguro y garantizado para limpiar.
+     */
+    for (const stale of list.querySelectorAll<HTMLElement>('[data-leaving]')) {
+      if (Number(stale.dataset.leaving) < Date.now() - 900) stale.remove();
+    }
+
     for (const e of pending) {
       seen.add(e.id);
       let node = nodes.get(e.id);
@@ -69,17 +89,24 @@ export function mountInterrupts(el: HTMLElement) {
     for (const [id, node] of nodes) {
       if (seen.has(id)) continue;
       nodes.delete(id);
+      if (node.dataset.leaving) continue;
+      node.dataset.leaving = String(Date.now());
+
       // Answered questions leave with a lime confirm wipe, as in the comp.
       const wipe = document.createElement('i');
       wipe.className = 'int__confirm';
       node.appendChild(wipe);
+      const drop = () => node.remove();
       gsap.timeline()
         .fromTo(wipe, { scaleX: 0 },
           { scaleX: 1, duration: 0.28, ease: 'power2.inOut', transformOrigin: 'left center' })
         .to(node, {
           autoAlpha: 0, height: 0, marginBottom: 0, duration: 0.24,
-          ease: 'power2.in', onComplete: () => node.remove(),
+          ease: 'power2.in', onComplete: drop,
         }, '+=0.1');
+      // Red de seguridad: una animación interrumpida no puede dejar una tarjeta
+      // vacía flotando en la cola para siempre.
+      setTimeout(drop, 1200);
     }
 
     // Un agente bloqueado esperando un permiso también te necesita, aunque no
@@ -150,12 +177,7 @@ export function mountInterrupts(el: HTMLElement) {
         window.dispatchEvent(new CustomEvent('orca:open-agent', { detail: { id: a.id } }));
         return;
       }
-      const act = b.dataset.act!;
-      if (act === 'once' || act === 'session') {
-        void hub.cmd({ k: 'permit', agentId: a.id, allow: true, scope: act as 'once' | 'session' });
-      } else if (act === 'deny') {
-        void hub.cmd({ k: 'permit', agentId: a.id, allow: false, scope: 'once' });
-      } else if (act === 'open') {
+      if (b.dataset.act === 'open') {
         window.dispatchEvent(new CustomEvent('orca:open-agent', { detail: { id: a.id } }));
       }
     });
@@ -179,17 +201,22 @@ export function mountInterrupts(el: HTMLElement) {
       : ms < 3_600_000 ? Math.floor(ms / 60_000) + 'M'
         : Math.floor(ms / 3_600_000) + 'H');
 
-    // Un permiso se contesta con tres botones; un bloqueo de otro tipo se
-    // contesta abriendo el agente, porque hace falta ver el contexto.
+    /*
+     * Un prompt de permisos NO se puede contestar desde aquí: Claude Code
+     * 2.1.260 no expone forma de responderlo desde fuera del proceso. Un botón
+     * ALLOW que falla en silencio sería peor que no tenerlo, así que la consola
+     * dice la verdad — dónde está ese agente y que hay que ir a su terminal.
+     *
+     * Cuando el CLI lo exponga, aquí vuelven los tres botones y `Command.permit`
+     * ya está en el protocolo esperándolos.
+     */
     const opts = node.querySelector<HTMLElement>('[data-blockopts]')!;
     const kind = a.block?.kind ?? 'input';
-    const want = kind === 'permission' ? 'permit' : 'open';
-    if (opts.dataset.sig !== want) {
-      opts.dataset.sig = want;
+    if (opts.dataset.sig !== kind) {
+      opts.dataset.sig = kind;
       opts.innerHTML = kind === 'permission'
-        ? `<button class="int__opt" type="button" data-act="once"><span class="px px--tiny">ALLOW ONCE</span></button>
-           <button class="int__opt" type="button" data-act="session"><span class="px px--tiny">ALLOW SESSION</span></button>
-           <button class="int__opt int__opt--deny" type="button" data-act="deny"><span class="px px--tiny">DENY</span></button>`
+        ? `<span class="int__note px px--tiny">ANSWER IN ITS TERMINAL</span>
+           <button class="int__opt" type="button" data-act="open"><span class="px px--tiny">WHERE IS IT</span></button>`
         : `<button class="int__opt" type="button" data-act="open"><span class="px px--tiny">OPEN AGENT</span></button>`;
     }
   }
@@ -427,16 +454,21 @@ function mountBreach() {
     }
   }
 
-  // Dismissing is per-question and permanent for that question. The queue
-  // still shows it in amber; the operator has simply acknowledged the shout.
-  el.addEventListener('click', () => {
+  /*
+   * Se descarta con cualquier clic en la página, no sólo sobre el velo: el velo
+   * no recibe eventos precisamente para que el clic con el que respondes la
+   * pregunta también apague la alarma. Descartar es por pregunta y permanente
+   * para ella; la cola la sigue mostrando en ámbar.
+   */
+  document.addEventListener('click', () => {
+    if (!on) return;
     for (const id of (el.dataset.ids ?? '').split(',')) if (id) dismissed.add(id);
     document.body.classList.remove('is-breach');
     tl?.kill();
     tl = null;
     on = false;
     gsap.to(el, { autoAlpha: 0, duration: 0.2 });
-  });
+  }, { capture: true });
 
   return { evaluate };
 }

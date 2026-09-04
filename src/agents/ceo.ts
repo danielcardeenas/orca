@@ -133,6 +133,16 @@ export class Ceo {
       content: [{ type: 'text', text: this.fleetBrief() }, { type: 'text', text: brief }],
     }];
 
+    /**
+     * Durante el triaje, cualquier ask_human se refiere a ESTA pregunta. Se
+     * envuelve el contexto en vez de pasar el id por el esquema de la tool,
+     * porque el modelo no debería poder equivocarse de escalación.
+     */
+    const triageCtx: CeoContext = {
+      ...this.ctx,
+      raiseToHuman: (input) => this.ctx.raiseToHuman({ ...input, replaces: esc.id }),
+    };
+
     let terminal: 'answered' | 'escalated' | null = null;
     let lastText = '';
 
@@ -151,7 +161,7 @@ export class Ceo {
 
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const call of calls) {
-        const out = await runTool(this.ctx, call.name, (call.input ?? {}) as Record<string, unknown>);
+        const out = await runTool(triageCtx, call.name, (call.input ?? {}) as Record<string, unknown>);
         if (out.terminal) terminal = out.terminal;
         results.push({
           type: 'tool_result', tool_use_id: call.id,
@@ -165,7 +175,7 @@ export class Ceo {
     // waiting on a CEO that wandered off is the one failure mode this system
     // cannot have.
     if (!terminal) {
-      this.ctx.raiseToHuman({
+      triageCtx.raiseToHuman({
         question: esc.question,
         context: esc.context,
         options: esc.options,

@@ -33,7 +33,13 @@ export interface CeoContext {
   /** Persist an answer so the same question never reaches the human twice. */
   remember(question: string, answer: string, projectId: string | null): void;
 
-  /** Raise a question to the human. Returns the escalation it created. */
+  /**
+   * Raise a question to the human. Returns the escalation it created — or the
+   * one it updated: when the CEO is triaging a question an agent already
+   * asked, `replaces` names that record, and the CEO's attempt is written onto
+   * it. Creating a second record would show the operator the same question
+   * twice, which is precisely the noise this whole system exists to remove.
+   */
   raiseToHuman(input: {
     question: string;
     context: string | null;
@@ -42,6 +48,7 @@ export interface CeoContext {
     agentId: string | null;
     projectId: string | null;
     ceoAttempt: Escalation['ceoAttempt'];
+    replaces?: string | null;
   }): Escalation;
 
   /** Send an answer back down to a waiting agent. */

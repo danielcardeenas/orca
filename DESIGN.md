@@ -101,6 +101,9 @@ Rules taken from the comp and kept:
 - **Activity bars report speed, never progress.** They are travelling bands with
   no end state, because an agent has no percentage complete and pretending
   otherwise is a lie the operator will act on.
+- **No control the console cannot honour.** If a button cannot do the thing it
+  names — a permission prompt ORCA has no way to answer — the console says so
+  in words instead. A button that fails silently is worse than an absent one.
 
 `prefers-reduced-motion` removes the scanlines, the breathing, and the travelling
 bands; every state remains legible as a static colour.

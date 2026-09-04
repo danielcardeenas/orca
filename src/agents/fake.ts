@@ -23,8 +23,14 @@ import { newId } from '../shared/protocol.ts';
 import type { CeoContext } from './tools.ts';
 import type { CeoEvents } from './ceo.ts';
 
-/** Above this recall score, answering without the human is safe enough. */
-const CONFIDENT = 0.62;
+/**
+ * Above this recall score, answering without the human is safe enough.
+ *
+ * Calibrated against the recalibrated similarity metric: a genuine paraphrase
+ * of a stored question scores ~0.60-0.79, an unrelated question scores 0.00.
+ * The gap is wide, so the exact number matters less than being inside it.
+ */
+const CONFIDENT = 0.55;
 
 export interface FakeCeoOptions {
   /** Why the real CEO is not running. Shown to the operator once. */
@@ -74,6 +80,7 @@ export class FakeCeo {
     }
 
     this.ctx.raiseToHuman({
+      replaces: esc.id,
       question: esc.question,
       context: esc.context,
       options: esc.options,

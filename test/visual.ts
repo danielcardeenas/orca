@@ -166,9 +166,17 @@ async function shootConsole(browser: Browser) {
   await sleep(900);
   await shot(page, 'console-09-interrupt');
 
-  // And the breach takeover, by backdating the question past its threshold.
-  await agePendingEscalations(page, 120_000);
-  await sleep(1600);
+  /*
+   * The breach gets its own page load with a shortened threshold. Leaving that
+   * threshold short for the whole run would put every other frame under the red
+   * wash, and those frames exist to be looked at as design references.
+   */
+  await page.goto(`http://127.0.0.1:${UI_PORT}/?noboot=1&breachAfter=1200`,
+    { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => document.fonts.ready);
+  await until(async () => await page.locator('.atile').count() > 3, 20_000, 300);
+  await injectEscalation(page, 'blocking');
+  await sleep(3000);
   await shot(page, 'console-10-breach');
 
   await page.close();
@@ -238,7 +246,9 @@ async function injectEscalation(page: Page, urgency: 'low' | 'normal' | 'blockin
     if (!store) return;
     const agent = Object.values(store.world.agents)[0] as any;
     const id = 'esc_visual_' + Math.random().toString(36).slice(2, 8);
-    store.world.escalations[id] = {
+    // injectForTest: no toca el rev, así que la consola no pide resync ni
+    // pierde la tarjeta a mitad de captura.
+    store.injectForTest({
       id,
       agentId: agent?.id ?? 'unknown',
       projectId: agent?.projectId ?? 'unknown',
@@ -256,22 +266,8 @@ async function injectEscalation(page: Page, urgency: 'low' | 'normal' | 'blockin
       },
       answer: null, answeredBy: null, rememberAs: null,
       askedAt: Date.now(), answeredAt: null, expiresAt: null,
-    };
-    store.emitAll?.();
-    store.on && store.applyPatch(store.world.rev + 1, []);
+    });
   }, urgency);
-}
-
-/** Backdate pending questions so the breach threshold trips on demand. */
-async function agePendingEscalations(page: Page, byMs: number) {
-  await page.evaluate((ms) => {
-    const w = window as unknown as { __orca?: { store: any } };
-    const store = w.__orca?.store;
-    if (!store) return;
-    for (const e of Object.values(store.world.escalations) as any[]) {
-      if (e.status === 'pending' || e.status === 'with_ceo') e.askedAt -= ms;
-    }
-  }, byMs);
 }
 
 /* ── Process plumbing ─────────────────────────────────────────────── */

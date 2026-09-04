@@ -123,7 +123,13 @@
      one thing the alarm is telling them to go do. */
   background: rgba(20, 3, 2, 0.62);
   backdrop-filter: blur(1.5px);
-  pointer-events: auto;
+  /*
+   * El velo NO intercepta clics. Una alarma que te impide hacer exactamente lo
+   * que te está pidiendo es una trampa: el operador tiene que poder pulsar el
+   * botón de respuesta con la alarma encima. Se descarta con cualquier clic,
+   * mediante un listener a nivel de documento, y ese mismo clic llega abajo.
+   */
+  pointer-events: none;
 }
 .breach__dismiss { color: #b06055; letter-spacing: 0.2em; }
 .breach__banner { width: min(860px, 92%); }
@@ -149,9 +155,24 @@ body.is-breach .feed { background: var(--red-deep); }
 }
 
 @media (max-width: 940px) {
-  .ints { max-height: none; }
-  .int__opt { padding: 10px 14px; min-height: 40px; }
-  .int__input, .int__send { min-height: 40px; }
+  .ints { max-height: none; grid-template-rows: 30px 1fr; min-height: 0; }
+  .ints__list { padding: 8px; }
+
+  /* Thumb-sized, and never wider than the screen. The options row wraps; a
+     long option truncates instead of pushing the card off the viewport. */
+  .int { padding: 12px 12px; }
+  .int__opts { gap: 6px; }
+  .int__opt {
+    padding: 10px 14px; min-height: 44px; max-width: 100%;
+    overflow: hidden;
+  }
+  .int__opt .px {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .int__input, .int__send { min-height: 44px; }
+  .int__q { font-size: 13px; }
+  .int__remember { padding: 4px 0; }
+  .int__remember input { width: 16px; height: 16px; }
 }
 
 /* ── Blocked agents ───────────────────────────────────────────────────
@@ -176,3 +197,11 @@ body.is-breach .feed { background: var(--red-deep); }
 .int__opt--deny .px { color: var(--ink-dimmer); }
 .int__opt--deny:hover { background: var(--red); border-color: var(--red); }
 .int__opt--deny:hover .px { color: #1a0000; }
+
+/* Said plainly rather than shown as a button that cannot work: a permission
+   prompt lives in the agent's own terminal and only a person there can answer
+   it. The console's job is to say which terminal. */
+.int__note {
+  display: inline-flex; align-items: center;
+  color: var(--ink-faint); padding: 7px 0; margin-right: 8px;
+}

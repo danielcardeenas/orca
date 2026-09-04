@@ -84,7 +84,19 @@ transcripts are 24MB — re-reading is not an option):
 | `done` / `dead` | over |
 
 Plus spend, tokens/sec, lines changed, tool calls, turns, and the parent→child
-lineage when an agent spawns subagents.
+lineage when an agent spawns subagents (read from each subagent's `.meta.json`,
+which carries `agentType`, `description` and `spawnDepth`).
+
+Two honest caveats, both properties of Claude Code rather than of ORCA:
+
+- **A live agent legitimately shows `$0.00`.** Claude Code writes its
+  `cost-state` line once, when the session ends. Only finished sessions have a
+  total; running ones report what ORCA has observed since it attached.
+- **A permission prompt cannot be answered from the console.** Claude Code
+  2.1.260 exposes no way to reply to one from outside the process. ORCA detects
+  the block and tells you which agent and which machine; you answer in its
+  terminal. `Command.permit` is in the protocol waiting for the day the CLI
+  supports it.
 
 Only sessions touched inside the fleet window count — 24h by default,
 `ORCA_FLEET_WINDOW_MS` to change it. Without that filter the console loads every

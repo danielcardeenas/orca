@@ -943,6 +943,20 @@ export class World {
     return e;
   }
 
+  /**
+   * El CEO intentó contestar y no pudo: se anota qué probó y por qué se rindió,
+   * y la pregunta vuelve a la cola del humano. Ese rastro es lo que le permite
+   * al operador cerrar el hueco de una vez con REMEMBER.
+   */
+  attachCeoAttempt(id: string, attempt: Escalation['ceoAttempt']): void {
+    const e = this.state.escalations[id];
+    if (!e) return;
+    e.ceoAttempt = attempt;
+    e.status = 'pending';
+    this.emit({ o: 'escalation', id, v: e });
+    this.flushOut();
+  }
+
   /** El CEO se hizo cargo: la consola lo muestra en triaje, no sin leer. */
   markEscalationWithCeo(id: string): void {
     const e = this.state.escalations[id];

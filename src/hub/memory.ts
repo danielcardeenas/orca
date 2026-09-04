@@ -105,7 +105,21 @@ function blend(a: Set<string>, b: Set<string>): number {
   return 0.5 * jaccard(a, b) + 0.5 * containment(a, b);
 }
 
-/** 0..1. Bigramas mandan (capturan orden), unigramas rescatan frases cortas. */
+/**
+ * 0..1. Los unigramas mandan; los bigramas sólo suben el número cuando además
+ * coincide el orden.
+ *
+ * La ponderación original era al revés y fallaba en lo único que importa: una
+ * paráfrasis reordena palabras, así que sus bigramas se desmoronan. Medido
+ * sobre pares reales, "¿Despliego staging con la clave de test o la de
+ * producción?" contra "Para el deploy de staging, ¿qué clave uso, la de test o
+ * la de producción?" daba 0.51 con bigramas al 60% y da 0.79 así — y son la
+ * misma pregunta, que es exactamente el caso que este sistema existe para
+ * atrapar.
+ *
+ * Los bigramas siguen contando porque distinguen "borrar la rama main" de
+ * "main borra la rama", pero como bonificación, no como base.
+ */
 export function similarity(a: string, b: string): number {
   const ta = tokenize(a);
   const tb = tokenize(b);
@@ -113,7 +127,7 @@ export function similarity(a: string, b: string): number {
   const uni = blend(new Set(ta), new Set(tb));
   if (ta.length < 2 || tb.length < 2) return uni;
   const bi = blend(bigrams(ta), bigrams(tb));
-  return 0.6 * bi + 0.4 * uni;
+  return 0.72 * uni + 0.28 * bi;
 }
 
 /* ── el almacén ───────────────────────────────────────────────────── */
@@ -203,7 +217,15 @@ export class AnswerMemory {
     const out: Recalled[] = [];
     for (const entry of this.entries) {
       const qScore = similarity(question, entry.question);
-      const rScore = entry.rememberAs ? similarity(question, entry.rememberAs) : 0;
+      // Una regla es una instrucción, no una pregunta: comparte vocabulario
+      // pero nunca la forma. Se puntúa por contención de sus términos en la
+      // pregunta nueva, que es lo que "esta regla aplica aquí" significa.
+      const rScore = entry.rememberAs
+        ? Math.max(
+          similarity(question, entry.rememberAs),
+          containment(new Set(tokenize(entry.rememberAs)), new Set(tokenize(question))),
+        )
+        : 0;
       let score = Math.max(qScore, rScore);
       const matchedOn: Recalled['matchedOn'] = rScore > qScore ? 'rememberAs' : 'question';
       // Misma casa, misma respuesta: un empate lo rompe el proyecto.

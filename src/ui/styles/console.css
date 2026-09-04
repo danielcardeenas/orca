@@ -194,10 +194,49 @@
 @media (max-width: 1200px) {
   .body { grid-template-columns: 190px 1fr 300px; }
 }
+/* ── Phone ────────────────────────────────────────────────────────────
+   On a phone the interrupt queue is the entire product: this is where the
+   operator answers a question in four seconds while standing up. Everything
+   else folds away rather than being shrunk. */
+
 @media (max-width: 940px) {
-  /* Phone: the interrupt queue is the whole product. Everything else folds. */
+  .console { grid-template-rows: 42px 1fr 26px; }
+
+  /* The gauge row is the fleet in one line; it scrolls sideways rather than
+     wrapping, so the masthead never grows a second row and shoves the body. */
+  .mast {
+    grid-template-columns: auto 1fr auto;
+    gap: 10px; padding: 0 10px;
+  }
+  .mast__brand canvas { display: none; }
+  .gauges {
+    overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  .gauges::-webkit-scrollbar { display: none; }
+  .gauge { flex: 0 0 auto; padding: 4px 8px; }
+
   .body { grid-template-columns: 1fr; grid-template-rows: 1fr; }
-  .rail, .side { display: none; }
+  .rail { display: none; }
+
+  /* The side column becomes the whole width — never a 340px column squeezed
+     into a 402px screen, which is what cut every answer button in half. */
+  .side {
+    display: none;
+    border-left: 0;
+    grid-template-rows: auto 1fr;
+    min-width: 0;
+  }
   .console.show-side .side { display: grid; }
   .console.show-side .stage { display: none; }
+
+  /* Interrupts get the room; the CEO collapses to its composer until tapped.
+     min-height:0 en la fila del log, no en el panel: sin eso el composer se
+     recorta y el placeholder aparece cortado a la mitad. */
+  .console.show-side .side__ceo { max-height: 38vh; }
+  .console.show-side .ceo__log { min-height: 0; }
+  .console.show-side .ceo__ta { min-height: 44px; }
+  .console.show-side .side__interrupts { min-height: 0; overflow: hidden; }
+
+  .feed { padding: 0 10px; }
 }

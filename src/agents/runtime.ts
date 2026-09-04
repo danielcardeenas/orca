@@ -98,6 +98,20 @@ export function attachCeo(hub: Hub, opts: RuntimeOptions = {}) {
     },
 
     raiseToHuman(input) {
+      // Triaje de una pregunta existente: se anota el intento del CEO sobre el
+      // registro original y se devuelve a la cola del humano. Un segundo
+      // registro sería la misma pregunta dos veces en pantalla.
+      const existing = input.replaces ? world.state.escalations[input.replaces] : undefined;
+      if (existing) {
+        world.attachCeoAttempt(existing.id, input.ceoAttempt);
+        hub.pushCeoMessage({
+          id: newId('msg'), role: 'ceo', at: Date.now(), actions: [],
+          escalationId: existing.id,
+          text: input.question,
+        });
+        return existing;
+      }
+
       const esc: Escalation = {
         id: newId('esc'),
         agentId: input.agentId ?? '',

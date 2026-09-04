@@ -658,6 +658,9 @@ class Collector {
     else for (const p of problems.slice(0, 20)) console.log(`  ✗ ${p}`);
     console.log('');
     this.stop();
+    // Salida explícita: puede quedar I/O de fondo en vuelo (el rastreo de
+    // cost-state, un `claude agents` a medias) y el diagnóstico ya terminó.
+    process.exit(problems.length === 0 ? 0 : 1);
   }
 }
 

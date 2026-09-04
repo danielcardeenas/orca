@@ -17,6 +17,9 @@
 
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { createReadStream, existsSync, statSync } from 'node:fs';
+import { extname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { RawData } from 'ws';
@@ -181,6 +184,67 @@ function isCommand(v: unknown): v is Command {
 }
 
 /* ── el hub ───────────────────────────────────────────────────────── */
+
+/**
+ * Dónde vive la consola construida, si existe.
+ *
+ * Servirla desde el propio hub convierte el despliegue en un proceso: se pone
+ * el hub en un VPS (o detrás de un túnel de Cloudflare), y la consola queda
+ * alcanzable desde el teléfono sin abrir un solo puerto en el portátil, porque
+ * los collectors marcan hacia fuera. En desarrollo no estorba: Vite sirve por
+ * su lado y aquí simplemente no hay dist/.
+ */
+const DIST_DIR: string | null = (() => {
+  const guess = fileURLToPath(new URL('../../dist', import.meta.url));
+  return existsSync(join(guess, 'index.html')) ? guess : null;
+})();
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.woff2': 'font/woff2',
+  '.map': 'application/json; charset=utf-8',
+  '.ico': 'image/x-icon',
+};
+
+function serveStatic(pathname: string, res: ServerResponse): boolean {
+  if (!DIST_DIR) return false;
+
+  // Normaliza y confina: `..` en la url no puede salir de dist/, pase lo que
+  // pase con la codificación.
+  let rel: string;
+  try {
+    rel = decodeURIComponent(pathname);
+  } catch {
+    return false;
+  }
+  const target = resolve(DIST_DIR, '.' + (rel === '/' ? '/index.html' : rel));
+  if (target !== DIST_DIR && !target.startsWith(DIST_DIR + sep)) return false;
+
+  let file = target;
+  if (!existsSync(file) || statSync(file).isDirectory()) {
+    // SPA: cualquier ruta desconocida devuelve el index; el enrutado vive en
+    // el cliente.
+    file = join(DIST_DIR, 'index.html');
+    if (!existsSync(file)) return false;
+  }
+
+  const ext = extname(file);
+  res.writeHead(200, {
+    'content-type': MIME[ext] ?? 'application/octet-stream',
+    // Los assets de Vite llevan hash en el nombre; el index nunca se cachea.
+    'cache-control': ext === '.html' ? 'no-store' : 'public, max-age=31536000, immutable',
+  });
+  createReadStream(file).pipe(res);
+  return true;
+}
 
 export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const quiet = options.quiet ?? false;
@@ -663,7 +727,18 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           return;
         }
         default:
-          json(res, 404, { ok: false, error: 'no such route', routes: ['/api/health', '/api/world', '/api/memory?q='] });
+          // Fuera de /api, el hub sirve la consola construida si está.
+          // Un solo proceso detrás de un túnel es todo lo que hace falta para
+          // que la consola sea alcanzable desde cualquier parte, que es la
+          // razón por la que los collectors marcan hacia fuera.
+          if (serveStatic(url.pathname, res)) return;
+          json(res, 404, {
+            ok: false, error: 'no such route',
+            routes: ['/api/health', '/api/world', '/api/memory?q='],
+            hint: DIST_DIR
+              ? 'la consola se sirve desde /'
+              : 'ejecuta `npm run build` para que este hub sirva también la consola',
+          });
       }
     } catch (err) {
       try { json(res, 500, { ok: false, error: String(err) }); } catch { res.end(); }

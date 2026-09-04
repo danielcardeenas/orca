@@ -171,13 +171,45 @@ hub, a synthetic fleet and Vite, drives a real browser, and photographs the boot
 sequence along its timeline plus every console state. Looking at those frames is
 part of finishing a change, not an optional extra.
 
-## Deploying
+## Reaching it from anywhere
 
-The hub is a Node process today. `src/hub/worker.ts` sketches the same thing as
-a Cloudflare Worker + Durable Object with WebSocket hibernation — `world.ts` and
-`bus.ts` port across unchanged; the transport, storage, alarms and auth are what
-change. Put Cloudflare Access in front of it and the console works from anywhere
-without opening a port on any of your machines.
+This is the point of the outbound-only design, and it takes one process.
+
+```bash
+npm run build                          # the console becomes static files
+ORCA_TOKEN=<a long secret> npx tsx src/orca.ts
+```
+
+With `dist/` present the hub serves the console itself, on the same port as the
+websockets. Put that one process somewhere reachable and you are done:
+
+**On a VPS.** Run it there, front it with a Cloudflare Tunnel (no inbound ports,
+no certificate to manage), and put Cloudflare Access in front of the hostname so
+only you can load it. Then on every machine that has agents — your laptop
+included — run the collector pointed at it:
+
+```bash
+ORCA_HUB_URL=wss://orca.example.com/ws/collector \
+ORCA_TOKEN=<the same secret> npx tsx src/collector/index.ts
+```
+
+Your laptop never accepts a connection. It dials out, the same as the VPS does.
+That is why a machine behind NAT and one behind a firewall are equivalent here.
+
+**On your Mac, reached from your phone.** Same thing without the VPS: run the
+hub locally and expose it with `cloudflared tunnel --url http://localhost:4479`.
+
+Set `ORCA_TOKEN` before exposing anything. Without it the hub accepts loopback
+connections with no token — convenient in development, wrong on a public port —
+and says so at startup in the loudest terms it has. `ORCA_STRICT_AUTH=1` removes
+that shortcut entirely.
+
+### Cloudflare Workers
+
+`src/hub/worker.ts` sketches the same hub as a Worker + Durable Object with
+WebSocket hibernation. `world.ts` and `bus.ts` port across unchanged; the
+transport, storage, alarms and auth are what change. Worth doing when you want
+the hub to cost nothing while the fleet is asleep; not needed to get started.
 
 ## Zero dependencies on its parent
 

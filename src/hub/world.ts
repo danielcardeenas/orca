@@ -33,6 +33,54 @@ import { BEAT_TIMEOUT_MS } from '../shared/protocol.ts';
 
 export const MAX_FEED = 500;
 export const MAX_CEO_MESSAGES = 100;
+
+/*
+ * Retención.
+ *
+ * El diseño original decía "marca muerto pero no borres: el humano necesita ver
+ * qué murió". Eso es cierto durante minutos y falso para siempre. Sin desalojo
+ * el hub crecía sin techo —de 50 a 1.289 agentes en dos minutos con una flota
+ * activa— y terminaba con `FATAL ERROR: Reached heap limit`. Una consola que se
+ * cae sola a las tres horas no es una consola.
+ *
+ * Lo que se conserva es lo reciente y lo que aún requiere a una persona; el
+ * resto ya está en el log append-only de ~/.orca/hub, que es donde vive la
+ * historia. La retención se aplica sólo a estados terminales: un agente vivo
+ * nunca se desaloja, por viejo que sea.
+ */
+export const AGENT_RETENTION_MS = 60 * 60_000;   // una hora de muertos a la vista
+export const MAX_TERMINAL_AGENTS = 300;
+export const ESCALATION_RETENTION_MS = 60 * 60_000;
+export const MAX_CLOSED_ESCALATIONS = 200;
+
+/*
+ * Válvula de seguridad, no una característica.
+ *
+ * Una máquina real tiene decenas de agentes; ningún operador tiene mil. Pero un
+ * collector con un bug —o uno hostil— puede inventar agentes tan rápido como
+ * el socket aguante, y el hub no tiene forma de distinguirlo de una flota
+ * enorme de verdad. Sin un techo, ese collector tumba el proceso y con él la
+ * consola de todas las demás máquinas.
+ *
+ * Al pasarse se descartan los MENOS recientemente tocados y se avisa a gritos:
+ * perder los agentes más viejos de una máquina desbocada es estrictamente mejor
+ * que perder el hub entero.
+ */
+export const MAX_AGENTS_PER_MACHINE = 400;
+
+/**
+ * Techo de preguntas abiertas.
+ *
+ * Si los agentes preguntan más rápido de lo que una persona contesta, la cola
+ * crece para siempre. Y una cola de cinco mil preguntas no es una cola: es
+ * ruido en el que la que importa se pierde, además de memoria que no se
+ * recupera.
+ *
+ * Al pasarse se caducan las MÁS VIEJAS que no sean `blocking`. Caducar no es
+ * perder: un agente que sigue necesitando su respuesta vuelve a preguntar, y
+ * las `blocking` —las que tienen a alguien parado— nunca se tocan.
+ */
+export const MAX_OPEN_ESCALATIONS = 100;
 /** Un frame malicioso no puede hacernos alojar 10 MB de strings. */
 const MAX_TEXT = 4_000;
 const MAX_LINE = 400;
@@ -696,7 +744,130 @@ export class World {
         this.emit({ o: 'escalation', id: e.id, v: e });
       }
     }
+    this.evictTerminal(now);
+    this.enforceMachineCap();
     this.flushOut();
+  }
+
+  /**
+   * Desaloja lo que ya terminó y lleva tiempo terminado.
+   *
+   * Dos límites por si uno falla: la edad, para que el operador conserve una
+   * hora de contexto, y un tope duro, para que una flota que muere en masa no
+   * pueda tumbar el proceso mientras la edad todavía no ha vencido.
+   */
+  private evictTerminal(now: number): void {
+    const agents = Object.values(this.state.agents);
+    const terminal = agents.filter((a) => a.state === 'done' || a.state === 'dead');
+
+    if (terminal.length > 0) {
+      // Más nuevos primero: lo que se tira es siempre la cola.
+      terminal.sort((a, b) => b.updatedAt - a.updatedAt);
+      for (let i = 0; i < terminal.length; i++) {
+        const a = terminal[i]!;
+        const tooOld = now - a.updatedAt > AGENT_RETENTION_MS;
+        const overCap = i >= MAX_TERMINAL_AGENTS;
+        if (!tooOld && !overCap) continue;
+        // Un agente con hijos vivos se queda: sin él el linaje se rompe y la
+        // consola mostraría subagentes huérfanos sin padre al que volver.
+        if (a.childIds.some((c) => {
+          const kid = this.state.agents[c];
+          return kid !== undefined && kid.state !== 'done' && kid.state !== 'dead';
+        })) continue;
+        this.dropAgent(a.id);
+      }
+    }
+
+    // Cola abierta: si desborda, caducan las más viejas no bloqueantes.
+    const open = Object.values(this.state.escalations)
+      .filter((e) => e.status === 'pending' || e.status === 'with_ceo');
+    if (open.length > MAX_OPEN_ESCALATIONS) {
+      const droppable = open
+        .filter((e) => e.urgency !== 'blocking')
+        .sort((a, b) => a.askedAt - b.askedAt);
+      const excess = open.length - MAX_OPEN_ESCALATIONS;
+      let expired = 0;
+      for (const e of droppable) {
+        if (expired >= excess) break;
+        e.status = 'expired';
+        this.emit({ o: 'escalation', id: e.id, v: e });
+        expired++;
+      }
+      if (expired > 0) {
+        this.log(
+          `cola de preguntas desbordada (${open.length}); caducadas ${expired} no bloqueantes. ` +
+          'Los agentes que aún las necesiten volverán a preguntar.',
+        );
+      }
+    }
+
+    const closed = Object.values(this.state.escalations)
+      .filter((e) => e.status === 'answered' || e.status === 'withdrawn' || e.status === 'expired');
+    if (closed.length === 0) return;
+    closed.sort((a, b) => (b.answeredAt ?? b.askedAt) - (a.answeredAt ?? a.askedAt));
+    for (let i = 0; i < closed.length; i++) {
+      const e = closed[i]!;
+      const when = e.answeredAt ?? e.askedAt;
+      if (now - when <= ESCALATION_RETENTION_MS && i < MAX_CLOSED_ESCALATIONS) continue;
+      delete this.state.escalations[e.id];
+      this.emit({ o: 'escalation', id: e.id, v: null });
+    }
+  }
+
+  /**
+   * Techo por máquina. Ver MAX_AGENTS_PER_MACHINE: esto existe para que un
+   * collector desbocado no se lleve por delante al hub.
+   */
+  private enforceMachineCap(): void {
+    const byMachine = new Map<string, Agent[]>();
+    for (const a of Object.values(this.state.agents)) {
+      const list = byMachine.get(a.machineId);
+      if (list) list.push(a); else byMachine.set(a.machineId, [a]);
+    }
+    for (const [machineId, list] of byMachine) {
+      if (list.length <= MAX_AGENTS_PER_MACHINE) continue;
+      // Lo que necesita a una persona nunca se tira, ni aunque sea lo más viejo.
+      const droppable = list
+        .filter((a) => a.state !== 'blocked')
+        .sort((a, b) => a.updatedAt - b.updatedAt);
+      const excess = list.length - MAX_AGENTS_PER_MACHINE;
+      let dropped = 0;
+      for (const a of droppable) {
+        if (dropped >= excess) break;
+        this.dropAgent(a.id);
+        dropped++;
+      }
+      this.log(
+        `máquina ${machineId} superó el techo de ${MAX_AGENTS_PER_MACHINE} agentes ` +
+        `(${list.length}); descartados ${dropped} de los menos recientes. ` +
+        'Esto casi siempre significa un collector con un bug, no una flota enorme.',
+      );
+    }
+  }
+
+  /** Quita un agente del mundo y de todos los índices que lo referencian. */
+  private dropAgent(id: string): void {
+    const a = this.state.agents[id];
+    if (!a) return;
+    // Desengancharlo del padre para no dejar un childIds apuntando a la nada.
+    if (a.parentId) {
+      const parent = this.state.agents[a.parentId];
+      if (parent) {
+        const at = parent.childIds.indexOf(id);
+        if (at >= 0) {
+          parent.childIds.splice(at, 1);
+          this.emit({ o: 'agent:patch', id: parent.id, v: { childIds: parent.childIds } });
+        }
+      }
+    }
+    const project = this.state.projects[a.projectId];
+    if (project) {
+      const at = project.sessionIds.indexOf(id);
+      if (at >= 0) project.sessionIds.splice(at, 1);
+    }
+    this.unindexAgent(id);
+    delete this.state.agents[id];
+    this.emit({ o: 'agent', id, v: null });
   }
 
   /* ── snapshot completo de una máquina ───────────────────────────── */

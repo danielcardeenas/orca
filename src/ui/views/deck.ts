@@ -9,6 +9,7 @@
 
 import gsap from 'gsap';
 import type { Agent, AgentState } from '../../shared/types.ts';
+import { leave, sweepLeaving } from '../leave.ts';
 import { store } from '../store.ts';
 import { selectedProject } from './rail.ts';
 
@@ -102,11 +103,11 @@ export function mountDeck(el: HTMLElement) {
     for (const [id, node] of nodes) {
       if (seen.has(id)) continue;
       nodes.delete(id);
-      gsap.to(node, {
-        autoAlpha: 0, scale: 0.9, duration: 0.16, ease: 'power2.in',
-        onComplete: () => node.remove(),
-      });
+      leave(node, { to: { scale: 0.9, duration: 0.16 } });
     }
+    // Red de seguridad: un tween cancelado por un repintado posterior nunca
+    // ejecuta su onComplete, y el nodo se queda invisible pero presente.
+    sweepLeaving(grid);
 
     const p = selectedProject ? store.world.projects[selectedProject] : null;
     const scope = p ? `${p.code} · ${p.name}` : 'ALL PROJECTS';

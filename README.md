@@ -107,6 +107,31 @@ Only sessions touched inside the fleet window count — 24h by default,
 `ORCA_FLEET_WINDOW_MS` to change it. Without that filter the console loads every
 session the machine has ever had and stops being a console.
 
+## Bounds
+
+ORCA is meant to be left running. Everything it holds is bounded, and each
+bound exists because something actually broke without it:
+
+| What | Bound | Why |
+|---|---|---|
+| finished agents | 1h, or 300 | the hub kept every dead session forever and OOM'd |
+| open questions | 100 | a queue of 5,000 is noise, and memory you never get back |
+| answered questions | 1h, or 200 | history lives in the log, not in the frame |
+| agents per machine | 400 | so a collector with a bug cannot take the hub down |
+| telemetry feed | 500 lines | |
+| CEO conversation | 100 turns in the frame | the rest is on disk |
+
+Nothing that needs a person is ever dropped: a `blocked` agent survives the
+per-machine cap even as the oldest one there, a `blocking` question never
+expires from overflow, and a dead parent with a live child stays so the lineage
+graph has something to point at.
+
+Measured after these landed: an absurd synthetic fleet (three machines, chaos
+reconnects, six times real speed) that used to crash the hub in three minutes
+now settles flat at ~330 agents and 75MB. The browser tab went from 169,705 DOM
+nodes after three minutes to 2,673 — tracking the real fleet size, and falling
+when agents are reaped.
+
 ## Credentials
 
 Keys are given to a project once and stay on the machine that holds them,

@@ -7,6 +7,7 @@
  */
 
 import type { Machine, Project } from '../../shared/types.ts';
+import { sweepLeaving } from '../leave.ts';
 import { AGENT_STATES } from '../../shared/types.ts';
 import { store } from '../store.ts';
 
@@ -50,6 +51,7 @@ export function mountRail(el: HTMLElement) {
     for (const [id, node] of machineNodes) {
       if (!seen.has(id)) { node.remove(); machineNodes.delete(id); }
     }
+    sweepLeaving(machinesEl);
     emptyState(machinesEl, list.length === 0, 'NO COLLECTORS');
   }
 
@@ -87,6 +89,7 @@ export function mountRail(el: HTMLElement) {
     for (const [id, node] of projectNodes) {
       if (!seen.has(id)) { node.remove(); projectNodes.delete(id); }
     }
+    sweepLeaving(projectsEl);
     emptyState(projectsEl, list.length === 0, 'NO ACTIVE PROJECTS');
   }
 

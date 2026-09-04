@@ -14,6 +14,7 @@
 
 import gsap from 'gsap';
 import type { Agent, Escalation } from '../../shared/types.ts';
+import { leave, sweepLeaving } from '../leave.ts';
 import { store } from '../store.ts';
 import { hub } from '../net/client.ts';
 
@@ -59,16 +60,8 @@ export function mountInterrupts(el: HTMLElement) {
     const pending = store.pending();
     const seen = new Set<string>();
 
-    /*
-     * Barrido de salientes. La animación de salida quita el nodo en su
-     * onComplete, pero un onComplete puede no llegar nunca: GSAP lo descarta si
-     * algo mata el tween, y el resultado era una tarjeta vacía tapada por su
-     * propio barrido lima, encallada arriba de la cola. Un repintado posterior
-     * es un momento seguro y garantizado para limpiar.
-     */
-    for (const stale of list.querySelectorAll<HTMLElement>('[data-leaving]')) {
-      if (Number(stale.dataset.leaving) < Date.now() - 900) stale.remove();
-    }
+    sweepLeaving(list);
+    sweepLeaving(blockedEl);
 
     for (const e of pending) {
       seen.add(e.id);
@@ -89,24 +82,17 @@ export function mountInterrupts(el: HTMLElement) {
     for (const [id, node] of nodes) {
       if (seen.has(id)) continue;
       nodes.delete(id);
-      if (node.dataset.leaving) continue;
-      node.dataset.leaving = String(Date.now());
-
-      // Answered questions leave with a lime confirm wipe, as in the comp.
-      const wipe = document.createElement('i');
-      wipe.className = 'int__confirm';
-      node.appendChild(wipe);
-      const drop = () => node.remove();
-      gsap.timeline()
-        .fromTo(wipe, { scaleX: 0 },
-          { scaleX: 1, duration: 0.28, ease: 'power2.inOut', transformOrigin: 'left center' })
-        .to(node, {
-          autoAlpha: 0, height: 0, marginBottom: 0, duration: 0.24,
-          ease: 'power2.in', onComplete: drop,
-        }, '+=0.1');
-      // Red de seguridad: una animación interrumpida no puede dejar una tarjeta
-      // vacía flotando en la cola para siempre.
-      setTimeout(drop, 1200);
+      leave(node, {
+        // Answered questions leave with a lime confirm wipe, as in the comp.
+        before: (n) => {
+          const wipe = document.createElement('i');
+          wipe.className = 'int__confirm';
+          n.appendChild(wipe);
+          gsap.fromTo(wipe, { scaleX: 0 },
+            { scaleX: 1, duration: 0.28, ease: 'power2.inOut', transformOrigin: 'left center' });
+        },
+        to: { scale: 1, height: 0, marginBottom: 0, duration: 0.3, delay: 0.28 },
+      });
     }
 
     // Un agente bloqueado esperando un permiso también te necesita, aunque no
@@ -146,10 +132,7 @@ export function mountInterrupts(el: HTMLElement) {
     for (const [id, node] of blockedNodes) {
       if (seen.has(id)) continue;
       blockedNodes.delete(id);
-      gsap.to(node, {
-        autoAlpha: 0, height: 0, marginBottom: 0, duration: 0.2,
-        onComplete: () => node.remove(),
-      });
+      leave(node, { to: { scale: 1, height: 0, marginBottom: 0, duration: 0.2 } });
     }
     blockedLabel.hidden = list.length === 0;
   }

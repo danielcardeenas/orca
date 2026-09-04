@@ -64,6 +64,11 @@ export class FakeCeo {
     // it needs no model: the fleet state is right here.
     if (/status|doing|running|qué|que hacen|estado/i.test(text)) {
       this.ev.onDelta(id, '\n' + this.statusLine());
+      // El tráfico entre agentes también sale sin modelo, y es la mitad de la
+      // respuesta a "¿por qué está parado eso?": un agente esperando a otro se
+      // ve igual que uno pensando.
+      const traffic = this.trafficLine();
+      if (traffic) this.ev.onDelta(id, '\n' + traffic);
     } else {
       this.ev.onDelta(id, 'Questions from agents will still reach you directly.');
     }
@@ -99,6 +104,33 @@ export class FakeCeo {
           reason: `nothing in memory, and I am ${this.reason}`,
         },
     });
+  }
+
+  /**
+   * Quién espera a quién, y qué archivos se están pisando. Sin juicio ninguno:
+   * son hechos que ya están en el mundo y que nadie más va a leer en voz alta.
+   */
+  private trafficLine(): string {
+    const lines: string[] = [];
+    const name = (id: string | null): string =>
+      id === null ? '?' : (id === 'ceo' ? 'CEO' : this.ctx.agent(id)?.callsign ?? id);
+
+    const waiting = this.ctx.messages()
+      .filter((m) => m.kind === 'ask' && m.answer === null)
+      .sort((a, b) => a.at - b.at);
+    for (const m of waiting.slice(0, 5)) {
+      const mins = Math.round((Date.now() - m.at) / 60_000);
+      lines.push(`${m.fromCallsign} espera a ${name(m.toAgentId)}: ${m.subject} (${mins}m)`);
+    }
+    if (waiting.length > 5) lines.push(`…y ${waiting.length - 5} preguntas más sin responder.`);
+
+    const collisions = this.ctx.collisions().filter((c) => !c.acknowledged);
+    for (const c of collisions.slice(0, 3)) {
+      lines.push(`colisión en ${c.path}: ${c.agentIds.map(name).join(' y ')}`);
+    }
+    if (collisions.length > 3) lines.push(`…y ${collisions.length - 3} colisiones más.`);
+
+    return lines.join('\n');
   }
 
   private statusLine(): string {

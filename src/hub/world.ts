@@ -22,8 +22,9 @@
  */
 
 import type {
-  Agent, AgentMetrics, AgentState, CeoMessage, Escalation, FeedItem,
-  KeyDescriptor, Machine, Project, SessionRollup, WorldState,
+  Agent, AgentMessage, AgentMetrics, AgentState, CeoMessage, Collision, Escalation,
+  FeedItem, KeyDescriptor, Machine, MessageKind, MessageScope, Project, SessionRollup,
+  WorldState,
 } from '../shared/types.ts';
 import { AGENT_STATES, LIVE_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
 import type { CollectorFrame, PatchOp } from '../shared/protocol.ts';
@@ -81,10 +82,47 @@ export const MAX_AGENTS_PER_MACHINE = 400;
  * las `blocking` —las que tienen a alguien parado— nunca se tocan.
  */
 export const MAX_OPEN_ESCALATIONS = 100;
+
+/*
+ * Tráfico entre agentes.
+ *
+ * Un mensaje ya entregado hizo su trabajo: vive una hora por si el operador
+ * quiere entender por qué T1 hizo lo que hizo, y después se queda sólo en el
+ * log append-only. Vale la misma lógica que para los agentes muertos, con una
+ * excepción que no es negociable:
+ *
+ *   un `ask` sin responder NUNCA se desaloja.
+ *
+ * Detrás de cada uno hay un agente parado esperando la respuesta. Tirarlo por
+ * viejo lo dejaría bloqueado para siempre y sin nada en pantalla que explique
+ * por qué, que es exactamente el fallo silencioso que esta consola existe para
+ * evitar. Si la cola de asks crece sin parar, el problema es que nadie está
+ * contestando; esconderlo no lo arregla, así que se avisa a gritos y se
+ * conservan.
+ */
+export const MESSAGE_RETENTION_MS = 60 * 60_000;
+export const MAX_MESSAGES = 300;
+
+/*
+ * Las colisiones las cierra el collector con `collision:clear` en cuanto los
+ * agentes dejan de pisarse, así que en condiciones normales este techo no se
+ * toca nunca. Existe para cuando no llega ese clear: un collector con un bug,
+ * uno viejo, o uno que se cayó justo después de abrirlas. Sin techo, eso es
+ * memoria que no vuelve.
+ */
+export const MAX_COLLISIONS = 200;
+
 /** Un frame malicioso no puede hacernos alojar 10 MB de strings. */
 const MAX_TEXT = 4_000;
 const MAX_LINE = 400;
 const MAX_ARRAY = 2_000;
+/* Un mensaje entre agentes es un asunto de una línea y un cuerpo corto: si
+ * hace falta más, lo que se pasa es un archivo, no un mensaje. */
+const MAX_SUBJECT = 300;
+const MAX_BODY = 8_000;
+const MAX_FILES = 20;
+/** Nadie necesita saber que un mensaje lo leyeron doscientos agentes. */
+const MAX_READ_BY = 64;
 
 /* ── eventos hacia el log persistente ─────────────────────────────── */
 
@@ -237,13 +275,18 @@ function block(raw: unknown): Agent['block'] {
   const o = obj(raw);
   if (!o) return null;
   const kind = o['kind'];
-  const ok = kind === 'permission' || kind === 'question' || kind === 'input' || kind === 'error';
+  const ok = kind === 'permission' || kind === 'question' || kind === 'peer'
+    || kind === 'input' || kind === 'error';
   const out: NonNullable<Agent['block']> = {
     kind: ok ? kind : 'input',
     summary: s(o['summary'], MAX_LINE),
     since: n(o['since'], Date.now()),
   };
   if (validId(o['escalationId'])) out.escalationId = o['escalationId'];
+  // Un bloqueo 'peer' sin messageId no se puede desbloquear al contestar: el
+  // mundo no sabría qué mensaje lo liberó. Se copian los dos si son válidos.
+  if (validId(o['messageId'])) out.messageId = o['messageId'];
+  if (validId(o['waitingOn'])) out.waitingOn = o['waitingOn'];
   return out;
 }
 
@@ -456,6 +499,98 @@ export function sanitizeEscalation(raw: unknown, machineId: string): Escalation 
   };
 }
 
+const MESSAGE_KINDS = new Set<string>(['notice', 'ask', 'handoff', 'warning']);
+const MESSAGE_SCOPES = new Set<string>(['agent', 'project', 'fleet']);
+
+/**
+ * Un mensaje entre agentes.
+ *
+ * Mismo rigor que el resto: lista blanca campo por campo, ids validados, textos
+ * recortados y secretos tachados. Dos rechazos duros, porque un mensaje así no
+ * se puede ni enrutar ni atribuir:
+ *
+ *  - sin `fromAgentId` válido no sabríamos a quién NO devolvérselo, y un
+ *    mensaje que vuelve a su emisor es un bucle;
+ *  - un `scope:'agent'` sin destinatario no tiene a dónde ir.
+ *
+ * `machineId` no se copia a ningún campo —`AgentMessage` no lleva máquina, la
+ * dice el `Agent` que lo mandó— pero se acepta por simetría con los demás
+ * sanitizadores y porque quien llama ya la tiene a mano para el rechazo.
+ */
+export function sanitizeMessage(raw: unknown, machineId: string): AgentMessage | null {
+  void machineId;
+  const o = obj(raw);
+  if (!o || !validId(o['id'])) return null;
+  if (!validId(o['fromAgentId'])) return null;
+
+  const k = o['kind'];
+  const kind: MessageKind = typeof k === 'string' && MESSAGE_KINDS.has(k) ? k as MessageKind : 'notice';
+  const sc = o['scope'];
+  const scope: MessageScope = typeof sc === 'string' && MESSAGE_SCOPES.has(sc) ? sc as MessageScope : 'agent';
+
+  const toAgentId = validId(o['toAgentId']) ? o['toAgentId'] : null;
+  const fromProjectId = validId(o['fromProjectId']) ? o['fromProjectId'] : '';
+  // Un mensaje de proyecto sin proyecto declarado se entiende como "los de mi
+  // propio proyecto", que es lo que quiere decir un agente que no lo puso.
+  const toProjectId = validId(o['toProjectId']) ? o['toProjectId']
+    : (scope === 'project' && fromProjectId ? fromProjectId : null);
+  if (scope === 'agent' && toAgentId === null) return null;
+  if (scope === 'project' && toProjectId === null) return null;
+
+  // Se recorta antes de mirar si queda algo: un asunto de espacios en blanco no
+  // es un asunto, y en el mapa dibujaría una arista sin etiqueta.
+  const subject = s(o['subject'], MAX_SUBJECT).trim();
+  if (!subject) return null;
+
+  return {
+    id: o['id'],
+    kind,
+    scope,
+    fromAgentId: o['fromAgentId'],
+    fromCallsign: s(o['fromCallsign'], 12, o['fromAgentId'].slice(-2).toUpperCase()),
+    fromProjectId,
+    toAgentId: scope === 'agent' ? toAgentId : null,
+    toProjectId: scope === 'project' ? toProjectId : null,
+    subject,
+    body: sOrNull(o['body'], MAX_BODY),
+    files: strArray(o['files'], MAX_FILES),
+    at: n(o['at'], Date.now()),
+    readBy: strArray(o['readBy'], MAX_READ_BY).filter(validId),
+    expiresAt: nOrNull(o['expiresAt']),
+    answer: sOrNull(o['answer'], MAX_BODY),
+    answeredAt: nOrNull(o['answeredAt']),
+    answeredBy: validId(o['answeredBy']) ? o['answeredBy'] : null,
+  };
+}
+
+/**
+ * Una colisión es derivada, no declarada: el collector la deduce de las
+ * escrituras que ya vio. Aun así entra por la misma puerta que todo lo demás —
+ * el collector puede tener un bug o no ser quien dice ser.
+ *
+ * Con menos de dos agentes no hay colisión, y guardarla sería enseñarle al
+ * operador una alarma que no describe nada.
+ */
+export function sanitizeCollision(raw: unknown, machineId: string): Collision | null {
+  const o = obj(raw);
+  if (!o || !validId(o['id'])) return null;
+  const path = s(o['path'], 1024);
+  if (!path) return null;
+  const agentIds = strArray(o['agentIds'], 32).filter(validId);
+  if (agentIds.length < 2) return null;
+  const now = Date.now();
+  return {
+    id: o['id'],
+    path,
+    projectId: validId(o['projectId']) ? o['projectId'] : '',
+    machineId: validId(o['machineId']) ? o['machineId'] : machineId,
+    agentIds,
+    firstSeen: n(o['firstSeen'], now),
+    lastSeen: n(o['lastSeen'], now),
+    acknowledged: b(o['acknowledged']),
+  };
+}
+
 /* ── rollups ──────────────────────────────────────────────────────── */
 
 /**
@@ -648,6 +783,11 @@ export class World {
       case 'feed': return this.pushFeed(machineId, frame.items);
       case 'escalation': return this.upsertEscalation(machineId, frame.escalation);
       case 'escalation:withdraw': return this.withdrawEscalation(machineId, frame.id, frame.reason);
+      // El ruteo no vive aquí: el mundo guarda el mensaje y emite el evento;
+      // quien sabe qué máquina tiene cada destinatario es server.ts.
+      case 'message': { this.upsertMessage(machineId, frame.message); return; }
+      case 'collision': { this.upsertCollision(machineId, frame.collision); return; }
+      case 'collision:clear': return this.clearCollision(machineId, frame.id);
       case 'beat': return this.beat(machineId, frame.at, frame.load);
       case 'ack': return;   // lo maneja server.ts, no toca el mundo
       default: {
@@ -803,15 +943,80 @@ export class World {
 
     const closed = Object.values(this.state.escalations)
       .filter((e) => e.status === 'answered' || e.status === 'withdrawn' || e.status === 'expired');
-    if (closed.length === 0) return;
-    closed.sort((a, b) => (b.answeredAt ?? b.askedAt) - (a.answeredAt ?? a.askedAt));
-    for (let i = 0; i < closed.length; i++) {
-      const e = closed[i]!;
-      const when = e.answeredAt ?? e.askedAt;
-      if (now - when <= ESCALATION_RETENTION_MS && i < MAX_CLOSED_ESCALATIONS) continue;
-      delete this.state.escalations[e.id];
-      this.emit({ o: 'escalation', id: e.id, v: null });
+    if (closed.length > 0) {
+      closed.sort((a, b) => (b.answeredAt ?? b.askedAt) - (a.answeredAt ?? a.askedAt));
+      for (let i = 0; i < closed.length; i++) {
+        const e = closed[i]!;
+        const when = e.answeredAt ?? e.askedAt;
+        if (now - when <= ESCALATION_RETENTION_MS && i < MAX_CLOSED_ESCALATIONS) continue;
+        delete this.state.escalations[e.id];
+        this.emit({ o: 'escalation', id: e.id, v: null });
+      }
     }
+
+    this.evictMessages(now);
+    this.evictCollisions();
+  }
+
+  /**
+   * Desaloja tráfico gastado. La regla dura: un `ask` sin responder no entra
+   * nunca en la lista de candidatos, ni por edad ni por techo, porque hay un
+   * agente parado detrás. Todo lo demás —notices leídos, handoffs viejos, asks
+   * ya contestados— se va a la hora, y si aun así se pasa el techo, se tira lo
+   * menos reciente.
+   */
+  private evictMessages(now: number): void {
+    const all = Object.values(this.state.messages);
+    if (all.length === 0) return;
+
+    const waiting = all.filter((m) => m.kind === 'ask' && m.answer === null);
+    const droppable = all.filter((m) => !(m.kind === 'ask' && m.answer === null));
+    // Los que no se pueden tirar ocupan sitio igual: el techo de los demás es
+    // lo que queda después de ellos.
+    const room = Math.max(0, MAX_MESSAGES - waiting.length);
+
+    // Más nuevos primero: lo que se tira es siempre la cola.
+    droppable.sort((a, b) => (b.answeredAt ?? b.at) - (a.answeredAt ?? a.at));
+    for (let i = 0; i < droppable.length; i++) {
+      const m = droppable[i]!;
+      const when = m.answeredAt ?? m.at;
+      const tooOld = now - when > MESSAGE_RETENTION_MS;
+      const expired = m.expiresAt !== null && m.expiresAt < now;
+      const overCap = i >= room;
+      if (!tooOld && !expired && !overCap) continue;
+      delete this.state.messages[m.id];
+      this.emit({ o: 'message', id: m.id, v: null });
+    }
+
+    if (waiting.length > MAX_MESSAGES) {
+      this.log(
+        `${waiting.length} preguntas entre agentes sin responder (techo ${MAX_MESSAGES}). ` +
+        'No se desaloja ninguna: cada una tiene un agente parado detrás. ' +
+        'Esto significa que nadie está contestando, no que sobren mensajes.',
+      );
+    }
+  }
+
+  /**
+   * Techo de colisiones. En condiciones normales las cierra el collector con
+   * `collision:clear`; esto sólo actúa si ese clear no llega nunca. Se tiran
+   * antes las ya reconocidas —alguien ya las vio— y después las más viejas.
+   */
+  private evictCollisions(): void {
+    const list = Object.values(this.state.collisions);
+    if (list.length <= MAX_COLLISIONS) return;
+    list.sort((a, b) =>
+      (Number(b.acknowledged) - Number(a.acknowledged)) || (a.lastSeen - b.lastSeen));
+    const excess = list.length - MAX_COLLISIONS;
+    for (let i = 0; i < excess; i++) {
+      const c = list[i]!;
+      delete this.state.collisions[c.id];
+      this.emit({ o: 'collision', id: c.id, v: null });
+    }
+    this.log(
+      `techo de colisiones superado (${list.length}); descartadas ${excess}. ` +
+      'Casi siempre significa un collector que abre colisiones y no las cierra.',
+    );
   }
 
   /**
@@ -865,9 +1070,42 @@ export class World {
       const at = project.sessionIds.indexOf(id);
       if (at >= 0) project.sessionIds.splice(at, 1);
     }
+    this.dropTrafficFor(id);
     this.unindexAgent(id);
     delete this.state.agents[id];
     this.emit({ o: 'agent', id, v: null });
+  }
+
+  /**
+   * Al desalojar un agente, su correo se va con él — igual que su linaje.
+   *
+   * Un mensaje suyo no lo puede contestar nadie ya, y uno dirigido a él no lo
+   * va a leer nadie: dejarlos sería tráfico que apunta a un hueco. Ojo con el
+   * orden: esto se llama ANTES de borrar el agente, así que un `ask` sin
+   * responder de un agente que se va no bloquea a nadie y sí se puede tirar.
+   */
+  private dropTrafficFor(id: string): void {
+    for (const m of Object.values(this.state.messages)) {
+      if (m.fromAgentId === id || (m.scope === 'agent' && m.toAgentId === id)) {
+        delete this.state.messages[m.id];
+        this.emit({ o: 'message', id: m.id, v: null });
+        continue;
+      }
+      if (!m.readBy.includes(id)) continue;
+      m.readBy = m.readBy.filter((x) => x !== id);
+      this.emit({ o: 'message', id: m.id, v: m });
+    }
+    for (const c of Object.values(this.state.collisions)) {
+      if (!c.agentIds.includes(id)) continue;
+      c.agentIds = c.agentIds.filter((x) => x !== id);
+      // Un solo agente escribiendo un archivo es trabajo normal, no colisión.
+      if (c.agentIds.length < 2) {
+        delete this.state.collisions[c.id];
+        this.emit({ o: 'collision', id: c.id, v: null });
+        continue;
+      }
+      this.emit({ o: 'collision', id: c.id, v: c });
+    }
   }
 
   /* ── snapshot completo de una máquina ───────────────────────────── */
@@ -988,6 +1226,8 @@ export class World {
     if (!validId(id)) throw new Error('agent id inválido');
     const a = this.state.agents[id];
     if (!a || a.machineId !== machineId) return;
+    // La sesión ya no existe en disco: su correo tampoco lleva a ninguna parte.
+    this.dropTrafficFor(id);
     delete this.state.agents[id];
     this.unindexAgent(id);
     if (a.parentId) {
@@ -1177,6 +1417,162 @@ export class World {
     return e;
   }
 
+  /* ── tráfico entre agentes ──────────────────────────────────────── */
+
+  /**
+   * Entra un mensaje de un collector.
+   *
+   * El mundo lo guarda y emite el evento; el ruteo pasa en server.ts, que es el
+   * único que ve las dos máquinas. Devuelve el mensaje ya saneado para que quien
+   * lo aplicó pueda entregarlo sin volver a leer el estado.
+   */
+  upsertMessage(machineId: string, raw: unknown): AgentMessage {
+    const m = sanitizeMessage(raw, machineId);
+    if (!m) throw new Error('message inválido');
+    // Un collector habla por sus propios agentes y por ninguno más. Si dice ser
+    // otro, o es un bug o es un frame forjado; en los dos casos no entra.
+    const from = this.state.agents[m.fromAgentId];
+    if (from && from.machineId !== machineId) throw new Error('mensaje de un agente de otra máquina');
+
+    const prev = this.state.messages[m.id];
+    // Un frame tardío no deshace una respuesta ya dada, igual que con las
+    // escalaciones: quien preguntó ya siguió trabajando.
+    if (prev && prev.answer !== null && m.answer === null) return prev;
+    if (prev) {
+      const seen = new Set([...prev.readBy, ...m.readBy]);
+      m.readBy = [...seen].slice(-MAX_READ_BY);
+    }
+    this.state.messages[m.id] = m;
+    this.emit({ o: 'message', id: m.id, v: m });
+    if (!prev) {
+      this.event({
+        at: this.now(), kind: 'message:new', machineId, agentId: m.fromAgentId,
+        projectId: m.fromProjectId, text: m.subject,
+        data: { id: m.id, kind: m.kind, scope: m.scope, to: m.toAgentId ?? m.toProjectId },
+      });
+    }
+    return m;
+  }
+
+  /**
+   * Un mensaje nacido dentro del hub: lo manda el CEO, no un collector.
+   *
+   * Pasa por el mismo sanitizador aunque venga de casa — el texto lo escribió
+   * un modelo, y un modelo puede repetir un secreto que leyó en un transcript.
+   * El evento lleva otra clase (`message:relay`) a propósito: el ruteo de los
+   * mensajes de collector cuelga de `message:new`, y reutilizarla haría que el
+   * relay se enrutara dos veces.
+   */
+  upsertMessageLocal(raw: AgentMessage): AgentMessage {
+    const m = sanitizeMessage(raw, '');
+    if (!m) throw new Error('mensaje del CEO inválido');
+    this.state.messages[m.id] = m;
+    this.emit({ o: 'message', id: m.id, v: m });
+    this.event({
+      at: this.now(), kind: 'message:relay', agentId: m.fromAgentId, projectId: m.fromProjectId,
+      text: m.subject, data: { kind: m.kind, scope: m.scope, to: m.toAgentId ?? m.toProjectId },
+    });
+    this.flushOut();
+    return m;
+  }
+
+  /**
+   * Marca a quién se le entregó. Es lo que hace que un mensaje envejezca: uno
+   * que nadie ha leído todavía no ha hecho su trabajo.
+   */
+  markDelivered(id: string, agentIds: string[]): void {
+    const m = this.state.messages[id];
+    if (!m) return;
+    const seen = new Set(m.readBy);
+    let added = false;
+    for (const a of agentIds) {
+      if (!validId(a) || seen.has(a)) continue;
+      seen.add(a);
+      added = true;
+    }
+    if (!added) return;
+    m.readBy = [...seen].slice(-MAX_READ_BY);
+    this.emit({ o: 'message', id, v: m });
+    this.flushOut();
+  }
+
+  /**
+   * Se contesta un `ask`. Esto es lo único que desbloquea a quien preguntó, así
+   * que la respuesta y el desbloqueo van juntos y en la misma mutación lógica:
+   * un mensaje contestado con el agente todavía en `blocked` sería un agente
+   * parado sin nada que lo explique.
+   *
+   * `by` es quien contesta: otro agente, o 'ceo'.
+   */
+  answerMessage(id: string, answer: string, by: string | null): AgentMessage | null {
+    const m = this.state.messages[id];
+    if (!m) return null;
+    m.answer = redact(answer.slice(0, MAX_BODY));
+    m.answeredAt = this.now();
+    m.answeredBy = by !== null && validId(by) ? by : null;
+    this.emit({ o: 'message', id, v: m });
+
+    const a = this.state.agents[m.fromAgentId];
+    if (a && a.state === 'blocked' && a.block?.kind === 'peer' && a.block.messageId === id) {
+      a.block = null;
+      a.state = 'working';
+      a.updatedAt = this.now();
+      this.touchAgentBucket(a.id);
+      this.emit({ o: 'agent:patch', id: a.id, v: { block: null, state: 'working', updatedAt: a.updatedAt } });
+    }
+    this.event({
+      at: this.now(), kind: 'message:answered', agentId: m.fromAgentId, projectId: m.fromProjectId,
+      text: m.subject, data: { id: m.id, by: m.answeredBy, answer: m.answer },
+    });
+    this.flushOut();
+    return m;
+  }
+
+  /* ── colisiones ─────────────────────────────────────────────────── */
+
+  upsertCollision(machineId: string, raw: unknown): Collision {
+    const c = sanitizeCollision(raw, machineId);
+    if (!c) throw new Error('collision inválida');
+    c.machineId = machineId;
+    const prev = this.state.collisions[c.id];
+    // Reconocer es una decisión de una persona (o del CEO). Un frame nuevo del
+    // collector no la deshace, o la misma alarma volvería cada dos segundos.
+    if (prev?.acknowledged) c.acknowledged = true;
+    this.state.collisions[c.id] = c;
+    this.emit({ o: 'collision', id: c.id, v: c });
+    if (!prev) {
+      this.event({
+        at: this.now(), kind: 'collision:new', machineId, projectId: c.projectId,
+        text: c.path, data: { id: c.id, agentIds: c.agentIds },
+      });
+    }
+    return c;
+  }
+
+  /**
+   * El collector dice que dejaron de pisarse. `machineId` en null significa que
+   * lo cierra el hub, no una máquina.
+   */
+  clearCollision(machineId: string | null, id: unknown): void {
+    if (!validId(id)) return;
+    const c = this.state.collisions[id];
+    if (!c) return;
+    if (machineId !== null && c.machineId !== machineId) return;
+    delete this.state.collisions[id];
+    this.emit({ o: 'collision', id, v: null });
+  }
+
+  /** Alguien la vio. Se queda en el mundo, pero deja de gritar. */
+  ackCollision(id: string): Collision | null {
+    const c = this.state.collisions[id];
+    if (!c) return null;
+    if (c.acknowledged) return c;
+    c.acknowledged = true;
+    this.emit({ o: 'collision', id, v: c });
+    this.flushOut();
+    return c;
+  }
+
   /* ── CEO ────────────────────────────────────────────────────────── */
 
   addCeoMessage(msg: CeoMessage): CeoMessage {
@@ -1251,6 +1647,16 @@ export class World {
       escalations: {
         total: Object.keys(this.state.escalations).length,
         pending: Object.values(this.state.escalations).filter((e) => e.status === 'pending' || e.status === 'with_ceo').length,
+      },
+      messages: {
+        total: Object.keys(this.state.messages).length,
+        // Preguntas entre agentes sin contestar: cada una es un agente parado.
+        waiting: Object.values(this.state.messages)
+          .filter((m) => m.kind === 'ask' && m.answer === null).length,
+      },
+      collisions: {
+        total: Object.keys(this.state.collisions).length,
+        unacknowledged: Object.values(this.state.collisions).filter((c) => !c.acknowledged).length,
       },
       keys: Object.keys(this.state.keys).length,
       feed: this.state.feed.length,

@@ -13,10 +13,24 @@ import { leave, sweepLeaving } from '../leave.ts';
 import { store } from '../store.ts';
 import { selectedProject } from './rail.ts';
 
-/** Sort weight per state. Lower sorts first. */
+/**
+ * Peso de orden. Menor va primero.
+ *
+ * `blocked` está partido en dos a propósito: un agente esperando a OTRO AGENTE
+ * no te necesita a ti, y ponerlo arriba en ámbar junto a los que sí es una
+ * mentira que hace que la cola parezca el doble de larga de lo que es. Espera
+ * igual, pero no es tuya.
+ */
 const RANK: Record<AgentState, number> = {
-  blocked: 0, working: 1, thinking: 2, booting: 3, idle: 4, done: 5, dead: 6,
+  blocked: 0, working: 2, thinking: 3, booting: 4, idle: 5, done: 6, dead: 7,
 };
+/** Los que esperan a un compañero caen entre lo que te necesita y lo que corre. */
+const PEER_RANK = 1;
+
+function rankOf(a: Agent): number {
+  if (a.state === 'blocked' && a.block?.kind === 'peer') return PEER_RANK;
+  return RANK[a.state];
+}
 
 const STATE_LABEL: Record<AgentState, string> = {
   booting: 'BOOTING', thinking: 'THINKING', working: 'WORKING',
@@ -65,7 +79,8 @@ export function mountDeck(el: HTMLElement) {
 
   function inScope(a: Agent): boolean {
     if (selectedProject && a.projectId !== selectedProject) return false;
-    if (filter === 'blocked') return a.state === 'blocked';
+    // El filtro BLOCKED es "lo que me necesita", no "lo que no avanza".
+    if (filter === 'blocked') return a.state === 'blocked' && a.block?.kind !== 'peer';
     if (filter === 'live') return a.state !== 'done' && a.state !== 'dead';
     return true;
   }
@@ -74,7 +89,8 @@ export function mountDeck(el: HTMLElement) {
     const list = Object.values(store.world.agents)
       .filter(inScope)
       .sort((a, b) => {
-        if (RANK[a.state] !== RANK[b.state]) return RANK[a.state] - RANK[b.state];
+        const ra = rankOf(a), rb = rankOf(b);
+        if (ra !== rb) return ra - rb;
         // Within a state, the busiest first, then the most recently touched.
         if (b.metrics.tokensPerSec !== a.metrics.tokensPerSec) {
           return b.metrics.tokensPerSec - a.metrics.tokensPerSec;
@@ -144,9 +160,15 @@ export function mountDeck(el: HTMLElement) {
   }
 
   function update(node: HTMLElement, a: Agent) {
-    const prev = node.dataset.state as AgentState | undefined;
-    if (prev !== a.state) {
-      node.dataset.state = a.state;
+    /*
+     * `data-state` lleva 'peer' en vez de 'blocked' cuando la espera es de otro
+     * agente: el CSS necesita distinguirlos porque el tratamiento ámbar está
+     * reservado para lo que requiere a una persona.
+     */
+    const visual = a.state === 'blocked' && a.block?.kind === 'peer' ? 'peer' : a.state;
+    const prev = node.dataset.state;
+    if (prev !== visual) {
+      node.dataset.state = visual;
       if (prev) flashState(node, a.state);
     }
 
@@ -156,7 +178,10 @@ export function mountDeck(el: HTMLElement) {
     };
 
     set('.atile__call', a.callsign);
-    set('.atile__state', STATE_LABEL[a.state]);
+    const waitingOn = a.block?.kind === 'peer' && a.block.waitingOn
+      ? store.world.agents[a.block.waitingOn]?.callsign
+      : null;
+    set('.atile__state', waitingOn ? `WAITING ${waitingOn}` : STATE_LABEL[a.state]);
     set('.atile__title', a.title || a.mission || 'UNTITLED SESSION');
 
     const proj = store.world.projects[a.projectId];

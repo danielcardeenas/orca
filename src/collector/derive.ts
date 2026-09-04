@@ -59,6 +59,10 @@ export interface BlockSignal {
   kind: BlockKind;
   summary: string;
   escalationId?: string;
+  /** Sólo con kind 'peer': el mensaje sin responder que lo tiene parado. */
+  messageId?: string;
+  /** Sólo con kind 'peer': quién debe la respuesta. */
+  waitingOn?: string;
   since: number;
 }
 
@@ -153,7 +157,8 @@ export class SessionDeriver {
 
   setBlock(b: BlockSignal | null): void {
     const same = (this.block?.kind === b?.kind) && (this.block?.summary === b?.summary)
-      && (this.block?.escalationId === b?.escalationId);
+      && (this.block?.escalationId === b?.escalationId)
+      && (this.block?.messageId === b?.messageId);
     this.block = b;
     if (!same) this.rev++;
   }
@@ -420,6 +425,8 @@ export class SessionDeriver {
         kind: this.block.kind, summary: this.block.summary, since: this.block.since,
       };
       if (this.block.escalationId) b.escalationId = this.block.escalationId;
+      if (this.block.messageId) b.messageId = this.block.messageId;
+      if (this.block.waitingOn) b.waitingOn = this.block.waitingOn;
       return b;
     }
     const asking = this.askingTool();

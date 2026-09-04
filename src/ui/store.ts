@@ -7,7 +7,8 @@
  */
 
 import type {
-  Agent, AgentState, Escalation, FeedItem, Machine, Project, WorldState, CeoMessage,
+  Agent, AgentMessage, AgentState, Collision, Escalation, FeedItem,
+  Machine, Project, WorldState, CeoMessage,
 } from '../shared/types.ts';
 import { emptyWorld, emptyRollup } from '../shared/types.ts';
 import type { PatchOp } from '../shared/protocol.ts';
@@ -18,6 +19,8 @@ export type StoreEvent =
   | { k: 'projects'; ids: string[] }
   | { k: 'machines'; ids: string[] }
   | { k: 'escalations'; ids: string[] }
+  /** Messages between agents, or file collisions, changed. */
+  | { k: 'traffic'; ids: string[] }
   | { k: 'feed' }
   | { k: 'ceo' }
   | { k: 'link'; up: boolean }                      // hub connection state
@@ -67,6 +70,7 @@ export class Store {
     const projects: string[] = [];
     const machines: string[] = [];
     const escalations: string[] = [];
+    const traffic: string[] = [];
     const alarms: { agentId: string; on: boolean }[] = [];
     let feed = false;
     let ceo = false;
@@ -104,6 +108,14 @@ export class Store {
           if (op.v) w.escalations[op.id] = op.v; else delete w.escalations[op.id];
           escalations.push(op.id);
           break;
+        case 'message':
+          if (op.v) w.messages[op.id] = op.v; else delete w.messages[op.id];
+          traffic.push(op.id);
+          break;
+        case 'collision':
+          if (op.v) w.collisions[op.id] = op.v; else delete w.collisions[op.id];
+          traffic.push(op.id);
+          break;
         case 'key':
           if (op.v) w.keys[op.id] = op.v; else delete w.keys[op.id];
           break;
@@ -129,6 +141,7 @@ export class Store {
     if (projects.length) this.emit({ k: 'projects', ids: projects });
     if (agents.length) this.emit({ k: 'agents', ids: agents });
     if (escalations.length) this.emit({ k: 'escalations', ids: escalations });
+    if (traffic.length) this.emit({ k: 'traffic', ids: traffic });
     if (feed) this.emit({ k: 'feed' });
     if (ceo) this.emit({ k: 'ceo' });
     for (const a of alarms) this.emit({ k: 'alarm', agentId: a.agentId, on: a.on });
@@ -231,6 +244,53 @@ export class Store {
     return Object.values(this.world.agents)
       .filter((a) => a.state === 'blocked')
       .sort((a, b) => (a.block?.since ?? 0) - (b.block?.since ?? 0));
+  }
+
+  /**
+   * Quién está bloqueado detrás de un objetivo, transitivamente.
+   *
+   * Es la conclusión del mapa, y vive aquí porque el sitio donde más importa no
+   * es el mapa sino la tarjeta donde contestas: "esto desbloquea a 4" cambia el
+   * orden en que atiendes la cola, y "un agente bloqueado" no.
+   *
+   * `'human'` como objetivo son las escalaciones pendientes; un id de agente
+   * son los `ask` entre agentes sin responder.
+   */
+  dammedBehind(targetId: string): string[] {
+    /** objetivo → quién espera directamente por él */
+    const waiters = new Map<string, string[]>();
+    for (const a of Object.values(this.world.agents)) {
+      if (a.state !== 'blocked' || !a.block) continue;
+      const target = a.block.kind === 'peer' ? a.block.waitingOn : 'human';
+      if (!target) continue;
+      const list = waiters.get(target);
+      if (list) list.push(a.id); else waiters.set(target, [a.id]);
+    }
+
+    const seen = new Set<string>();
+    const queue = [...(waiters.get(targetId) ?? [])];
+    while (queue.length) {
+      const id = queue.shift()!;
+      // Un ciclo sería un bug aguas arriba, pero una vista no puede colgarse.
+      if (seen.has(id) || id === targetId) continue;
+      seen.add(id);
+      for (const behind of waiters.get(id) ?? []) queue.push(behind);
+    }
+    return [...seen];
+  }
+
+  /** Traffic involving one agent, newest first. */
+  trafficFor(agentId: string): AgentMessage[] {
+    return Object.values(this.world.messages ?? {})
+      .filter((m) => m.fromAgentId === agentId || m.toAgentId === agentId)
+      .sort((a, b) => b.at - a.at);
+  }
+
+  /** Unacknowledged file conflicts. */
+  liveCollisions(): Collision[] {
+    return Object.values(this.world.collisions ?? {})
+      .filter((c) => !c.acknowledged)
+      .sort((a, b) => a.firstSeen - b.firstSeen);
   }
 
   machines(): Machine[] {

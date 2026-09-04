@@ -5,3 +5,7 @@ dist/
 test/shots/
 *.log
 .DS_Store
+
+# Buzones locales del canal agente↔agente y de las escalaciones. Estado de
+# esta máquina, no código del proyecto.
+.orca/

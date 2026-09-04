@@ -93,6 +93,15 @@ function makeCtx(opts: {
       return esc;
     },
     resolveEscalation: (id, answer, by) => { rec.resolved.push({ id, answer, by }); },
+
+    // El canal agente↔agente no lo ejercita esta suite (ver traffic.test.ts);
+    // aquí sólo tiene que existir para que el contexto esté completo.
+    messages: () => [],
+    message: () => undefined,
+    collisions: () => [],
+    relay: () => ({ messageId: 'm_none', delivered: [], skipped: 0, reason: 'fake ctx' }),
+    answerPeer: () => null,
+    acknowledgeCollision: () => null,
   };
 
   const incoming: Escalation = {

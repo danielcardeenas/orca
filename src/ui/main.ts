@@ -14,7 +14,7 @@ import './styles/ceo.css';
 import './styles/feed.css';
 import './styles/agent.css';
 import './styles/interrupts.css';
-import './styles/scene.css';
+import './styles/map.css';
 
 import gsap from 'gsap';
 import { store } from './store.ts';
@@ -22,7 +22,7 @@ import { hub } from './net/client.ts';
 import { runBoot } from './boot.ts';
 import { mountRail } from './views/rail.ts';
 import { mountDeck } from './views/deck.ts';
-import { mountScene } from './views/scene.ts';
+import { mountMap } from './views/map.ts';
 import { mountCeo } from './views/ceo.ts';
 import { mountInterrupts } from './views/interrupts.ts';
 import { mountFeed } from './views/feed.ts';
@@ -36,7 +36,7 @@ import { AGENT_STATES } from '../shared/types.ts';
  * cola de interrupciones desde un teléfono — que es justo donde se contesta
  * una pregunta en cuatro segundos.
  */
-type View = 'deck' | 'scene' | 'inbox';
+type View = 'deck' | 'map' | 'inbox';
 
 const app = document.getElementById('app')!;
 
@@ -53,7 +53,7 @@ app.innerHTML = `
       <div class="mast__right">
         <div class="viewtog" data-viewtog>
           <button type="button" data-view="deck" class="is-on">DECK</button>
-          <button type="button" data-view="scene">FLEET</button>
+          <button type="button" data-view="map">MAP</button>
           <button type="button" data-view="inbox" class="viewtog__inbox">
             INBOX<i data-inbox-n></i>
           </button>
@@ -65,7 +65,7 @@ app.innerHTML = `
       <aside class="rail" data-rail></aside>
       <main class="stage" data-stage>
         <div class="stage__view" data-view-deck></div>
-        <div class="stage__view" data-view-scene hidden></div>
+        <div class="stage__view" data-view-map hidden></div>
       </main>
       <aside class="side">
         <div class="side__ceo" data-ceo></div>
@@ -99,7 +99,7 @@ const consoleEl = $('[data-console]');
 
 mountRail($('[data-rail]'));
 mountDeck($('[data-view-deck]'));
-const scene = mountScene($('[data-view-scene]'));
+const map = mountMap($('[data-view-map]'));
 mountCeo($('[data-ceo]'));
 mountInterrupts($('[data-interrupts]'));
 mountFeed($('[data-feed]'));
@@ -117,12 +117,12 @@ function setView(v: View) {
   consoleEl.classList.toggle('show-side', inbox);
   // En inbox el escenario no se ve, así que el deck vuelve a ser el stage por
   // debajo: al salir del inbox el operador aterriza donde estaba.
-  $('[data-view-deck]').hidden = v === 'scene';
-  $('[data-view-scene]').hidden = v !== 'scene';
+  $('[data-view-deck]').hidden = v === 'map';
+  $('[data-view-map]').hidden = v !== 'map';
   for (const b of app.querySelectorAll<HTMLElement>('[data-viewtog] button')) {
     b.classList.toggle('is-on', b.dataset.view === v);
   }
-  scene.setActive(v === 'scene');
+  map.setActive(v === 'map');
   try { localStorage.setItem('orca.view', v); } catch { /* private mode */ }
 }
 $('[data-viewtog]').addEventListener('click', (e) => {
@@ -134,10 +134,16 @@ setView(view);
 /* ── Fleet gauges ─────────────────────────────────────────────────── */
 
 const gaugeEl = $('[data-gauges]');
+/*
+ * `blocked` se parte en dos porque son cosas distintas: lo que te necesita a ti
+ * y lo que espera a otro agente. Un solo número que sume ambas hace que la cola
+ * parezca el doble de larga, y el operador aprende a ignorarlo.
+ */
 const GAUGES: { key: string; label: string; cls?: string }[] = [
   { key: 'working',  label: 'WORKING',  cls: 'is-working' },
   { key: 'thinking', label: 'THINKING' },
-  { key: 'blocked',  label: 'BLOCKED',  cls: 'is-blocked' },
+  { key: 'needsyou', label: 'NEEDS YOU', cls: 'is-blocked' },
+  { key: 'waiting',  label: 'WAITING' },
   { key: 'idle',     label: 'IDLE' },
   { key: 'dead',     label: 'DEAD',     cls: 'is-dead' },
   { key: 'cost',     label: 'SPEND' },
@@ -156,20 +162,30 @@ function paintGauges() {
     if (n && n.textContent !== v) n.textContent = v;
   };
   for (const s of AGENT_STATES) put(s, String(f.byState[s] ?? 0));
+
+  let needsYou = 0, waiting = 0;
+  for (const a of Object.values(store.world.agents)) {
+    if (a.state !== 'blocked') continue;
+    if (a.block?.kind === 'peer') waiting++; else needsYou++;
+  }
+  put('needsyou', String(needsYou));
+  put('waiting', String(waiting));
   put('cost', '$' + f.costUSD.toFixed(2));
   put('tps', String(Math.round(f.tokensPerSec)));
-  // A blocked agent tints the whole gauge row, so peripheral vision catches it.
-  gaugeEl.classList.toggle('has-block', f.blocked > 0);
+  // Sólo lo que te necesita tiñe la fila: la visión periférica no debe
+  // dispararse por agentes que se esperan entre ellos.
+  gaugeEl.classList.toggle('has-block', needsYou > 0);
 
   // El badge del inbox: en un teléfono la cola está a un toque de distancia y
   // detrás de una pestaña, así que el número tiene que estar en la pestaña.
-  const waiting = store.pending().length
-    + store.blockedAgents().filter((a) => !a.block?.escalationId).length;
+  const inboxCount = store.pending().length
+    + store.blockedAgents()
+      .filter((a) => !a.block?.escalationId && a.block?.kind !== 'peer').length;
   const badge = app.querySelector<HTMLElement>('[data-inbox-n]');
   if (badge) {
-    const txt = waiting > 0 ? String(waiting) : '';
+    const txt = inboxCount > 0 ? String(inboxCount) : '';
     if (badge.textContent !== txt) badge.textContent = txt;
-    badge.classList.toggle('is-on', waiting > 0);
+    badge.classList.toggle('is-on', inboxCount > 0);
   }
 }
 
@@ -249,7 +265,7 @@ if (skipBoot) {
   runBoot(document.body).done.then(() => {
     consoleEl.classList.add('is-live');
     gsap.fromTo(consoleEl, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.5, ease: 'power2.out' });
-    scene.setActive(view === 'scene');
+    map.setActive(view === 'map');
   });
 }
 

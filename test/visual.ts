@@ -147,16 +147,10 @@ async function shootConsole(browser: Browser) {
     await sleep(500);
   }
 
-  // The 3D fleet view, given a moment to settle its eases
-  await page.locator('[data-view="scene"]').click().catch(() => {});
-  await sleep(2500);
-  await shot(page, 'console-06-fleet-3d');
-  await dragScene(page, 220, -60);
-  await sleep(1500);
-  await shot(page, 'console-07-fleet-3d-orbit');
-  await page.mouse.wheel(0, -400);
+  // The map. Static by design, so one frame is the whole story.
+  await page.locator('[data-view="map"]').click().catch(() => {});
   await sleep(1200);
-  await shot(page, 'console-08-fleet-3d-close');
+  await shot(page, 'console-06-map');
   await page.locator('[data-view="deck"]').click().catch(() => {});
   await sleep(600);
 
@@ -221,20 +215,6 @@ async function newPage(browser: Browser, w: number, h: number): Promise<Page> {
 async function shot(page: Page, name: string) {
   await page.screenshot({ path: join(SHOTS, `${name}.png`) });
   console.log(`  ${name}`);
-}
-
-async function dragScene(page: Page, dx: number, dy: number) {
-  const box = await page.locator('.scene__canvas').boundingBox();
-  if (!box) return;
-  const cx = box.x + box.width / 2;
-  const cy = box.y + box.height / 2;
-  await page.mouse.move(cx, cy);
-  await page.mouse.down();
-  for (let i = 1; i <= 12; i++) {
-    await page.mouse.move(cx + (dx * i) / 12, cy + (dy * i) / 12);
-    await sleep(16);
-  }
-  await page.mouse.up();
 }
 
 /**

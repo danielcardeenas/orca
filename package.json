@@ -16,17 +16,16 @@
     "mock": "tsx test/fake-collector.ts",
     "dev:orca": "tsx watch src/orca.ts",
     "start": "tsx src/orca.ts",
-    "visual": "tsx test/visual.ts"
+    "visual": "tsx test/visual.ts",
+    "stress": "tsx test/map-stress.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",
     "gsap": "^3.14.2",
-    "three": "^0.185.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "@types/three": "^0.185.4",
     "@types/ws": "^8.5.13",
     "concurrently": "^9.1.0",
     "playwright": "^1.62.1",

@@ -11,7 +11,8 @@
  */
 
 import type {
-  Agent, Escalation, FeedItem, KeyDescriptor, Machine, Project, WorldState, CeoMessage,
+  Agent, AgentMessage, Collision, Escalation, FeedItem, KeyDescriptor,
+  Machine, Project, WorldState, CeoMessage,
 } from './types.ts';
 
 export const PROTOCOL_VERSION = 1;
@@ -35,6 +36,11 @@ export type CollectorFrame =
   | { t: 'feed'; machineId: string; items: FeedItem[] }
   /** An agent asked the human something. */
   | { t: 'escalation'; machineId: string; escalation: Escalation }
+  /** An agent said something to another agent, a project, or the fleet. */
+  | { t: 'message'; machineId: string; message: AgentMessage }
+  /** Two agents are writing the same file. Derived from the transcripts. */
+  | { t: 'collision'; machineId: string; collision: Collision }
+  | { t: 'collision:clear'; machineId: string; id: string }
   /** The agent no longer needs its answer (died, or figured it out). */
   | { t: 'escalation:withdraw'; machineId: string; id: string; reason: string }
   /** Result of a command the hub sent down. */
@@ -77,6 +83,13 @@ export type Command =
   | { k: 'remove'; agentId: string }
   /** Answer an escalation. Routed to the agent that raised it. */
   | { k: 'answer'; escalationId: string; answer: string; rememberAs: string | null }
+  /**
+   * Deliver a message into an agent's inbox on disk. This is how a routed
+   * message reaches its recipient: the hub decides, the collector writes.
+   */
+  | { k: 'deliver'; agentId: string; message: AgentMessage }
+  /** Answer an agent's `ask`, so whoever sent it stops waiting. */
+  | { k: 'reply'; messageId: string; answer: string; fromAgentId: string | null }
   /** Store a credential on the machine. The value never returns. */
   | { k: 'key:set'; projectId: string; name: string; value: string }
   | { k: 'key:remove'; projectId: string; name: string }
@@ -110,6 +123,8 @@ export type PatchOp =
   | { o: 'agent'; id: string; v: Agent | null }
   | { o: 'agent:patch'; id: string; v: Partial<Agent> }
   | { o: 'escalation'; id: string; v: Escalation | null }
+  | { o: 'message'; id: string; v: AgentMessage | null }
+  | { o: 'collision'; id: string; v: Collision | null }
   | { o: 'key'; id: string; v: KeyDescriptor | null }
   | { o: 'feed'; v: FeedItem[] }
   | { o: 'fleet'; v: WorldState['fleet'] }
@@ -123,6 +138,8 @@ export type ClientFrame =
   | { t: 'ceo:say'; text: string }
   /** The human answered an escalation directly, bypassing the CEO. */
   | { t: 'escalation:answer'; id: string; answer: string; rememberAs: string | null }
+  /** The human acknowledged a file collision; stop showing it. */
+  | { t: 'collision:ack'; id: string }
   | { t: 'escalation:dismiss'; id: string }
   /** Any machine command, routed by the hub to the owning collector. */
   | { t: 'cmd'; id: string; cmd: Command }

@@ -49,6 +49,11 @@ function keyOf(op: PatchOp): string {
     case 'machine': return `machine:${op.id}`;
     case 'project': return `project:${op.id}`;
     case 'escalation': return `escalation:${op.id}`;
+    // Un mensaje y una colisión son registros completos: dos ops del mismo id
+    // en la misma ventana son el mismo hecho contado dos veces y gana el último
+    // (una entrega que añade un lector, un clear que la borra).
+    case 'message': return `message:${op.id}`;
+    case 'collision': return `collision:${op.id}`;
     case 'key': return `key:${op.id}`;
     case 'feed': return 'feed';
     case 'fleet': return 'fleet';

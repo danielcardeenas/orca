@@ -22,11 +22,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import type { Command } from '../shared/protocol.ts';
+import type { AgentMessage } from '../shared/types.ts';
 import type { EscalationWatcher } from './escalate.ts';
 import type { KeyVault } from './keys.ts';
 import type { LineageIndex } from './lineage.ts';
+import type { MessageWatcher } from './messages.ts';
 import type { ProjectRegistry } from './projects.ts';
-import { errText, home, isInside, log, oneLine } from './util.ts';
+import { errText, home, isInside, launchable, log, oneLine } from './util.ts';
 
 const SCOPE = 'commands';
 
@@ -52,6 +54,7 @@ export interface CommandDeps {
   keys: KeyVault;
   lineage: LineageIndex;
   escalations: EscalationWatcher;
+  messages: MessageWatcher;
   /** Sólo devuelve agentes que ORCA está observando ahora mismo. */
   agent(id: string): AgentHandle | null;
   onResync(): void;
@@ -62,28 +65,6 @@ export interface CommandResult {
   ok: boolean;
   detail?: string;
   data?: unknown;
-}
-
-/**
- * Rutas donde nunca se lanza nada, pase lo que pase. El resto de la defensa es
- * que la ruta tiene que venir de un proyecto que el collector DESCUBRIÓ en
- * ~/.claude/projects — es decir, un sitio donde el propio usuario ya corrió
- * Claude Code. Esa procedencia es mejor garantía que un prefijo de $HOME:
- * exigir el home dejaba fuera los repos de un VPS en /srv o /opt sin añadir
- * seguridad real, porque un hub comprometido sólo puede nombrar rutas que ya
- * tienen sesiones.
- */
-const FORBIDDEN_ROOTS = ['/etc', '/usr', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys', '/var/log'];
-
-function launchable(cwd: string): { ok: true } | { ok: false; why: string } {
-  const resolved = path.resolve(cwd);
-  if (resolved === '/') return { ok: false, why: 'la raíz del sistema no es un proyecto' };
-  for (const root of FORBIDDEN_ROOTS) {
-    if (resolved === root || resolved.startsWith(root + path.sep)) {
-      return { ok: false, why: `ruta de sistema, no se lanza nada ahí: ${resolved}` };
-    }
-  }
-  return { ok: true };
 }
 
 export class CommandRunner {
@@ -110,6 +91,8 @@ export class CommandRunner {
         case 'resume': return await this.resume(cmd);
         case 'remove': return await this.simple(cmd.agentId, ['rm'], 'remove');
         case 'answer': return await this.answer(cmd);
+        case 'deliver': return await this.deliver(cmd);
+        case 'reply': return await this.reply(cmd);
         case 'key:set': return this.keySet(cmd);
         case 'key:remove': return this.keyRemove(cmd);
         case 'resync': this.deps.onResync(); return { ok: true, detail: 'resync encolado' };
@@ -295,6 +278,52 @@ export class CommandRunner {
     return ok
       ? { ok: true }
       : { ok: false, detail: `escalación desconocida: ${cmd.escalationId}` };
+  }
+
+  /* ── mensajes entre agentes ───────────────────────────────────── */
+
+  /**
+   * Deja un mensaje en el buzón de entrada del destinatario.
+   *
+   * Misma postura que `spawn`: la ruta NO viene del hub. Viene del agente, del
+   * agente sale su proyecto, y del registro de proyectos sale la ruta — una que
+   * el collector descubrió él mismo en ~/.claude/projects. Un hub comprometido
+   * no puede nombrar un directorio donde escribir; a lo sumo puede nombrar un
+   * agente que existe, y el peor daño posible es un JSON en el `.orca/in/` de un
+   * repo del propio usuario.
+   */
+  private async deliver(cmd: Extract<Command, { k: 'deliver' }>): Promise<CommandResult> {
+    const a = this.deps.agent(cmd.agentId);
+    if (!a) return { ok: false, detail: `agente desconocido: ${cmd.agentId}` };
+    const msg = cmd.message as AgentMessage | undefined;
+    if (!msg || typeof msg !== 'object' || typeof msg.id !== 'string' || !msg.id) {
+      return { ok: false, detail: 'mensaje malformado' };
+    }
+    if (typeof msg.subject !== 'string' || !msg.subject) {
+      return { ok: false, detail: 'mensaje sin subject' };
+    }
+    const cwd = await this.cwdOf(a);
+    if (!cwd.ok) return cwd.res;
+    return await this.deps.messages.deliverTo(cwd.path, msg, a.id);
+  }
+
+  /** Cierra un `ask`: la respuesta llega al buzón del que preguntó. */
+  private async reply(cmd: Extract<Command, { k: 'reply' }>): Promise<CommandResult> {
+    if (typeof cmd.messageId !== 'string' || !cmd.messageId) {
+      return { ok: false, detail: 'messageId vacío' };
+    }
+    if (typeof cmd.answer !== 'string' || !cmd.answer.trim()) {
+      return { ok: false, detail: 'respuesta vacía' };
+    }
+    // El autor de la respuesta, si viene, tiene que ser un agente que ORCA está
+    // mirando: `answeredBy` acaba en la consola y en el disco del que preguntó.
+    let by: string | null = null;
+    if (cmd.fromAgentId) {
+      const from = this.deps.agent(cmd.fromAgentId);
+      if (!from) return { ok: false, detail: `agente desconocido: ${cmd.fromAgentId}` };
+      by = from.id;
+    }
+    return await this.deps.messages.reply(cmd.messageId, cmd.answer, by);
   }
 
   /* ── keys ─────────────────────────────────────────────────────── */

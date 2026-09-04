@@ -106,6 +106,36 @@ export function isInside(parent: string, child: string): boolean {
   return c.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
 }
 
+/* ── rutas donde nunca se lanza ni se escribe nada ────────────────── */
+
+/**
+ * Raíces del sistema vetadas, pase lo que pase. El resto de la defensa es que
+ * la ruta tiene que venir de un proyecto que el collector DESCUBRIÓ en
+ * ~/.claude/projects — es decir, un sitio donde el propio usuario ya corrió
+ * Claude Code. Esa procedencia es mejor garantía que un prefijo de $HOME:
+ * exigir el home dejaba fuera los repos de un VPS en /srv o /opt sin añadir
+ * seguridad real, porque un hub comprometido sólo puede nombrar rutas que ya
+ * tienen sesiones.
+ *
+ * Vive en util.ts y no en commands.ts porque el buzón de mensajes escribe en
+ * las mismas rutas que el spawn lanza, y dos copias de esta lista es como se
+ * consigue que una de las dos se quede corta.
+ */
+export const FORBIDDEN_ROOTS = [
+  '/etc', '/usr', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys', '/var/log',
+];
+
+export function launchable(cwd: string): { ok: true } | { ok: false; why: string } {
+  const resolved = path.resolve(cwd);
+  if (resolved === '/') return { ok: false, why: 'la raíz del sistema no es un proyecto' };
+  for (const root of FORBIDDEN_ROOTS) {
+    if (resolved === root || resolved.startsWith(root + path.sep)) {
+      return { ok: false, why: `ruta de sistema, no se toca nada ahí: ${resolved}` };
+    }
+  }
+  return { ok: true };
+}
+
 /* ── hashing / códigos estables ───────────────────────────────────── */
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';

@@ -156,3 +156,14 @@
 @media (max-width: 940px) {
   .deck__grid { grid-template-columns: 1fr; padding: 10px 12px 18px; }
 }
+
+/* Waiting on another agent, not on you.
+   It is stalled, so it is not lime — but amber is reserved for what needs a
+   person, and spending it here would make the queue look twice as long as it
+   is. Blue: stopped, and not yours. */
+.atile[data-state="peer"] {
+  border-left-color: var(--st-thinking);
+  background: var(--screen);
+}
+.atile[data-state="peer"] .atile__state { color: var(--st-thinking); }
+.atile[data-state="peer"] .atile__act i { background: var(--st-thinking); }

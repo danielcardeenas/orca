@@ -73,6 +73,7 @@ export const AGENT_STATES: AgentState[] = [
 export type BlockKind =
   | 'permission'   // Claude Code is asking to run a tool
   | 'question'     // the agent asked the human something (via ORCA escalation)
+  | 'peer'         // the agent asked ANOTHER AGENT something and is waiting
   | 'input'        // plain end-of-turn waiting on a prompt
   | 'error';       // needs intervention to continue
 
@@ -94,6 +95,10 @@ export interface Agent {
     summary: string;
     /** Set when the block is an ORCA escalation. */
     escalationId?: string;
+    /** Set when kind === 'peer': the unanswered message it is waiting on. */
+    messageId?: string;
+    /** Set when kind === 'peer': who owes the answer. */
+    waitingOn?: string;
     since: number;
   } | null;
 
@@ -245,6 +250,92 @@ export interface FeedItem {
   projectId?: string;
 }
 
+/* ── Agent ↔ agent traffic ────────────────────────────────────────── */
+
+/**
+ * What one agent tells another.
+ *
+ * Agents have no socket to each other; they have a filesystem and a CEO that
+ * can see all of them. So a message is a file an agent drops, the collector
+ * picks up, and the hub routes — the same shape as an escalation, with an
+ * agent at the other end instead of the human.
+ *
+ * The CEO is the router on purpose. Twenty agents with direct lines to each
+ * other is twenty agents interrupting each other; routed, a message can be
+ * held until its recipient is between turns, merged with others, or answered
+ * by the CEO without waking anybody.
+ */
+export type MessageKind =
+  /** "I found this out." Anyone in scope may care; nobody must act. */
+  | 'notice'
+  /** "I need this from you." Creates a wait: the sender is stuck until it lands. */
+  | 'ask'
+  /** "This is now yours." Hands work over, with context. */
+  | 'handoff'
+  /** "Careful." Something the recipient is about to walk into. */
+  | 'warning';
+
+export type MessageScope =
+  | 'agent'     // one named agent
+  | 'project'   // everyone working in one project
+  | 'fleet';    // everyone, everywhere
+
+export interface AgentMessage {
+  id: string;
+  kind: MessageKind;
+  scope: MessageScope;
+
+  fromAgentId: string;
+  fromCallsign: string;
+  fromProjectId: string;
+
+  /** Set when scope === 'agent'. */
+  toAgentId: string | null;
+  /** Set when scope === 'project'. */
+  toProjectId: string | null;
+
+  /** One line. This is what shows on an edge in the map. */
+  subject: string;
+  body: string | null;
+  /** Files this is about, so a collision or a handoff can point at something. */
+  files: string[];
+
+  at: number;
+  /** Agent ids that have consumed it. */
+  readBy: string[];
+  /** Notices go stale; asks do not. */
+  expiresAt: number | null;
+
+  /**
+   * Set on an `ask` once answered. An unanswered ask is what makes the sender
+   * a link in a waiting chain.
+   */
+  answer: string | null;
+  answeredAt: number | null;
+  answeredBy: string | null;
+}
+
+/**
+ * Two agents editing the same file.
+ *
+ * Derived, never declared — the transcripts already say which files each agent
+ * touched, so this costs nothing and needs no cooperation from the agents. It
+ * is also the failure nobody notices until the second agent's work is silently
+ * overwritten.
+ */
+export interface Collision {
+  id: string;
+  path: string;
+  projectId: string;
+  machineId: string;
+  /** Live agents that have written this file inside the collision window. */
+  agentIds: string[];
+  firstSeen: number;
+  lastSeen: number;
+  /** Cleared once the operator or the CEO has seen it. */
+  acknowledged: boolean;
+}
+
 /* ── Credentials ──────────────────────────────────────────────────── */
 
 /**
@@ -273,6 +364,8 @@ export interface WorldState {
   projects: Record<string, Project>;
   agents: Record<string, Agent>;
   escalations: Record<string, Escalation>;
+  messages: Record<string, AgentMessage>;
+  collisions: Record<string, Collision>;
   keys: Record<string, KeyDescriptor>;
   ceo: {
     /** Bounded — older turns live in the hub's storage, not in the frame. */
@@ -303,6 +396,8 @@ export function emptyWorld(): WorldState {
     projects: {},
     agents: {},
     escalations: {},
+    messages: {},
+    collisions: {},
     keys: {},
     ceo: { messages: [], thinking: false, awaitingHuman: false },
     feed: [],

@@ -25,15 +25,18 @@ import { WebSocket } from 'ws';
 import type { CollectorFrame, Command, CommandFrame } from '../shared/protocol.ts';
 import { BEAT_INTERVAL_MS, PATHS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
 import type {
-  Agent, Escalation, FeedItem, FeedLevel, Machine, Project, SessionRollup,
+  Agent, AgentMessage, Escalation, FeedItem, FeedLevel, Machine, Project, SessionRollup,
 } from '../shared/types.ts';
-import { emptyRollup } from '../shared/types.ts';
+import { TERMINAL_STATES, emptyRollup } from '../shared/types.ts';
 import type { AgentHandle } from './commands.ts';
 import { CommandRunner } from './commands.ts';
 import type { BlockSignal, Liveness } from './derive.ts';
 import { CallsignBook, SessionDeriver } from './derive.ts';
+import type { CollisionAgent } from './collisions.ts';
+import { CollisionIndex } from './collisions.ts';
 import { EscalationWatcher } from './escalate.ts';
 import { KeyVault } from './keys.ts';
+import { MessageWatcher } from './messages.ts';
 import { LineageIndex } from './lineage.ts';
 import { ProjectRegistry } from './projects.ts';
 import {
@@ -47,6 +50,12 @@ const SCOPE = 'collector';
 
 const TICK_MS = 500;
 const LIVENESS_MS = 4_000;
+/**
+ * Las colisiones se recalculan cada N ticks. Es O(agentes × rutas) y no cambia
+ * en 500ms: dos segundos es latencia irrelevante para un aviso cuya alternativa
+ * es enterarse mañana en un `git diff`.
+ */
+const COLLISION_EVERY = 4;
 const GIT_MS = 15_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -87,6 +96,8 @@ class Collector {
   private readonly keys = new KeyVault();
   private readonly callsigns = new CallsignBook();
   private readonly escalations: EscalationWatcher;
+  private readonly messages: MessageWatcher;
+  private readonly collisions = new CollisionIndex();
   private readonly runner: CommandRunner;
 
   private derivers = new Map<string, SessionDeriver>();
@@ -97,6 +108,7 @@ class Collector {
   private feed: FeedItem[] = [];
   private pendingFeed: FeedItem[] = [];
   private escalationBySession = new Map<string, Escalation>();
+  private ticks = 0;
 
   private ws: WebSocket | null = null;
   private connected = false;
@@ -115,11 +127,18 @@ class Collector {
       machineId: this.machineId,
       resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
     });
+    this.messages = new MessageWatcher({
+      resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
+      agentByCallsign: (cs) => this.agentByCallsign(cs),
+      projectByName: (name) => this.projectByName(name),
+      callsignOf: (id) => this.derivers.get(id)?.callsign ?? '??',
+    });
     this.runner = new CommandRunner({
       projects: this.projects,
       keys: this.keys,
       lineage: this.lineage,
       escalations: this.escalations,
+      messages: this.messages,
       agent: (id) => this.agentHandle(id),
       onResync: () => { this.sent.clear(); this.sentProjects.clear(); this.sendSnapshot(); },
       onKeysChanged: () => this.sendKeys(),
@@ -140,6 +159,9 @@ class Collector {
     this.escalations.onWithdraw((id, reason) => this.onWithdraw(id, reason));
     this.escalations.start();
 
+    this.messages.onMessage((m) => this.onMessage(m));
+    this.messages.start();
+
     this.timers.push(setInterval(() => this.tick(), TICK_MS));
     this.timers.push(setInterval(() => { void this.pollLiveness(); }, LIVENESS_MS));
     this.timers.push(setInterval(() => { void this.projects.refreshGit(); }, GIT_MS));
@@ -155,6 +177,7 @@ class Collector {
     for (const t of this.timers) clearInterval(t);
     this.watcher.stop();
     this.escalations.stop();
+    this.messages.stop();
     try { this.ws?.close(); } catch { /* ya cerrado */ }
   }
 
@@ -164,10 +187,15 @@ class Collector {
     const d = this.deriverFor(batch.ref);
     d.ingest(batch);
     this.lineage.ingest(batch);
+    // El cwd se lee DESPUÉS de ingerir: una línea del propio lote puede ser la
+    // primera que lo declara, y las rutas relativas de file-history dependen de
+    // él. Un lote de arranque trae ambas cosas junta.
+    this.collisions.ingest(batch, d.cwd);
     if (d.cwd) {
       const p = this.projects.ensure(batch.ref.slug, d.cwd);
       d.setProject(p.id);
       this.escalations.track(p.id, p.path);
+      this.messages.track(p.id, p.path);
     }
   }
 
@@ -176,6 +204,11 @@ class Collector {
     if (!d) return;
     this.derivers.delete(ref.key);
     this.callsigns.release(d.projectId, ref.key);
+    this.collisions.forget(ref.key);
+    // Su `ask` abierto ya no bloquea a nadie: no hay nadie a quien bloquear.
+    for (const id of this.messages.forgetAgent(ref.key)) {
+      log('info', SCOPE, `mensaje ${id} retirado: su emisor desapareció`);
+    }
     this.sent.delete(ref.key);
     this.send({ t: 'agent:gone', machineId: this.machineId, id: ref.key });
     this.note('info', `${ref.key.slice(0, 8)} desapareció del disco`, ref.key);
@@ -189,6 +222,7 @@ class Collector {
     d.setCallsign(this.callsigns.assign(project.id, ref.key));
     this.derivers.set(ref.key, d);
     this.escalations.track(project.id, project.path);
+    this.messages.track(project.id, project.path);
     return d;
   }
 
@@ -242,6 +276,78 @@ class Collector {
     this.send({ t: 'escalation:withdraw', machineId: this.machineId, id, reason });
   }
 
+  /* ── mensajes entre agentes ───────────────────────────────────── */
+
+  private onMessage(m: AgentMessage): void {
+    this.send({ t: 'message', machineId: this.machineId, message: m });
+    const level: FeedLevel = m.kind === 'warning' ? 'alert'
+      : m.kind === 'ask' ? 'warn' : 'info';
+    const to = m.scope === 'agent' && m.toAgentId
+      ? (this.derivers.get(m.toAgentId)?.callsign ?? m.toAgentId.slice(0, 8))
+      : m.scope === 'project' ? (this.projects.get(m.toProjectId ?? '')?.code ?? 'proyecto')
+        : 'flota';
+    this.note(level, `${m.fromCallsign} → ${to} (${m.kind}): ${oneLine(m.subject, 90)}`,
+      m.fromAgentId);
+  }
+
+  /** Callsign → agente. Prefiere uno vivo: las etiquetas se reciclan al morir. */
+  private agentByCallsign(callsign: string): { agentId: string; projectId: string } | null {
+    const want = callsign.trim().toUpperCase();
+    if (!want) return null;
+    let fallback: { agentId: string; projectId: string } | null = null;
+    for (const d of this.derivers.values()) {
+      if (d.callsign.toUpperCase() !== want) continue;
+      const hit = { agentId: d.id, projectId: d.projectId };
+      if (!TERMINAL_STATES.has(d.state())) return hit;
+      fallback ??= hit;
+    }
+    return fallback;
+  }
+
+  /** Nombre, código o slug de proyecto → id. El agente escribe lo que recuerda. */
+  private projectByName(name: string): string | null {
+    const want = name.trim().toLowerCase();
+    if (!want) return null;
+    for (const p of this.projects.all()) {
+      if (p.name.toLowerCase() === want || p.code.toLowerCase() === want
+        || p.slug.toLowerCase() === want) return p.id;
+    }
+    // Segunda pasada, más laxa: "dijosi" debe encontrar "dijosi-workers-…".
+    for (const p of this.projects.all()) {
+      if (p.name.toLowerCase().includes(want)) return p.id;
+    }
+    return null;
+  }
+
+  /* ── colisiones ───────────────────────────────────────────────── */
+
+  private sweepCollisions(agents: Agent[], now: number): void {
+    const input: CollisionAgent[] = agents.map((a) => ({
+      id: a.id,
+      projectId: a.projectId,
+      machineId: a.machineId,
+      /*
+       * "Vivo" aquí es "no terminado", no `isLive()`. Un agente en `idle` está
+       * parado en end_turn con su proceso arriba: acaba de escribir y va a
+       * seguir escribiendo en cuanto alguien le hable. Excluirlo perdería
+       * justo las colisiones del momento en que un humano está a punto de
+       * mandar a dos agentes sobre el mismo archivo.
+       */
+      live: !TERMINAL_STATES.has(a.state),
+      parentId: a.parentId,
+    }));
+    const { open, cleared } = this.collisions.detect(input, now);
+    for (const col of open) {
+      this.send({ t: 'collision', machineId: this.machineId, collision: col });
+      const who = col.agentIds
+        .map((id) => this.derivers.get(id)?.callsign ?? id.slice(0, 8)).join(' + ');
+      this.note('alert', `colisión: ${who} escriben ${shortPath(col.path)}`, col.agentIds[0]);
+    }
+    for (const id of cleared) {
+      this.send({ t: 'collision:clear', machineId: this.machineId, id });
+    }
+  }
+
   /** Atribuye un buzón a un agente: el que declara el archivo, o el más activo. */
   private resolveAgent(projectId: string, hint: string | null): string | null {
     if (hint) {
@@ -265,7 +371,10 @@ class Collector {
 
   private tick(): void {
     const now = Date.now();
+    this.ticks++;
     this.escalations.reapExpired(now);
+    this.messages.reapExpired(now);
+    const peers = this.messages.blocks();
 
     // 1. señales externas dentro de cada deriver
     const inputs = [] as { key: string; sessionId: string; agentId: string | null;
@@ -276,11 +385,19 @@ class Collector {
         alive: false, background: false, shortId: null, pid: null,
         name: null, startedAt: null, cliState: null,
       });
+      // Prioridad: humano > par > job. Si un agente espera a las dos cosas, la
+      // pregunta al humano es la que nadie más puede desatascar.
       const esc = this.escalationBySession.get(d.id);
+      const peer = peers.get(d.id);
       if (esc) {
         d.setBlock({
           kind: 'question', summary: oneLine(esc.question, 160),
           escalationId: esc.id, since: esc.askedAt,
+        });
+      } else if (peer) {
+        d.setBlock({
+          kind: 'peer', summary: peer.summary,
+          messageId: peer.messageId, waitingOn: peer.waitingOn, since: peer.since,
         });
       } else {
         d.setBlock(this.jobStates.get(d.ref.sessionId) ?? null);
@@ -299,9 +416,11 @@ class Collector {
     }
 
     // 3. diffs de agentes
+    const all: Agent[] = [];
     const byProject = new Map<string, Agent[]>();
     for (const d of this.derivers.values()) {
       const snap = d.snapshot(now);
+      all.push(snap);
       const list = byProject.get(snap.projectId);
       if (list) list.push(snap); else byProject.set(snap.projectId, [snap]);
 
@@ -343,9 +462,13 @@ class Collector {
         this.send({ t: 'project', machineId: this.machineId, id: project.id, patch: fresh });
       }
       this.escalations.track(project.id, project.path);
+      this.messages.track(project.id, project.path);
     }
 
-    // 5. feed
+    // 5. colisiones (cada COLLISION_EVERY ticks; ver la constante)
+    if (this.ticks % COLLISION_EVERY === 0) this.sweepCollisions(all, now);
+
+    // 6. feed
     if (this.pendingFeed.length > 0) {
       const items = this.pendingFeed;
       this.pendingFeed = [];
@@ -476,6 +599,14 @@ class Collector {
     });
     for (const e of this.escalations.list()) {
       this.send({ t: 'escalation', machineId: this.machineId, escalation: e });
+    }
+    // Un `ask` abierto y una colisión viva son estado, no eventos: si el hub se
+    // reinició, no se enteraría de ellos hasta que cambiaran.
+    for (const m of this.messages.list()) {
+      this.send({ t: 'message', machineId: this.machineId, message: m });
+    }
+    for (const c of this.collisions.list()) {
+      this.send({ t: 'collision', machineId: this.machineId, collision: c });
     }
     if (this.feed.length > 0) {
       this.send({ t: 'feed', machineId: this.machineId, items: this.feed.slice(-50) });
@@ -751,6 +882,12 @@ function readJobBlock(shortId: string): BlockSignal | null {
   let since = Date.now();
   try { since = fs.statSync(file).mtimeMs; } catch { /* ok */ }
   return { kind: 'input', summary: oneLine(needs, 200), since };
+}
+
+/** Las dos últimas partes de una ruta: en el HUD lo demás no cabe ni importa. */
+function shortPath(p: string): string {
+  const parts = p.split('/').filter(Boolean);
+  return parts.slice(-2).join('/') || p;
 }
 
 function fmtDur(ms: number): string {

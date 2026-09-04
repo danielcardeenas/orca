@@ -45,10 +45,14 @@ npx tsx src/orca.ts --fake-ceo         # scripted CEO, spends nothing
 are always at the top. State on the left edge, current tool, spend, tokens/sec,
 and whether it spawned children.
 
-**Fleet** — the same data as a 3D scene. Projects are platforms, agents are
-ribbons standing on them. A working agent travels wide; a thinking one pulses in
-place; a blocked one **stops dead and goes amber**. You can read a fleet of
-thirty from across the room without looking at a word.
+**Map** — what is waiting on what. Projects as columns, agents as nodes, and
+edges for lineage, messages between agents, and file conflicts. The loud ones
+are the waits: a thick amber line pointing at whoever owes an answer.
+
+You are a node on it. If T1 is waiting on K9 and K9 is waiting on you, that is
+a chain ending at YOU with "2 BLOCKED BEHIND YOU" under it — and the card where
+you answer says `UNBLOCKS 3`. That reorders which question you answer first,
+which is the point.
 
 **CEO** — one agent you talk to. It surveys, spawns agents with real briefs,
 unblocks them, and stops the ones burning money. It has no filesystem and no
@@ -165,6 +169,11 @@ npm test                # 70+ assertions: collector, hub, CEO loop, views
 npm run visual          # drives the real console, writes test/shots/
 npm run mock            # a synthetic fleet to develop against
 ```
+
+`npm run stress` (`test/map-stress.ts`) injects synthetic fleets from 24 to 300
+agents and reports paint time, SVG node count and real edge crossings — the
+evidence behind the decision not to have a 3D view. Re-run it before arguing
+about layout.
 
 `test/visual.ts` is the one that matters for anything visual: it brings up the
 hub, a synthetic fleet and Vite, drives a real browser, and photographs the boot

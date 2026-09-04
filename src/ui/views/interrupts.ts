@@ -57,7 +57,17 @@ export function mountInterrupts(el: HTMLElement) {
   const breach = mountBreach();
 
   function paint() {
-    const pending = store.pending();
+    // La urgencia manda, pero a igualdad de urgencia va primero lo que más
+    // trabajo desatasca. store.pending() ya ordena por urgencia y antigüedad;
+    // esto reordena dentro de cada grupo de urgencia.
+    const pending = store.pending().slice().sort((a, b) => {
+      const rank = { blocking: 0, normal: 1, low: 2 } as const;
+      if (rank[a.urgency] !== rank[b.urgency]) return rank[a.urgency] - rank[b.urgency];
+      const ca = a.agentId ? store.dammedBehind(a.agentId).length : 0;
+      const cb = b.agentId ? store.dammedBehind(b.agentId).length : 0;
+      if (ca !== cb) return cb - ca;
+      return a.askedAt - b.askedAt;
+    });
     const seen = new Set<string>();
 
     sweepLeaving(list);
@@ -100,7 +110,10 @@ export function mountInterrupts(el: HTMLElement) {
     // cuatro agentes parados, que es exactamente la mentira que este producto
     // existe para no contar.
     const waiting = store.blockedAgents()
-      .filter((a) => !a.block?.escalationId);
+      // Un agente esperando a otro agente NO te necesita: aparece en el mapa
+      // como una cadena, no aquí como una tarea tuya. Meterlo en esta cola
+      // sería exactamente el ruido que la cola existe para evitar.
+      .filter((a) => !a.block?.escalationId && a.block?.kind !== 'peer');
     paintBlocked(waiting);
 
     const n = pending.length + waiting.length;
@@ -213,6 +226,7 @@ export function mountInterrupts(el: HTMLElement) {
         <span class="int__call px"></span>
         <span class="int__proj px px--tiny"></span>
         <span class="int__spacer"></span>
+        <span class="int__unblocks px px--tiny" hidden></span>
         <span class="int__age px px--tiny"></span>
       </header>
       <p class="int__q mono"></p>
@@ -245,6 +259,24 @@ export function mountInterrupts(el: HTMLElement) {
     };
 
     node.dataset.urgency = e.urgency;
+
+    /*
+     * Cuánto trabajo libera esta respuesta.
+     *
+     * Un agente puede estar esperando a otro que a su vez te espera a ti. Sin
+     * este número las preguntas parecen todas iguales y las contestas en el
+     * orden en que llegaron; con él, la que desbloquea a cuatro sube sola. Es
+     * la conclusión del mapa traída al sitio donde se actúa.
+     */
+    const chain = agent ? store.dammedBehind(agent.id).length : 0;
+    const unblocks = node.querySelector<HTMLElement>('.int__unblocks')!;
+    if (chain > 0) {
+      unblocks.hidden = false;
+      set('.int__unblocks', `UNBLOCKS ${chain + 1}`);
+    } else {
+      unblocks.hidden = true;
+    }
+
     set('.int__call', agent?.callsign ?? '--');
     set('.int__proj', proj?.code ?? '--');
     set('.int__q', e.question);

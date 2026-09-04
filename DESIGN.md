@@ -31,6 +31,7 @@ bug.
 | `--screen-in` | `#17161c` | a panel recessed into the glass |
 | `--lime` | `#c0f94a` | **live, confirmed, working.** The only accent. |
 | `--amber` | `#f5a524` | **a human is required.** Nothing else, ever. |
+| `--st-thinking` | `#8fb8ff` | stalled, but not on you — waiting on another agent |
 | `--red` | `#ff2a12` | **dead, or breach.** Never decoration. |
 | `--red-deep` | `#2a0504` | the field under a breach |
 | `--xhair-gold` | `#c4a06a` | left-hand crosshairs |
@@ -42,7 +43,13 @@ Ink ramp: `--ink #e8e8ea` · `--ink-bright #f2f4f0` · `--ink-mid #c5cad3` ·
 Structure: `--line #2a2e38` · `--line-soft #22252d` · `--tile #252a38` ·
 `--pill-off #3a3a40`.
 
-Agent states each own a colour, shared by the deck and the 3D scene:
+**The amber discipline.** An agent waiting on *another agent* is stopped, but it
+is not yours. Spending amber on it makes the queue look twice as long as it is,
+and an operator who learns that amber sometimes means nothing stops looking. So
+a peer wait is blue — stalled, and somebody else's — and only a wait that
+terminates at a person is amber.
+
+Agent states each own a colour, shared by the deck and the map:
 `booting #6a8cff` · `thinking #8fb8ff` · `working #c0f94a` · `blocked #f5a524` ·
 `idle #6e736c` · `done #4a4e48` · `dead #ff2a12`.
 
@@ -146,19 +153,67 @@ zoom on the way out.
 232px / 1fr / 340px. Below 940px the rail and side collapse; the interrupt queue
 is the whole product on a phone.
 
-## The 3D scene
+## The map
 
-Same palette, same states, no new vocabulary. A project is a platform outlined
-like an instrument face; an agent is a ribbon standing on it.
+Projects are columns, agents are nodes, and the edges are what is waiting on
+what. Flat, orthogonal, deterministic — the same fleet lays out the same way
+every time.
 
-- `working` — travels wide, amplitude scales with tokens/sec
-- `thinking` — contracts, pulses from inside, barely moves
-- `blocked` — **stops dead** and goes amber. Stillness inside a moving field is
-  the loudest signal available and it costs no colour.
-- `idle` — a slow drift
-- `dead` — collapses to the platform, red
-- ribbon **width** is spend; **height** is uptime; a curve from parent to child
-  is lineage
+Line weight carries the priority, not colour: an unanswered wait is a thick
+amber dashed line that travels toward whoever owes the answer; lineage is a
+hairline in the structure grey. The eye should land on what is dammed up and
+slide past what merely happened.
+
+Only agents that are part of a relationship appear — with a parent, a child, a
+message, a block, or a file conflict. An isolated agent says nothing about
+relationships and is already on the deck; leaving it out is what keeps this
+readable at eighty agents.
+
+The human is a node. Every chain that ends at them carries a count of how many
+agents are stuck behind, and that same count is printed on the card where the
+question gets answered.
+
+## Why there is no 3D view
+
+There was one. Agents were ribbons standing on platforms, amplitude read
+tokens/sec, width read spend. It was removed, and the reasoning is recorded
+here so it does not get rebuilt.
+
+It was chosen for style, not function — the ribbon language came from the
+Axolots hero — and every value it encoded is read *worse* in three dimensions.
+2D position is the most accurate visual encoding humans have; depth is among
+the least. Size confuses "large" with "near". There is no common baseline.
+
+The disqualifying problem is not perceptual, though. It is that in 3D something
+is always behind something else, and this console exists so that what needs a
+human is never hidden. The pulsing ring added under blocked agents was a patch
+for a problem the choice of 3D created. On top of that, every reading costs a
+camera gesture, and the same fleet looks different from every angle — which
+destroys the spatial memory that was supposed to be 3D's advantage.
+
+3D earns its place for data that is already spatial, for dense graphs where 2D
+forces many edge crossings, and for immersive scale. Only the middle one was
+ever plausible here, so it was measured rather than argued — `test/map-stress.ts`
+injects synthetic fleets and counts the crossings the 2D layout actually
+produces:
+
+| fleet | agents | cross-project msgs | paint | crossings | **crossings that matter** |
+|---|---|---|---|---|---|
+| realistic | 24 | 6 | 12ms | 0 | **0** |
+| busy | 60 | 20 | 17ms | 29 | **0** |
+| heavy | 120 | 60 | 31ms | 397 | **0** |
+| absurd | 300 | 200 | 68ms | 5,465 | **0** |
+
+The last column is the one that decides it. Crossings only cost the operator
+something when they happen between edges the eye has to *trace* — waits,
+escalations, conflicts. Those never cross, at any scale, because a wait is
+structurally a chain toward a terminus rather than an arbitrary link. Every one
+of the 5,465 crossings in the absurd case is in the quiet background layer that
+the line-weight discipline already tells you to slide past.
+
+So 3D's single real advantage does not apply to this graph, and there is
+nothing left on its side of the ledger. Re-run the harness before reopening
+this.
 
 ## Verification
 

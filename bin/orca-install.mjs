@@ -31,7 +31,11 @@ import { execFileSync } from 'node:child_process';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ORCA_ROOT = resolve(HERE, '..');
 const SKILL_SRC = join(ORCA_ROOT, 'skill', 'orca-ask', 'SKILL.md');
+const TALK_SKILL_SRC = join(ORCA_ROOT, 'skill', 'orca-talk', 'SKILL.md');
 const ASK_BIN = join(ORCA_ROOT, 'bin', 'orca-ask.mjs');
+
+/** Los comandos que un agente puede necesitar. Todos se enlazan juntos. */
+const COMMANDS = ['orca-ask', 'orca-tell', 'orca-read'];
 
 /** Written into the installed skill so we know we may replace it later. */
 const MARKER = '<!-- installed by orca-install; edits here will be preserved -->';
@@ -51,9 +55,11 @@ function usage() {
   orca-install --check       report what is installed where
   orca-install --remove [p]  uninstall
 
-Installs the orca-ask skill into <project>/.claude/skills/orca-ask/ and links
-the orca-ask command into <project>/.claude/bin/. An agent that loads the skill
-knows when to interrupt you and when to work it out itself.`);
+Installs two skills into <project>/.claude/skills/ and links orca-ask,
+orca-tell and orca-read into <project>/.claude/bin/:
+
+  orca-ask   when to interrupt YOU, and when to work it out instead
+  orca-talk  how to reach ANOTHER AGENT, and when that beats asking you`);
 }
 
 /* ── Where ORCA thinks the projects are ───────────────────────────── */
@@ -89,42 +95,53 @@ function currentRepo() {
 
 /* ── Install ──────────────────────────────────────────────────────── */
 
-function skillBody() {
-  const src = readFileSync(SKILL_SRC, 'utf8');
+function skillBody(src) {
   // The absolute path is baked in so the skill works with no PATH setup at all.
-  return src.replace(
-    'node /path/to/orca/bin/orca-ask.mjs',
-    `node ${ASK_BIN}`,
-  ) + `\n\n${MARKER}\n`;
+  return readFileSync(src, 'utf8')
+    .replace('node /path/to/orca/bin/orca-ask.mjs', `node ${ASK_BIN}`)
+    .replace(/\/path\/to\/orca\/bin\//g, join(ORCA_ROOT, 'bin') + '/')
+    + `\n\n${MARKER}\n`;
+}
+
+/** Las skills que se instalan juntas: preguntar al humano y hablar entre agentes. */
+function skillSources() {
+  const out = [{ name: 'orca-ask', src: SKILL_SRC }];
+  if (existsSync(TALK_SKILL_SRC)) out.push({ name: 'orca-talk', src: TALK_SKILL_SRC });
+  return out;
 }
 
 function installInto(root, label = root) {
-  const skillDir = join(root, '.claude', 'skills', 'orca-ask');
-  const skillFile = join(skillDir, 'SKILL.md');
+  let wrote = 0;
+  for (const { name, src } of skillSources()) {
+    const skillDir = join(root, '.claude', 'skills', name);
+    const skillFile = join(skillDir, 'SKILL.md');
 
-  if (existsSync(skillFile)) {
-    const existing = readFileSync(skillFile, 'utf8');
-    if (!existing.includes(MARKER)) {
+    if (existsSync(skillFile) && !readFileSync(skillFile, 'utf8').includes(MARKER)) {
       // Someone edited it, or wrote their own. Their version wins, always.
-      console.log(`  skip   ${label}  (a hand-edited orca-ask skill is already there)`);
-      return 'skipped';
+      console.log(`  skip   ${label}  (a hand-edited ${name} skill is already there)`);
+      continue;
     }
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillFile, skillBody(src));
+    wrote++;
   }
+  if (wrote === 0) return 'skipped';
 
-  mkdirSync(skillDir, { recursive: true });
-  writeFileSync(skillFile, skillBody());
-
-  // A symlink into .claude/bin so `orca-ask` resolves inside the project even
+  // Symlinks into .claude/bin so the commands resolve inside the project even
   // when nothing has been added to the shell's PATH.
   const binDir = join(root, '.claude', 'bin');
   mkdirSync(binDir, { recursive: true });
-  const link = join(binDir, 'orca-ask');
-  try {
-    if (lstatSync(link, { throwIfNoEntry: false })) unlinkSync(link);
-    symlinkSync(ASK_BIN, link);
-  } catch (err) {
-    // A failed symlink is not fatal: the skill carries the absolute path.
-    console.log(`  note   ${label}  (could not link orca-ask: ${err.message})`);
+  for (const cmd of COMMANDS) {
+    const target = join(ORCA_ROOT, 'bin', `${cmd}.mjs`);
+    if (!existsSync(target)) continue;
+    const link = join(binDir, cmd);
+    try {
+      if (lstatSync(link, { throwIfNoEntry: false })) unlinkSync(link);
+      symlinkSync(target, link);
+    } catch (err) {
+      // A failed symlink is not fatal: the skills carry absolute paths.
+      console.log(`  note   ${label}  (could not link ${cmd}: ${err.message})`);
+    }
   }
 
   console.log(`  ok     ${label}`);
@@ -132,23 +149,24 @@ function installInto(root, label = root) {
 }
 
 function removeFrom(root, label = root) {
-  const skillDir = join(root, '.claude', 'skills', 'orca-ask');
-  const link = join(root, '.claude', 'bin', 'orca-ask');
   let touched = false;
-
-  if (existsSync(join(skillDir, 'SKILL.md'))) {
-    const body = readFileSync(join(skillDir, 'SKILL.md'), 'utf8');
-    if (!body.includes(MARKER)) {
-      console.log(`  skip   ${label}  (hand-edited; leaving it alone)`);
-      return;
+  for (const { name } of skillSources()) {
+    const skillDir = join(root, '.claude', 'skills', name);
+    const file = join(skillDir, 'SKILL.md');
+    if (!existsSync(file)) continue;
+    if (!readFileSync(file, 'utf8').includes(MARKER)) {
+      console.log(`  skip   ${label}  (${name} is hand-edited; leaving it alone)`);
+      continue;
     }
     rmSync(skillDir, { recursive: true, force: true });
     touched = true;
   }
-  try {
-    if (lstatSync(link, { throwIfNoEntry: false })) { unlinkSync(link); touched = true; }
-  } catch { /* nothing to remove */ }
-
+  for (const cmd of COMMANDS) {
+    const link = join(root, '.claude', 'bin', cmd);
+    try {
+      if (lstatSync(link, { throwIfNoEntry: false })) { unlinkSync(link); touched = true; }
+    } catch { /* nothing to remove */ }
+  }
   console.log(touched ? `  removed ${label}` : `  none   ${label}`);
 }
 

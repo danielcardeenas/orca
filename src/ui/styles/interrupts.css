@@ -205,3 +205,12 @@ body.is-breach .feed { background: var(--red-deep); }
   display: inline-flex; align-items: center;
   color: var(--ink-faint); padding: 7px 0; margin-right: 8px;
 }
+
+/* How much this one answer releases. A question that frees four agents and one
+   that frees none look identical without this, and get answered in arrival
+   order — which is the wrong order. */
+.int__unblocks {
+  color: #111; background: var(--amber);
+  padding: 2px 6px; border-radius: 1px; font-size: 8.5px;
+}
+.int__unblocks[hidden] { display: none; }

@@ -30,7 +30,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 
-import type { Agent, Escalation, FeedItem, KeyDescriptor, Machine, Project } from '../src/shared/types.ts';
+import type {
+  Agent, AgentMessage, Collision, Escalation, FeedItem, KeyDescriptor, Machine, Project,
+} from '../src/shared/types.ts';
 import { emptyRollup } from '../src/shared/types.ts';
 import type { Command, CollectorFrame, CommandFrame } from '../src/shared/protocol.ts';
 import { BEAT_INTERVAL_MS, PATHS, PORTS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
@@ -166,6 +168,25 @@ const QUESTIONS: readonly {
   },
 ];
 
+/** Lo que un agente le dice a otro. Plausible, no decorativo. */
+const TRAFFIC: readonly { kind: 'notice'|'ask'|'handoff'|'warning'; subject: string; files?: string[] }[] = [
+  { kind: 'warning', subject: 'El endpoint /v1/charges devuelve 402 en sandbox desde hoy', files: ['src/api/charges.ts'] },
+  { kind: 'notice',  subject: 'La migración de sesiones ya está aplicada en staging' },
+  { kind: 'ask',     subject: '¿Ya renombraste AuthContext o sigo con el nombre viejo?' },
+  { kind: 'ask',     subject: '¿El worker de correo espera el payload plano o anidado?' },
+  { kind: 'handoff', subject: 'Terminé el cliente HTTP; falta cachear y reintentos', files: ['src/lib/http.ts'] },
+  { kind: 'warning', subject: 'No toques wrangler.jsonc, lo estoy reescribiendo', files: ['wrangler.jsonc'] },
+  { kind: 'notice',  subject: 'El índice parcial baja la consulta de 400ms a 12ms' },
+  { kind: 'ask',     subject: '¿Los tests de pago van contra el sandbox o los mockeo?' },
+  { kind: 'handoff', subject: 'Dejé el esquema listo; queda el seed', files: ['db/schema.sql'] },
+];
+
+/** Archivos que dos agentes pueden acabar tocando a la vez. */
+const HOT_FILES: readonly string[] = [
+  'src/hub/world.ts', 'src/lib/http.ts', 'wrangler.jsonc',
+  'src/api/charges.ts', 'db/schema.sql', 'src/ui/store.ts',
+];
+
 const PERMISSIONS: readonly string[] = [
   'Bash(rm -rf node_modules) — borrar dependencias para reinstalar',
   'Bash(git push --force-with-lease origin hero) — reescribir la rama remota',
@@ -237,6 +258,8 @@ export class FakeMachine {
   private agents = new Map<string, Local>();
   private escalations = new Map<string, Escalation>();
   private timers: ReturnType<typeof setInterval>[] = [];
+  private messages = new Map<string, AgentMessage>();
+  private collisions = new Map<string, Collision>();
   private stopped = false;
   private callsignSeq = 0;
 
@@ -344,6 +367,8 @@ export class FakeMachine {
     every(BEAT_INTERVAL_MS, () => this.beat());
     every(250, () => this.tick(250));
     every(1800, () => this.emitFeed());
+    every(6500, () => this.emitTraffic());
+    every(11_000, () => this.churnCollisions());
     this.timers.push();
   }
 
@@ -441,6 +466,127 @@ export class FakeMachine {
   }
 
   /** El motor: transiciones de estado con tiempos de permanencia distintos. */
+  /**
+   * Tráfico entre agentes.
+   *
+   * Un `ask` sin responder deja bloqueado a quien lo manda con `kind:'peer'`,
+   * que es lo que forma las cadenas de espera que el mapa dibuja. Sin eso el
+   * mapa sólo tendría linaje, y el linaje no es una cadena: nadie espera a
+   * nadie por haber sido lanzado.
+   */
+  private emitTraffic(): void {
+    const live = [...this.agents.values()]
+      .map((l) => l.agent)
+      .filter((a) => a.state !== 'done' && a.state !== 'dead');
+    if (live.length < 2) return;
+
+    const from = pick(live);
+    // Un agente ya bloqueado no manda nada; está parado.
+    if (from.state === 'blocked') return;
+
+    const t = pick(TRAFFIC);
+    // Un tercio del tráfico cruza de proyecto: es el caso interesante y el que
+    // ninguna herramienta muestra hoy.
+    const crossProject = chance(0.35);
+    const candidates = live.filter((a) =>
+      a.id !== from.id && (crossProject ? a.projectId !== from.projectId : a.projectId === from.projectId));
+    if (candidates.length === 0) return;
+    const to = pick(candidates);
+
+    const msg: AgentMessage = {
+      id: newId('msg'),
+      kind: t.kind, scope: 'agent',
+      fromAgentId: from.id, fromCallsign: from.callsign, fromProjectId: from.projectId,
+      toAgentId: to.id, toProjectId: null,
+      subject: t.subject, body: null, files: t.files ? [...t.files] : [],
+      at: Date.now(), readBy: [], expiresAt: t.kind === 'notice' ? Date.now() + 900_000 : null,
+      answer: null, answeredAt: null, answeredBy: null,
+    };
+    this.messages.set(msg.id, msg);
+    this.send({ t: 'message', machineId: this.spec.id, message: msg });
+
+    if (t.kind === 'ask') {
+      from.state = 'blocked';
+      from.block = {
+        kind: 'peer', summary: t.subject,
+        messageId: msg.id, waitingOn: to.id, since: Date.now(),
+      };
+      from.updatedAt = Date.now();
+      this.send({
+        t: 'agent', machineId: this.spec.id, id: from.id,
+        patch: { state: from.state, block: from.block, updatedAt: from.updatedAt },
+      });
+      this.feed('warn', from, `espera a ${to.callsign}: ${t.subject}`);
+    } else {
+      this.feed('info', from, `→ ${to.callsign}: ${t.subject}`);
+    }
+
+    // Alguna se contesta sola, o las cadenas crecerían para siempre.
+    for (const [id, m] of this.messages) {
+      if (m.kind !== 'ask' || m.answer !== null) continue;
+      if (Date.now() - m.at < 20_000 || !chance(0.4)) continue;
+      m.answer = 'Sí, ya está hecho.';
+      m.answeredAt = Date.now();
+      m.answeredBy = m.toAgentId;
+      this.send({ t: 'message', machineId: this.spec.id, message: m });
+      const waiter = this.agents.get(m.fromAgentId)?.agent;
+      if (waiter && waiter.block?.messageId === id) {
+        waiter.block = null;
+        waiter.state = 'working';
+        waiter.updatedAt = Date.now();
+        this.send({
+          t: 'agent', machineId: this.spec.id, id: waiter.id,
+          patch: { state: 'working', block: null, updatedAt: waiter.updatedAt },
+        });
+      }
+    }
+  }
+
+  /**
+   * Colisiones de archivo. Dos agentes vivos escribiendo lo mismo — el fallo
+   * que nadie nota hasta que el trabajo del segundo desaparece.
+   */
+  private churnCollisions(): void {
+    // Primero limpia las que ya no son ciertas.
+    for (const [id, c] of this.collisions) {
+      const alive = c.agentIds.filter((aid) => {
+        const a = this.agents.get(aid)?.agent;
+        return a && a.state !== 'done' && a.state !== 'dead';
+      });
+      if (alive.length >= 2 && chance(0.7)) continue;
+      this.collisions.delete(id);
+      this.send({ t: 'collision:clear', machineId: this.spec.id, id });
+    }
+
+    if (this.collisions.size >= 2 || !chance(0.45)) return;
+
+    const live = [...this.agents.values()].map((l) => l.agent)
+      .filter((a) => a.state === 'working');
+    // Del mismo proyecto: dos agentes en repos distintos no comparten archivo.
+    const byProject = new Map<string, typeof live>();
+    for (const a of live) {
+      const list = byProject.get(a.projectId);
+      if (list) list.push(a); else byProject.set(a.projectId, [a]);
+    }
+    const pair = [...byProject.values()].find((l) => l.length >= 2);
+    if (!pair) return;
+
+    // Padre e hijo comparten worktree por diseño; eso no es una colisión.
+    const a1 = pair[0]!;
+    const a2 = pair.find((x) => x.id !== a1.id && x.parentId !== a1.id && a1.parentId !== x.id);
+    if (!a2) return;
+
+    const c: Collision = {
+      id: newId('col'), path: pick(HOT_FILES),
+      projectId: a1.projectId, machineId: this.spec.id,
+      agentIds: [a1.id, a2.id],
+      firstSeen: Date.now(), lastSeen: Date.now(), acknowledged: false,
+    };
+    this.collisions.set(c.id, c);
+    this.send({ t: 'collision', machineId: this.spec.id, collision: c });
+    this.feed('alert', a1, `colisión con ${a2.callsign} en ${c.path}`);
+  }
+
   private tick(dtBase: number): void {
     const dt = dtBase * this.speed;
     for (const local of [...this.agents.values()]) {

@@ -353,6 +353,10 @@ function describe(name: string, input: unknown): string {
     case 'send_to_agent': return `messaging ${String(i.agent_id ?? '')}`;
     case 'stop_agent': return `stopping ${String(i.agent_id ?? '')}`;
     case 'recall': return 'checking what you told me before';
+    case 'read_traffic': return 'reading what the agents are telling each other';
+    case 'relay': return `relaying to ${String(i.agent_id ?? i.project_id ?? 'the fleet')}`;
+    case 'answer_peer': return 'answering an agent for another agent';
+    case 'resolve_collision': return 'deciding who keeps the file';
     case 'answer_agent': return 'answering the agent myself';
     case 'ask_human': return 'asking you';
     default: return name;
@@ -383,6 +387,13 @@ The order is always: recall, then decide.
 - Interrupt the operator only for things only they can know: a preference never stated, a business decision, a credential, an ambiguity where guessing wrong costs an hour.
 - Never ask the same thing twice. If you had to ask, the answer is now in memory — use it.
 
+WHAT THE AGENTS TELL EACH OTHER
+The agents also talk to each other — notices, handoffs, warnings, and questions one agent needs another to answer. You are the only party that sees all of it, and they are each looking at one repo.
+
+Read the traffic before you answer any question about why something is stalled. An agent waiting on another agent looks identical to an agent thinking hard, and the traffic is the only place that difference is visible. When you find a question sitting unanswered and you can answer it from fleet state, from recall, or from something the operator told you, answer it yourself: that is one agent moving again and nobody woken up to do it. Leave it to the agent it was addressed to only when the answer lives inside work only they have done.
+
+A collision — two agents writing the same file — is work about to be lost with no error anywhere. Decide who keeps the file and warn the other off. Late is worse than wrong: a wrong call costs a rewrite, a slow one costs an hour of output that nobody knew was being thrown away.
+
 WRITING A MISSION
 When you spawn an agent, the mission is everything it will ever know about why it exists. Write it for a capable engineer who was not in this conversation: the goal, what done looks like, the constraints they could not infer from the repo, and what not to touch. A thin mission produces an agent that asks five questions — which lands back on you, and then on the operator.
 
@@ -397,6 +408,8 @@ const ESCALATION_SYSTEM = `You are the CEO of ORCA, triaging a question raised b
 You have one decision to make: answer it yourself, or interrupt the human.
 
 Call recall FIRST, always. The human should never answer the same question twice, and recall is the only thing preventing that.
+
+If the question is about what another agent is doing or has already done, read_traffic answers it more often than you would expect — the other agent may have said it out loud already.
 
 Answer it yourself (answer_agent) when:
 - recall returns a close match

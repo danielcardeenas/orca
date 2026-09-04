@@ -1,0 +1,106 @@
+/*
+ * The map. Flat, orthogonal, still.
+ *
+ * Line weight carries priority here, not colour: an unanswered wait is thick
+ * and amber, lineage is a hairline in the structure grey. That ordering is the
+ * view's whole argument — the eye should land on what is dammed up, and slide
+ * past what merely happened.
+ */
+
+.map { position: absolute; inset: 0; display: grid; grid-template-rows: 38px 1fr; }
+
+.map__head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 0 18px; border-bottom: 1px solid var(--line-soft);
+}
+.map__head [data-summary] { color: var(--ink-dim); }
+.map__head [data-summary].is-alert { color: var(--amber); }
+
+.map__legend { display: flex; gap: 14px; color: var(--ink-faint); }
+.map__legend span { display: inline-flex; align-items: center; gap: 5px; }
+.map__key { display: inline-block; width: 14px; height: 0; border-top: 1px solid; }
+.map__key--lineage   { border-color: var(--line); }
+.map__key--notice    { border-color: var(--st-thinking); }
+.map__key--ask       { border-top-width: 2px; border-color: var(--amber); }
+.map__key--collision { border-top-style: dashed; border-color: var(--red); }
+
+.map__scroll { position: relative; overflow: auto; padding: 0 0 24px; }
+.map__svg { display: block; }
+
+.map__empty {
+  position: absolute; inset: 38px 0 0; display: grid; place-items: center;
+  text-align: center; line-height: 1.8; color: var(--ink-faint);
+  pointer-events: none;
+}
+.map__empty[hidden] { display: none; }
+
+/* ── Edges ────────────────────────────────────────────────────────── */
+
+.map__edge { stroke-linejoin: miter; stroke-linecap: butt; }
+
+/* Lineage is context. It should be legible and never the first thing seen. */
+.map__edge--lineage { stroke: var(--line); stroke-width: 1; }
+
+/* Traffic that blocked nobody: present, cool, quiet. */
+.map__edge--notice { stroke: var(--st-thinking); stroke-width: 1; opacity: 0.55; }
+
+/* A wait. Thick, amber, and the only edge that moves — the dashes travel
+   toward whoever owes the answer, so the direction is readable without an
+   arrowhead cluttering a 26px node. */
+.map__edge--ask,
+.map__edge--human {
+  stroke: var(--amber); stroke-width: 2;
+  stroke-dasharray: 5 4;
+  animation: map-flow 1.1s linear infinite;
+}
+@keyframes map-flow { to { stroke-dashoffset: -9; } }
+
+/* A conflict is not a flow: dashed, red, and drawn as a bracket beside the
+   two agents rather than between them. */
+.map__edge--collision {
+  stroke: var(--red); stroke-width: 1.5; stroke-dasharray: 2 3; opacity: 0.9;
+}
+
+/* ── Nodes ────────────────────────────────────────────────────────── */
+
+.map__node { cursor: none; }
+.map__box {
+  fill: var(--screen);
+  stroke: var(--line-soft); stroke-width: 1;
+}
+.map__node:hover .map__box { fill: #16151c; stroke: var(--line); }
+
+.map__call {
+  font-family: 'Tiny5', monospace; font-size: 11px; letter-spacing: 0.1em;
+  fill: var(--ink-bright);
+}
+.map__code {
+  font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.08em;
+  fill: var(--ink-dimmer);
+}
+/* The number the view exists to produce, hung under the node it belongs to. */
+.map__dam {
+  font-family: 'Tiny5', monospace; font-size: 8.5px; letter-spacing: 0.14em;
+  fill: var(--amber);
+}
+
+.map__node.is-alert .map__box { stroke: var(--amber); }
+.map__node.is-dam .map__box { stroke: var(--amber); stroke-width: 1.5; }
+
+/* The human is the terminus of every chain that reaches them, and is drawn
+   like the lime slab elsewhere in the console: inverted, unmistakable. */
+.map__node--human .map__box { fill: var(--amber); stroke: var(--amber); }
+.map__node--human .map__call { fill: #111; }
+.map__node--human:not(.is-alert) .map__box {
+  fill: transparent; stroke: var(--ink-dimmer);
+}
+.map__node--human:not(.is-alert) .map__call { fill: var(--ink-dimmer); }
+
+@media (prefers-reduced-motion: reduce) {
+  .map__edge--ask, .map__edge--human { animation: none; }
+}
+
+@media (max-width: 940px) {
+  .map__legend { display: none; }
+  .map__head { padding: 0 12px; }
+}

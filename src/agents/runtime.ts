@@ -141,6 +141,40 @@ export function attachCeo(hub: Hub, opts: RuntimeOptions = {}) {
     resolveEscalation(id, answer, by) {
       hub.answerEscalationLocal(id, answer, by);
     },
+
+    /* ── tráfico entre agentes ────────────────────────────────────── */
+
+    messages: () => Object.values(world.state.messages),
+    message: (id) => world.state.messages[id],
+    collisions: () => Object.values(world.state.collisions),
+
+    relay(input) {
+      const out = hub.relayMessage({
+        kind: input.kind,
+        scope: input.scope,
+        toAgentId: input.toAgentId,
+        toProjectId: input.toProjectId,
+        subject: input.subject,
+        body: input.body,
+        files: input.files,
+      });
+      // Se devuelve a quién llegó de verdad, no a quién iba dirigido: el CEO
+      // tiene que poder decirle al operador "no le llegó" en vez de dar por
+      // hecho que sí.
+      return {
+        messageId: out.message.id,
+        delivered: out.delivered,
+        skipped: out.skipped,
+        reason: out.reason,
+      };
+    },
+
+    // El CEO contesta en lugar del destinatario. Firma la respuesta como suya:
+    // quien preguntó merece saber que no se la contestó el agente al que
+    // preguntó, por si acaso quería justamente a ése.
+    answerPeer: (messageId, answer) => hub.replyToMessageLocal(messageId, answer, 'ceo'),
+
+    acknowledgeCollision: (id) => hub.acknowledgeCollision(id),
   };
 
   if (opts.disabled) {

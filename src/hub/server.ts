@@ -24,7 +24,10 @@ import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { RawData } from 'ws';
 
-import type { CeoMessage } from '../shared/types.ts';
+import type {
+  Agent, AgentMessage, CeoMessage, Collision, MessageKind,
+} from '../shared/types.ts';
+import { TERMINAL_STATES } from '../shared/types.ts';
 import type {
   ClientFrame, CollectorFrame, Command, CommandFrame, PatchOp, ServerFrame,
 } from '../shared/protocol.ts';
@@ -50,6 +53,17 @@ const SWEEP_INTERVAL_MS = 2_000;
 /** Si una consola acumula esto en el buffer, dejó de leer: no la ahogamos más. */
 const MAX_BUFFERED = 4 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Techo de destinatarios de un mensaje difundido.
+ *
+ * Un `notice` a cien agentes no es un mensaje: es una tormenta que interrumpe a
+ * toda la flota a la vez y le cuesta un turno a cada uno. Pasado este número se
+ * entrega sólo a los que no están bloqueados —a un agente parado esperando a
+ * una persona, el correo no lo desbloquea— y se anota el recorte en el feed,
+ * porque un mensaje que no llegó y no se ve es peor que uno que no se mandó.
+ */
+export const MAX_BROADCAST = 25;
 
 /* ── tipos internos ───────────────────────────────────────────────── */
 
@@ -103,6 +117,29 @@ export interface HubOptions {
   onEscalation?: (escalationId: string, hub: Hub) => void;
 }
 
+/** Lo que el CEO necesita decir para meter un mensaje en la flota. */
+export interface RelayInput {
+  kind: MessageKind;
+  /** El CEO habla con un agente o con un proyecto. Difundir a la flota entera
+   *  es una decisión de la que nadie se hace responsable, así que no está. */
+  scope: 'agent' | 'project';
+  toAgentId?: string | null;
+  toProjectId?: string | null;
+  subject: string;
+  body?: string | null;
+  files?: string[];
+}
+
+export interface RelayResult {
+  message: AgentMessage;
+  /** Agentes a cuyo collector se mandó la entrega. */
+  delivered: string[];
+  /** Destinatarios que se quedaron fuera (techo, máquina caída, terminados). */
+  skipped: number;
+  /** Por qué se quedaron fuera, si se quedó alguno. */
+  reason: string | null;
+}
+
 export interface Hub {
   world: World;
   bus: PatchBus;
@@ -126,6 +163,19 @@ export interface Hub {
    * humana: cierra el registro, la manda al agente, y la guarda si procede.
    */
   answerEscalationLocal(id: string, answer: string, by: 'human' | 'ceo'): void;
+  /**
+   * El CEO mete un mensaje en el tráfico de la flota y el hub lo enruta. Es la
+   * única forma que tiene de redirigir a un agente sin interrumpir a la persona.
+   */
+  relayMessage(input: RelayInput): RelayResult;
+  /**
+   * Contesta un `ask` entre agentes desde dentro del proceso. Desbloquea a quien
+   * preguntó sin despertar al que le tocaba contestar, que es el caso en el que
+   * el CEO aporta algo que ningún agente puede: ve la flota entera.
+   */
+  replyToMessageLocal(messageId: string, answer: string, from: string | null): AgentMessage | null;
+  /** Marca una colisión como vista, desde la consola o desde el CEO. */
+  acknowledgeCollision(id: string): Collision | null;
   broadcast(frame: ServerFrame): void;
   counts(): { collectors: number; consoles: number; pending: number };
   close(): Promise<void>;
@@ -166,6 +216,8 @@ function describeCommand(cmd: Command): string {
     case 'resume': return `resume ${cmd.agentId}`;
     case 'remove': return `remove ${cmd.agentId}`;
     case 'answer': return `answer ${cmd.escalationId}`;
+    case 'deliver': return `deliver ${cmd.message.kind} → ${cmd.agentId}`;
+    case 'reply': return `reply ${cmd.messageId}`;
     case 'key:set': return `key:set ${cmd.projectId}/${cmd.name} (valor omitido)`;
     case 'key:remove': return `key:remove ${cmd.projectId}/${cmd.name}`;
     case 'resync': return 'resync';
@@ -179,7 +231,7 @@ function isCommand(v: unknown): v is Command {
   const k = (v as { k?: unknown }).k;
   return typeof k === 'string' && [
     'spawn', 'say', 'permit', 'stop', 'resume', 'remove',
-    'answer', 'key:set', 'key:remove', 'resync', 'logs',
+    'answer', 'deliver', 'reply', 'key:set', 'key:remove', 'resync', 'logs',
   ].includes(k);
 }
 
@@ -275,6 +327,17 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       const escId = ev.kind === 'escalation:new'
         ? (ev.data as { id?: string } | undefined)?.id
         : undefined;
+      if (ev.kind === 'message:new') {
+        const msgId = (ev.data as { id?: string } | undefined)?.id;
+        // Fuera del camino crítico, igual que el triaje: el mundo publica el
+        // mensaje aunque el ruteo tarde o falle.
+        if (msgId) {
+          queueMicrotask(() => {
+            try { routeNewMessage(msgId); }
+            catch (err) { warn('ruteo de mensaje falló:', err); }
+          });
+        }
+      }
       if (escId && options.onEscalation) {
         // Fuera del camino crítico: el mundo no espera al CEO para publicar.
         queueMicrotask(() => {
@@ -360,6 +423,15 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         return e ? { machineId: e.machineId, broadcast: false }
           : { machineId: null, broadcast: false, error: `escalación desconocida: ${cmd.escalationId}` };
       }
+      case 'reply': {
+        // La respuesta a un `ask` va a la máquina de QUIEN PREGUNTÓ, no a la de
+        // quien contesta: ahí es donde hay un agente parado esperándola.
+        const m = world.state.messages[cmd.messageId];
+        if (!m) return { machineId: null, broadcast: false, error: `mensaje desconocido: ${cmd.messageId}` };
+        const asker = world.state.agents[m.fromAgentId];
+        return asker ? { machineId: asker.machineId, broadcast: false }
+          : { machineId: null, broadcast: false, error: `el que preguntó ya no existe: ${m.fromAgentId}` };
+      }
       default: {
         const a = world.state.agents[cmd.agentId];
         return a ? { machineId: a.machineId, broadcast: false }
@@ -425,6 +497,136 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     clearTimeout(p.timer);
     pending.delete(cmdId);
     ackTo(p.consoleId, cmdId, ok, detail, data);
+  }
+
+  /* ── tráfico entre agentes ──────────────────────────────────────── */
+
+  /**
+   * Quién puede recibir correo.
+   *
+   * `idle` cuenta: un agente esperando su siguiente turno lee el mensaje en
+   * cuanto arranca, y un handoff dirigido a él es exactamente para eso. Los
+   * terminales no: escribirle a un `dead` es tirar el mensaje sin decirlo.
+   */
+  function canReceive(a: Agent): boolean {
+    return !TERMINAL_STATES.has(a.state);
+  }
+
+  /**
+   * Enruta un mensaje ya guardado en el mundo.
+   *
+   * Éste es el trabajo que sólo el hub puede hacer: el mensaje llega del
+   * collector de la máquina A y su destinatario puede estar en la B. Nadie más
+   * ve las dos.
+   */
+  function routeMessage(msg: AgentMessage): { delivered: string[]; skipped: number; reason: string | null } {
+    const all = Object.values(world.state.agents);
+    let targets: Agent[];
+    let reason: string | null = null;
+    let skipped = 0;
+
+    switch (msg.scope) {
+      case 'agent': {
+        const to = msg.toAgentId ? world.state.agents[msg.toAgentId] : undefined;
+        if (!to) return { delivered: [], skipped: 1, reason: `destinatario desconocido: ${msg.toAgentId ?? '?'}` };
+        if (!canReceive(to)) {
+          return { delivered: [], skipped: 1, reason: `${to.callsign} ya terminó (${to.state})` };
+        }
+        targets = [to];
+        break;
+      }
+      case 'project': {
+        const pid = msg.toProjectId ?? msg.fromProjectId;
+        targets = all.filter((a) => a.projectId === pid && canReceive(a));
+        break;
+      }
+      case 'fleet':
+        targets = all.filter(canReceive);
+        break;
+    }
+
+    // Nunca de vuelta a quien lo mandó: un agente leyendo su propio aviso se
+    // interrumpe a sí mismo, y en un `ask` se quedaría esperándose a sí mismo.
+    // Quedarse fuera por ser el emisor no cuenta como omitido.
+    targets = targets.filter((a) => a.id !== msg.fromAgentId);
+
+    if (msg.scope !== 'agent' && targets.length > MAX_BROADCAST) {
+      const wanted = targets.length;
+      const awake = targets.filter((a) => a.state !== 'blocked');
+      targets = (awake.length > 0 ? awake : targets)
+        // Los que más recientemente hicieron algo son los que más probablemente
+        // sigan trabajando en lo que el mensaje toca.
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, MAX_BROADCAST);
+      skipped += wanted - targets.length;
+      reason = `techo de difusión: ${wanted} destinatarios → ${targets.length}`;
+      warn(`mensaje ${msg.id} (${msg.scope}) ${reason}`);
+      world.pushFeed('', [{
+        id: `f_bcast_${msg.id}`, at: Date.now(), level: 'warn', source: 'ORCA',
+        text: `difusión de ${msg.fromCallsign} recortada: ${wanted} → ${targets.length} destinatarios`,
+        ...(msg.fromProjectId ? { projectId: msg.fromProjectId } : {}),
+      }]);
+    }
+
+    const delivered: string[] = [];
+    const unreachable: string[] = [];
+    for (const a of targets) {
+      const conn = collectors.get(a.machineId);
+      if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
+        skipped += 1;
+        unreachable.push(a.callsign);
+        continue;
+      }
+      dispatchCommand(newId('cmd'), { k: 'deliver', agentId: a.id, message: msg }, null);
+      delivered.push(a.id);
+    }
+    if (delivered.length > 0) world.markDelivered(msg.id, delivered);
+    if (unreachable.length > 0 && reason === null) {
+      reason = `sin collector conectado: ${unreachable.slice(0, 5).join(', ')}`;
+    }
+    return { delivered, skipped, reason };
+  }
+
+  /**
+   * Un mensaje que no llega a nadie es el fallo silencioso de este canal: quien
+   * lo mandó cree que informó, y en un `ask` se queda esperando una respuesta
+   * que nunca va a existir. Así que cuando no llega, se dice.
+   */
+  function routeNewMessage(id: string): void {
+    const msg = world.state.messages[id];
+    if (!msg) return;
+    const out = routeMessage(msg);
+    if (out.delivered.length > 0) {
+      log(`mensaje ${msg.kind} de ${msg.fromCallsign} → ${out.delivered.length} agente(s)`);
+      return;
+    }
+    const why = out.reason ?? 'no había nadie a quien entregárselo';
+    warn(`mensaje ${msg.id} de ${msg.fromCallsign} sin entregar: ${why}`);
+    world.pushFeed('', [{
+      id: `f_undeliv_${msg.id}`, at: Date.now(),
+      level: msg.kind === 'ask' ? 'alert' : 'warn', source: 'ORCA',
+      text: `${msg.fromCallsign}: "${msg.subject}" sin entregar — ${why}`,
+      ...(msg.fromProjectId ? { projectId: msg.fromProjectId } : {}),
+      ...(msg.fromAgentId ? { agentId: msg.fromAgentId } : {}),
+    }]);
+  }
+
+  /**
+   * Contestar un `ask` hace dos cosas a la vez: cierra el mensaje en el mundo
+   * —que es lo que desbloquea a quien preguntó— y manda la respuesta a su
+   * collector, que es quien la escribe en su inbox.
+   */
+  function replyToMessage(
+    messageId: string, answer: string, from: string | null, consoleId: string | null,
+  ): AgentMessage | null {
+    const m = world.answerMessage(messageId, answer, from);
+    if (!m) { ackTo(consoleId, messageId, false, `mensaje desconocido: ${messageId}`); return null; }
+    dispatchCommand(
+      newId('cmd'),
+      { k: 'reply', messageId: m.id, answer: m.answer ?? answer, fromAgentId: from },
+      consoleId,
+    );
+    return m;
   }
 
   /* ── collectors ─────────────────────────────────────────────────── */
@@ -628,7 +830,30 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           send(conn, { t: 'error', message: 'cmd malformado' });
           return;
         }
-        dispatchCommand(frame.id, frame.cmd, conn.id);
+        // Un `reply` no es sólo un comando de máquina: cierra el mensaje en el
+        // mundo, y eso es lo que desbloquea al agente que preguntó. Mandarlo
+        // por el camino genérico entregaría la respuesta y dejaría al que
+        // preguntó marcado como bloqueado para siempre.
+        const cmd = frame.cmd;
+        if (cmd.k === 'reply') {
+          if (typeof cmd.messageId !== 'string' || typeof cmd.answer !== 'string') {
+            send(conn, { t: 'error', message: 'reply malformado' });
+            return;
+          }
+          replyToMessage(
+            cmd.messageId, cmd.answer,
+            typeof cmd.fromAgentId === 'string' ? cmd.fromAgentId : null,
+            conn.id,
+          );
+          return;
+        }
+        dispatchCommand(frame.id, cmd, conn.id);
+        return;
+      }
+
+      case 'collision:ack': {
+        if (typeof frame.id !== 'string') return;
+        world.ackCollision(frame.id);
         return;
       }
 
@@ -726,6 +951,39 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         case '/api/world':
           json(res, 200, world.snapshot(bus.rev));
           return;
+        case '/api/traffic': {
+          /*
+           * Lo que se están diciendo los agentes, en JSON.
+           *
+           * Sin esto, depurar el canal agente↔agente exige abrir el navegador
+           * y mirar la escena, que es justo lo que no se puede hacer desde un
+           * VPS por ssh a las tres de la mañana.
+           */
+          const project = url.searchParams.get('project');
+          const kind = url.searchParams.get('kind');
+          const rawLimit = Number(url.searchParams.get('limit'));
+          const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(500, Math.floor(rawLimit)) : 100;
+          const all = Object.values(world.state.messages);
+          const messages = all
+            .filter((m) => !project || m.fromProjectId === project || m.toProjectId === project)
+            .filter((m) => !kind || m.kind === kind)
+            .sort((a, b) => b.at - a.at)
+            .slice(0, limit);
+          const collisions = Object.values(world.state.collisions)
+            .filter((c) => !project || c.projectId === project)
+            .sort((a, b) => b.lastSeen - a.lastSeen);
+          json(res, 200, {
+            at: Date.now(),
+            total: all.length,
+            // Lo primero que se quiere saber al mirar esto: cuánta gente está
+            // parada esperando a otro agente.
+            waiting: all.filter((m) => m.kind === 'ask' && m.answer === null).length,
+            shown: messages.length,
+            messages,
+            collisions,
+          });
+          return;
+        }
         case '/api/memory': {
           // Útil para ver por qué el CEO decidió no preguntar.
           const q = url.searchParams.get('q');
@@ -740,7 +998,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           if (serveStatic(url.pathname, res)) return;
           json(res, 404, {
             ok: false, error: 'no such route',
-            routes: ['/api/health', '/api/world', '/api/memory?q='],
+            routes: ['/api/health', '/api/world', '/api/traffic?project=&kind=&limit=', '/api/memory?q='],
             hint: DIST_DIR
               ? 'la consola se sirve desde /'
               : 'ejecuta `npm run build` para que este hub sirva también la consola',
@@ -815,6 +1073,42 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       // Una respuesta del CEO no se guarda en memoria: la memoria es lo que
       // dijo el humano. Recordar lo que el CEO dedujo la contaminaría.
       answerEscalation(id, answer, null, null, by);
+    },
+    relayMessage(input) {
+      const now = Date.now();
+      const to = input.scope === 'agent' && input.toAgentId
+        ? world.state.agents[input.toAgentId] : undefined;
+      const projectId = input.scope === 'agent' ? (to?.projectId ?? '') : (input.toProjectId ?? '');
+      const message: AgentMessage = {
+        id: newId('m'),
+        kind: input.kind,
+        scope: input.scope,
+        // El CEO no es un agente y no tiene máquina: se identifica como tal
+        // para que el destinatario sepa que esto no viene de un compañero.
+        fromAgentId: 'ceo',
+        fromCallsign: 'CEO',
+        fromProjectId: projectId,
+        toAgentId: input.scope === 'agent' ? (input.toAgentId ?? null) : null,
+        toProjectId: input.scope === 'project' ? (input.toProjectId ?? null) : null,
+        subject: input.subject,
+        body: input.body ?? null,
+        files: input.files ?? [],
+        at: now,
+        readBy: [],
+        // Un aviso del CEO caduca; nada de esto es una pregunta que alguien
+        // esté esperando, así que no puede quedarse en el mundo para siempre.
+        expiresAt: now + 60 * 60_000,
+        answer: null, answeredAt: null, answeredBy: null,
+      };
+      const stored = world.upsertMessageLocal(message);
+      const routed = routeMessage(stored);
+      return { message: stored, ...routed };
+    },
+    replyToMessageLocal(messageId, answer, from) {
+      return replyToMessage(messageId, answer, from, null);
+    },
+    acknowledgeCollision(id) {
+      return world.ackCollision(id);
     },
     dispatch(cmd) {
       const cmdId = newId('cmd');

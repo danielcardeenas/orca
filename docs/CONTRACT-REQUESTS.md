@@ -276,3 +276,167 @@ rechaza cualquier otra cosa antes de construir el argv. Un valor del contrato
 siempre pasa; los dos extra son inalcanzables desde la consola.
 
 **Petición:** alinear el union con el CLI.
+
+## 18. `AgentMessage` no dice de qué máquina viene
+
+Un mensaje se enruta entre máquinas, pero no lleva `machineId` — a diferencia de
+`Escalation` y `Collision`, que sí. El hub necesita saberlo para dos cosas:
+rechazar a un collector que habla en nombre de un agente ajeno, y saber a qué
+collector bajar el `{k:'reply'}`.
+
+**Mientras tanto:** el hub lo deduce del `Agent` del emisor
+(`agents[fromAgentId].machineId`). Funciona salvo en una ventana estrecha: si el
+mensaje llega **antes** que el `agent:new` de su emisor, no hay a quién comparar
+y el frame se acepta sin poder verificar la propiedad. Con snapshot al conectar
+esa ventana es de milisegundos, pero existe.
+
+**Petición:** `machineId: string` en `AgentMessage`, como en todo lo demás que
+viaja por el cable.
+
+## 19. Una colisión no registra quién la resolvió ni con qué criterio
+
+`Collision.acknowledged` es un booleano. Cuando el CEO decide quién se queda con
+el archivo (`resolve_collision`), esa decisión —qué agente sigue, cuál se
+aparta, por qué— no cabe en ningún sitio: sólo queda el aviso que se le manda al
+que se aparta, que vive en `messages` y caduca en una hora.
+
+**Mientras tanto:** la decisión queda en el log append-only del hub
+(`collision:new` + el `message:relay` del aviso) y la colisión sólo se marca
+`acknowledged`. La consola no puede mostrar "K9 se queda con api.ts (decidió el
+CEO)".
+
+**Petición:** `resolvedBy?: 'human' | 'ceo'`, `keepAgentId?: string` y
+`reason?: string` en `Collision`.
+
+## 20. La consola puede contestar un mensaje pero no mandar uno
+
+`ClientFrame` tiene `{t:'collision:ack'}` y puede emitir `{k:'reply'}` dentro de
+un `{t:'cmd'}`, pero no hay forma de que el operador mande un mensaje a un
+agente o a un proyecto desde la consola: `{k:'deliver'}` exige un `AgentMessage`
+ya construido, con id, y la consola no debería estar inventando ids del mundo.
+
+**Mientras tanto:** sólo el CEO puede originar tráfico, vía `Hub.relayMessage`,
+que construye el `AgentMessage` dentro del hub (emisor `'ceo'`, callsign `CEO`) y
+lo enruta. Desde la consola el operador lo pide hablando con el CEO.
+
+**Petición:** `{ t:'message:send'; kind; scope; toAgentId?; toProjectId?; subject;
+body? }` en `ClientFrame`, y que el hub le ponga el id.
+
+## 21. `{t:'collision:ack'}` y `{k:'reply'}` no tienen acuse propio
+
+Mismo problema que el punto 3, en el canal nuevo: cuando la consola reconoce una
+colisión no recibe confirmación, y cuando manda un `reply` el ack que le vuelve
+lleva un `cmdId` que ella no generó (el hub abre un comando propio hacia el
+collector del que preguntó).
+
+**Mientras tanto:** el mundo cambia y la consola lo ve por el `PatchOp`
+correspondiente (`{o:'collision'}`, `{o:'message'}`), que es suficiente para
+pintar pero no para decir "no pude entregarlo, la máquina está caída".
+
+**Petición:** `cmdId?: string` opcional en los frames de consola que provocan un
+comando de máquina.
+
+---
+
+# Peticiones del canal agente ↔ agente
+
+Escrito por el agente del canal de mensajes y colisiones. Mismas reglas:
+`types.ts` y `protocol.ts` no se tocaron. El contrato completo del lado del
+agente está en `docs/MESSAGING.md`.
+
+## 18. No hay forma de RETIRAR un mensaje  ⟵ el importante
+
+Una escalación se puede retirar (`{t:'escalation:withdraw', id, reason}`). Un
+mensaje no: `CollectorFrame` sólo tiene `{t:'message'}`. Pero un mensaje sí se
+muere de tres maneras:
+
+- un `notice` pasa su `expiresAt`;
+- un `ask` sin responder cuyo **emisor desapareció del disco** — ya no bloquea a
+  nadie porque no queda nadie a quien bloquear;
+- un `ask` con `ttlMinutes` que vence.
+
+Sin frame de retirada, el hub sigue enseñando en el mapa una arista que el
+collector ya olvidó, y el `block.kind='peer'` desaparece del agente sin que el
+mensaje que lo causaba desaparezca con él. Las dos mitades del mismo hecho
+viajan por caminos distintos.
+
+**Mientras tanto:** el collector deja de contarlo en su `blocks()` (así que el
+agente sale de `blocked` por el patch normal) y simplemente deja de reenviarlo en
+el snapshot. El hub debe caducar por su cuenta usando `expiresAt`, y para el caso
+del emisor muerto no tiene ninguna señal.
+
+**Petición:** `{t:'message:withdraw', machineId, id, reason}`, exactamente como
+el de escalaciones. Es el mismo problema y merece la misma solución.
+
+## 19. `AgentMessage` no dice de qué máquina viene
+
+`Escalation` tiene `machineId`. `Collision` tiene `machineId`. `AgentMessage` no.
+El frame `{t:'message', machineId, message}` lo lleva fuera, pero en cuanto el
+hub lo guarda en `WorldState.messages` esa información se pierde, y `{k:'reply',
+messageId, …}` no dice a qué collector bajar.
+
+**Mientras tanto:** el hub tiene que recordar por su cuenta qué máquina emitió
+cada mensaje (o buscar por `fromProjectId`, que sí lleva el machineId dentro por
+la convención `<machineId>/<slug>` de `ProjectRegistry.idForSlug`). Esa
+convención no está escrita en `types.ts`, que es el mismo problema que la #4.
+
+**Petición:** `machineId: string` en `AgentMessage`.
+
+## 20. El payload del buzón de salida necesitaba un `replyTo`
+
+El diseño original del buzón `.orca/out/` sólo contempla mensajes nuevos. Con
+eso, un `ask` sólo puede cerrarse desde la consola: dos agentes en la misma
+máquina no pueden terminar una conversación entre ellos, aunque los dos estén
+mirando el mismo filesystem.
+
+**Mientras tanto:** un archivo de salida con `{replyTo, answer, agentId}` se
+enruta como respuesta en vez de como mensaje nuevo, y `orca-tell --reply <id>`
+lo escribe. Está documentado en `docs/MESSAGING.md` §5. No toca `protocol.ts`
+—es forma en disco, no forma de cable— pero el CEO y la skill del agente
+dependen de ello.
+
+**Petición:** ninguna al contrato; sólo que `docs/MESSAGING.md` se considere
+normativo igual que `docs/ESCALATION.md`.
+
+## 21. `AgentMessage.readBy` no puede completarse para un scope amplio
+
+`readBy: string[]` funciona para un mensaje `scope:'agent'`: se entrega en un
+buzón, aparece un `<id>.read`, se sabe quién. Para `scope:'project'` o `'fleet'`
+el mensaje se entrega en N buzones y la marca de leído no dice **cuál** de los
+agentes de ese proyecto la escribió — el archivo lo escribe el CLI, no ORCA, y
+un proyecto puede tener cinco sesiones compartiendo directorio.
+
+**Mientras tanto:** `readBy` sólo se llena para entregas dirigidas a un agente
+concreto. Para las demás se queda vacío, que es honesto: mejor no saber que
+afirmar algo falso.
+
+**Petición:** o declarar `readBy` como "sólo significativo con scope 'agent'", o
+que la marca de leído lleve el sessionId dentro y el contrato lo diga.
+
+## 22. `Collision.acknowledged` no tiene camino de vuelta al collector
+
+La consola manda `{t:'collision:ack', id}` al hub, y `Collision.acknowledged`
+existe en el tipo. Pero no hay `Command` que le diga al collector "esta ya la
+vieron": el collector la seguirá re-emitiendo cada vez que el `lastSeen` se
+mueva de forma perceptible, y el hub tendrá que re-aplicar el ack a cada
+re-emisión.
+
+**Mientras tanto:** el collector emite siempre `acknowledged: false` — es el
+único valor que puede afirmar con verdad, porque el reconocimiento es un hecho
+de la consola, no de la máquina. El hub debe preservar su propio `acknowledged`
+al fusionar una re-emisión.
+
+**Petición:** decirlo en `types.ts` (`acknowledged` lo posee el hub, el collector
+siempre manda false), o añadir `{k:'collision:ack', id}` a `Command`.
+
+## 23. `block.waitingOn` no tiene forma definida
+
+`Agent.block.waitingOn?: string` no dice si es un `agentId`, un callsign, o algo
+más. Un `ask` a un proyecto o a la flota además no señala a nadie en concreto.
+
+**Mientras tanto:** el collector pone el `agentId` cuando el scope es `'agent'`,
+`project:<projectId>` cuando es de proyecto y `fleet` cuando es de flota. La
+consola tiene que saber desambiguar por el prefijo.
+
+**Petición:** `waitingOn?: { kind: 'agent'|'project'|'fleet'; id: string | null }`,
+o dejar la convención del prefijo escrita en `types.ts`.

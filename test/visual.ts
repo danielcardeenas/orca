@@ -192,8 +192,11 @@ async function shootMobile(browser: Browser) {
   await sleep(3000);
   await shot(page, 'mobile-01-deck');
 
-  await page.evaluate(() => document.querySelector('.console')?.classList.add('show-side'));
   await injectEscalation(page, 'blocking');
+  await sleep(600);
+  // Por la pestaña real, no forzando la clase: si el botón no llega al inbox,
+  // el fotograma tiene que fallar igual que le fallaría a una persona.
+  await page.locator('[data-view="inbox"]').click();
   await sleep(900);
   await shot(page, 'mobile-02-interrupts');
   await page.close();

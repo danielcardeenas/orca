@@ -230,13 +230,40 @@
   .console.show-side .side { display: grid; }
   .console.show-side .stage { display: none; }
 
-  /* Interrupts get the room; the CEO collapses to its composer until tapped.
-     min-height:0 en la fila del log, no en el panel: sin eso el composer se
-     recorta y el placeholder aparece cortado a la mitad. */
-  .console.show-side .side__ceo { max-height: 38vh; }
+  /*
+   * En el teléfono la cola manda. En escritorio el CEO crece y las
+   * interrupciones se ajustan al contenido; aquí es al revés, porque el
+   * operador abrió el inbox para contestar, no para leer conversación.
+   */
+  .console.show-side .side { grid-template-rows: auto minmax(0, 1fr); }
+  .console.show-side .side__ceo { max-height: 42vh; min-height: 0; }
+  .console.show-side .side__interrupts { min-height: 0; display: grid; }
   .console.show-side .ceo__log { min-height: 0; }
   .console.show-side .ceo__ta { min-height: 44px; }
   .console.show-side .side__interrupts { min-height: 0; overflow: hidden; }
 
   .feed { padding: 0 10px; }
+}
+
+/* The inbox tab. Desktop never needs it — the side column is always on screen —
+   so it only exists below the fold where that column is hidden. */
+.viewtog__inbox { display: none; position: relative; }
+.viewtog__inbox i {
+  font-style: normal; font-size: 9px; margin-left: 5px;
+  padding: 1px 4px; border-radius: 2px; color: transparent;
+}
+.viewtog__inbox i.is-on { background: var(--amber); color: #111; }
+.viewtog button.is-on .viewtog__inbox i.is-on { background: #111; color: var(--amber); }
+
+@media (max-width: 940px) {
+  .viewtog__inbox { display: inline-flex; align-items: center; }
+}
+
+/* Un CEO sin conversación no necesita alto: se encoge a su cabecera, sus tres
+   arranques y el composer, y todo lo demás es para la cola. */
+@media (max-width: 940px) {
+  .console.show-side .side__ceo:has(.ceo__blank:not([hidden])) { max-height: none; }
+  .console.show-side .ceo:has(.ceo__blank:not([hidden])) {
+    grid-template-rows: auto auto auto;
+  }
 }

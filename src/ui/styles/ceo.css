@@ -9,12 +9,14 @@
 .side__ceo { min-height: 0; }
 
 .ceo {
-  position: relative;   /* ancla del estado vacío, que flota sobre el log */
   display: grid;
   grid-template-rows: auto 1fr auto;
+  grid-template-columns: 1fr;
   height: 100%;
   min-height: 0;
 }
+/* El log y el estado vacío comparten la fila 2; sólo uno está visible. */
+.ceo__log { grid-row: 2; grid-column: 1; }
 
 /* ── Cabecera ─────────────────────────────────────────────────────── */
 
@@ -186,11 +188,18 @@
    A blank panel teaches the operator nothing. This one says what the CEO is
    for and hands over three questions worth asking on day one. */
 
+/*
+ * Ocupa la MISMA celda de rejilla que el log, no todo el panel. Posicionado
+ * absoluto se desbordaba sobre el composer y sobre la cabecera de interrupciones
+ * en cuanto el panel se estrechaba — que es exactamente lo que pasa en un
+ * teléfono, donde este panel mide 38vh.
+ */
 .ceo__blank {
-  position: absolute; inset: 30px 0 auto;
+  grid-row: 2; grid-column: 1;
   padding: 22px 16px;
   display: grid; gap: 12px; align-content: start;
-  pointer-events: auto;
+  overflow: hidden;
+  min-height: 0;
 }
 .ceo__blank .px { color: var(--ink-faint); }
 .ceo__blankbody {
@@ -205,3 +214,11 @@
 .ceo__seed:hover { border-color: var(--lime); }
 .ceo__seed:hover .px { color: var(--lime); }
 .ceo__seed .px { color: var(--ink-dimmer); font-size: 9px; }
+
+@media (max-width: 940px) {
+  /* En el inbox el operador vino a contestar, no a leer qué es el CEO. Se
+     queda el título y los arranques; el párrafo explicativo sobra. */
+  .ceo__blankbody { display: none; }
+  .ceo__blank { padding: 12px 12px; gap: 8px; }
+  .ceo__seed { padding: 10px 12px; min-height: 40px; }
+}

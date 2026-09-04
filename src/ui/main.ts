@@ -30,7 +30,13 @@ import { mountAgentDrawer } from './views/agent.ts';
 import { drawBits, inlineORCA, sizeOf } from './gfx/logo.ts';
 import { AGENT_STATES } from '../shared/types.ts';
 
-type View = 'deck' | 'scene';
+/**
+ * `inbox` sólo existe en móvil: bajo 940px el riel y la columna lateral se
+ * pliegan, y sin este botón no había ninguna forma de llegar al CEO ni a la
+ * cola de interrupciones desde un teléfono — que es justo donde se contesta
+ * una pregunta en cuatro segundos.
+ */
+type View = 'deck' | 'scene' | 'inbox';
 
 const app = document.getElementById('app')!;
 
@@ -48,6 +54,9 @@ app.innerHTML = `
         <div class="viewtog" data-viewtog>
           <button type="button" data-view="deck" class="is-on">DECK</button>
           <button type="button" data-view="scene">FLEET</button>
+          <button type="button" data-view="inbox" class="viewtog__inbox">
+            INBOX<i data-inbox-n></i>
+          </button>
         </div>
       </div>
     </header>
@@ -99,9 +108,16 @@ mountAgentDrawer($('[data-drawer]'));
 /* ── View toggle. The 3D scene only renders while it is the stage. ── */
 
 let view: View = (localStorage.getItem('orca.view') as View) || 'deck';
+// El inbox no sobrevive a un escritorio: allí la columna lateral está siempre
+// visible y "inbox" no significa nada.
+if (view === 'inbox' && !matchMedia('(max-width: 940px)').matches) view = 'deck';
 function setView(v: View) {
   view = v;
-  $('[data-view-deck]').hidden = v !== 'deck';
+  const inbox = v === 'inbox';
+  consoleEl.classList.toggle('show-side', inbox);
+  // En inbox el escenario no se ve, así que el deck vuelve a ser el stage por
+  // debajo: al salir del inbox el operador aterriza donde estaba.
+  $('[data-view-deck]').hidden = v === 'scene';
   $('[data-view-scene]').hidden = v !== 'scene';
   for (const b of app.querySelectorAll<HTMLElement>('[data-viewtog] button')) {
     b.classList.toggle('is-on', b.dataset.view === v);
@@ -144,6 +160,17 @@ function paintGauges() {
   put('tps', String(Math.round(f.tokensPerSec)));
   // A blocked agent tints the whole gauge row, so peripheral vision catches it.
   gaugeEl.classList.toggle('has-block', f.blocked > 0);
+
+  // El badge del inbox: en un teléfono la cola está a un toque de distancia y
+  // detrás de una pestaña, así que el número tiene que estar en la pestaña.
+  const waiting = store.pending().length
+    + store.blockedAgents().filter((a) => !a.block?.escalationId).length;
+  const badge = app.querySelector<HTMLElement>('[data-inbox-n]');
+  if (badge) {
+    const txt = waiting > 0 ? String(waiting) : '';
+    if (badge.textContent !== txt) badge.textContent = txt;
+    badge.classList.toggle('is-on', waiting > 0);
+  }
 }
 
 /* ── Link state ───────────────────────────────────────────────────── */
@@ -173,6 +200,7 @@ store.on((e) => {
   switch (e.k) {
     case 'world':
     case 'agents':
+    case 'escalations':
       paintGauges();
       break;
     case 'link':
@@ -224,6 +252,10 @@ if (skipBoot) {
     scene.setActive(view === 'scene');
   });
 }
+
+window.addEventListener('orca:open-escalation', () => {
+  if (matchMedia('(max-width: 940px)').matches) setView('inbox');
+});
 
 /* Expose a handle for the visual test harness to drive the console. */
 (window as unknown as { __orca: unknown }).__orca = { store, hub, setView };

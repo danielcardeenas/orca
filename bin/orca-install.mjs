@@ -35,7 +35,7 @@ const TALK_SKILL_SRC = join(ORCA_ROOT, 'skill', 'orca-talk', 'SKILL.md');
 const ASK_BIN = join(ORCA_ROOT, 'bin', 'orca-ask.mjs');
 
 /** Los comandos que un agente puede necesitar. Todos se enlazan juntos. */
-const COMMANDS = ['orca-ask', 'orca-tell', 'orca-read'];
+const COMMANDS = ['orca-ask', 'orca-tell', 'orca-read', 'orca-show', 'orca-spawn'];
 
 /** Written into the installed skill so we know we may replace it later. */
 const MARKER = '<!-- installed by orca-install; edits here will be preserved -->';
@@ -56,7 +56,7 @@ function usage() {
   orca-install --remove [p]  uninstall
 
 Installs two skills into <project>/.claude/skills/ and links orca-ask,
-orca-tell and orca-read into <project>/.claude/bin/:
+orca-tell, orca-read, orca-show and orca-spawn into <project>/.claude/bin/:
 
   orca-ask   when to interrupt YOU, and when to work it out instead
   orca-talk  how to reach ANOTHER AGENT, and when that beats asking you`);

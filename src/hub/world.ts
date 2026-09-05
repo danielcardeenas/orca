@@ -22,11 +22,12 @@
  */
 
 import type {
-  Agent, AgentMessage, AgentMetrics, AgentState, CeoMessage, Collision, Escalation,
-  FeedItem, KeyDescriptor, Machine, MessageKind, MessageScope, Project, SessionRollup,
-  WorldState,
+  Agent, AgentMessage, AgentMetrics, AgentRole, AgentState, Artifact, ArtifactKind, CeoMessage,
+  Collision, Escalation, FeedItem, KeyDescriptor, Machine, MessageKind, MessageScope,
+  Project, SessionRollup, WorldState,
 } from '../shared/types.ts';
 import { AGENT_STATES, LIVE_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
+import { squadName } from '../shared/squads.ts';
 import type { CollectorFrame, PatchOp } from '../shared/protocol.ts';
 import { BEAT_TIMEOUT_MS } from '../shared/protocol.ts';
 
@@ -112,6 +113,18 @@ export const MAX_MESSAGES = 300;
  */
 export const MAX_COLLISIONS = 200;
 
+/*
+ * Artefactos.
+ *
+ * Se conservan mucho más que un mensaje o un agente muerto, y a propósito: lo
+ * que la flota produjo ayer sigue siendo lo que produjo, y volver a mirarlo por
+ * la mañana es un caso normal. Lo que no puede es crecer sin techo — cada
+ * registro tiene además un archivo cacheado en disco detrás, así que el desalojo
+ * también libera bytes de verdad.
+ */
+export const ARTIFACT_RETENTION_MS = 24 * 60 * 60_000;
+export const MAX_ARTIFACTS = 300;
+
 /** Un frame malicioso no puede hacernos alojar 10 MB de strings. */
 const MAX_TEXT = 4_000;
 const MAX_LINE = 400;
@@ -143,6 +156,12 @@ export interface WorldHooks {
   onEvent?: (ev: WorldEvent) => void;
   /** Lo que se cae del frame por recorte (feed > 500, ceo > 100). */
   onOverflow?: (kind: 'feed' | 'ceo', items: unknown[]) => void;
+  /**
+   * Un artefacto salió del mundo. El hub guarda una copia de sus bytes en
+   * ~/.orca/artifacts; sin este aviso la caché sobreviviría al registro y
+   * crecería para siempre en un disco que nadie mira.
+   */
+  onArtifactGone?: (id: string) => void;
   now?: () => number;
 }
 
@@ -253,6 +272,17 @@ function agentState(v: unknown, fallback: AgentState = 'booting'): AgentState {
   return typeof v === 'string' && AGENT_STATE_SET.has(v) ? (v as AgentState) : fallback;
 }
 
+/**
+ * Sólo 'capcom' asciende; todo lo demás es un agente normal.
+ *
+ * Es una lista blanca de un elemento a propósito: el rol decide a quién le
+ * entrega el hub lo que escribe el humano, así que un valor inventado en un
+ * frame no puede secuestrar el mando de la flota.
+ */
+function agentRole(v: unknown): AgentRole {
+  return v === 'capcom' ? 'capcom' : 'agent';
+}
+
 function metrics(raw: unknown): AgentMetrics {
   const o = obj(raw) ?? {};
   return {
@@ -299,12 +329,15 @@ export function sanitizeAgentPatch(raw: unknown): Partial<Agent> {
   if (has(o, 'projectId') && validId(o['projectId'])) p.projectId = o['projectId'];
   if (has(o, 'title')) p.title = s(o['title']);
   if (has(o, 'callsign')) p.callsign = s(o['callsign'], 12);
+  if (has(o, 'role')) p.role = agentRole(o['role']);
   if (has(o, 'state')) p.state = agentState(o['state'], 'booting');
   if (has(o, 'block')) p.block = block(o['block']);
   if (has(o, 'parentId')) p.parentId = validId(o['parentId']) ? o['parentId'] : null;
   if (has(o, 'depth')) p.depth = Math.max(0, Math.min(64, Math.round(n(o['depth']))));
   if (has(o, 'childIds')) p.childIds = strArray(o['childIds'], 512).filter(validId);
   if (has(o, 'mission')) p.mission = sOrNull(o['mission'], MAX_TEXT);
+  if (has(o, 'squad')) p.squad = squadName(o['squad']);
+  if (has(o, 'lead')) p.lead = b(o['lead']);
   if (has(o, 'model')) p.model = sOrNull(o['model'], 80);
   if (has(o, 'tool')) p.tool = sOrNull(o['tool'], 64);
   if (has(o, 'toolDetail')) p.toolDetail = sOrNull(o['toolDetail']);
@@ -330,12 +363,28 @@ export function sanitizeAgent(raw: unknown, machineId: string): Agent | null {
     projectId: validId(o['projectId']) ? o['projectId'] : '',
     title: s(o['title'], MAX_LINE, id),
     callsign: s(o['callsign'], 12, id.slice(-2).toUpperCase()),
+    runtime: s(o['runtime'], 16, 'claude'),
+    /*
+     * El rol viene del collector que lanzó la sesión, y sólo hay dos valores
+     * posibles. Cualquier otra cosa cae a 'agent': un frame que dijera
+     * `role:'capcom'` mal formado no puede convertir a un agente cualquiera en
+     * el comando de la flota.
+     */
+    role: agentRole(o['role']),
     state: agentState(o['state']),
     block: block(o['block']),
     parentId: validId(o['parentId']) ? o['parentId'] : null,
     depth: Math.max(0, Math.min(64, Math.round(n(o['depth'])))),
     childIds: strArray(o['childIds'], 512).filter(validId),
     mission: sOrNull(o['mission'], MAX_TEXT),
+    /*
+     * El escuadrón pasa por su propio validador y no por `sOrNull`: es una
+     * etiqueta que la consola enruta y dibuja, no texto libre. Un nombre con
+     * espacios o de trescientos caracteres no es un escuadrón al que nadie
+     * pueda escribir, así que cae a null en vez de entrar recortado.
+     */
+    squad: squadName(o['squad']),
+    lead: squadName(o['squad']) !== null && b(o['lead']),
     model: sOrNull(o['model'], 80),
     tool: sOrNull(o['tool'], 64),
     toolDetail: sOrNull(o['toolDetail']),
@@ -500,7 +549,7 @@ export function sanitizeEscalation(raw: unknown, machineId: string): Escalation 
 }
 
 const MESSAGE_KINDS = new Set<string>(['notice', 'ask', 'handoff', 'warning']);
-const MESSAGE_SCOPES = new Set<string>(['agent', 'project', 'fleet']);
+const MESSAGE_SCOPES = new Set<string>(['agent', 'project', 'squad', 'fleet']);
 
 /**
  * Un mensaje entre agentes.
@@ -534,8 +583,12 @@ export function sanitizeMessage(raw: unknown, machineId: string): AgentMessage |
   // propio proyecto", que es lo que quiere decir un agente que no lo puso.
   const toProjectId = validId(o['toProjectId']) ? o['toProjectId']
     : (scope === 'project' && fromProjectId ? fromProjectId : null);
+  const toSquad = squadName(o['toSquad']);
   if (scope === 'agent' && toAgentId === null) return null;
   if (scope === 'project' && toProjectId === null) return null;
+  // Un `squad` sin nombre de escuadrón no tiene a dónde ir, igual que un
+  // `agent` sin destinatario: el hub enruta por la etiqueta, no por otra cosa.
+  if (scope === 'squad' && toSquad === null) return null;
 
   // Se recorta antes de mirar si queda algo: un asunto de espacios en blanco no
   // es un asunto, y en el mapa dibujaría una arista sin etiqueta.
@@ -551,6 +604,7 @@ export function sanitizeMessage(raw: unknown, machineId: string): AgentMessage |
     fromProjectId,
     toAgentId: scope === 'agent' ? toAgentId : null,
     toProjectId: scope === 'project' ? toProjectId : null,
+    toSquad: scope === 'squad' ? toSquad : null,
     subject,
     body: sOrNull(o['body'], MAX_BODY),
     files: strArray(o['files'], MAX_FILES),
@@ -588,6 +642,47 @@ export function sanitizeCollision(raw: unknown, machineId: string): Collision | 
     firstSeen: n(o['firstSeen'], now),
     lastSeen: n(o['lastSeen'], now),
     acknowledged: b(o['acknowledged']),
+  };
+}
+
+const ARTIFACT_KINDS = new Set<string>(['image', 'video', 'html', 'text', 'file']);
+
+/**
+ * Un artefacto entra por la misma puerta que todo lo demás.
+ *
+ * La `url` NO viene del collector: la pone el hub, porque el hub es quien lo
+ * sirve y el collector no sabe con qué host lo va a mirar nadie. Dejar que la
+ * declarara el productor sería dejar que un collector con un bug —o uno
+ * hostil— pusiera un `javascript:` o un tercero en el `src` de la consola.
+ */
+export function sanitizeArtifact(raw: unknown, machineId: string): Artifact | null {
+  const o = obj(raw);
+  if (!o || !validId(o['id'])) return null;
+  const p = s(o['path'], 1024);
+  if (!p) return null;
+  const k = o['kind'];
+  const kind: ArtifactKind = typeof k === 'string' && ARTIFACT_KINDS.has(k)
+    ? k as ArtifactKind : 'file';
+  const place = obj(o['placement']);
+  return {
+    id: o['id'],
+    agentId: validId(o['agentId']) ? o['agentId'] : '',
+    projectId: validId(o['projectId']) ? o['projectId'] : '',
+    machineId,
+    kind,
+    path: p,
+    title: s(o['title'], 200) || p.split('/').pop() || p,
+    url: `/api/artifact/${o['id']}`,
+    bytes: Math.max(0, Math.round(n(o['bytes']))),
+    width: nOrNull(o['width']),
+    height: nOrNull(o['height']),
+    at: n(o['at'], Date.now()),
+    // `open` es una petición del agente, no un permiso: sobrevive el booleano
+    // y nada más. Qué significa abrir algo lo decide la consola.
+    open: b(o['open']),
+    placement: place
+      ? { x: n(place['x']), y: n(place['y']), z: n(place['z']) }
+      : null,
   };
 }
 
@@ -786,6 +881,8 @@ export class World {
       // El ruteo no vive aquí: el mundo guarda el mensaje y emite el evento;
       // quien sabe qué máquina tiene cada destinatario es server.ts.
       case 'message': { this.upsertMessage(machineId, frame.message); return; }
+      case 'artifact': { this.upsertArtifact(machineId, frame.artifact); return; }
+      case 'artifact:gone': return this.removeArtifact(machineId, frame.id);
       case 'collision': { this.upsertCollision(machineId, frame.collision); return; }
       case 'collision:clear': return this.clearCollision(machineId, frame.id);
       case 'beat': return this.beat(machineId, frame.at, frame.load);
@@ -956,6 +1053,7 @@ export class World {
 
     this.evictMessages(now);
     this.evictCollisions();
+    this.evictArtifacts(now);
   }
 
   /**
@@ -995,6 +1093,30 @@ export class World {
         'Esto significa que nadie está contestando, no que sobren mensajes.',
       );
     }
+  }
+
+  /**
+   * Desaloja artefactos por edad y por techo. Ver ARTIFACT_RETENTION_MS: lo
+   * reciente se queda, y cuando aun así sobran, se va lo más viejo. Nada de esto
+   * borra el archivo del disco del agente; sólo deja de estar en la consola.
+   */
+  private evictArtifacts(now: number): void {
+    const all = Object.values(this.state.artifacts);
+    if (all.length === 0) return;
+    // Más nuevos primero: lo que se tira es siempre la cola.
+    all.sort((a, x) => x.at - a.at);
+    for (let i = 0; i < all.length; i++) {
+      const a = all[i]!;
+      if (now - a.at <= ARTIFACT_RETENTION_MS && i < MAX_ARTIFACTS) continue;
+      this.dropArtifact(a.id);
+    }
+  }
+
+  private dropArtifact(id: string): void {
+    if (!this.state.artifacts[id]) return;
+    delete this.state.artifacts[id];
+    this.emit({ o: 'artifact', id, v: null });
+    this.hooks.onArtifactGone?.(id);
   }
 
   /**
@@ -1177,7 +1299,11 @@ export class World {
     this.emit({ o: 'agent', id: a.id, v: a });
     this.event({
       at: this.now(), kind: 'agent:new', machineId, agentId: a.id, projectId: a.projectId,
-      text: a.title, data: { parentId: a.parentId, depth: a.depth, mission: a.mission },
+      text: a.title,
+      data: {
+        parentId: a.parentId, depth: a.depth, mission: a.mission,
+        squad: a.squad, lead: a.lead,
+      },
     });
   }
 
@@ -1216,7 +1342,10 @@ export class World {
     if (patch.state && patch.state !== before) {
       this.event({
         at: this.now(), kind: 'agent:state', machineId, agentId: a.id, projectId: a.projectId,
-        text: `${before} → ${a.state}`, data: { block: a.block },
+        // `from`/`to` sueltos además del texto: la línea de tiempo (history.ts)
+        // dispara una instantánea inmediata al cruzar a blocked/dead, y no debe
+        // tener que parsear una frase para saberlo.
+        text: `${before} → ${a.state}`, data: { block: a.block, from: before, to: a.state },
       });
     }
     this.emit({ o: 'agent:patch', id: a.id, v: { ...patch, updatedAt: a.updatedAt, metrics: a.metrics } });
@@ -1448,7 +1577,7 @@ export class World {
       this.event({
         at: this.now(), kind: 'message:new', machineId, agentId: m.fromAgentId,
         projectId: m.fromProjectId, text: m.subject,
-        data: { id: m.id, kind: m.kind, scope: m.scope, to: m.toAgentId ?? m.toProjectId },
+        data: { id: m.id, kind: m.kind, scope: m.scope, to: m.toAgentId ?? m.toProjectId ?? m.toSquad },
       });
     }
     return m;
@@ -1470,7 +1599,7 @@ export class World {
     this.emit({ o: 'message', id: m.id, v: m });
     this.event({
       at: this.now(), kind: 'message:relay', agentId: m.fromAgentId, projectId: m.fromProjectId,
-      text: m.subject, data: { kind: m.kind, scope: m.scope, to: m.toAgentId ?? m.toProjectId },
+      text: m.subject, data: { kind: m.kind, scope: m.scope, to: m.toAgentId ?? m.toProjectId ?? m.toSquad },
     });
     this.flushOut();
     return m;
@@ -1573,6 +1702,45 @@ export class World {
     return c;
   }
 
+  /* ── artefactos ─────────────────────────────────────────────────── */
+
+  /**
+   * Upsert por id. Reescribir un archivo produce el mismo id, así que la
+   * segunda versión de una gráfica sustituye a la primera EN EL SITIO donde el
+   * operador la había dejado puesta: por eso la colocación sobrevive al cambio.
+   */
+  upsertArtifact(machineId: string, raw: unknown): Artifact {
+    const a = sanitizeArtifact(raw, machineId);
+    if (!a) throw new Error('artifact inválido');
+    const prev = this.state.artifacts[a.id];
+    if (prev) {
+      // La colocación la decidió una persona; un frame nuevo del collector no
+      // la deshace.
+      if (prev.machineId !== machineId) throw new Error('artefacto de otra máquina');
+      a.placement = prev.placement ?? a.placement;
+    }
+    this.state.artifacts[a.id] = a;
+    this.emit({ o: 'artifact', id: a.id, v: a });
+    if (!prev) {
+      this.event({
+        at: this.now(), kind: 'artifact:new', machineId, projectId: a.projectId,
+        agentId: a.agentId, text: a.title, data: { id: a.id, kind: a.kind, bytes: a.bytes },
+      });
+    }
+    this.flushOut();
+    return a;
+  }
+
+  /** El collector dice que ya no está: se fue del disco o cayó de su techo. */
+  removeArtifact(machineId: string | null, id: unknown): void {
+    if (!validId(id)) return;
+    const a = this.state.artifacts[id];
+    if (!a) return;
+    if (machineId !== null && a.machineId !== machineId) return;
+    this.dropArtifact(id);
+    this.flushOut();
+  }
+
   /* ── CEO ────────────────────────────────────────────────────────── */
 
   addCeoMessage(msg: CeoMessage): CeoMessage {
@@ -1658,6 +1826,7 @@ export class World {
         total: Object.keys(this.state.collisions).length,
         unacknowledged: Object.values(this.state.collisions).filter((c) => !c.acknowledged).length,
       },
+      artifacts: Object.keys(this.state.artifacts).length,
       keys: Object.keys(this.state.keys).length,
       feed: this.state.feed.length,
       ceoMessages: this.state.ceo.messages.length,

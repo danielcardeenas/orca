@@ -9,3 +9,6 @@ test/shots/
 # Buzones locales del canal agente↔agente y de las escalaciones. Estado de
 # esta máquina, no código del proyecto.
 .orca/
+
+# Artefactos de trabajo de diseño (caché de impeccable), no código.
+.impeccable/

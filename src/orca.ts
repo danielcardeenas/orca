@@ -1,16 +1,28 @@
 /**
- * ORCA entry point — hub + CEO in one process.
+ * ORCA entry point — the hub, and whatever commands the fleet.
  *
- *   npx tsx src/orca.ts                 hub and CEO
+ *   npx tsx src/orca.ts                 hub, ready for a CAPCOM session
+ *   npx tsx src/orca.ts --api-command   force the API CEO even if CAPCOM is up
  *   npx tsx src/orca.ts --no-ceo        hub only (no model calls, no spend)
  *   npx tsx src/orca.ts --port 8080
  *
- * The collector runs separately, on every machine that has agents:
+ * The collector runs separately, on every machine that has agents, and exactly
+ * one of them carries the command session:
  *   npx tsx src/collector/index.ts
+ *   npx tsx src/collector/index.ts --capcom     (on ONE machine)
  *
- * Credentials: the CEO reads ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or an
- * `ant auth login` profile — whichever it finds. Keys are given to the machine
- * once and never travel over the console link.
+ * ── Who commands ───────────────────────────────────────────────────
+ *
+ * CAPCOM is a CLI session out in the fleet whose tools are this hub's MCP
+ * server. It runs on the operator's Claude subscription, so commanding a fleet
+ * costs no API spend at all. When a live CAPCOM exists the hub routes to it and
+ * never calls the API; the API CEO below is the fallback for a machine with no
+ * CLI, and the scripted one is the fallback for no credentials at all. No path
+ * leaves the fleet without a command.
+ *
+ * Credentials (fallback only): the API CEO reads ANTHROPIC_API_KEY,
+ * ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile — whichever it finds.
+ * Keys are given to the machine once and never travel over the console link.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -28,6 +40,7 @@ const value = (name: string): string | undefined => {
 
 async function main() {
   const noCeo = flag('no-ceo');
+  const apiCommand = flag('api-command');
   const port = Number(value('port') ?? process.env['ORCA_PORT'] ?? 4479);
 
   // Standing orders: whatever the operator has told the CEO about how the
@@ -43,6 +56,7 @@ async function main() {
 
   const hub = await startHub({
     port,
+    apiCommand,
     onCeoSay: (text) => runtime?.onCeoSay(text),
     onEscalation: (id) => runtime?.onEscalation(id),
   });
@@ -60,11 +74,27 @@ async function main() {
       : (!hasKey ? 'no Anthropic credentials on this machine' : undefined),
   });
 
+  /*
+   * Quién manda, dicho en voz alta al arrancar.
+   *
+   * Es la primera pregunta que se hace quien mira este log —"¿estoy pagando
+   * API?"— y merece una respuesta sin ambigüedad, no una deducción a partir de
+   * tres líneas sobre credenciales.
+   */
   console.log('');
-  if (noCeo) {
-    console.log('[ceo] disabled (--no-ceo). Agent questions go straight to the human.');
+  if (apiCommand) {
+    console.log('[command] API CEO forced (--api-command). A CAPCOM session, if any, gets nothing.');
   } else {
-    console.log(`[ceo] ${process.env['ORCA_MODEL'] ?? 'claude-opus-5'}, ` +
+    console.log('[command] CAPCOM when a session is live — zero API spend. It is a CLI session');
+    console.log('[command]   on your subscription, and its tools are this hub\'s MCP server:');
+    console.log(`[command]   http://localhost:${hub.port}/mcp`);
+    console.log('[command]   Start it on ONE machine:  npx tsx src/collector/index.ts --capcom');
+    console.log(`[command] Until then, the fallback below commands the fleet.`);
+  }
+  if (noCeo) {
+    console.log('[ceo] fallback disabled (--no-ceo). Without CAPCOM, agent questions go straight to you.');
+  } else {
+    console.log(`[ceo] fallback: ${process.env['ORCA_MODEL'] ?? 'claude-opus-5'}, ` +
       `credentials: ${hasKey ? 'env' : 'ant profile or none'}`);
     if (standingOrders) {
       console.log(`[ceo] standing orders loaded (${standingOrders.length} chars)`);
@@ -75,9 +105,9 @@ async function main() {
       console.log('[ceo] --fake-ceo: scripted, deterministic, spends nothing.');
     } else if (!hasKey) {
       console.log('[ceo] ⚠ no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN found.');
-      console.log('[ceo]   Running the scripted CEO instead: it recalls past answers');
-      console.log('[ceo]   and routes everything else to you. Set a key and restart');
-      console.log('[ceo]   to get the real one.');
+      console.log('[ceo]   Running the scripted fallback instead: it recalls past answers');
+      console.log('[ceo]   and routes everything else to you. Start CAPCOM, or set a key,');
+      console.log('[ceo]   to get a command that can think.');
     }
   }
   console.log('');
@@ -90,6 +120,7 @@ async function main() {
   } else {
     console.log('[orca] console:   npx vite   → http://127.0.0.1:4478/');
     console.log('[orca] collector: npx tsx src/collector/index.ts   (on each machine)');
+    console.log('[orca] command:   npx tsx src/collector/index.ts --capcom   (on ONE machine)');
     console.log('[orca] or all three at once:  npm run dev');
   }
 

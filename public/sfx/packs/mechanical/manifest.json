@@ -1,0 +1,199 @@
+{
+ "pack": "mechanical",
+ "label": "MECHANICAL",
+ "style": "Tiny real mechanisms, close and soft: small switches, relays, keycaps, latches, detents. Gentle, nothing tonal.",
+ "clips": [
+  {
+   "id": "interrupt",
+   "file": "packs/mechanical/interrupt.mp3",
+   "label": "a human is needed",
+   "len": 0.5
+  },
+  {
+   "id": "answer",
+   "file": "packs/mechanical/answer.mp3",
+   "label": "a question closed",
+   "len": 0.5
+  },
+  {
+   "id": "spawn",
+   "file": "packs/mechanical/spawn.mp3",
+   "label": "lineage grew",
+   "len": 0.5
+  },
+  {
+   "id": "launch",
+   "file": "packs/mechanical/launch.mp3",
+   "label": "a fleet went up",
+   "len": 1.2
+  },
+  {
+   "id": "squad",
+   "file": "packs/mechanical/squad.mp3",
+   "label": "a squadron formed",
+   "len": 0.5
+  },
+  {
+   "id": "dead",
+   "file": "packs/mechanical/dead.mp3",
+   "label": "a unit ended",
+   "len": 0.5
+  },
+  {
+   "id": "breach",
+   "file": "packs/mechanical/breach.mp3",
+   "label": "the link went down",
+   "len": 1.4
+  },
+  {
+   "id": "link",
+   "file": "packs/mechanical/link.mp3",
+   "label": "the link came back",
+   "len": 0.5
+  },
+  {
+   "id": "artifact",
+   "file": "packs/mechanical/artifact.mp3",
+   "label": "an artifact landed",
+   "len": 0.5
+  },
+  {
+   "id": "placed",
+   "file": "packs/mechanical/placed.mp3",
+   "label": "placed on the field",
+   "len": 0.5
+  },
+  {
+   "id": "open.agent",
+   "file": "packs/mechanical/open.agent.mp3",
+   "label": "an instrument arrived",
+   "len": 0.5
+  },
+  {
+   "id": "open.alert",
+   "file": "packs/mechanical/open.alert.mp3",
+   "label": "it arrived urgent",
+   "len": 0.5
+  },
+  {
+   "id": "open.list",
+   "file": "packs/mechanical/open.list.mp3",
+   "label": "rows unrolled",
+   "len": 0.5
+  },
+  {
+   "id": "open.tool",
+   "file": "packs/mechanical/open.tool.mp3",
+   "label": "a tool arrived",
+   "len": 0.5
+  },
+  {
+   "id": "open.capcom",
+   "file": "packs/mechanical/open.capcom.mp3",
+   "label": "a channel opened",
+   "len": 0.5
+  },
+  {
+   "id": "close",
+   "file": "packs/mechanical/close.mp3",
+   "label": "a panel left",
+   "len": 0.5
+  },
+  {
+   "id": "fold",
+   "file": "packs/mechanical/fold.mp3",
+   "label": "folded to the tray",
+   "len": 0.5
+  },
+  {
+   "id": "unfold",
+   "file": "packs/mechanical/unfold.mp3",
+   "label": "back out of the tray",
+   "len": 0.5
+  },
+  {
+   "id": "wipe",
+   "file": "packs/mechanical/wipe.mp3",
+   "label": "the lime sweep",
+   "len": 0.5
+  },
+  {
+   "id": "bookmark.save",
+   "file": "packs/mechanical/bookmark.save.mp3",
+   "label": "a view pinned",
+   "len": 0.5
+  },
+  {
+   "id": "fly",
+   "file": "packs/mechanical/fly.mp3",
+   "label": "the camera flew",
+   "len": 0.5
+  },
+  {
+   "id": "mode.on",
+   "file": "packs/mechanical/mode.on.mp3",
+   "label": "a mode engaged",
+   "len": 0.5
+  },
+  {
+   "id": "mode.off",
+   "file": "packs/mechanical/mode.off.mp3",
+   "label": "a mode released",
+   "len": 0.5
+  },
+  {
+   "id": "lasso",
+   "file": "packs/mechanical/lasso.mp3",
+   "label": "a lasso closed",
+   "len": 0.5
+  },
+  {
+   "id": "select",
+   "file": "packs/mechanical/select.mp3",
+   "label": "a thing picked",
+   "len": 0.5
+  },
+  {
+   "id": "deck.enter",
+   "file": "packs/mechanical/deck.enter.mp3",
+   "label": "the deck aligned",
+   "len": 0.9
+  },
+  {
+   "id": "deck.exit",
+   "file": "packs/mechanical/deck.exit.mp3",
+   "label": "back to the field",
+   "len": 0.5
+  },
+  {
+   "id": "deck.sort",
+   "file": "packs/mechanical/deck.sort.mp3",
+   "label": "rows reordered",
+   "len": 0.5
+  },
+  {
+   "id": "deck.settle",
+   "file": "packs/mechanical/deck.settle.mp3",
+   "label": "the deck landed",
+   "len": 0.5
+  },
+  {
+   "id": "tick",
+   "file": "packs/mechanical/tick.mp3",
+   "label": "one tile landed",
+   "len": 0.5
+  },
+  {
+   "id": "replay.enter",
+   "file": "packs/mechanical/replay.enter.mp3",
+   "label": "into the past",
+   "len": 0.5
+  },
+  {
+   "id": "replay.exit",
+   "file": "packs/mechanical/replay.exit.mp3",
+   "label": "back to live",
+   "len": 0.5
+  }
+ ]
+}

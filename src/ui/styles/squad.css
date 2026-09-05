@@ -1,0 +1,74 @@
+/*
+ * Squad outline, rótulo and roster. Owned by column D of docs/IDENTITY.md.
+ *
+ * The outline itself is drawn in WebGL by `pipes.ts` — it is a pipe, like
+ * every other line on the field. What lives here is the rótulo that sits on
+ * that line: a sigil, a roster of state squares, and, once the tiles are
+ * legible, the name, the lead and what the lead is there to do.
+ *
+ * It is a `fieldset` legend, not a caption. The field projects the top-left of
+ * the block, offsets it 0.3 units along the top edge and centres this on the
+ * line; the bezel-coloured ground then interrupts the outline the way a legend
+ * interrupts a border. That is why the ground is opaque `--bezel` and not the
+ * translucent panel a region label uses: a region label floats above its box,
+ * this one is *in* the line.
+ *
+ * The roster is the piece that earns the rótulo at every zoom. One 6px square
+ * per member in `Squad.memberIds` order — the lead first, framed in ink —
+ * coloured by state. When the tiles are motes the roster is still saying "five
+ * working, one waiting on you", and a square whose state changes jumps to
+ * `--ink-bright` for one `T.snap` and cuts back, the same beat the tile makes.
+ */
+
+.squad {
+  position: absolute; left: 0; top: 0; will-change: transform;
+  display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  padding: 1px 5px;
+  background: var(--bezel);
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink-dim);
+  /*
+   * The rótulo is the block's handle: `field.ts` switches its pointer-events
+   * on, so a drag that starts here moves the whole squad — outline, roster
+   * and every member — and a click selects them all.
+   */
+  pointer-events: none;
+}
+.squad:hover { color: var(--ink-bright); }
+.squad:hover .squad__sigil, .squad:hover .squad__k { color: var(--ink-bright); }
+/* A block the operator moved wears a lime tick where the outline enters it. */
+.squad.is-moved { box-shadow: -2px 0 0 0 var(--lime); }
+
+/* The squadron's patch: the same glyph every member wears on its tile. */
+.squad__sigil { display: inline-flex; align-items: center; color: var(--ink-dim); }
+
+/* ── The roster ───────────────────────────────────────────────────── */
+
+.squad__roster { display: inline-flex; align-items: center; gap: 2px; }
+
+.rsq {
+  display: inline-block; width: 6px; height: 6px;
+  background: var(--c, var(--ink-faint));
+  /* A cut, never a fade: the square lands on its new colour, it does not
+     travel there. The jump to ink is the class below. */
+  transition: none;
+}
+
+/* The lead wears a frame, so the first square is a rank and not just a state. */
+.rsq--lead { box-shadow: 0 0 0 1px var(--ink-bright); margin-right: 2px; }
+
+/* One frame of ink on a state change — §3.2's beat, `T.snap` long. */
+.rsq.is-beat { background: var(--ink-bright); }
+
+/* ── The words, as the zoom earns them ────────────────────────────── */
+
+.squad__k { font-size: 10px; color: var(--ink-dim); }
+.squad__n { font-size: 9px; color: var(--ink-faint); }
+.squad__lead { font-size: 9px; color: var(--ink-dimmer); }
+.squad__mission {
+  font-size: 9px; color: var(--ink-faint);
+  max-width: 22em; overflow: hidden; text-overflow: ellipsis;
+  text-transform: none; letter-spacing: 0.08em;
+}
+/* Amber is reserved for what only a person can clear, here as everywhere. */
+.squad__need { font-size: 9px; color: var(--amber); }

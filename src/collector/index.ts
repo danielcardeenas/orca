@@ -13,6 +13,9 @@
  *   ORCA_LOG           trace|debug|info|warn|error
  *   ORCA_DIAG=1        corre contra los transcripts reales, imprime un resumen
  *                      y sale. No abre socket ni ejecuta nada.
+ *   ORCA_CAPCOM=1      esta máquina lleva CAPCOM (igual que `--capcom`).
+ *                      SÓLO UNA máquina de la flota debe llevarlo.
+ *   ORCA_CAPCOM_DIR    dónde vive esa sesión; por defecto ~/.orca/capcom
  */
 
 import { execFile } from 'node:child_process';
@@ -25,11 +28,14 @@ import { WebSocket } from 'ws';
 import type { CollectorFrame, Command, CommandFrame } from '../shared/protocol.ts';
 import { BEAT_INTERVAL_MS, PATHS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
 import type {
-  Agent, AgentMessage, Escalation, FeedItem, FeedLevel, Machine, Project, SessionRollup,
+  Agent, AgentMessage, Artifact, Escalation, FeedItem, FeedLevel, Machine, Project,
+  SessionRollup,
 } from '../shared/types.ts';
 import { TERMINAL_STATES, emptyRollup } from '../shared/types.ts';
-import type { AgentHandle } from './commands.ts';
-import { CommandRunner } from './commands.ts';
+import { ArtifactIndex } from './artifacts.ts';
+import { CapcomSession } from './capcom.ts';
+import type { AgentHandle, SpawnLookup } from './commands.ts';
+import { CommandRunner, resolveClaudeBin } from './commands.ts';
 import type { BlockSignal, Liveness } from './derive.ts';
 import { CallsignBook, SessionDeriver } from './derive.ts';
 import type { CollisionAgent } from './collisions.ts';
@@ -37,6 +43,7 @@ import { CollisionIndex } from './collisions.ts';
 import { EscalationWatcher } from './escalate.ts';
 import { KeyVault } from './keys.ts';
 import { MessageWatcher } from './messages.ts';
+import { SpawnWatcher, planChild, writeAck, type SpawnRequest } from './spawns.ts';
 import { LineageIndex } from './lineage.ts';
 import { ProjectRegistry } from './projects.ts';
 import {
@@ -57,6 +64,14 @@ const LIVENESS_MS = 4_000;
  */
 const COLLISION_EVERY = 4;
 const GIT_MS = 15_000;
+/**
+ * Cada cuánto se comprueba que CAPCOM sigue vivo.
+ *
+ * Diez segundos: un mando caído es una flota sin comando, y eso se parece
+ * exactamente a una flota tranquila —nadie falla, simplemente dejan de
+ * contestarse preguntas— así que la latencia con la que se nota importa.
+ */
+const CAPCOM_CHECK_MS = 10_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const FEED_MAX = 200;
@@ -97,8 +112,12 @@ class Collector {
   private readonly callsigns = new CallsignBook();
   private readonly escalations: EscalationWatcher;
   private readonly messages: MessageWatcher;
+  private readonly spawns: SpawnWatcher;
   private readonly collisions = new CollisionIndex();
+  private readonly artifacts: ArtifactIndex;
   private readonly runner: CommandRunner;
+  /** El mando de la flota, cuando esta máquina es la que lo lleva. */
+  private capcom: CapcomSession | null = null;
 
   private derivers = new Map<string, SessionDeriver>();
   private sent = new Map<string, Agent>();
@@ -117,9 +136,11 @@ class Collector {
   private stopping = false;
   private timers: NodeJS.Timeout[] = [];
   private cpuPrev: { idle: number; total: number } | null = null;
+  private readonly wantsCapcom: boolean;
 
-  constructor() {
+  constructor(opts: { capcom?: boolean } = {}) {
     const ident = machineIdentity();
+    this.wantsCapcom = opts.capcom === true;
     this.machineId = ident.id;
     this.machineName = ident.name;
     this.projects = new ProjectRegistry(this.machineId);
@@ -133,15 +154,30 @@ class Collector {
       projectByName: (name) => this.projectByName(name),
       callsignOf: (id) => this.derivers.get(id)?.callsign ?? '??',
     });
+    this.artifacts = new ArtifactIndex({
+      machineId: this.machineId,
+      resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
+    });
+    this.spawns = new SpawnWatcher({
+      resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
+    });
     this.runner = new CommandRunner({
       projects: this.projects,
       keys: this.keys,
       lineage: this.lineage,
       escalations: this.escalations,
       messages: this.messages,
+      artifacts: this.artifacts,
       agent: (id) => this.agentHandle(id),
+      awaitSpawn: (want, ms) => this.awaitSpawn(want, ms),
       onResync: () => { this.sent.clear(); this.sentProjects.clear(); this.sendSnapshot(); },
       onKeysChanged: () => this.sendKeys(),
+      // Se resuelve en cada llamada: `this.capcom` no existe hasta start().
+      capcom: {
+        owns: (shortId) => this.capcom?.owns(shortId) ?? false,
+        launchArgs: () => this.capcom?.launchArgs() ?? [],
+        adopt: (shortId) => this.capcom?.adopt(shortId),
+      },
     });
   }
 
@@ -162,6 +198,37 @@ class Collector {
     this.messages.onMessage((m) => this.onMessage(m));
     this.messages.start();
 
+    this.artifacts.onArtifact((a) => this.onArtifact(a));
+    this.artifacts.onGone((id) => this.send({ t: 'artifact:gone', machineId: this.machineId, id }));
+    this.artifacts.start();
+
+    this.spawns.onRequest((r) => this.onSpawnRequest(r));
+    this.spawns.start();
+
+    if (this.wantsCapcom) {
+      /*
+       * Sólo UNA máquina de la flota debe llevar CAPCOM: el hub entrega lo que
+       * escribe el humano a la sesión con `role:'capcom'`, y dos de ellas serían
+       * dos mentes triando la misma pregunta. Aquí no se puede comprobar —esta
+       * máquina no ve a las otras— así que la regla vive en el README y en el
+       * hecho de que arrancarlo es un flag explícito.
+       */
+      this.capcom = new CapcomSession({
+        bin: resolveClaudeBin(),
+        hubUrl: this.hubUrl(),
+        token: process.env['ORCA_TOKEN'] ?? '',
+        lineage: this.lineage,
+        alive: (shortId) => this.shortIdAlive(shortId),
+        note: (level, text) => this.note(level, text),
+      });
+      log('info', SCOPE, `CAPCOM habilitado en ${this.capcom.dir}`);
+      this.timers.push(setInterval(() => {
+        // Sin hub no se relanza: sus herramientas viven en el hub, y un CAPCOM
+        // sin tools quema una vuelta para descubrir que no puede hacer nada.
+        if (this.connected) this.capcom?.check();
+      }, CAPCOM_CHECK_MS));
+    }
+
     this.timers.push(setInterval(() => this.tick(), TICK_MS));
     this.timers.push(setInterval(() => { void this.pollLiveness(); }, LIVENESS_MS));
     this.timers.push(setInterval(() => { void this.projects.refreshGit(); }, GIT_MS));
@@ -178,6 +245,8 @@ class Collector {
     this.watcher.stop();
     this.escalations.stop();
     this.messages.stop();
+    this.artifacts.stop();
+    this.spawns.stop();
     try { this.ws?.close(); } catch { /* ya cerrado */ }
   }
 
@@ -196,6 +265,8 @@ class Collector {
       d.setProject(p.id);
       this.escalations.track(p.id, p.path);
       this.messages.track(p.id, p.path);
+      this.artifacts.track(p.id, p.path);
+      this.spawns.track(p.id, p.path);
     }
   }
 
@@ -223,6 +294,8 @@ class Collector {
     this.derivers.set(ref.key, d);
     this.escalations.track(project.id, project.path);
     this.messages.track(project.id, project.path);
+    this.artifacts.track(project.id, project.path);
+    this.spawns.track(project.id, project.path);
     return d;
   }
 
@@ -285,9 +358,70 @@ class Collector {
     const to = m.scope === 'agent' && m.toAgentId
       ? (this.derivers.get(m.toAgentId)?.callsign ?? m.toAgentId.slice(0, 8))
       : m.scope === 'project' ? (this.projects.get(m.toProjectId ?? '')?.code ?? 'proyecto')
-        : 'flota';
+        : m.scope === 'squad' ? `squad:${m.toSquad ?? '?'}`
+          : 'flota';
     this.note(level, `${m.fromCallsign} → ${to} (${m.kind}): ${oneLine(m.subject, 90)}`,
       m.fromAgentId);
+  }
+
+  /* ── un agente pide otro agente ───────────────────────────────── */
+
+  /**
+   * `orca-spawn` desde un agente: se decide aquí, con lo que el collector ya
+   * sabe del que pide, y se lanza por el mismo runner que usa la consola. El
+   * ack se escribe SIEMPRE, también cuando se rechaza: una petición que no
+   * dice nada es indistinguible de un collector caído.
+   */
+  private async onSpawnRequest(r: SpawnRequest): Promise<void> {
+    const d = r.requesterId ? this.derivers.get(r.requesterId) : undefined;
+    const who = d ? (() => {
+      const snap = d.snapshot();
+      const live = snap.childIds.filter((id) => {
+        const c = this.derivers.get(id);
+        return c ? !TERMINAL_STATES.has(c.state()) : false;
+      }).length;
+      return { id: d.id, callsign: d.callsign, squad: snap.squad, liveChildren: live };
+    })() : null;
+    const size = (name: string) => {
+      let n = 0;
+      for (const x of this.derivers.values()) {
+        if (x.snapshot().squad === name && !TERMINAL_STATES.has(x.state())) n++;
+      }
+      return n;
+    };
+
+    const plan = planChild(r, who, size);
+    if (!plan.ok) {
+      this.note('warn', `${who?.callsign ?? '??'} pidió un agente: rechazado — ${plan.reason}`, who?.id);
+      await writeAck(r.ackFile, { ok: false, reason: plan.reason, at: Date.now() });
+      return;
+    }
+
+    const res = await this.runner.execute(plan.cmd);
+    const data = (res.data ?? {}) as { agentId?: string | null; callsign?: string | null; shortId?: string | null };
+    await writeAck(r.ackFile, {
+      ok: res.ok,
+      ...(res.ok ? {} : { reason: res.detail ?? 'the collector could not launch it' }),
+      agentId: data.agentId ?? null,
+      callsign: data.callsign ?? null,
+      shortId: data.shortId ?? null,
+      squad: plan.squad,
+      parentId: who?.id ?? null,
+      at: Date.now(),
+    });
+    this.note(res.ok ? 'info' : 'warn',
+      res.ok
+        ? `${who?.callsign ?? '??'} lanzó a ${data.callsign ?? '(pendiente)'}${plan.squad ? ` en ${plan.squad}` : ''}: ${oneLine(r.mission, 80)}`
+        : `${who?.callsign ?? '??'} pidió un agente: falló — ${res.detail ?? '?'}`,
+      who?.id);
+  }
+
+  /* ── artefactos ───────────────────────────────────────────────── */
+
+  private onArtifact(a: Artifact): void {
+    this.send({ t: 'artifact', machineId: this.machineId, artifact: a });
+    const d = this.derivers.get(a.agentId);
+    this.note('info', `${d?.callsign ?? '??'} produjo ${a.kind}: ${oneLine(a.title, 80)}`, a.agentId);
   }
 
   /** Callsign → agente. Prefiere uno vivo: las etiquetas se reciclan al morir. */
@@ -402,6 +536,14 @@ class Collector {
       } else {
         d.setBlock(this.jobStates.get(d.ref.sessionId) ?? null);
       }
+      // Lo que el agente escribió y merece verse. El deriver sólo apunta la
+      // ruta; aquí se le pone dueño y proyecto, que es lo que él no sabe.
+      for (const file of d.drainProduced()) {
+        this.artifacts.observe({
+          path: file.path, projectId: d.projectId, agentId: d.id,
+          at: file.at, cwd: d.cwd,
+        });
+      }
       inputs.push({
         key: d.id, sessionId: d.ref.sessionId, agentId: d.ref.agentId,
         metaPath: d.ref.metaPath, shortId: l?.shortId ?? null,
@@ -463,6 +605,8 @@ class Collector {
       }
       this.escalations.track(project.id, project.path);
       this.messages.track(project.id, project.path);
+      this.artifacts.track(project.id, project.path);
+    this.spawns.track(project.id, project.path);
     }
 
     // 5. colisiones (cada COLLISION_EVERY ticks; ver la constante)
@@ -495,9 +639,21 @@ class Collector {
 
   /* ── handles para commands.ts ─────────────────────────────────── */
 
+  /** ¿Sigue el CLI listando esa sesión de background? Lo que usa CAPCOM. */
+  private shortIdAlive(shortId: string): boolean {
+    for (const l of this.liveness.values()) {
+      if (l.shortId === shortId && l.alive) return true;
+    }
+    return false;
+  }
+
   private agentHandle(id: string): AgentHandle | null {
     const d = this.derivers.get(id);
     if (!d) return null;
+    return this.handleOf(d);
+  }
+
+  private handleOf(d: SessionDeriver): AgentHandle {
     const l = this.liveness.get(d.ref.sessionId);
     return {
       id: d.id,
@@ -506,7 +662,60 @@ class Collector {
       shortId: l?.shortId ?? null,
       background: l?.background ?? false,
       alive: l?.alive ?? false,
+      callsign: d.callsign,
     };
+  }
+
+  /**
+   * Espera a que la sesión que acabamos de lanzar exista de verdad.
+   *
+   * Lanzar es sólo arrancar un proceso: el agente no es nadie para ORCA hasta
+   * que `claude agents --json` lo lista y su transcript aparece. Quien lanzó a
+   * un líder necesita ese id para lanzarle miembros, así que aquí se paga la
+   * espera una vez en lugar de obligar a la consola a sondear.
+   *
+   * Se refresca la liveness en cada vuelta: sin eso estaríamos esperando a un
+   * mapa que sólo se actualiza cada LIVENESS_MS y la espera duraría siempre lo
+   * mismo, gane quien gane.
+   */
+  private async awaitSpawn(want: SpawnLookup, timeoutMs: number): Promise<AgentHandle | null> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      const hit = this.findSpawned(want);
+      if (hit) return hit;
+      if (Date.now() >= deadline) return null;
+      await sleep(250);
+      await this.pollLiveness();
+      await this.watcher.refresh();
+    }
+  }
+
+  /**
+   * La sesión recién nacida, si ya se ve.
+   *
+   * Con short id es exacto: el CLI lo imprimió y la liveness lo empareja con su
+   * sessionId. Sin él —un spawn en primer plano no imprime ninguno— se cae a
+   * "la sesión raíz más nueva de ese proyecto que no existía antes de lanzar",
+   * que es cierto porque `since` se toma justo antes del `spawn()`.
+   */
+  private findSpawned(want: SpawnLookup): AgentHandle | null {
+    if (want.shortId) {
+      for (const [sessionId, l] of this.liveness) {
+        if (l.shortId !== want.shortId) continue;
+        const d = this.derivers.get(sessionId);
+        if (d) return this.handleOf(d);
+      }
+      return null;
+    }
+    let best: SessionDeriver | null = null;
+    for (const d of this.derivers.values()) {
+      // Sólo sesiones raíz: un subagente no es lo que acabamos de lanzar.
+      if (d.ref.metaPath !== null) continue;
+      if (d.projectId !== want.projectId) continue;
+      if (d.firstSeenAt < want.since) continue;
+      if (!best || d.firstSeenAt > best.firstSeenAt) best = d;
+    }
+    return best ? this.handleOf(best) : null;
   }
 
   /* ── websocket ────────────────────────────────────────────────── */
@@ -537,6 +746,9 @@ class Collector {
       this.sendHello();
       this.sendSnapshot();
       this.sendKeys();
+      // El mando arranca cuando hay hub: sus herramientas son el servidor MCP
+      // del hub, así que lanzarlo antes es lanzarlo manco.
+      void this.capcom?.ensure();
     });
     ws.on('message', (raw) => { void this.onFrame(raw.toString()); });
     ws.on('error', (err) => {
@@ -607,6 +819,9 @@ class Collector {
     }
     for (const c of this.collisions.list()) {
       this.send({ t: 'collision', machineId: this.machineId, collision: c });
+    }
+    for (const a of this.artifacts.list()) {
+      this.send({ t: 'artifact', machineId: this.machineId, artifact: a });
     }
     if (this.feed.length > 0) {
       this.send({ t: 'feed', machineId: this.machineId, items: this.feed.slice(-50) });
@@ -806,8 +1021,8 @@ export function diffAgent(prev: Agent, next: Agent): Partial<Agent> | null {
   };
 
   for (const k of ['state', 'title', 'callsign', 'model', 'tool', 'toolDetail',
-    'lastPrompt', 'lastSay', 'mission', 'parentId', 'depth', 'background',
-    'shortId', 'projectId'] as const) {
+    'lastPrompt', 'lastSay', 'mission', 'squad', 'lead', 'role', 'parentId', 'depth',
+    'background', 'shortId', 'projectId'] as const) {
     if (prev[k] !== next[k]) set(k);
   }
   if (JSON.stringify(prev.block) !== JSON.stringify(next.block)) set('block');
@@ -904,7 +1119,8 @@ function fmtDur(ms: number): string {
 
 async function main(): Promise<void> {
   const diag = process.env['ORCA_DIAG'] === '1' || process.argv.includes('--diag');
-  const collector = new Collector();
+  const capcom = process.env['ORCA_CAPCOM'] === '1' || process.argv.includes('--capcom');
+  const collector = new Collector({ capcom });
 
   // Un throw suelto en un callback de fs no puede matar la observabilidad.
   process.on('uncaughtException', (err) => {

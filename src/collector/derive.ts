@@ -13,7 +13,8 @@
  *   3. señales de bloqueo externas: escalaciones ORCA y ~/.claude/jobs/<id>/state.json
  */
 
-import type { Agent, AgentMetrics, AgentState, BlockKind } from '../shared/types.ts';
+import type { Agent, AgentMetrics, AgentRole, AgentState, BlockKind } from '../shared/types.ts';
+import { ARTIFACT_TOOLS, kindOf } from './artifacts.ts';
 import type { LineBatch, TranscriptRef } from './watch.ts';
 import { isRecord, num, oneLine, stableCallsign, str, tsMs } from './util.ts';
 
@@ -71,6 +72,17 @@ export interface Lineage {
   depth: number;
   childIds: string[];
   mission: string | null;
+  /** Escuadrón al que lo alistó el spawn. Ver src/shared/squads.ts. */
+  squad: string | null;
+  /** Si lo lidera. Sin `squad` no significa nada. */
+  lead: boolean;
+  /**
+   * 'capcom' cuando esta sesión es el mando de la flota, 'agent' para todo lo
+   * demás. Viaja por el mismo camino que `mission`: lo dijo quien la lanzó y se
+   * persistió en lineage.json, porque no hay nada en el transcript que permita
+   * distinguir al comando de un agente que habla de la flota.
+   */
+  role: AgentRole;
 }
 
 /* ── el deriver ───────────────────────────────────────────────────── */
@@ -83,6 +95,18 @@ interface PendingTool {
 }
 
 interface TokenSample { at: number; tokens: number; }
+
+/** Un archivo que el agente escribió y que quizá haya que enseñar. */
+export interface ProducedFile { path: string; at: number; }
+
+/**
+ * Cuántas rutas producidas se guardan sin recoger.
+ *
+ * index.ts las drena en cada tick, así que en marcha esto nunca pasa de dos o
+ * tres. El techo es para la lectura de cola al arrancar: un transcript de un
+ * agente que generó mil fotogramas no puede materializarse entero aquí dentro.
+ */
+const MAX_PRODUCED = 64;
 
 export class SessionDeriver {
   readonly id: string;
@@ -110,8 +134,13 @@ export class SessionDeriver {
 
   private pending = new Map<string, PendingTool>();
   private lastTool: PendingTool | null = null;
+  private produced: ProducedFile[] = [];
 
-  private firstSeenAt: number;
+  /**
+   * Cuándo vio ORCA este transcript por primera vez. Público porque el ack de
+   * un `spawn` sin short id necesita saber qué sesión es NUEVA.
+   */
+  readonly firstSeenAt: number;
   private startedAt = 0;
 
   /** Totales del último cost-state, que es autoritativo para toda la sesión. */
@@ -129,7 +158,10 @@ export class SessionDeriver {
     name: null, startedAt: null, cliState: null,
   };
   private block: BlockSignal | null = null;
-  private lineage: Lineage = { parentId: null, depth: 0, childIds: [], mission: null };
+  private lineage: Lineage = {
+    parentId: null, depth: 0, childIds: [], mission: null, squad: null, lead: false,
+    role: 'agent',
+  };
 
   /** Sube en cada mutación observable; index.ts la usa para diffear barato. */
   rev = 0;
@@ -300,6 +332,7 @@ export class SessionDeriver {
         this.pending.set(p.id, p);
         this.lastTool = p;
         this.toolCalls++;
+        this.noteProduced(name, raw['input'], p.at);
       }
     }
     // Un turno que cierra no puede dejar tools colgando.
@@ -336,6 +369,30 @@ export class SessionDeriver {
       // Claude Code cierra cada turno con esto: nada colgando.
       this.pending.clear();
     }
+  }
+
+  /**
+   * Un `Write` de un .png no es una herramienta más: es una cosa que apareció y
+   * que a alguien le sirve ver. Aquí sólo se anota la ruta —barato, sin tocar
+   * disco—; quién es su agente y si el archivo existe de verdad lo resuelve
+   * `artifacts.ts`, que es donde vive esa decisión.
+   */
+  private noteProduced(name: string, input: unknown, at: number): void {
+    if (!ARTIFACT_TOOLS.has(name) || !isRecord(input)) return;
+    const file = str(input['file_path']) ?? str(input['notebook_path']);
+    if (!file || !kindOf(file)) return;
+    this.produced.push({ path: file, at: at || Date.now() });
+    if (this.produced.length > MAX_PRODUCED) {
+      this.produced.splice(0, this.produced.length - MAX_PRODUCED);
+    }
+  }
+
+  /** Vacía la cola de archivos producidos. La llama index.ts en cada tick. */
+  drainProduced(): ProducedFile[] {
+    if (this.produced.length === 0) return [];
+    const out = this.produced;
+    this.produced = [];
+    return out;
   }
 
   private trimSamples(): void {
@@ -476,12 +533,16 @@ export class SessionDeriver {
       projectId: this.projectId,
       title: this.title ?? this.cliName ?? this.lastPrompt ?? shortId(this.ref.sessionId),
       callsign: this.callsign,
+      runtime: 'claude',
+      role: this.lineage.role,
       state,
       block: this.blockOf(now),
       parentId: this.lineage.parentId,
       depth: this.lineage.depth,
       childIds: [...this.lineage.childIds],
       mission: this.lineage.mission,
+      squad: this.lineage.squad,
+      lead: this.lineage.lead,
       model: this.model,
       tool: working ? (this.currentTool()?.name ?? null) : null,
       toolDetail: working ? (this.currentTool()?.detail ?? null) : null,

@@ -13,7 +13,7 @@ import { newId } from '../shared/protocol.ts';
 import type { Hub } from '../hub/server.ts';
 import { Ceo, type CeoEvents, type CeoOptions } from './ceo.ts';
 import { FakeCeo } from './fake.ts';
-import type { CeoContext } from './tools.ts';
+import { hubContext } from './context.ts';
 
 export interface RuntimeOptions extends CeoOptions {
   /** Skip the model entirely. Used by tests and by `--no-ceo`. */
@@ -34,6 +34,7 @@ interface CeoLike {
 
 export function attachCeo(hub: Hub, opts: RuntimeOptions = {}) {
   const world = hub.world;
+  const ctx = hubContext(hub);
 
   /** Messages currently streaming, so deltas land on the right record. */
   const live = new Map<string, CeoMessage>();
@@ -75,107 +76,6 @@ export function attachCeo(hub: Hub, opts: RuntimeOptions = {}) {
     },
   };
 
-  const ctx: CeoContext = {
-    agents: () => Object.values(world.state.agents),
-    projects: () => Object.values(world.state.projects),
-    agent: (id) => world.state.agents[id],
-    project: (id) => world.state.projects[id],
-    escalation: (id) => world.state.escalations[id],
-
-    dispatch: (_machineId, cmd) => hub.dispatch(cmd),
-
-    recall: (question, projectId) =>
-      hub.memory.recall(question, { projectId, limit: 4 }).map((r) => ({
-        question: r.entry.question,
-        // A stored rule beats the one-off answer that produced it: the rule is
-        // what the human actually wanted applied next time.
-        answer: r.entry.rememberAs ?? r.entry.answer,
-        score: r.score,
-      })),
-
-    remember: (question, answer, projectId) => {
-      hub.memory.remember({ question, answer, projectId, at: Date.now() });
-    },
-
-    raiseToHuman(input) {
-      // Triaje de una pregunta existente: se anota el intento del CEO sobre el
-      // registro original y se devuelve a la cola del humano. Un segundo
-      // registro sería la misma pregunta dos veces en pantalla.
-      const existing = input.replaces ? world.state.escalations[input.replaces] : undefined;
-      if (existing) {
-        world.attachCeoAttempt(existing.id, input.ceoAttempt);
-        hub.pushCeoMessage({
-          id: newId('msg'), role: 'ceo', at: Date.now(), actions: [],
-          escalationId: existing.id,
-          text: input.question,
-        });
-        return existing;
-      }
-
-      const esc: Escalation = {
-        id: newId('esc'),
-        agentId: input.agentId ?? '',
-        projectId: input.projectId ?? '',
-        machineId: (input.agentId && world.state.agents[input.agentId]?.machineId) || '',
-        question: input.question,
-        context: input.context,
-        options: input.options,
-        optionsOnly: false,
-        urgency: input.urgency,
-        status: 'pending',
-        ceoAttempt: input.ceoAttempt,
-        answer: null, answeredBy: null, rememberAs: null,
-        askedAt: Date.now(), answeredAt: null, expiresAt: null,
-      };
-      world.upsertEscalationLocal(esc);
-      // Say it in the conversation too. The operator should be able to live in
-      // the CEO panel and still see everything the fleet needs from them.
-      hub.pushCeoMessage({
-        id: newId('msg'), role: 'ceo', at: Date.now(), actions: [],
-        escalationId: esc.id,
-        text: input.question,
-      });
-      return esc;
-    },
-
-    resolveEscalation(id, answer, by) {
-      hub.answerEscalationLocal(id, answer, by);
-    },
-
-    /* ── tráfico entre agentes ────────────────────────────────────── */
-
-    messages: () => Object.values(world.state.messages),
-    message: (id) => world.state.messages[id],
-    collisions: () => Object.values(world.state.collisions),
-
-    relay(input) {
-      const out = hub.relayMessage({
-        kind: input.kind,
-        scope: input.scope,
-        toAgentId: input.toAgentId,
-        toProjectId: input.toProjectId,
-        subject: input.subject,
-        body: input.body,
-        files: input.files,
-      });
-      // Se devuelve a quién llegó de verdad, no a quién iba dirigido: el CEO
-      // tiene que poder decirle al operador "no le llegó" en vez de dar por
-      // hecho que sí.
-      return {
-        messageId: out.message.id,
-        delivered: out.delivered,
-        skipped: out.skipped,
-        reason: out.reason,
-      };
-    },
-
-    // El CEO contesta en lugar del destinatario. Firma la respuesta como suya:
-    // quien preguntó merece saber que no se la contestó el agente al que
-    // preguntó, por si acaso quería justamente a ése.
-    answerPeer: (messageId, answer) => hub.replyToMessageLocal(messageId, answer, 'ceo'),
-
-    acknowledgeCollision: (id) => hub.acknowledgeCollision(id),
-  };
 
   if (opts.disabled) {
     return {

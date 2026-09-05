@@ -1,0 +1,1001 @@
+/*
+ * Windows: small instruments in the comp's HUD shell.
+ *
+ *   ┌+──────────────────────────────┐   gold crosshair top-left
+ *   │ K9 LZ  TITLE      tele  PIN — × │   header, drag handle
+ *   │┌────────────────────────────┐ │
+ *   ││ glass                       │ │   body, kind-specific
+ *   │└────────────────────────────┘ │
+ *   │ stamp                       ◢ +│   blue crosshair bottom-right, resize
+ *   └────────────────────────────────┘
+ *
+ * A window is anchored (follows a tile) or docked (fixed to the screen). The
+ * only difference in the DOM is `is-anchored`, which draws its tether.
+ *
+ * ── The palettes of IDENTITY §6 ─────────────────────────────────────────
+ *
+ * `wm.ts` and `fx.ts` own the shapes; every colour change in a gesture lives
+ * here, and every one of them is a **cut**. The classes the manager toggles:
+ *
+ *   .win.is-flash        the state channel jumps to `--ink-bright` and falls
+ *                        to the state colour in `--t-snap`. Never on `dead`.
+ *   .win.is-focus        `.win__head::after` grows left→right in `--t-snap`;
+ *                        losing the class cuts, because the transition is
+ *                        declared inside the focused rule and leaves with it.
+ *   .slab-btn.is-flash   the confirm: inverted to ink for one `--t-snap`.
+ *   .slab-btn.is-busy    A3, the thin band on the slab's bottom edge, until
+ *                        the ack.
+ *   kbd.key.is-echo      the keyboard echo, lime for one `--t-snap`.
+ */
+
+/* Windows sit above the mast and its tools: an instrument you opened is never behind the buttons that opened it. */
+.wm { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: calc(var(--z-hud) + 1); }
+
+.win {
+  position: absolute; left: 0; top: 0;
+  width: 380px; height: 420px;
+  min-width: 240px; min-height: 120px;
+  background: var(--shell);
+  border-radius: var(--r-panel);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.045), 0 0 0 1px rgba(0,0,0,0.7), 0 18px 40px rgba(0,0,0,0.45);
+  display: grid; grid-template-rows: 30px 1fr 18px;
+  pointer-events: auto;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.win.is-focus { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.09), 0 0 0 1px rgba(0,0,0,0.8), 0 22px 48px rgba(0,0,0,0.55); }
+.win.is-min { display: none; }
+
+/* State edge on the housing, same 2px channel the tile shader uses. */
+.win::before {
+  content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px;
+  background: var(--win-state, var(--line));
+  border-radius: 1px;
+  /* §6.1: after the flash it falls to the new state colour. The rise is a cut. */
+  transition: background var(--t-snap) var(--ease-out);
+}
+/*
+ * The tile's heartbeat, on the housing: one frame of `--ink-bright`, then the
+ * channel falls to the state it just took. `transition: none` is what makes
+ * the jump a cut — only the fall is timed. `wm.ts` never adds this on `dead`.
+ */
+.win.is-flash::before { background: var(--ink-bright); transition: none; }
+
+.win__xh { position: absolute; width: 10px; height: 10px; pointer-events: none; z-index: 3; }
+.win__xh::before, .win__xh::after { content: ''; position: absolute; background: currentColor; }
+.win__xh::before { width: 100%; height: 1.5px; top: 50%; left: 0; }
+.win__xh::after  { height: 100%; width: 1.5px; left: 50%; top: 0; }
+.win__xh--tl { top: 6px; left: 8px; color: var(--xhair-gold); }
+.win__xh--br { bottom: 4px; right: 22px; color: var(--xhair-blue); }
+
+/* ── Header ───────────────────────────────────────────────────────── */
+
+.win__head {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px;
+  padding: 0 8px 0 20px;
+  user-select: none;
+  position: relative;
+}
+/*
+ * The window that has the keyboard says so twice: the focus shadow, and a
+ * 2px lime rule under its title. From across the room only the rule reads.
+ *
+ * §6.1: taking the focus **draws** the rule left to right in `--t-snap` — the
+ * comp's fill, growing from the direction of reading. Losing it is a cut, and
+ * that is not an oversight: the transition is declared inside the focused
+ * rule, so it goes away with the class and nothing is left to ease.
+ */
+.win .win__head::after {
+  content: ''; position: absolute; left: 20px; right: 8px; bottom: 0; height: 2px;
+  background: var(--lime); pointer-events: none;
+  transform: scaleX(0); transform-origin: left center;
+}
+.win.is-focus .win__head::after {
+  transform: scaleX(1);
+  transition: transform var(--t-snap) var(--ease-out);
+}
+/* On the amber header the lime would be a second accent. Ink instead. */
+.win.is-blocked .win__head::after { background: #111; }
+.win__id { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.win__cs { font-family: 'Tiny5', monospace; font-size: 13px; letter-spacing: 0.12em; color: var(--ink-bright); text-transform: uppercase; }
+.win__pj { font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.14em; color: var(--ink-dimmer); text-transform: uppercase; padding: 1px 4px; border: 1px solid var(--line-soft); }
+.win__kind { font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; color: var(--ink-dim); text-transform: uppercase; }
+.win__title {
+  font-family: 'Geist Mono', monospace; font-size: 10px; color: var(--ink-mid);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.win__ctl { display: flex; align-items: center; gap: 2px; }
+.win__btn {
+  background: transparent; border: 0; color: var(--ink-dimmer);
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  padding: 4px 6px; line-height: 1;
+}
+.win__btn:hover { color: var(--lime); }
+.win__btn.is-on { color: var(--lime); }
+.win__btn--x:hover { color: var(--red); }
+
+/* A blocked agent's window inverts its header to amber. One exception, on purpose. */
+.win.is-blocked .win__head { background: var(--amber); border-radius: var(--r-panel) var(--r-panel) 0 0; }
+.win.is-blocked .win__cs, .win.is-blocked .win__title, .win.is-blocked .win__kind, .win.is-blocked .win__btn { color: #111; }
+.win.is-blocked .win__pj { color: #111; border-color: rgba(0,0,0,0.35); }
+.win.is-blocked .win__btn:hover { color: #000; }
+.win.is-blocked .win__xh--tl { color: #111; }
+.win.is-dead .win__cs { color: var(--red); }
+
+/* ── Body ─────────────────────────────────────────────────────────── */
+
+.win__body {
+  margin: 0 8px; background: var(--screen); border: 1px solid var(--line-soft);
+  border-radius: 2px; overflow: hidden; position: relative; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.win__scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+
+/* ── Foot ─────────────────────────────────────────────────────────── */
+
+.win__foot {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 30px 0 20px; color: var(--ink-faint); font-size: 9px;
+}
+.win__tele { color: var(--ink-faint); font-size: 8px; letter-spacing: 0.14em; white-space: nowrap; overflow: hidden; max-width: 22ch; }
+.win__grip {
+  position: absolute; right: 4px; bottom: 4px; width: 14px; height: 14px; cursor: none;
+  background: linear-gradient(135deg, transparent 50%, var(--line) 50%, var(--line) 60%, transparent 60%, transparent 75%, var(--line) 75%, var(--line) 85%, transparent 85%);
+}
+
+/* ── Tether: an anchored window draws its pipe to the tile ────────── */
+
+.tether {
+  position: absolute; left: 0; top: 0; pointer-events: none; z-index: 0;
+  width: 100%; height: 100%; overflow: visible;
+}
+.tether line { stroke: var(--line); stroke-width: 2; }
+.tether rect { fill: var(--ink-mid); }
+.tether.is-blocked line { stroke: var(--amber); }
+.tether.is-blocked rect { fill: var(--amber); }
+
+/* ── Instrument primitives used inside window bodies ──────────────── */
+
+.sec { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); }
+.sec:last-child { border-bottom: 0; }
+.sec__k { font-size: 9px; color: var(--ink-dimmer); margin-bottom: 6px; letter-spacing: 0.18em; }
+.sec__v { color: var(--ink-mid); white-space: pre-wrap; word-break: break-word; }
+.sec__v.is-empty { color: var(--ink-faint); }
+
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line-soft); }
+.grid4 > div { padding: 8px 10px; border-right: 1px solid var(--line-soft); }
+.grid4 > div:nth-child(4n) { border-right: 0; }
+.grid4 > div:nth-child(n+5) { border-top: 1px solid var(--line-soft); }
+.num { font-family: 'Tiny5', monospace; font-size: 15px; color: var(--ink-bright); letter-spacing: 0.06em; font-variant-numeric: tabular-nums; line-height: 1; }
+.num.is-lime { color: var(--lime); }
+.num.is-amber { color: var(--amber); }
+.num__k { font-size: 8px; color: var(--ink-dimmer); letter-spacing: 0.16em; margin-top: 4px; }
+
+.chip {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 3px 7px; border: 1px solid var(--line); background: transparent; color: var(--ink-mid);
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  border-left-width: 3px; border-left-color: var(--chip-state, var(--line));
+}
+.chip:hover { border-color: var(--lime); color: var(--ink-bright); }
+.chip small { font-size: 8px; color: var(--ink-dimmer); letter-spacing: 0.14em; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* The secondary row: FLY, LOGS, FRAME, RAW. 34px so it lines up with
+   `.slab-btn--sm` wherever the two share a row. */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 34px; background: transparent; border: 1px solid var(--line); color: var(--ink-mid);
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  padding: 0 12px; border-radius: 2px; line-height: 1;
+}
+.btn:hover { border-color: var(--lime); color: var(--lime); }
+/* §6.2: it goes down and to the right while it is held. One pixel, no
+   transition — a button that eases under the thumb is a button lagging it. */
+.btn:active { transform: translate(1px, 1px); }
+/*
+ * `.btn` no longer carries a colour of its own. A lit lime button is
+ * `.slab-btn`, an amber one is `.slab-btn--amber`, an armed one is
+ * `.slab-btn--red`. Two ways to draw the same lime was the drift.
+ */
+.btn.is-off { color: var(--ink-faint); border-color: var(--line-soft); pointer-events: none; }
+.btn:disabled { color: var(--ink-faint); border-color: var(--line-soft); }
+
+.row { display: flex; align-items: center; gap: 8px; }
+.row--wrap { flex-wrap: wrap; }
+.row--end { justify-content: flex-end; }
+.row--split { justify-content: space-between; }
+
+.input {
+  background: var(--screen-in); border: 1px solid var(--line); color: var(--ink);
+  font-family: 'Geist Mono', monospace; font-size: 11px; padding: 8px 10px; border-radius: 2px;
+  width: 100%; outline: none; resize: none;
+}
+.input:focus { border-color: var(--lime); }
+.input::placeholder { color: var(--ink-faint); }
+select.input { appearance: auto; text-transform: none; cursor: none; }
+select.input option { background: var(--shell); color: var(--ink); }
+
+.chk { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-dim); font-size: 9px; letter-spacing: 0.16em; }
+.chk input { appearance: none; width: 11px; height: 11px; border: 1px solid var(--line); margin: 0; background: transparent; cursor: none; }
+.chk input:checked { background: var(--lime); border-color: var(--lime); }
+
+/* A block panel: what the agent is waiting on. Amber, and the only amber. */
+.block {
+  margin: 10px 12px; padding: 10px 12px; border: 1px solid var(--amber); border-radius: 2px;
+  background: rgba(245,165,36,0.06);
+}
+.block__k { display: flex; justify-content: space-between; font-size: 9px; color: var(--amber); letter-spacing: 0.18em; margin-bottom: 8px; }
+.block__q { color: var(--ink-bright); font-size: 12px; line-height: 1.45; }
+.block__tried { margin-top: 8px; padding: 8px; border: 1px dashed var(--line); color: var(--ink-dim); }
+.block__tried b { display: block; font-family: 'Tiny5', monospace; font-weight: 400; font-size: 8px; letter-spacing: 0.16em; color: var(--ink-dimmer); margin-bottom: 4px; }
+.block__opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.block__peer { color: var(--st-thinking); }
+
+/* Activity band: speed, never progress. */
+.band { height: 3px; background: var(--line-soft); overflow: hidden; position: relative; }
+.band::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 28%; background: var(--lime);
+  animation: band-run var(--band-t, 1.4s) linear infinite;
+}
+.band.is-off::after { display: none; }
+@keyframes band-run { from { left: -30%; } to { left: 100%; } }
+
+/* Message rows inside an agent window. */
+.msg { display: grid; grid-template-columns: 44px 1fr auto; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line-soft); align-items: baseline; }
+.msg__kind { font-size: 8px; letter-spacing: 0.16em; }
+.msg__kind.is-ask { color: var(--amber); }
+.msg__kind.is-notice { color: var(--st-thinking); }
+.msg__kind.is-warning { color: var(--red); }
+.msg__kind.is-handoff { color: var(--lime); }
+.msg__body { color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg__body b { font-family: 'Tiny5', monospace; font-weight: 400; font-size: 9px; letter-spacing: 0.12em; color: var(--ink-dim); margin-right: 6px; }
+.msg__t { font-size: 8px; color: var(--ink-faint); }
+
+/* Artifact thumbnails. */
+.thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; padding: 10px 12px; }
+.thumb {
+  position: relative; aspect-ratio: 4/3; border: 1px solid var(--line); background: var(--screen-in);
+  overflow: hidden; padding: 0; display: grid; place-items: center; cursor: none;
+}
+.thumb:hover { border-color: var(--lime); }
+.thumb img, .thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb__k { font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.14em; color: var(--ink-dim); text-transform: uppercase; }
+.thumb__t {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 4px; background: rgba(11,10,13,0.75);
+  font-family: 'Geist Mono', monospace; font-size: 8px; color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
+}
+
+/* Agent rows in a fleet window. */
+.arow {
+  display: grid; grid-template-columns: 8px 44px 1fr auto; gap: 8px; align-items: center;
+  padding: 6px 12px; border-bottom: 1px solid var(--line-soft); cursor: none;
+}
+.arow:hover { background: var(--screen-in); }
+.arow__st { width: 6px; height: 14px; background: var(--arow-state, var(--line)); }
+.arow__cs { font-family: 'Tiny5', monospace; font-size: 12px; letter-spacing: 0.12em; color: var(--ink-bright); }
+.arow__t { color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arow__m { font-size: 9px; color: var(--ink-dimmer); letter-spacing: 0.12em; white-space: nowrap; }
+.arow.is-blocked .arow__cs { color: var(--amber); }
+
+/* CEO conversation. */
+.ceo__log { padding: 8px 12px; display: flex; flex-direction: column; gap: 10px; }
+.ceo__m { display: grid; grid-template-columns: 34px 1fr; gap: 8px; }
+.ceo__who { font-size: 8px; letter-spacing: 0.16em; color: var(--ink-dimmer); padding-top: 3px; }
+.ceo__m.is-human .ceo__who { color: var(--lime); }
+.ceo__m.is-system .ceo__who { color: var(--amber); }
+.ceo__text { color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.ceo__text.is-streaming::after { content: '▮'; color: var(--lime); animation: blink 0.9s steps(1) infinite; }
+.ceo__acts { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.ceo__act { display: grid; grid-template-columns: 8px 1fr; gap: 6px; align-items: baseline; color: var(--ink-dim); font-size: 10px; }
+.ceo__act i { width: 6px; height: 6px; background: var(--line); display: block; align-self: center; }
+.ceo__act.is-ok i { background: var(--lime); }
+.ceo__act.is-error i { background: var(--red); }
+.ceo__act.is-running i { background: var(--st-thinking); animation: blink 0.8s steps(1) infinite; }
+.ceo__empty { padding: 14px 12px; color: var(--ink-dim); line-height: 1.5; }
+.ceo__orders { padding: 8px 12px; border-top: 1px solid var(--line-soft); display: flex; gap: 6px; flex-wrap: wrap; }
+/* What you type, then the slab that sends it — one under the other, so SEND
+   is the full width of the order it carries. */
+.ceo__in { display: grid; gap: 8px; padding: 8px; border-top: 1px solid var(--line-soft); }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Feed lines. */
+.feed__line { display: grid; grid-template-columns: 52px 64px 1fr; gap: 8px; padding: 3px 12px; cursor: none; }
+.feed__line:hover { background: var(--screen-in); }
+.feed__t { color: var(--ink-faint); font-size: 9px; }
+.feed__src { font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.12em; color: var(--ink-dim); text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; }
+.feed__txt { color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed__line.is-warn .feed__txt { color: var(--amber); }
+.feed__line.is-alert .feed__txt { color: var(--red); }
+.feed__line.is-trace .feed__txt { color: var(--ink-dim); }
+
+/* Queue rows. */
+.qrow { padding: 8px 12px; border-bottom: 1px solid var(--line-soft); cursor: none; display: grid; gap: 4px; }
+.qrow:hover { background: var(--screen-in); }
+.qrow__h { display: flex; justify-content: space-between; align-items: baseline; }
+.qrow__cs { font-family: 'Tiny5', monospace; font-size: 12px; letter-spacing: 0.12em; color: var(--amber); }
+.qrow__q { color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qrow__meta { font-size: 8px; color: var(--ink-dimmer); letter-spacing: 0.14em; }
+.qrow__meta b { font-weight: 400; color: var(--amber); }
+
+/* Artifact viewer. */
+.art { display: grid; place-items: center; background: #000; flex: 1; min-height: 0; overflow: hidden; }
+.art img, .art video { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+.art iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+.art pre { margin: 0; padding: 12px; width: 100%; height: 100%; overflow: auto; color: var(--ink-mid); white-space: pre-wrap; align-self: start; }
+.art__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line-soft); }
+.art__path { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Spawn form. */
+.form { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.form label { display: grid; gap: 5px; }
+.form textarea.input { min-height: 96px; }
+
+/* Breach marquee window body. */
+.breach { display: grid; place-items: center; height: 100%; background: transparent; }
+.breach .banner { display: flex; align-items: center; gap: 22px; padding: 14px 24px; color: var(--red); filter: drop-shadow(0 0 10px var(--red-glow)); margin-right: 18px; }
+.win.is-breach { background: var(--red-deep); }
+.win.is-breach .win__body { background: transparent; border-color: rgba(255,42,18,0.3); }
+.win.is-breach .win__cs { color: var(--red); }
+
+@media (max-width: 720px) {
+  .wm { z-index: calc(var(--z-hud) + 1); }
+  .win { left: 0 !important; top: 46px !important; width: 100vw !important; height: calc(100dvh - 46px - 60px) !important; border-radius: 0; transform: none !important; }
+  .win__grip { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .band::after, .ceo__text.is-streaming::after, .ceo__act.is-running i { animation: none; }
+  /* The preference removes motion, never information: the busy band stays on
+     the slab's edge and the focus rule stays under the header. Both stop. */
+  .slab-btn.is-busy::after { animation: none; }
+  .win::before, .win.is-focus .win__head::after { transition: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Comp transitions, glyphs, gallery and launch.
+   Everything below belongs to `windows/fx.ts`, `kinds/gallery.ts` and
+   `kinds/launch.ts`.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── fx.ts · A5, the lime sweep ───────────────────────────────────── */
+
+.winfx { position: absolute; pointer-events: none; }
+
+/*
+ * The bar sits UNDER the body's own children, not over them: what it has
+ * reached reads as inverted ink on lime, what it has not reached is #1a0000 on
+ * dark glass — already eaten. That is the comp's read of A5, in one element.
+ */
+.winfx--wipe { inset: 0; z-index: 0; transform: scaleX(0); transform-origin: left center; }
+.win__body.is-fx-wipe > *:not(.winfx) { position: relative; z-index: 1; }
+.win__body.is-fx-wipe {
+  color: #1a0000;
+  --ink: #1a0000; --ink-bright: #1a0000; --ink-mid: #1a0000;
+  --ink-dim: #1a0000; --ink-dimmer: #1a0000; --ink-faint: #1a0000;
+  --lime: #1a0000; --amber: #1a0000; --red: #1a0000;
+  --line: rgba(26, 0, 0, 0.4); --line-soft: rgba(26, 0, 0, 0.22);
+  --screen-in: transparent;
+}
+
+/* ── fx.ts · A6, the check board ──────────────────────────────────── */
+
+.winfx--check { inset: 0; z-index: 6; background: #c0f94a; display: grid; place-items: center; }
+.winfx__check {
+  width: 62%; aspect-ratio: 8 / 6;
+  display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(6, 1fr); gap: 6%;
+}
+.winfx__px { background: #111; }
+
+/* ── fx.ts · A4, glyphs in bursts ─────────────────────────────────── */
+
+/* The boot's `.glyph` markup at instrument scale. Same pixels, smaller. */
+.glyphs { display: inline-flex; gap: 5px; vertical-align: middle; }
+.glyphs .glyph { width: 13px; height: 13px; gap: 2px; }
+.glyphs .glyph i { box-shadow: 0 0 6px rgba(255, 255, 255, 0.4); }
+
+/* ── gallery.ts ───────────────────────────────────────────────────── */
+
+.gal__bar {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line-soft);
+}
+.gal__sort { align-self: flex-start; }
+.chip.is-on { border-color: var(--lime); color: var(--lime); }
+.gal__empty { padding: 18px 12px; line-height: 1.7; color: var(--ink-dim); grid-column: 1 / -1; }
+
+/* A little wider than it was: the thumbnail now carries a 34px slab at its
+   foot, and at 112px the artifact had nothing left to show. */
+.thumbs--gal { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 8px; }
+.thumb--gal { margin: 0; aspect-ratio: 4 / 3; }
+.thumb--gal.is-placed { border-color: var(--lime); }
+.thumb--gal.is-dragging { opacity: 0.4; }
+.thumb__who {
+  position: absolute; left: 0; right: 0; top: 0; padding: 2px 4px;
+  background: rgba(11, 10, 13, 0.75); font-size: 8px; letter-spacing: 0.12em;
+  color: var(--ink-dim); text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+/*
+ * PLACE, at the foot of its own thumbnail: the slab at its smallest, square
+ * because it is clipped to a square frame.
+ *
+ * Forty lit slabs at once would be forty things claiming to be live, and lime
+ * would stop meaning anything. So the offer is the ghost and fills under the
+ * hand; the ones already standing in the field are the lit ones, which is what
+ * lime has always meant here.
+ */
+.thumb--gal .thumb__t { bottom: 34px; }
+.thumb .thumb__place {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  border-radius: 0;
+}
+.thumb .thumb__place.slab-btn--ghost { background: rgba(11, 10, 13, 0.85); }
+.thumb .thumb__place.slab-btn--ghost:hover {
+  background: var(--lime); color: #111;
+  box-shadow: 0 0 24px rgba(192, 249, 74, 0.35);
+}
+
+/* ── launch.ts ────────────────────────────────────────────────────── */
+
+.launch__brief { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: baseline; padding: 3px 0; }
+.launch__n { color: var(--ink-faint); }
+/* The button this whole system is drawn from. It carries no geometry of its
+   own any more — it is `.slab-btn--lg`, and so is everything else. */
+.launch__go { padding: 12px; }
+.launch__edit summary { color: var(--ink-dimmer); cursor: none; }
+.launch__json { min-height: 180px; margin-top: 8px; white-space: pre; overflow-x: auto; }
+
+.launch__stage { display: grid; place-items: center; padding: 14px 10px; }
+/* The comp's modal, sized for an instrument rather than a screen. */
+.launch__algn { width: 100%; border-radius: 6px; padding: 12px; box-shadow: 0 0 32px rgba(192, 249, 74, 0.3); }
+.launch__algn .algn__head { margin-bottom: 8px; }
+/* 7.5rem gutters are sized for a screen; in a 480px instrument they eat the bar. */
+.launch__algn .algn-row { grid-template-columns: 5.2rem 1fr 5.2rem; }
+.launch__algn .px--modal { font-size: 11px; letter-spacing: 0.16em; }
+.launch__mission {
+  grid-column: 1 / -1; margin: 3px 0 0; color: rgba(192, 249, 74, 0.7);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* A spawn that failed. Red is a cut, never a transition. */
+.algn-row.is-fail { background: var(--red-deep); color: var(--red); }
+.algn-row.is-fail .px { color: var(--red); }
+.algn-row.is-fail .launch__mission { color: var(--red); }
+.algn-row.is-fail .algn-zip { visibility: hidden; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   controls.ts · the console's own instruments
+   A native select opens the OS: rounded, animated, smoothed, with its own
+   highlight and its own cursor. These three replace it, the picker built
+   from the command line's menu so both dropdowns in the console read as one.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.pick { position: relative; display: block; }
+.pick__btn {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center;
+  width: 100%; text-align: left; cursor: none;
+  background: var(--screen-in); border: 1px solid var(--line); border-radius: 2px;
+  padding: 7px 10px; outline: none;
+}
+.pick__btn b {
+  font-family: 'Tiny5', monospace; font-weight: 400; font-size: 11px; letter-spacing: 0.12em;
+  color: var(--ink-bright); text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pick__btn > span {
+  color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.pick.is-empty .pick__btn b { color: var(--ink-faint); }
+.pick__btn:hover { border-color: var(--lime); }
+.pick__btn:focus-visible { border-color: var(--lime); }
+.pick.is-open .pick__btn { border-color: var(--lime); }
+
+/* The caret, drawn rather than typed: a two-row pixel wedge. */
+.pick__caret {
+  width: 8px; height: 8px; display: block; background: var(--ink-dim);
+  clip-path: polygon(
+    0 0, 100% 0, 100% 25%, 87.5% 25%, 87.5% 50%, 75% 50%, 75% 75%, 62.5% 75%,
+    62.5% 100%, 37.5% 100%, 37.5% 75%, 25% 75%, 25% 50%, 12.5% 50%, 12.5% 25%, 0 25%
+  );
+}
+.pick.is-open .pick__caret, .pick__btn:hover .pick__caret { background: var(--lime); }
+
+/*
+ * On <body>, fixed: a window's glass is `overflow: hidden`, and the menu of
+ * the last row must not be cut in half by it.
+ */
+.pick__menu {
+  position: fixed; z-index: 90; min-width: 160px;
+  background: rgba(20,19,24,0.97); border: 1px solid var(--line); border-radius: 2px;
+}
+.pick__search {
+  display: block; width: 100%; background: transparent; color: var(--ink);
+  border: 0; border-bottom: 1px solid var(--line-soft); outline: none;
+  padding: 6px 12px; font-family: 'Geist Mono', monospace; font-size: 11px;
+}
+.pick__search::placeholder { color: var(--ink-faint); }
+.pick__list { max-height: 240px; overflow-y: auto; }
+.pick__item {
+  display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: 12px;
+  padding: 6px 12px; align-items: baseline; cursor: none;
+  border-left: 2px solid transparent;
+}
+.pick__item.is-sel, .pick__item:hover { background: var(--screen-in); }
+.pick__item.is-cur { border-left-color: var(--lime); }
+.pick__item b {
+  font-family: 'Tiny5', monospace; font-weight: 400; font-size: 11px; letter-spacing: 0.12em;
+  color: var(--ink-bright); text-transform: uppercase; white-space: nowrap;
+}
+.pick__item.is-sel b { color: var(--lime); }
+.pick__item span { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* What the collector cannot drive yet stays on the list, greyed, with why. */
+.pick__item.is-off { pointer-events: none; }
+.pick__item.is-off b, .pick__item.is-off span { color: var(--ink-faint); }
+.pick__none { padding: 8px 12px; color: var(--ink-faint); }
+
+/* ── toggle ───────────────────────────────────────────────────────── */
+
+.tgl {
+  display: inline-flex; align-items: center; gap: 8px; cursor: none;
+  background: transparent; border: 0; padding: 2px 2px; outline: none;
+  color: var(--ink-dim);
+}
+.tgl .px { font-size: 9px; letter-spacing: 0.16em; color: inherit; }
+.tgl:hover { color: var(--ink-mid); }
+.tgl:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+/* The world's notched tile, at 11px. The bite is the signature; keep it. */
+.tgl__box {
+  width: 11px; height: 11px; display: block; flex: 0 0 auto;
+  background: var(--line);
+  clip-path: polygon(
+    0 0, 100% 0, 100% 30%,
+    82% 30%, 82% 36%, 70% 36%, 70% 64%, 82% 64%, 82% 70%,
+    100% 70%, 100% 100%, 0 100%
+  );
+}
+.tgl.is-on .tgl__box { background: var(--lime); }
+.tgl.is-on { color: var(--ink-mid); }
+
+/* ── fold ─────────────────────────────────────────────────────────── */
+
+.fold__k {
+  display: inline-flex; align-items: center; gap: 7px; cursor: none;
+  background: transparent; border: 0; padding: 2px 0; outline: none;
+  color: var(--ink-dim); font-size: 10px;
+}
+.fold__k:hover { color: var(--lime); }
+.fold__k:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+/* A pixel plus that loses its stem when the body is out. */
+.fold__sign { position: relative; width: 7px; height: 7px; display: block; flex: 0 0 auto; }
+.fold__sign::before, .fold__sign::after { content: ''; position: absolute; background: currentColor; }
+.fold__sign::before { width: 100%; height: 1.5px; top: 50%; left: 0; transform: translateY(-50%); }
+.fold__sign::after  { height: 100%; width: 1.5px; left: 50%; top: 0; transform: translateX(-50%); }
+.fold.is-open .fold__sign::after { display: none; }
+.fold__body { margin-top: 6px; }
+
+/* ── capcom ───────────────────────────────────────────────────────── */
+
+/* The band and the mode note are swapped per mode, not rebuilt. */
+.band[hidden], .capcom__note[hidden] { display: none; }
+
+/* Which command loop you are looking at. Dim: it is a fact, not a warning. */
+.capcom__note {
+  margin: 0; padding: 8px 12px 0; color: var(--ink-dim);
+  line-height: 1.5; text-transform: uppercase;
+}
+/* The transcript's own header: state, burn, speed. Sits above the log. */
+.capcom__head { border-bottom: 1px solid var(--line-soft); }
+.capcom__acts { padding-top: 0; }
+/* A message body or a feed source under its line. Never competes with it. */
+.capcom__note2 { margin-top: 3px; color: var(--ink-dimmer); font-size: 10px; word-break: break-word; }
+
+/* ── squads ───────────────────────────────────────────────────────── */
+
+/* The leader's row in the ALGN staircase: bright, not another colour. Lime is
+   the fleet's own colour and one row cannot outrank it. */
+.algn-row.is-lead [data-left] { color: var(--ink-bright); }
+/* What the ack could not tell us. Amber: it launched, with a caveat. */
+.algn-row .px.launch__warn {
+  grid-column: 1 / -1; margin: 3px 0 0; text-align: left; color: var(--amber);
+}
+.algn-row .px.launch__warn[hidden] { display: none; }
+/* LEAD next to a mission in the preset preview. */
+.launch__lead { color: var(--ink-bright); margin-right: 6px; }
+
+/* A fleet window on a squad gets one more column: the mark that says who
+   answers for the rest. Empty on every other row, so the callsigns stay aligned. */
+.arow--squad { grid-template-columns: 8px 30px 44px 1fr auto; }
+.arow__lead {
+  font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.12em;
+  color: var(--ink-bright); text-transform: uppercase;
+}
+/* The line that opens a squad's rows inside a project window. */
+.arow__group {
+  padding: 9px 12px 4px; color: var(--ink-dimmer);
+  border-bottom: 1px solid var(--line-soft); background: var(--screen-in);
+}
+
+/* ── sfx ──────────────────────────────────────────────────────────── */
+
+/*
+ * The instrument at the top: PRESET, PACK, LEVEL, one under the other with
+ * their Tiny5 labels in a fixed column, so the three controls line up on a
+ * single left edge whatever the window's width is.
+ */
+.sfx__head { flex: 0 0 auto; }
+.sfx__deck {
+  display: grid; grid-template-columns: 46px 1fr;
+  align-items: center; gap: 6px 10px;
+}
+.sfx__lab { color: var(--ink-dimmer); letter-spacing: 0.18em; }
+.sfx__acts { margin-top: 10px; gap: 8px; flex-wrap: wrap; }
+.sfx__save { gap: 6px; }
+/* Room for a name and no more: a preset is called MIXED, not a sentence. */
+.sfx__name-in { width: 108px; padding: 5px 7px; font-size: 10px; }
+
+/*
+ * The master, as an instrument and not as a browser's slider: ten cells, lit
+ * lime from the left. It reads at a glance the way the mast's own bars do,
+ * and it can be dragged, arrowed or clicked straight to a step.
+ */
+.sfx__vol { display: flex; align-items: center; gap: 8px; }
+.vol {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+  gap: 2px; flex: 1; min-width: 90px; height: 16px;
+  padding: 0; background: transparent; border: 0; cursor: none;
+  touch-action: none;
+}
+.vol:focus-visible { outline: 1px solid var(--lime); outline-offset: 3px; }
+.vol__cell { display: block; height: 100%; background: var(--pill-off); }
+/* Lit means audible. The glow is the slab's, at the size of one cell. */
+.vol__cell.is-lit { background: var(--lime); box-shadow: 0 0 10px var(--lime-glow); }
+.vol:hover .vol__cell.is-lit { filter: brightness(1.06); }
+.vol__n { flex: 0 0 auto; width: 30px; text-align: right; font-size: 10px; color: var(--ink-dim); }
+
+/* One event, its clip and its ▶. The picker takes what the name leaves. */
+.sfx__row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 168px 20px;
+  align-items: center; gap: 8px; padding: 6px 0;
+}
+/* A picker in a row is a fact, not a headline: the clip's name at the row's
+   own size, and the note beside it small enough to stay a note. */
+.sfx__pick .pick__btn { padding: 6px 8px; }
+/* `min-width: 0` is what lets a long `mechanical:open.capcom` ellipsise
+   instead of pushing the caret out of the button. */
+.sfx__pick .pick__btn b { font-size: 10px; letter-spacing: 0.1em; min-width: 0; }
+.sfx__pick .pick__btn .mono { font-size: 9px; text-align: right; }
+.sfx__row + .sfx__row { border-top: 1px solid var(--line-soft); }
+.sfx__name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+/* The event's own name: the row's subject, so one step above the fact under
+   it — never the headline the default Tiny5 size would make of it. */
+.sfx__name b { font-size: 11px; letter-spacing: 0.15em; color: var(--ink-mid); }
+/* What the event is, under its name. A fact, so it never competes with it. */
+.sfx__what { font-size: 9px; color: var(--ink-dimmer); }
+
+/* The audition. It ignores the mute, so it is lit even when the console is
+   silent — this is the operator's own sound, not the console's. */
+.sfx__play {
+  width: 20px; height: 20px; padding: 0; cursor: none;
+  display: grid; place-items: center; flex: 0 0 auto;
+  background: transparent; border: 1px solid var(--line);
+  color: var(--ink-dim); font-size: 9px; line-height: 1;
+}
+.sfx__play:hover { border-color: var(--lime); color: var(--lime); }
+.sfx__play:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+.sfx__play:active { background: var(--lime); color: #111; border-color: var(--lime); }
+
+/*
+ * The five voices, at the bottom. A sample, the name (which is also how you
+ * take it), how much of the set it actually has, and the voice in one line.
+ */
+.sfx__pack {
+  display: grid; grid-template-columns: 20px auto 1fr; gap: 8px;
+  align-items: center; padding: 7px 0;
+}
+.sfx__pack + .sfx__pack { border-top: 1px solid var(--line-soft); }
+.sfx__packname {
+  background: transparent; border: 0; padding: 0; cursor: none; text-align: left;
+  font-size: 11px; letter-spacing: 0.15em; color: var(--ink-mid);
+}
+.sfx__packname:hover { color: var(--lime); }
+.sfx__packname:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+/* The pack the console is speaking with. Lime, like everything chosen. */
+.sfx__pack.is-cur .sfx__packname { color: var(--lime); }
+.sfx__pack.is-cur .sfx__play { border-color: var(--lime); color: var(--lime); }
+/* The style line the generator wrote. It spans the row and it wraps. */
+.sfx__style {
+  grid-column: 2 / -1; margin: 3px 0 0;
+  color: var(--ink-dimmer); font-size: 9px; line-height: 1.6; text-transform: uppercase;
+}
+/* How many clips, or how long one runs. Right-aligned, never wrapping. */
+.sfx__meta {
+  margin-left: auto; text-align: right; color: var(--ink-dimmer);
+  font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── music ────────────────────────────────────────────────────────── */
+
+/*
+ * A record player in instrument chrome. The two embeds bring their own
+ * interiors — Bandcamp's black, Spotify's rounded green — so the console does
+ * the one thing it can: sets them into the glass behind a `--line` border and
+ * gives them nothing else. No shadow, no gradient, no frame around the frame.
+ */
+.mus__deck { padding: 8px; border-bottom: 1px solid var(--line-soft); }
+/*
+ * The well carries the border, the frame carries none. Spotify's embed picks
+ * its layout at exactly 352px of viewport height: a 1px border on a
+ * `border-box` iframe leaves it 350, and it draws the short card in the tall
+ * box with its own white page under the rest.
+ */
+.mus__well {
+  border: 1px solid var(--line); border-radius: 2px; background: var(--bezel);
+  overflow: hidden; line-height: 0;
+}
+.mus__well[hidden] { display: none; }
+/* Spotify's frame is built by its API inside this host; it wears `.mus__frame` once it exists. */
+.mus__sp { display: block; }
+.mus__sp[hidden], .mus__frame[hidden] { display: none; }
+.mus__frame {
+  display: block; width: 100%; height: var(--mus-h, 352px); border: 0;
+  /* Both players paint their own interior. This only decides what the frame
+     is while it is still arriving — a white flash across the glass otherwise. */
+  color-scheme: dark;
+}
+.mus__empty { padding: 18px 4px; color: var(--ink-faint); text-align: center; }
+.mus__empty[hidden] { display: none; }
+
+/* One source. ▶ takes it, ✕ drops it, and the one playing is the lime one. */
+.mus__row {
+  display: grid; grid-template-columns: 20px 1fr auto 18px; gap: 8px;
+  align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line-soft);
+}
+.mus__row:hover { background: var(--screen-in); }
+.mus__what { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mus__what b {
+  font-size: 11px; letter-spacing: 0.14em; color: var(--ink-mid); font-weight: 400;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The url is what a machine wrote, so it is mono and it is dim. */
+.mus__url { font-size: 9px; color: var(--ink-dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mus__kind { font-size: 8px; color: var(--ink-faint); letter-spacing: 0.16em; }
+
+/* Lime means playing, here as everywhere else. */
+.mus__row.is-on b { color: var(--lime); }
+.mus__row.is-on .mus__play { border-color: var(--lime); color: var(--lime); }
+.mus__row.is-on .mus__kind { color: var(--ink-dim); }
+
+.mus__play {
+  width: 20px; height: 20px; padding: 0; cursor: none;
+  display: grid; place-items: center;
+  background: transparent; border: 1px solid var(--line); color: var(--ink-dim);
+  font-size: 9px; line-height: 1;
+}
+.mus__play:hover { border-color: var(--lime); color: var(--lime); }
+.mus__play:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+.mus__play:active { background: var(--lime); color: #111; border-color: var(--lime); }
+
+.mus__drop {
+  width: 18px; height: 18px; padding: 0; cursor: none;
+  background: transparent; border: 0; color: var(--ink-faint); font-size: 10px; line-height: 1;
+}
+.mus__drop:hover { color: var(--red); }
+.mus__drop:focus-visible { outline: 1px solid var(--red); outline-offset: 2px; }
+
+/* The paste line, held at the bottom of the glass. */
+.mus__add {
+  display: grid; gap: 8px;
+  padding: 8px; border-top: 1px solid var(--line-soft); flex: 0 0 auto;
+}
+.mus__add .input { font-size: 10px; }
+
+/* What went wrong, in the console's own voice. Amber: it wants a human. */
+.mus__note {
+  margin: 0; padding: 0 10px 8px; color: var(--amber); line-height: 1.6;
+  font-size: 9px; text-transform: uppercase; flex: 0 0 auto;
+}
+.mus__note[hidden] { display: none; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   slab buttons · the console's primary action, as an instrument
+   ══════════════════════════════════════════════════════════════════════
+
+   The comp's LAUNCH FLEET is the shape: a lime slab across the full width of
+   what it commits, black pixel type at a wide track, and the slab's glow. Any
+   window that asks the operator to do one thing gets exactly one of these, so
+   the lime always answers "what does this window want from me".
+
+   `.btn` stays what it is — the secondary row (FLY, LOGS, FRAME, RAW) — and
+   it is 34px tall so it lines up with `.slab-btn--sm`.
+
+   The colours carry their usual meaning and nothing else:
+     lime   the console is certain, and this is the thing to do
+     amber  a human decides · answering an escalation, leaving the past
+     red    armed and destructive · the second click of STOP
+     ghost  a second action of equal rank, never a second lime
+*/
+
+.slab-btn {
+  -webkit-appearance: none; appearance: none;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; margin: 0; padding: 0 16px;
+  min-height: 44px;
+  background: var(--lime); color: #111;
+  border: 0; border-radius: var(--r-panel);
+  box-shadow: 0 0 28px rgba(192, 249, 74, 0.35);
+  font-family: 'Tiny5', monospace; font-weight: 400;
+  font-size: 14px; letter-spacing: 0.22em; line-height: 1;
+  text-transform: uppercase; text-align: center; white-space: nowrap;
+}
+/* Anything inside the slab is the slab's ink, whatever `.px` says. */
+.slab-btn .px, .slab-btn b { color: inherit; font-size: inherit; letter-spacing: inherit; }
+
+.slab-btn--lg { min-height: 58px; font-size: 18px; }
+.slab-btn--sm { min-height: 34px; font-size: 11px; padding: 0 12px; }
+/* A slab that sits in a row of facts instead of owning one: LIVE, an armed STOP. */
+.slab-btn--fit { width: auto; }
+
+.slab-btn:hover { filter: brightness(1.06); }
+/* It goes down when you press it. One pixel is the whole gesture. */
+.slab-btn:active { transform: translateY(1px); }
+
+/*
+ * §6.2 · The confirm. The slab inverts to ink for one `--t-snap` and cuts
+ * back — the comp's local flash, spent on the button that just took an order.
+ * Two cuts and no transition: a palette never eases, here or anywhere.
+ *
+ * `fx.ts` puts this class on and takes it off; red never gets it, because the
+ * armed STOP is the one thing in the console that must not move.
+ */
+.slab-btn.is-flash { background: #111; color: var(--lime); box-shadow: none; }
+.slab-btn--amber.is-flash { color: var(--amber); }
+.slab-btn--ghost.is-flash { color: var(--lime); box-shadow: inset 0 0 0 1px var(--lime); }
+.slab-btn.is-flash > kbd.key { color: rgba(192, 249, 74, 0.6); }
+
+/*
+ * §6.2 · A3, at the size of a button: while the action is out with the hub a
+ * thin band runs along the slab's bottom edge. It reports that something is in
+ * flight and never how far along it is — an agent has no percentage, and
+ * neither does a spawn.
+ */
+.slab-btn { position: relative; overflow: hidden; }
+.slab-btn.is-busy::after {
+  content: ''; position: absolute; left: 0; bottom: 0; height: 2px; width: 30%;
+  background: #111;
+  animation: slab-band 1.15s var(--ease-inout) infinite;
+}
+.slab-btn--red.is-busy::after { background: #1a0000; }
+.slab-btn--ghost.is-busy::after { background: var(--lime); }
+@keyframes slab-band { from { transform: translateX(-110%); } to { transform: translateX(370%); } }
+/* The focus ring is drawn inside the slab, in the slab's own ink. */
+.slab-btn:focus-visible { outline: 1px solid #111; outline-offset: -4px; }
+
+/* Amber: a human decides. */
+.slab-btn--amber { background: var(--amber); box-shadow: 0 0 28px rgba(245, 165, 36, 0.35); }
+/* Red: armed. Only ever the second click. */
+.slab-btn--red { background: var(--red); color: #1a0000; box-shadow: 0 0 28px rgba(255, 42, 18, 0.35); }
+.slab-btn--red:focus-visible { outline-color: #1a0000; }
+
+/* Ghost: the same button, unlit. A second action that is not a second lime. */
+.slab-btn--ghost {
+  background: transparent; color: var(--lime);
+  box-shadow: inset 0 0 0 1px var(--lime);
+}
+.slab-btn--ghost:hover { filter: none; background: rgba(192, 249, 74, 0.1); }
+.slab-btn--ghost:focus-visible { outline-color: var(--lime); }
+
+/* Off is off: the slab loses its colour and its glow, like `.slab.is-off`. */
+.slab-btn:disabled, .slab-btn.is-off {
+  background: var(--pill-off); color: #d2d2d6; box-shadow: none;
+  pointer-events: none; filter: none; transform: none;
+}
+
+/*
+ * The strip a slab lives in: what you type, then the slab that sends it. It is
+ * its own container, so the slab can take the larger size when the window is
+ * wide enough to deserve it and stay compact when it is not.
+ */
+.slab-row {
+  display: grid; gap: 8px; container-type: inline-size;
+}
+.slab-pair { display: flex; gap: 8px; }
+.slab-pair > .slab-btn { flex: 1 1 0; min-width: 0; }
+@container (min-width: 360px) {
+  .slab-btn--auto { min-height: 58px; font-size: 18px; }
+}
+
+/* One escalation's one-tap answers: the amber slabs share the block's width
+   and wrap, so two options are two halves and five are a keypad. */
+.block__opts > .slab-btn { width: auto; flex: 1 1 auto; }
+
+/* The artifact's own strip, under the bar of facts. */
+.art__go { padding: 0 10px 8px; }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   keycaps · every button says which key it is
+   ══════════════════════════════════════════════════════════════════════
+
+   The manager injects these from `data-key`; no kind types one by hand. They
+   are the mast's caps exactly — Tiny5 at 8px, `--ink-faint` — so the same
+   mark means the same thing on the glass and inside a window. On a lit slab
+   the cap is the slab's own ink at 60%: present, and never louder than the
+   word it sits next to.
+*/
+
+kbd.key {
+  font-family: 'Tiny5', monospace; font-size: 8px; font-weight: 400;
+  letter-spacing: 0.1em; line-height: 1; color: var(--ink-faint);
+  background: none; border: 0; padding: 0;
+}
+/* `.chip` and `.slab-btn` already carry a gap; `.btn` and `.win__btn` do not. */
+.btn > kbd.key, .win__btn > kbd.key, .fold__k > kbd.key, .tgl > kbd.key { margin-left: 6px; }
+
+.slab-btn > kbd.key { color: rgba(17, 17, 17, 0.6); font-size: 9px; }
+.slab-btn--lg > kbd.key { font-size: 11px; }
+.slab-btn--red > kbd.key { color: rgba(26, 0, 0, 0.6); }
+.slab-btn--ghost > kbd.key { color: rgba(192, 249, 74, 0.6); }
+.slab-btn:disabled > kbd.key, .slab-btn.is-off > kbd.key { color: rgba(17, 17, 17, 0.45); }
+.btn:hover > kbd.key, .chip:hover > kbd.key { color: var(--ink-dimmer); }
+
+/*
+ * §6.2 · The keyboard echo. The chord fires, and the cap of the button it
+ * fired cuts to lime and falls back after one `--t-snap`. It is the only proof
+ * a key press gets that it landed where the cap promised, and it never moves
+ * the button — a button that jumps under a keystroke reads as a mis-hit.
+ *
+ * On a lit slab the cap is already the slab's own ink, so the echo inverts the
+ * other way: it goes to the slab's colour, which reads as the same flash.
+ */
+kbd.key.is-echo { color: var(--lime); }
+.slab-btn > kbd.key.is-echo { color: #111; opacity: 1; }
+.slab-btn--red > kbd.key.is-echo { color: #1a0000; }
+.slab-btn--ghost > kbd.key.is-echo { color: var(--lime); }
+
+/* The gallery answers `P` on whichever thumbnail is under the hand, so only
+   that one wears the cap. Twelve caps at once would be twelve promises. */
+.thumb .thumb__place > kbd.key { opacity: 0; }
+.thumb:hover .thumb__place > kbd.key,
+.thumb:focus-within .thumb__place > kbd.key { opacity: 1; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   the edge indicator · this window's tile is off screen
+   ══════════════════════════════════════════════════════════════════════
+
+   A window anchored to a tile that wandered out of view used to fade to 15%
+   and take its report with it. Now it clamps to the edge nearest the tile at
+   full size and grows this: the tether's square port, a pixel arrow pointing
+   the way, and the callsign, in the window's state colour. Click it — or `V`
+   with the window active — for a temporary zoom-out that Backspace undoes.
+*/
+
+.win__off {
+  position: absolute; z-index: 6;
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 7px; margin: 0;
+  background: rgba(11, 10, 13, 0.92);
+  border: 1px solid var(--win-state, var(--line));
+  color: var(--win-state, var(--ink-mid));
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.14em;
+  text-transform: uppercase; line-height: 1; white-space: nowrap;
+}
+.win__off:hover { background: rgba(11, 10, 13, 1); filter: brightness(1.15); }
+.win__off-port { width: 6px; height: 6px; background: currentColor; flex: none; }
+.win__off-arr { width: 9px; height: 9px; background: currentColor; flex: none; }
+
+/* Pixel arrows, cut not drawn: the shape is the clip. */
+.win__off.is-l .win__off-arr { clip-path: polygon(100% 0, 100% 100%, 0 50%); }
+.win__off.is-r .win__off-arr { clip-path: polygon(0 0, 0 100%, 100% 50%); }
+.win__off.is-t .win__off-arr { clip-path: polygon(0 100%, 100% 100%, 50% 0); }
+.win__off.is-b .win__off-arr { clip-path: polygon(0 0, 100% 0, 50% 100%); }
+
+/* Stuck to the side the tile is on, inside the housing so nothing clips it. */
+.win__off.is-l { left: 6px; top: 50%; transform: translateY(-50%); }
+.win__off.is-r { right: 6px; top: 50%; transform: translateY(-50%); flex-direction: row-reverse; }
+.win__off.is-t { top: 36px; left: 50%; transform: translateX(-50%); }
+.win__off.is-b { bottom: 24px; left: 50%; transform: translateX(-50%); flex-direction: row-reverse; }
+
+/* ── Settings: the console's knobs, one row each ─────────────────── */
+.set__row { display: grid; grid-template-columns: 56px 1fr; gap: 12px; align-items: center; margin-top: 8px; }
+.set__lab { color: var(--ink-dimmer); letter-spacing: 0.18em; }
+.set__hint { margin: 10px 0 0; color: var(--ink-faint); letter-spacing: 0.14em; line-height: 1.6; }
+.lvl { display: flex; align-items: center; gap: 8px; }

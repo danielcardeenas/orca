@@ -24,6 +24,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { squadName } from '../shared/squads.ts';
+import type { AgentRole } from '../shared/types.ts';
 import type { Lineage } from './derive.ts';
 import type { LineBatch, TranscriptRef } from './watch.ts';
 import { errText, guard, isRecord, log, oneLine, orcaDir, safeJson, str } from './util.ts';
@@ -42,6 +44,19 @@ interface SpawnRecord {
   sessionId: string | null;
   parentId: string | null;
   mission: string | null;
+  /** Squad the console enlisted it in, if any. Same provenance as `mission`. */
+  squad: string | null;
+  /** Whether it was spawned as that squad's leader. */
+  lead: boolean;
+  /**
+   * 'capcom' when this spawn was the fleet's command session.
+   *
+   * Same provenance as `mission` and `squad`, and the same reason for being on
+   * disk: nothing in a transcript says "this session commands the fleet", so
+   * without this line a collector restart would demote CAPCOM to an ordinary
+   * agent and the console would lose its command window.
+   */
+  role: AgentRole;
   at: number;
 }
 
@@ -118,10 +133,22 @@ export class LineageIndex {
 
   /* ── (b) spawns de ORCA ───────────────────────────────────────── */
 
-  noteSpawn(shortId: string, parentId: string | null, mission: string | null): void {
+  /**
+   * Un spawn de ORCA, con todo lo que la Command dijo de él.
+   *
+   * `squad`, `lead` y `role` viajan por el mismo camino que `mission` y por la
+   * misma razón: nada de eso está en el transcript, así que si no lo apuntamos
+   * aquí el agente aparece huérfano de contexto al siguiente arranque del
+   * collector — y CAPCOM, en concreto, dejaría de ser el mando de la flota.
+   */
+  noteSpawn(
+    shortId: string, parentId: string | null, mission: string | null,
+    squad: string | null = null, lead = false, role: AgentRole = 'agent',
+  ): void {
     this.spawns = this.spawns.filter((s) => s.shortId !== shortId);
     this.spawns.push({
       shortId, sessionId: null, parentId, mission: mission ? oneLine(mission, 240) : null,
+      squad, lead: squad ? lead : false, role,
       at: Date.now(),
     });
     this.trimSpawns();
@@ -152,11 +179,15 @@ export class LineageIndex {
       if (!isRecord(raw)) continue;
       const shortId = str(raw['shortId']);
       if (!shortId) continue;
+      const squad = squadName(raw['squad']);
       this.spawns.push({
         shortId,
         sessionId: str(raw['sessionId']),
         parentId: str(raw['parentId']),
         mission: str(raw['mission']),
+        squad,
+        lead: squad !== null && raw['lead'] === true,
+        role: raw['role'] === 'capcom' ? 'capcom' : 'agent',
         at: typeof raw['at'] === 'number' ? raw['at'] : Date.now(),
       });
     }
@@ -188,11 +219,17 @@ export class LineageIndex {
     const known = new Set(inputs.map((i) => i.key));
     const parent = new Map<string, string | null>();
     const mission = new Map<string, string | null>();
+    const squad = new Map<string, string | null>();
+    const lead = new Map<string, boolean>();
+    const role = new Map<string, AgentRole>();
     const hintDepth = new Map<string, number>();
 
     for (const inp of inputs) {
       parent.set(inp.key, null);
       mission.set(inp.key, null);
+      squad.set(inp.key, null);
+      lead.set(inp.key, false);
+      role.set(inp.key, 'agent');
 
       if (inp.metaPath) {
         const meta = this.readMeta(inp.metaPath);
@@ -221,6 +258,19 @@ export class LineageIndex {
       );
       if (spawn) {
         if (spawn.mission) mission.set(inp.key, spawn.mission);
+        // El escuadrón no se hereda ni se adivina: o lo dijo el spawn, o no
+        // hay escuadrón. Un subagente `Task` de un miembro trabaja PARA su
+        // padre, no para el escuadrón, y meterlo dentro convertiría cualquier
+        // fan-out interno en tres miembros más que el líder no pidió.
+        if (spawn.squad) {
+          squad.set(inp.key, spawn.squad);
+          lead.set(inp.key, spawn.lead);
+        }
+        // El rol no se hereda ni se propaga hacia abajo: un subagente `Task` de
+        // CAPCOM trabaja PARA el mando, no ES el mando, y dos sesiones con
+        // role:'capcom' sería un hub que no sabe a cuál entregarle lo que
+        // escribe el humano.
+        if (spawn.role === 'capcom') role.set(inp.key, 'capcom');
         if (spawn.parentId && known.has(spawn.parentId) && spawn.parentId !== inp.key) {
           parent.set(inp.key, spawn.parentId);
         }
@@ -242,6 +292,9 @@ export class LineageIndex {
         depth: depthOf(key, parent, hintDepth),
         childIds: (children.get(key) ?? []).sort(),
         mission: mission.get(key) ?? null,
+        squad: squad.get(key) ?? null,
+        lead: lead.get(key) ?? false,
+        role: role.get(key) ?? 'agent',
       });
     }
     return out;

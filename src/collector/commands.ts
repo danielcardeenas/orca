@@ -18,11 +18,16 @@
  */
 
 import { spawn } from 'node:child_process';
+import { runtimeNote, runtimeReady } from './runtime.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Command } from '../shared/protocol.ts';
+import type { Command, SpawnAck } from '../shared/protocol.ts';
+import { SPAWN_ACK_TIMEOUT_MS } from '../shared/protocol.ts';
+import { squadName } from '../shared/squads.ts';
 import type { AgentMessage } from '../shared/types.ts';
+import { squadBrief, withBrief } from './briefs.ts';
+import type { ArtifactIndex } from './artifacts.ts';
 import type { EscalationWatcher } from './escalate.ts';
 import type { KeyVault } from './keys.ts';
 import type { LineageIndex } from './lineage.ts';
@@ -47,6 +52,17 @@ export interface AgentHandle {
   shortId: string | null;
   background: boolean;
   alive: boolean;
+  /** La etiqueta que la consola enseña, p.ej. "K9". */
+  callsign: string;
+}
+
+/** Qué sesión buscar tras un spawn. Ver `CommandDeps.awaitSpawn`. */
+export interface SpawnLookup {
+  /** El short id que imprimió el CLI, cuando lo imprimió. */
+  shortId: string | null;
+  projectId: string;
+  /** epoch ms justo antes de lanzar: descarta sesiones que ya existían. */
+  since: number;
 }
 
 export interface CommandDeps {
@@ -55,10 +71,39 @@ export interface CommandDeps {
   lineage: LineageIndex;
   escalations: EscalationWatcher;
   messages: MessageWatcher;
+  artifacts: ArtifactIndex;
   /** Sólo devuelve agentes que ORCA está observando ahora mismo. */
   agent(id: string): AgentHandle | null;
+  /**
+   * Espera a que la sesión recién lanzada aparezca de verdad, para poder
+   * devolver su id en el ack. null si no llegó a tiempo — el proceso arrancó
+   * igual y `agent:new` la anunciará cuando ORCA la vea.
+   */
+  awaitSpawn(want: SpawnLookup, timeoutMs: number): Promise<AgentHandle | null>;
   onResync(): void;
   onKeysChanged(): void;
+  /**
+   * El canal de CAPCOM, cuando esta máquina lo lleva.
+   *
+   * CAPCOM se habla con el mismo `say` que cualquier agente y NO se lanza como
+   * cualquier agente: sus herramientas viven en un servidor MCP y hay que
+   * volver a nombrarlo en cada invocación. Peor: `claude --bg --resume` arrastra
+   * la conversación a una sesión NUEVA, así que el rol tiene que mudarse con
+   * ella o la flota se queda sin mando en cuanto el humano dice la primera cosa.
+   * Las dos cosas son de CAPCOM y de nadie más, así que entran por aquí en vez
+   * de ensuciar `say` con condicionales.
+   */
+  capcom?: CapcomChannel;
+}
+
+/** Lo que `commands.ts` necesita saber de CAPCOM. Lo implementa capcom.ts. */
+export interface CapcomChannel {
+  /** ¿Es este short id la sesión CAPCOM? */
+  owns(shortId: string | null): boolean;
+  /** Las opciones que toda invocación suya necesita: MCP, permisos, nombre. */
+  launchArgs(): string[];
+  /** El resume creó una sesión nueva: el rol se muda a ella. */
+  adopt(shortId: string): void;
 }
 
 export interface CommandResult {
@@ -95,6 +140,7 @@ export class CommandRunner {
         case 'reply': return await this.reply(cmd);
         case 'key:set': return this.keySet(cmd);
         case 'key:remove': return this.keyRemove(cmd);
+        case 'artifact:read': return await this.artifactRead(cmd);
         case 'resync': this.deps.onResync(); return { ok: true, detail: 'resync encolado' };
         case 'logs': return await this.logs(cmd);
         default: {
@@ -112,6 +158,9 @@ export class CommandRunner {
   /* ── spawn ────────────────────────────────────────────────────── */
 
   private async spawn(cmd: Extract<Command, { k: 'spawn' }>): Promise<CommandResult> {
+    // Un runtime que este collector no sabe conducir se rechaza con el porqué,
+    // en vez de lanzar `claude` y fingir que era Codex.
+    if (!runtimeReady(cmd.runtime)) return { ok: false, detail: runtimeNote(cmd.runtime) };
     if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
     const project = this.deps.projects.get(cmd.projectId);
     if (!project) return { ok: false, detail: `proyecto desconocido: ${cmd.projectId}` };
@@ -124,6 +173,34 @@ export class CommandRunner {
       return { ok: false, detail: 'prompt vacío' };
     }
     if (cmd.prompt.length > 100_000) return { ok: false, detail: 'prompt absurdamente largo' };
+
+    /*
+     * Escuadrón.
+     *
+     * Se valida antes de tocar nada porque el nombre acaba en tres sitios que
+     * no perdonan basura: el argv de nadie (nunca), el disco (lineage.json), y
+     * el pie del prompt que el agente va a leer como instrucción. Un nombre
+     * inventado sería un escuadrón al que nadie puede escribirle.
+     */
+    let squad: string | null = null;
+    if (cmd.squad !== undefined && cmd.squad !== null && cmd.squad !== '') {
+      squad = squadName(cmd.squad);
+      if (!squad) return { ok: false, detail: `nombre de escuadrón inválido: ${String(cmd.squad)}` };
+    }
+    const lead = squad !== null && cmd.lead === true;
+
+    /*
+     * El pie del brief.
+     *
+     * Va DENTRO del prompt, no en el env, porque el env no lo lee el modelo. Un
+     * miembro que no sabe que tiene líder escala al humano, y cinco agentes
+     * escalando al humano es exactamente lo que un escuadrón existe para
+     * evitar. El texto vive en briefs.ts para poder editarlo sin leer esto.
+     */
+    let prompt = cmd.prompt;
+    const brief = squadBrief(squad, lead,
+      cmd.parentId ? this.deps.agent(cmd.parentId)?.callsign ?? null : null);
+    if (brief) prompt = withBrief(prompt, brief);
 
     // argv como ARRAY. El prompt es un elemento, nunca texto de shell.
     const args: string[] = [];
@@ -149,8 +226,8 @@ export class CommandRunner {
      * starts the interactive session that `claude agents` attaches to"— así que
      * con -p todo spawn en background fallaba antes de arrancar.
      */
-    if (cmd.background) args.push(cmd.prompt);
-    else args.push('-p', cmd.prompt);
+    if (cmd.background) args.push(prompt);
+    else args.push('-p', prompt);
 
     const env = {
       ...process.env,
@@ -159,6 +236,7 @@ export class CommandRunner {
       ORCA_PARENT_ID: cmd.parentId ?? '',
     };
 
+    const since = Date.now();
     const res = await run(this.bin, args, { cwd, env, timeoutMs: 60_000, detach: true });
     if (!res.ok) return { ok: false, detail: res.detail };
 
@@ -166,13 +244,37 @@ export class CommandRunner {
     if (shortId) {
       // Anotamos el linaje ANTES de contárselo al hub: si el collector muere en
       // el siguiente instante, el padre ya quedó persistido en disco.
-      this.deps.lineage.noteSpawn(shortId, cmd.parentId, cmd.mission);
+      this.deps.lineage.noteSpawn(shortId, cmd.parentId, cmd.mission, squad, lead);
     }
-    log('info', SCOPE, `spawn en ${project.name} → ${shortId ?? '(sin id)'}`);
+
+    /*
+     * Esperar al id.
+     *
+     * El CLI imprime un short id, no un id de sesión, y ORCA nombra las cosas
+     * por sesión. Sin resolverlo aquí, quien acaba de lanzar a un líder no
+     * tiene con qué lanzar a sus miembros — `parentId` es exactamente ese id —
+     * y tendría que adivinarlo mirando la consola.
+     *
+     * Se espera hasta SPAWN_ACK_TIMEOUT_MS (8s). Pasado eso el ack sale igual
+     * con `agentId: null`: el proceso ARRANCÓ, y decir que falló sería mentir.
+     */
+    const found = await this.deps.awaitSpawn(
+      { shortId, projectId: cmd.projectId, since }, SPAWN_ACK_TIMEOUT_MS,
+    );
+    const data: SpawnAck = {
+      agentId: found?.id ?? null,
+      callsign: found?.callsign ?? null,
+      shortId: found?.shortId ?? shortId,
+      stdout: oneLine(res.stdout, 400),
+    };
+    log('info', SCOPE, `spawn en ${project.name} → ${data.agentId ?? shortId ?? '(sin id)'}`
+      + (squad ? ` [${squad}${lead ? ' lead' : ''}]` : ''));
     return {
       ok: true,
-      detail: shortId ? `sesión ${shortId}` : 'lanzado',
-      data: { shortId, stdout: oneLine(res.stdout, 400) },
+      detail: found
+        ? `sesión ${found.callsign} (${found.id})`
+        : `lanzado; la sesión no apareció en ${SPAWN_ACK_TIMEOUT_MS / 1000}s, llegará por agent:new`,
+      data,
     };
   }
 
@@ -190,12 +292,33 @@ export class CommandRunner {
     // No hay `claude say`. Continuar la sesión en background con un prompt nuevo
     // ES el canal de entrada de texto que el CLI ofrece hoy.
     // Prompt posicional: con --bg, -p es un error del CLI (ver spawn()).
-    const res = await run(this.bin, ['--bg', '--resume', a.sessionId, cmd.text], {
+    const cap = this.capcomFor(a);
+    const res = await run(this.bin, ['--bg', ...(cap?.launchArgs() ?? []), '--resume', a.sessionId, cmd.text], {
       cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000, detach: true,
     });
+    if (res.ok && cap) this.moveCapcom(cap, res.stdout);
     return res.ok
       ? { ok: true, detail: oneLine(res.stdout, 200) }
       : { ok: false, detail: res.detail };
+  }
+
+  /** El canal de CAPCOM si este agente lo es, null para todos los demás. */
+  private capcomFor(a: AgentHandle): CapcomChannel | null {
+    const cap = this.deps.capcom;
+    return cap && cap.owns(a.shortId) ? cap : null;
+  }
+
+  /**
+   * El resume devolvió un short id nuevo: ahí está CAPCOM ahora.
+   *
+   * Si el CLI no imprimió ninguno no se toca nada. Mudar el rol a un id que no
+   * conocemos sería peor que no mudarlo: el vigilante del collector daría por
+   * muerto al mando y lanzaría un segundo CAPCOM encima del que acaba de
+   * contestar.
+   */
+  private moveCapcom(cap: CapcomChannel, stdout: string): void {
+    const next = extractShortId(stdout);
+    if (next) cap.adopt(next);
   }
 
   private async resume(cmd: Extract<Command, { k: 'resume' }>): Promise<CommandResult> {
@@ -205,9 +328,11 @@ export class CommandRunner {
     if (!ID_RE.test(a.sessionId)) return { ok: false, detail: 'sessionId inválido' };
     const cwd = await this.cwdOf(a);
     if (!cwd.ok) return cwd.res;
-    const res = await run(this.bin, ['--bg', '--resume', a.sessionId], {
+    const cap = this.capcomFor(a);
+    const res = await run(this.bin, ['--bg', ...(cap?.launchArgs() ?? []), '--resume', a.sessionId], {
       cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000, detach: true,
     });
+    if (res.ok && cap) this.moveCapcom(cap, res.stdout);
     return res.ok
       ? { ok: true, detail: oneLine(res.stdout, 200) }
       : { ok: false, detail: res.detail };
@@ -324,6 +449,23 @@ export class CommandRunner {
       by = from.id;
     }
     return await this.deps.messages.reply(cmd.messageId, cmd.answer, by);
+  }
+
+  /* ── artefactos ───────────────────────────────────────────────── */
+
+  /**
+   * Los bytes de algo que el collector ya registró.
+   *
+   * Ojo con lo que NO hay aquí: una ruta. El hub nombra un id, y la lista
+   * blanca es el propio índice de artefactos — sólo archivos que este proceso
+   * vio aparecer o que un agente publicó desde su proyecto. Un hub comprometido
+   * no puede convertir esto en "léeme ~/.ssh/id_rsa".
+   */
+  private async artifactRead(cmd: Extract<Command, { k: 'artifact:read' }>): Promise<CommandResult> {
+    if (typeof cmd.artifactId !== 'string' || !cmd.artifactId) {
+      return { ok: false, detail: 'artifactId vacío' };
+    }
+    return await this.deps.artifacts.read(cmd.artifactId);
   }
 
   /* ── keys ─────────────────────────────────────────────────────── */

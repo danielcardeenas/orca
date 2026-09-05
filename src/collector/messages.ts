@@ -31,6 +31,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import type { AgentMessage, MessageKind, MessageScope } from '../shared/types.ts';
+import { squadName } from '../shared/squads.ts';
 import {
   errText, guardAsync, isRecord, launchable, log, oneLine, safeJson, sha1, str,
 } from './util.ts';
@@ -350,6 +351,7 @@ export class MessageWatcher {
       fromProjectId: t.projectId,
       toAgentId: route.toAgentId,
       toProjectId: route.toProjectId,
+      toSquad: route.toSquad,
       subject,
       body,
       files,
@@ -363,38 +365,61 @@ export class MessageWatcher {
   }
 
   /**
-   * `to` → scope + destino. Tres formas y un degradado:
+   * `to` → scope + destino. Cuatro formas y un degradado:
    *   "K9"                → agent    (si ese callsign existe ahora mismo)
    *   "project:dijosi"    → project
+   *   "squad:audit-01"    → squad
    *   "fleet" | null | "" → fleet
    * Cualquier otra cosa que parezca un callsign y no lo sea cae a project del
    * emisor, con nota.
+   *
+   * Un `squad:` NO se comprueba aquí, y es deliberado: un escuadrón puede tener
+   * miembros en otra máquina, y este collector sólo ve la suya. El hub es el
+   * único que ve la flota entera, así que es el único que puede decir "en ese
+   * escuadrón no hay nadie" — y lo dice, en el feed, en vez de tragárselo.
    */
   private route(to: unknown, fromProjectId: string): {
-    scope: MessageScope; toAgentId: string | null; toProjectId: string | null; note: string | null;
+    scope: MessageScope; toAgentId: string | null; toProjectId: string | null;
+    toSquad: string | null; note: string | null;
   } {
     const raw = typeof to === 'string' ? to.trim() : '';
     if (!raw || raw.toLowerCase() === 'fleet' || raw === '*') {
-      return { scope: 'fleet', toAgentId: null, toProjectId: null, note: null };
+      return { scope: 'fleet', toAgentId: null, toProjectId: null, toSquad: null, note: null };
     }
 
     const lower = raw.toLowerCase();
     if (lower.startsWith('project:')) {
       const name = raw.slice('project:'.length).trim();
       const id = name ? this.deps.projectByName(name) : null;
-      if (id) return { scope: 'project', toAgentId: null, toProjectId: id, note: null };
+      if (id) {
+        return { scope: 'project', toAgentId: null, toProjectId: id, toSquad: null, note: null };
+      }
       return {
-        scope: 'project', toAgentId: null, toProjectId: fromProjectId,
+        scope: 'project', toAgentId: null, toProjectId: fromProjectId, toSquad: null,
         note: `no encontré el proyecto ${oneLine(name, 40) || '(vacío)'}`,
+      };
+    }
+
+    if (lower.startsWith('squad:')) {
+      const name = squadName(raw.slice('squad:'.length));
+      if (name) {
+        return { scope: 'squad', toAgentId: null, toProjectId: null, toSquad: name, note: null };
+      }
+      return {
+        scope: 'project', toAgentId: null, toProjectId: fromProjectId, toSquad: null,
+        note: `escuadrón inválido ${oneLine(raw.slice('squad:'.length), 40) || '(vacío)'}`,
       };
     }
 
     const hit = this.deps.agentByCallsign(raw);
     if (hit) {
-      return { scope: 'agent', toAgentId: hit.agentId, toProjectId: hit.projectId, note: null };
+      return {
+        scope: 'agent', toAgentId: hit.agentId, toProjectId: hit.projectId,
+        toSquad: null, note: null,
+      };
     }
     return {
-      scope: 'project', toAgentId: null, toProjectId: fromProjectId,
+      scope: 'project', toAgentId: null, toProjectId: fromProjectId, toSquad: null,
       note: `no encontré a ${oneLine(raw, 40)}`,
     };
   }
@@ -559,12 +584,14 @@ export function messageId(file: string, at: number): string {
 function waitingOnOf(m: AgentMessage): string {
   if (m.scope === 'agent' && m.toAgentId) return m.toAgentId;
   if (m.scope === 'project' && m.toProjectId) return `project:${m.toProjectId}`;
+  if (m.scope === 'squad' && m.toSquad) return `squad:${m.toSquad}`;
   return 'fleet';
 }
 
 function labelOf(m: AgentMessage): string {
   if (m.scope === 'agent' && m.toAgentId) return m.toAgentId.slice(0, 8);
   if (m.scope === 'project') return 'el proyecto';
+  if (m.scope === 'squad') return `el escuadrón ${m.toSquad ?? '?'}`;
   return 'la flota';
 }
 

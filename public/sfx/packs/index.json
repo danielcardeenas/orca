@@ -1,0 +1,37 @@
+[
+ {
+  "id": "cinema",
+  "label": "CINEMA",
+  "style": "Film sci-fi interface design: glass and air over a soft sub transient, very short tail, minimal reverb.",
+  "count": 32,
+  "manifest": "packs/cinema/manifest.json"
+ },
+ {
+  "id": "mac",
+  "label": "MAC",
+  "style": "Modern Apple system sound, richer: a round warm marimba or glass note, soft attack, short musical decay, groovy.",
+  "count": 32,
+  "manifest": "packs/mac/manifest.json"
+ },
+ {
+  "id": "capcom",
+  "label": "CAPCOM",
+  "style": "Mission control instruments, radio off: pure sine tones, a distant relay, tape beneath. Calm, clean, nothing harsh.",
+  "count": 32,
+  "manifest": "packs/capcom/manifest.json"
+ },
+ {
+  "id": "mechanical",
+  "label": "MECHANICAL",
+  "style": "Tiny real mechanisms, close and soft: small switches, relays, keycaps, latches, detents. Gentle, nothing tonal.",
+  "count": 32,
+  "manifest": "packs/mechanical/manifest.json"
+ },
+ {
+  "id": "legacy",
+  "label": "LEGACY",
+  "style": "The console's first voice: eight generated takes and eleven cuts of the reference film, with the film's score still under them.",
+  "count": 32,
+  "manifest": "packs/legacy/manifest.json"
+ }
+]

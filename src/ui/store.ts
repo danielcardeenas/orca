@@ -7,7 +7,7 @@
  */
 
 import type {
-  Agent, AgentMessage, AgentState, Collision, Escalation, FeedItem,
+  Agent, AgentMessage, AgentState, Artifact, Collision, Escalation, FeedItem,
   Machine, Project, WorldState, CeoMessage,
 } from '../shared/types.ts';
 import { emptyWorld, emptyRollup } from '../shared/types.ts';
@@ -21,6 +21,8 @@ export type StoreEvent =
   | { k: 'escalations'; ids: string[] }
   /** Messages between agents, or file collisions, changed. */
   | { k: 'traffic'; ids: string[] }
+  /** Things agents produced appeared, changed or were dropped. */
+  | { k: 'artifacts'; ids: string[] }
   | { k: 'feed' }
   | { k: 'ceo' }
   | { k: 'link'; up: boolean }                      // hub connection state
@@ -71,6 +73,7 @@ export class Store {
     const machines: string[] = [];
     const escalations: string[] = [];
     const traffic: string[] = [];
+    const artifacts: string[] = [];
     const alarms: { agentId: string; on: boolean }[] = [];
     let feed = false;
     let ceo = false;
@@ -116,6 +119,10 @@ export class Store {
           if (op.v) w.collisions[op.id] = op.v; else delete w.collisions[op.id];
           traffic.push(op.id);
           break;
+        case 'artifact':
+          if (op.v) w.artifacts[op.id] = op.v; else delete w.artifacts[op.id];
+          artifacts.push(op.id);
+          break;
         case 'key':
           if (op.v) w.keys[op.id] = op.v; else delete w.keys[op.id];
           break;
@@ -142,6 +149,7 @@ export class Store {
     if (agents.length) this.emit({ k: 'agents', ids: agents });
     if (escalations.length) this.emit({ k: 'escalations', ids: escalations });
     if (traffic.length) this.emit({ k: 'traffic', ids: traffic });
+    if (artifacts.length) this.emit({ k: 'artifacts', ids: artifacts });
     if (feed) this.emit({ k: 'feed' });
     if (ceo) this.emit({ k: 'ceo' });
     for (const a of alarms) this.emit({ k: 'alarm', agentId: a.agentId, on: a.on });
@@ -283,6 +291,13 @@ export class Store {
   trafficFor(agentId: string): AgentMessage[] {
     return Object.values(this.world.messages ?? {})
       .filter((m) => m.fromAgentId === agentId || m.toAgentId === agentId)
+      .sort((a, b) => b.at - a.at);
+  }
+
+  /** What an agent produced, newest first. */
+  artifactsOf(agentId: string): Artifact[] {
+    return Object.values(this.world.artifacts ?? {})
+      .filter((x) => x.agentId === agentId)
       .sort((a, b) => b.at - a.at);
   }
 

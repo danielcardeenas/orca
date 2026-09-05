@@ -18,6 +18,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createReadStream, existsSync, statSync } from 'node:fs';
+import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Duplex } from 'node:stream';
@@ -31,16 +32,29 @@ import { TERMINAL_STATES } from '../shared/types.ts';
 import type {
   ClientFrame, CollectorFrame, Command, CommandFrame, PatchOp, ServerFrame,
 } from '../shared/protocol.ts';
-import { PATHS, PORTS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
+import {
+  MAX_ARTIFACT_BYTES, PATHS, PORTS, PROTOCOL_VERSION, artifactMime, newId,
+} from '../shared/protocol.ts';
 
 import { World } from './world.ts';
 import type { WorldEvent } from './world.ts';
 import { PatchBus } from './bus.ts';
 import type { PatchFrame } from './bus.ts';
-import { CLOSE_BAD_HELLO, CLOSE_BAD_VERSION, CLOSE_UNAUTHORIZED, createAuth } from './auth.ts';
+import { CLOSE_BAD_HELLO, CLOSE_BAD_VERSION, CLOSE_UNAUTHORIZED, ORCA_DIR, createAuth } from './auth.ts';
 import type { Auth } from './auth.ts';
 import { HubStore } from './persist.ts';
+import { FleetStore } from './fleets.ts';
+import { nextSquadName, SQUAD_SEQ_FILE } from './squad-seq.ts';
+import { parsePresetList } from '../shared/fleets.ts';
+import { squadName } from '../shared/squads.ts';
+import { readBody } from './mcp.ts';
+import { History, HISTORY_RETENTION_MS } from './history.ts';
 import { AnswerMemory, MEMORY_FILE } from './memory.ts';
+import { CapcomRouter, capcomOf, realTimers } from './capcom.ts';
+import type { CapcomTimer } from './capcom.ts';
+import { serveMcp } from './mcp.ts';
+import type { McpHttpDeps } from './mcp.ts';
+import { hubContext } from '../agents/context.ts';
 
 /* ── constantes de operación ──────────────────────────────────────── */
 
@@ -53,6 +67,31 @@ const SWEEP_INTERVAL_MS = 2_000;
 /** Si una consola acumula esto en el buffer, dejó de leer: no la ahogamos más. */
 const MAX_BUFFERED = 4 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Un collector puede mandar frames más grandes que una consola, y sólo por una
+ * razón: el ack de `artifact:read` lleva los bytes del archivo en base64, que
+ * infla un tercio. Se le da su propio techo —y su propio WebSocketServer— para
+ * que ampliarlo no amplíe de paso lo que puede tirarle encima un navegador.
+ */
+const MAX_COLLECTOR_FRAME_BYTES = Math.ceil(MAX_ARTIFACT_BYTES * 4 / 3) + 256 * 1024;
+
+/** Dónde el hub guarda una copia de lo que ya se descargó de una máquina. */
+export const ARTIFACT_CACHE_DIR = join(ORCA_DIR, 'artifacts');
+
+/**
+ * Un artefacto tarda lo que tarde el disco de la otra máquina, pero no más:
+ * una consola esperando un `<img>` para siempre es peor que un 502.
+ */
+const ARTIFACT_FETCH_TIMEOUT_MS = 25_000;
+
+/**
+ * Los ids los produce el collector como `art_` + sha1 recortado. Aquí se exige
+ * la forma estricta —sin puntos ni barras— porque el id es también el nombre
+ * del archivo en la caché: sin esto, un `..` en una url sería una escritura
+ * fuera de ~/.orca/artifacts.
+ */
+const ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{1,120}$/;
 
 /**
  * Techo de destinatarios de un mensaje difundido.
@@ -100,9 +139,15 @@ export interface HubOptions {
   auth?: Auth;
   store?: HubStore;
   memory?: AnswerMemory;
+  /** La línea de tiempo. Una prueba la inyecta para darle su propio archivo. */
+  history?: History;
   hz?: number;
   /** Silencia el log; los tests lo agradecen. */
   quiet?: boolean;
+  /** Dónde se cachean los bytes de los artefactos. Por defecto ~/.orca/artifacts. */
+  artifactCache?: string;
+  /** Dónde viven los presets de flotilla. Por defecto ~/.orca/fleets. */
+  fleets?: FleetStore;
   /**
    * Gancho para el runtime del CEO, que vive fuera del hub. Si no está, el hub
    * guarda el mensaje del humano y contesta que no hay CEO conectado.
@@ -113,18 +158,34 @@ export interface HubOptions {
    * intenta contestarla antes de que llegue al humano; si no hay runtime, la
    * pregunta va directa a la cola de interrupciones, que es el comportamiento
    * correcto sin CEO — nunca se pierde.
+   *
+   * Sólo se llama cuando NO hay una sesión CAPCOM viva: el mando de la flota es
+   * uno, o dos mentes triarían la misma pregunta a la vez.
    */
   onEscalation?: (escalationId: string, hub: Hub) => void;
+  /**
+   * `--api-command`: manda el CEO de API aunque haya una sesión CAPCOM viva.
+   * Es la salida para quien no tenga CLI, no el camino normal — por defecto el
+   * hub prefiere CAPCOM y no gasta un solo token de API.
+   */
+  apiCommand?: boolean;
+  /** Cuánto se le da a CAPCOM para contestar. Las pruebas lo acortan. */
+  capcomAnswerMs?: number;
+  /** Reloj inyectable para esa cuenta atrás. Sin él, `setTimeout` de verdad. */
+  capcomTimer?: (fn: () => void, ms: number) => CapcomTimer;
 }
 
 /** Lo que el CEO necesita decir para meter un mensaje en la flota. */
 export interface RelayInput {
   kind: MessageKind;
-  /** El CEO habla con un agente o con un proyecto. Difundir a la flota entera
-   *  es una decisión de la que nadie se hace responsable, así que no está. */
-  scope: 'agent' | 'project';
+  /** El CEO habla con un agente, con un proyecto o con un escuadrón. Difundir a
+   *  la flota entera es una decisión de la que nadie se hace responsable, así
+   *  que no está. */
+  scope: 'agent' | 'project' | 'squad';
   toAgentId?: string | null;
   toProjectId?: string | null;
+  /** Sólo con scope 'squad': el nombre del escuadrón. */
+  toSquad?: string | null;
   subject: string;
   body?: string | null;
   files?: string[];
@@ -145,6 +206,10 @@ export interface Hub {
   bus: PatchBus;
   store: HubStore;
   memory: AnswerMemory;
+  /** Instantáneas del mundo para el scrubber y el "mientras no estabas". */
+  history: History;
+  /** Los presets de flotilla en disco: lo que `/launch` y `launch_squad` leen. */
+  fleets: FleetStore;
   auth: Auth;
   http: Server;
   port: number;
@@ -176,6 +241,13 @@ export interface Hub {
   replyToMessageLocal(messageId: string, answer: string, from: string | null): AgentMessage | null;
   /** Marca una colisión como vista, desde la consola o desde el CEO. */
   acknowledgeCollision(id: string): Collision | null;
+  /**
+   * La sesión CAPCOM viva de esta flota, o null.
+   *
+   * Es lo que decide quién manda: con CAPCOM arriba, lo que escribe el humano y
+   * cada pregunta de un agente van a esa sesión y la API no se toca.
+   */
+  capcom(): Agent | null;
   broadcast(frame: ServerFrame): void;
   counts(): { collectors: number; consoles: number; pending: number };
   close(): Promise<void>;
@@ -183,9 +255,9 @@ export interface Hub {
 
 /* ── utilidades ───────────────────────────────────────────────────── */
 
-function parseFrame(data: RawData): unknown {
+function parseFrame(data: RawData, max = MAX_FRAME_BYTES): unknown {
   const text = typeof data === 'string' ? data : data.toString('utf8');
-  if (text.length > MAX_FRAME_BYTES) throw new Error('frame demasiado grande');
+  if (text.length > max) throw new Error('frame demasiado grande');
   return JSON.parse(text);
 }
 
@@ -209,7 +281,8 @@ function tokenFromRequest(req: IncomingMessage): string | null {
 /** Nunca logueamos el valor de una credencial: sólo la forma del comando. */
 function describeCommand(cmd: Command): string {
   switch (cmd.k) {
-    case 'spawn': return `spawn ${cmd.projectId}`;
+    case 'spawn': return `spawn ${cmd.projectId}`
+      + (cmd.squad ? ` [${cmd.squad}${cmd.lead ? ' lead' : ''}]` : '');
     case 'say': return `say ${cmd.agentId}`;
     case 'permit': return `permit ${cmd.agentId} allow=${cmd.allow}`;
     case 'stop': return `stop ${cmd.agentId}`;
@@ -220,6 +293,7 @@ function describeCommand(cmd: Command): string {
     case 'reply': return `reply ${cmd.messageId}`;
     case 'key:set': return `key:set ${cmd.projectId}/${cmd.name} (valor omitido)`;
     case 'key:remove': return `key:remove ${cmd.projectId}/${cmd.name}`;
+    case 'artifact:read': return `artifact:read ${cmd.artifactId}`;
     case 'resync': return 'resync';
     case 'logs': return `logs ${cmd.agentId}`;
     default: return 'desconocido';
@@ -230,8 +304,8 @@ function isCommand(v: unknown): v is Command {
   if (typeof v !== 'object' || v === null) return false;
   const k = (v as { k?: unknown }).k;
   return typeof k === 'string' && [
-    'spawn', 'say', 'permit', 'stop', 'resume', 'remove',
-    'answer', 'deliver', 'reply', 'key:set', 'key:remove', 'resync', 'logs',
+    'spawn', 'say', 'permit', 'stop', 'resume', 'remove', 'answer', 'deliver',
+    'reply', 'key:set', 'key:remove', 'artifact:read', 'resync', 'logs',
   ].includes(k);
 }
 
@@ -264,9 +338,74 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.map': 'application/json; charset=utf-8',
   '.ico': 'image/x-icon',
+  // Sin este tipo Chrome ignora el manifest y la consola no se puede instalar.
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
 };
 
-function serveStatic(pathname: string, res: ServerResponse): boolean {
+/* ── caché de artefactos ──────────────────────────────────────────── */
+
+/**
+ * Lo que devuelve un collector al `artifact:read`. Se valida en vez de
+ * confiarse: el ack viene de la red, y de ahí sale un Buffer que servimos con
+ * un Content-Type.
+ */
+interface ArtifactPayload { base64: string; mime: string; bytes: number; }
+
+function asArtifactPayload(v: unknown): ArtifactPayload | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o['base64'] !== 'string' || o['base64'].length === 0) return null;
+  return {
+    base64: o['base64'],
+    mime: typeof o['mime'] === 'string' ? o['mime'] : 'application/octet-stream',
+    bytes: typeof o['bytes'] === 'number' ? o['bytes'] : 0,
+  };
+}
+
+/** tmp + rename: una petición concurrente no puede leer media descarga. */
+async function cacheArtifact(dir: string, id: string, buf: Buffer): Promise<boolean> {
+  const file = join(dir, id);
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(tmp, buf, { mode: 0o600 });
+    await rename(tmp, file);
+    return true;
+  } catch {
+    await unlink(tmp).catch(() => { /* nunca existió */ });
+    // Sin caché el artefacto se sigue sirviendo: sólo cuesta otra ida y vuelta.
+    return false;
+  }
+}
+
+async function dropArtifactCache(dir: string, id: string): Promise<void> {
+  if (!ARTIFACT_ID_RE.test(id)) return;
+  await unlink(join(dir, id)).catch(() => { /* nunca se cacheó */ });
+}
+
+/**
+ * Cabeceras de un artefacto.
+ *
+ * `Content-Security-Policy: sandbox` es lo importante y va sólo en el html: una
+ * página que escribió un agente se abre en el mismo origen que la consola, así
+ * que sin sandbox podría hacerle fetch al hub con las credenciales del
+ * operador. Con él no tiene scripts, ni origen, ni formularios: es un dibujo.
+ */
+function artifactHeaders(mime: string, length: number): Record<string, string> {
+  const head: Record<string, string> = {
+    'content-type': mime,
+    'content-length': String(length),
+    'cache-control': 'private, max-age=3600',
+    'x-content-type-options': 'nosniff',
+  };
+  if (mime.startsWith('text/html')) head['content-security-policy'] = 'sandbox';
+  return head;
+}
+
+function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse): boolean {
   if (!DIST_DIR) return false;
   /*
    * /api es de la API, siempre. Devolver el index para una llamada de API que
@@ -295,10 +434,34 @@ function serveStatic(pathname: string, res: ServerResponse): boolean {
   }
 
   const ext = extname(file);
+  const stat = statSync(file);
+  const lastModified = stat.mtime.toUTCString();
+  /*
+   * Tres políticas de caché, no una. Los assets de Vite (`/assets/*`) llevan
+   * hash en el nombre y pueden vivir un año. El index nunca se cachea: es lo
+   * que apunta al hash nuevo. Todo lo demás —manifest, iconos, fuentes, sfx—
+   * tiene nombre fijo, así que el navegador tiene que revalidarlo: con
+   * Last-Modified, la revalidación es un 304 sin cuerpo, no una descarga.
+   * Antes todo iba como immutable y un icono o manifest cambiado se quedaba
+   * pegado un año en cada instalación de la PWA.
+   */
+  const hashed = file.startsWith(join(DIST_DIR, 'assets') + sep);
+  const cache = ext === '.html' ? 'no-store'
+    : hashed ? 'public, max-age=31536000, immutable'
+    : 'public, max-age=0, must-revalidate';
+  if (!hashed && ext !== '.html') {
+    const since = req.headers['if-modified-since'];
+    if (typeof since === 'string' && since === lastModified) {
+      res.writeHead(304, { 'cache-control': cache, 'last-modified': lastModified });
+      res.end();
+      return true;
+    }
+  }
   res.writeHead(200, {
     'content-type': MIME[ext] ?? 'application/octet-stream',
-    // Los assets de Vite llevan hash en el nombre; el index nunca se cachea.
-    'cache-control': ext === '.html' ? 'no-store' : 'public, max-age=31536000, immutable',
+    'content-length': stat.size,
+    'cache-control': cache,
+    'last-modified': lastModified,
   });
   createReadStream(file).pipe(res);
   return true;
@@ -312,6 +475,9 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const auth = options.auth ?? createAuth();
   const store = options.store ?? new HubStore();
   const mem = options.memory ?? new AnswerMemory(MEMORY_FILE);
+  const history = options.history ?? new History();
+  const artifactCache = options.artifactCache ?? ARTIFACT_CACHE_DIR;
+  const fleets = options.fleets ?? new FleetStore();
 
   const collectors = new Map<string, CollectorConn>();   // machineId → conn
   const orphanCollectors = new Set<CollectorConn>();     // aún sin hello
@@ -324,6 +490,17 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     onOps: (ops: PatchOp[]) => bus.push(ops),
     onEvent: (ev: WorldEvent) => {
       store.logEvent(ev);
+      // Una transición a blocked o a dead es uno de los dos instantes que el
+      // operador va a querer encontrar exactamente en la línea de tiempo. La
+      // rejilla de 20 s se los perdería la mitad de las veces, así que se marca
+      // aquí; `mark` coalesce, así que una máquina que tumba veinte agentes
+      // sigue siendo una sola instantánea.
+      if (ev.kind === 'agent:state') {
+        const to = (ev.data as { to?: string } | undefined)?.to;
+        if (to === 'blocked' || to === 'dead') {
+          try { history.mark(world.state); } catch (err) { warn('history.mark falló:', err); }
+        }
+      }
       const escId = ev.kind === 'escalation:new'
         ? (ev.data as { id?: string } | undefined)?.id
         : undefined;
@@ -338,21 +515,60 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           });
         }
       }
-      if (escId && options.onEscalation) {
-        // Fuera del camino crítico: el mundo no espera al CEO para publicar.
+      if (escId) {
+        // Fuera del camino crítico: el mundo no espera al mando para publicar.
         queueMicrotask(() => {
-          try { options.onEscalation!(escId, hub); }
-          catch (err) { warn('onEscalation falló:', err); }
+          try {
+            // CAPCOM primero. Si se la queda, el CEO de API ni se entera: dos
+            // mentes triando la misma pregunta acabarían contestándola dos
+            // veces, y una de las dos respuestas sería la que el agente ignora.
+            if (capcomRouter.offer(escId)) return;
+            options.onEscalation?.(escId, hub);
+          } catch (err) { warn('triaje de escalación falló:', err); }
         });
       }
     },
     onOverflow: (kind, items) => store.overflow(kind, items),
+    // El registro y su copia en disco se van juntos, o la caché sobrevive al
+    // mundo y crece para siempre en un directorio que nadie mira.
+    onArtifactGone: (id) => { void dropArtifactCache(artifactCache, id); },
   });
 
   const bus = new PatchBus({
     hz: options.hz ?? 10,
     onBeforeFlush: () => { world.settle(); },
     onFlush: (frame: PatchFrame) => publishPatch(frame),
+  });
+
+  /*
+   * El mando de la flota.
+   *
+   * Si hay una sesión con `role:'capcom'` viva, ella recibe lo que escribe el
+   * humano y cada pregunta que levanta un agente. Si no la hay, todo sigue como
+   * antes: el CEO de API si hay clave, el guionizado si no. `--api-command`
+   * fuerza el segundo camino aunque exista CAPCOM.
+   */
+  const capcomRouter = new CapcomRouter({
+    capcom: () => capcomOf(world.state.agents),
+    say: (agentId, text) => { dispatchCommand(newId('cmd'), { k: 'say', agentId, text }, null); },
+    escalation: (id) => world.state.escalations[id],
+    markWithCeo: (id) => world.markEscalationWithCeo(id),
+    giveUp: (id, reason) => {
+      // El intento se anota sobre el registro original y la pregunta vuelve a
+      // la cola del humano: `attachCeoAttempt` hace las dos cosas.
+      world.attachCeoAttempt(id, { answer: '', confidence: 0, reason });
+    },
+    callsign: (id) => world.state.agents[id]?.callsign ?? null,
+    note: (text) => {
+      log(text);
+      world.pushFeed('', [{
+        id: newId('f_cap'), at: Date.now(), level: 'info', source: 'CAPCOM', text,
+      }]);
+    },
+    setTimer: options.capcomTimer ?? realTimers(),
+  }, {
+    enabled: options.apiCommand !== true,
+    ...(options.capcomAnswerMs !== undefined ? { answerMs: options.capcomAnswerMs } : {}),
   });
 
   // La conversación con el CEO sobrevive a los reinicios del hub.
@@ -418,6 +634,11 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         return p ? { machineId: p.machineId, broadcast: false }
           : { machineId: null, broadcast: false, error: `proyecto desconocido: ${cmd.projectId}` };
       }
+      case 'artifact:read': {
+        const a = world.state.artifacts[cmd.artifactId];
+        return a ? { machineId: a.machineId, broadcast: false }
+          : { machineId: null, broadcast: false, error: `artefacto desconocido: ${cmd.artifactId}` };
+      }
       case 'answer': {
         const e = world.state.escalations[cmd.escalationId];
         return e ? { machineId: e.machineId, broadcast: false }
@@ -442,6 +663,15 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
 
   /** Comandos lanzados dentro del proceso (el CEO), esperando su ack. */
   const localWaiters = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+
+  /** Manda un comando sin consola detrás y espera su ack. */
+  function dispatchLocal(cmd: Command): Promise<unknown> {
+    const cmdId = newId('cmd');
+    return new Promise<unknown>((resolve, reject) => {
+      localWaiters.set(cmdId, { resolve, reject });
+      dispatchCommand(cmdId, cmd, null);
+    });
+  }
 
   function ackTo(consoleId: string | null, cmdId: string, ok: boolean, detail?: string, data?: unknown): void {
     const waiter = localWaiters.get(cmdId);
@@ -538,6 +768,24 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       case 'project': {
         const pid = msg.toProjectId ?? msg.fromProjectId;
         targets = all.filter((a) => a.projectId === pid && canReceive(a));
+        break;
+      }
+      case 'squad': {
+        /*
+         * Un escuadrón no es un registro: es la etiqueta que llevan puesta unos
+         * cuantos agentes, y puede cruzar máquinas. Por eso se resuelve aquí y
+         * en ningún otro sitio — el collector del emisor sólo ve la suya.
+         *
+         * Sin nadie con esa etiqueta el mensaje NO se difunde a la flota: quien
+         * escribe a squad:audit-01 quiere hablar con ese escuadrón, y despertar
+         * a veinte agentes ajenos sería peor que no entregarlo. Se devuelve el
+         * porqué, y routeNewMessage lo dice en voz alta.
+         */
+        const squad = msg.toSquad;
+        targets = all.filter((a) => a.squad === squad && canReceive(a));
+        if (targets.length === 0) {
+          return { delivered: [], skipped: 0, reason: `nadie en el escuadrón ${squad ?? '?'}` };
+        }
         break;
       }
       case 'fleet':
@@ -649,7 +897,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     ws.on('message', (data) => {
       let frame: CollectorFrame;
       try {
-        frame = parseFrame(data) as CollectorFrame;
+        frame = parseFrame(data, MAX_COLLECTOR_FRAME_BYTES) as CollectorFrame;
         if (typeof frame !== 'object' || frame === null || typeof frame.t !== 'string') {
           throw new Error('frame sin tipo');
         }
@@ -864,13 +1112,22 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           id: newId('msg'), role: 'human', text, at: Date.now(), actions: [],
         };
         pushCeoMessage(msg);
+        /*
+         * CAPCOM manda si existe.
+         *
+         * El mensaje queda igualmente en `world.ceo.messages` como `human`: esa
+         * lista es el historial de la línea de comandos, y tiene que seguir
+         * siendo legible aunque el mando cambie de sitio a mitad de la sesión.
+         */
+        if (capcomRouter.humanSays(text)) return;
         if (options.onCeoSay) {
           options.onCeoSay(text, hub);
         } else {
-          // Sin runtime de CEO conectado, decirlo es mejor que el silencio.
+          // Sin mando conectado, decirlo es mejor que el silencio.
           pushCeoMessage({
             id: newId('msg'), role: 'system', at: Date.now(), actions: [],
-            text: 'El runtime del CEO no está conectado a este hub todavía. Tu mensaje quedó guardado.',
+            text: 'No hay comando conectado a este hub: ni sesión CAPCOM ni CEO de API. '
+              + 'Tu mensaje quedó guardado. Arranca una con `orca capcom` en la máquina que deba llevarlo.',
           });
         }
         return;
@@ -936,6 +1193,134 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     res.end(payload);
   }
 
+  function num(v: string | null, fallback: number): number {
+    const n = Number(v);
+    return v !== null && v !== '' && Number.isFinite(n) ? n : fallback;
+  }
+
+  /**
+   * Puerta de /api/history.
+   *
+   * La historia es la misma clase de dato que /api/world —un resumen de la
+   * flota, nunca contenido de la máquina de nadie— pero se cierra igual que
+   * `/api/artifact` porque es un registro de 24 h y la consola ya lleva el token
+   * en la url. Hereda la concesión de loopback-sin-token, así que el bucle de
+   * desarrollo no cambia.
+   */
+  function allowApi(req: IncomingMessage, res: ServerResponse): boolean {
+    const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
+    if (allowed.ok) return true;
+    json(res, 401, {
+      ok: false,
+      error: `no autorizado (${allowed.reason ?? 'falta token'})`,
+      hint: 'añade ?token=<ORCA_TOKEN> a la url, igual que hace el websocket',
+    });
+    return false;
+  }
+
+  function text(res: ServerResponse, code: number, body: string): void {
+    res.writeHead(code, {
+      'content-type': 'text/plain; charset=utf-8',
+      'content-length': Buffer.byteLength(body),
+      'cache-control': 'no-store',
+    });
+    res.end(body);
+  }
+
+  /**
+   * Los bytes de un artefacto.
+   *
+   * Primero la caché en disco, y si no está, se le pide al collector dueño y se
+   * guarda de paso. Un artefacto se mira muchas veces —el operador vuelve a él,
+   * la consola lo repinta— y cada vista no puede costar un viaje al portátil que
+   * lo produjo; peor aún, ese portátil puede estar dormido y el registro sigue
+   * siendo verdad.
+   *
+   * La autenticación es la misma que la de los sockets: token en `?token=`, en
+   * `Authorization: Bearer` o en `X-Orca-Token`, con la misma concesión de
+   * loopback-sin-token que el resto en desarrollo. Esto es contenido de la
+   * máquina de alguien, no un resumen: es la única ruta de /api donde eso pesa
+   * lo suficiente como para no heredar la puerta abierta de /api/world.
+   */
+  async function serveArtifact(id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
+    if (!allowed.ok) {
+      text(res, 401, `no autorizado (${allowed.reason ?? 'falta token'}). `
+        + 'Añade ?token=<ORCA_TOKEN> a la url, igual que hace el websocket.');
+      return;
+    }
+    if (!ARTIFACT_ID_RE.test(id)) { text(res, 404, 'id de artefacto inválido'); return; }
+    const record = world.state.artifacts[id];
+    if (!record) { text(res, 404, `no hay ningún artefacto ${id}`); return; }
+
+    const mime = artifactMime(record.path);
+    const cached = join(artifactCache, id);
+    if (existsSync(cached)) {
+      let size = 0;
+      try { size = statSync(cached).size; } catch { size = 0; }
+      res.writeHead(200, artifactHeaders(mime, size));
+      createReadStream(cached).pipe(res);
+      return;
+    }
+
+    let ack: unknown;
+    try {
+      ack = await Promise.race([
+        dispatchLocal({ k: 'artifact:read', artifactId: id }),
+        new Promise((_, reject) => {
+          const t = setTimeout(
+            () => reject(new Error(`sin respuesta en ${ARTIFACT_FETCH_TIMEOUT_MS / 1000}s`)),
+            ARTIFACT_FETCH_TIMEOUT_MS,
+          );
+          t.unref?.();
+        }),
+      ]);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      warn(`artefacto ${id} no llegó desde ${record.machineId}: ${why}`);
+      text(res, 502, `la máquina ${record.machineId} no entregó el artefacto: ${why}`);
+      return;
+    }
+
+    const payload = asArtifactPayload(ack);
+    if (!payload) {
+      text(res, 502, 'el collector contestó algo que no son bytes');
+      return;
+    }
+    const buf = Buffer.from(payload.base64, 'base64');
+    if (buf.length > MAX_ARTIFACT_BYTES) {
+      text(res, 502, `el artefacto pesa ${buf.length}B, por encima del límite`);
+      return;
+    }
+    await cacheArtifact(artifactCache, id, buf);
+    res.writeHead(200, artifactHeaders(payload.mime || mime, buf.length));
+    res.end(buf);
+  }
+
+  /**
+   * Lo que el servidor MCP necesita del hub.
+   *
+   * El contexto se construye en cada llamada a propósito: entre una tool y la
+   * siguiente la flota se ha movido, y un contexto cacheado le enseñaría a
+   * CAPCOM un mundo de hace un minuto.
+   */
+  const mcp: McpHttpDeps = {
+    version: `orca ${PROTOCOL_VERSION}`,
+    log: (message) => log('mcp:', message),
+    authorize: (r) => {
+      const allowed = auth.check(tokenFromRequest(r), remoteOf(r));
+      return allowed.ok ? null : (allowed.reason ?? 'falta token');
+    },
+    context: () => hubContext(hub, {
+      // Una pregunta que levanta CAPCOM es SUYA: sin dueño no aparecería en
+      // ninguna ventana de la consola, que es donde el humano la va a leer.
+      defaultAgentId: () => capcomRouter.live()?.id ?? null,
+      // Y si está pasando hacia arriba la pregunta de un agente sin decir cuál,
+      // la recuperamos por el único dato que nunca es ambiguo: quién preguntó.
+      replacesFor: (agentId) => capcomRouter.openFor(agentId),
+    }),
+  };
+
   const http = createServer((req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://hub.local');
@@ -984,32 +1369,135 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           });
           return;
         }
+        case '/api/history': {
+          /*
+           * La flota en el tiempo, para el scrubber.
+           *
+           * `step` submuestrea en el servidor y no en el cliente porque 24 h de
+           * instantáneas de una flota grande son megabytes que el navegador no
+           * necesita para dibujar 600 columnas de píxel.
+           */
+          if (!allowApi(req, res)) return;
+          const now = Date.now();
+          const from = num(url.searchParams.get('from'), now - HISTORY_RETENTION_MS);
+          const to = num(url.searchParams.get('to'), now);
+          const step = Math.max(0, num(url.searchParams.get('step'), 0));
+          json(res, 200, history.range(from, to, step));
+          return;
+        }
+        case '/api/history/summary': {
+          // "Qué pasó mientras no estabas": la diferencia entre el mundo que
+          // dejaste y el que hay, no un volcado de eventos que haya que leer.
+          if (!allowApi(req, res)) return;
+          const now = Date.now();
+          const since = num(url.searchParams.get('since'), now - HISTORY_RETENTION_MS);
+          json(res, 200, history.summary(world.state, Math.min(since, now), now));
+          return;
+        }
+        case '/mcp': {
+          /*
+           * Las herramientas de flota, como servidor MCP.
+           *
+           * Vive fuera de /api porque no es la API de la consola: es el otro
+           * extremo de CAPCOM, y la url entera —con su token— acaba escrita en
+           * un `.mcp.json` que lee un CLI.
+           */
+          void serveMcp(req, res, mcp).catch((err) => {
+            warn('mcp:', err);
+            try { json(res, 500, { ok: false, error: String(err) }); } catch { res.end(); }
+          });
+          return;
+        }
+        case '/api/fleets': {
+          /*
+           * Los presets de flotilla. GET los lista; PUT deja el directorio
+           * exactamente con la lista del cuerpo — el texto del editor ES la
+           * lista, y así es como se borra un preset. Un preset roto en disco
+           * se reporta en `broken` y no tumba la ventana.
+           */
+          if (!allowApi(req, res)) return;
+          const method = (req.method ?? 'GET').toUpperCase();
+          if (method === 'GET') { json(res, 200, { ...fleets.read(), dir: fleets.dir }); return; }
+          if (method !== 'PUT') { res.writeHead(405, { allow: 'GET, PUT' }).end(); return; }
+          void readBody(req).then((raw) => {
+            let body: unknown;
+            try { body = JSON.parse(raw); } catch { json(res, 400, { ok: false, error: 'NOT JSON' }); return; }
+            const list = parsePresetList(body);
+            if (typeof list === 'string') { json(res, 400, { ok: false, error: list }); return; }
+            fleets.replaceAll(list);
+            json(res, 200, { ok: true, ...fleets.read() });
+          }).catch((err) => { json(res, 413, { ok: false, error: String(err) }); });
+          return;
+        }
+        case '/api/squads/next': {
+          /*
+           * Un nombre de escuadrón numerado, del mismo contador que usa
+           * `launch_squad`. La consola lo pide antes de lanzar un preset para
+           * que un lanzamiento desde el navegador y uno desde CAPCOM no puedan
+           * acabar con la misma etiqueta. POST porque consume un número.
+           */
+          if (!allowApi(req, res)) return;
+          if ((req.method ?? 'GET').toUpperCase() !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
+          const base = squadName(url.searchParams.get('base'));
+          if (!base) { json(res, 400, { ok: false, error: 'base: letters, digits, - and _' }); return; }
+          try {
+            const name = nextSquadName(
+              join(store.dir, SQUAD_SEQ_FILE), base,
+              Object.values(world.state.agents).map((a) => a.squad),
+            );
+            json(res, 200, { ok: true, name });
+          } catch (err) {
+            json(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
         case '/api/memory': {
           // Útil para ver por qué el CEO decidió no preguntar.
           const q = url.searchParams.get('q');
           json(res, 200, q ? { q, results: mem.recall(q, { limit: 10, threshold: 0 }) } : { size: mem.size, entries: mem.all() });
           return;
         }
-        default:
+        default: {
+          if (url.pathname.startsWith('/api/artifact/')) {
+            const id = decodeURIComponent(url.pathname.slice('/api/artifact/'.length));
+            void serveArtifact(id, req, res).catch((err) => {
+              warn('sirviendo artefacto', err);
+              try { text(res, 500, 'fallo sirviendo el artefacto'); } catch { res.end(); }
+            });
+            return;
+          }
           // Fuera de /api, el hub sirve la consola construida si está.
           // Un solo proceso detrás de un túnel es todo lo que hace falta para
           // que la consola sea alcanzable desde cualquier parte, que es la
           // razón por la que los collectors marcan hacia fuera.
-          if (serveStatic(url.pathname, res)) return;
+          if (serveStatic(url.pathname, req, res)) return;
           json(res, 404, {
             ok: false, error: 'no such route',
-            routes: ['/api/health', '/api/world', '/api/traffic?project=&kind=&limit=', '/api/memory?q='],
+            routes: [
+              '/api/health', '/api/world', '/api/traffic?project=&kind=&limit=',
+              '/api/memory?q=', '/api/artifact/<id>', 'POST /mcp (fleet command, MCP)',
+              '/api/history?from=&to=&step=', '/api/history/summary?since=',
+              '/api/fleets (GET, PUT)', 'POST /api/squads/next?base=',
+            ],
             hint: DIST_DIR
               ? 'la consola se sirve desde /'
               : 'ejecuta `npm run build` para que este hub sirva también la consola',
           });
+        }
       }
     } catch (err) {
       try { json(res, 500, { ok: false, error: String(err) }); } catch { res.end(); }
     }
   });
 
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
+  /*
+   * Dos servidores, dos techos. El de collectors admite el ack de
+   * `artifact:read`, que lleva megabytes de base64; el de consolas se queda en
+   * los 4MB de siempre. Un solo maxPayload obligaría a subírselo también al
+   * navegador, que no tiene ninguna razón para mandar nada grande.
+   */
+  const wssCollector = new WebSocketServer({ noServer: true, maxPayload: MAX_COLLECTOR_FRAME_BYTES });
+  const wssConsole = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
 
   http.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     let pathname = '';
@@ -1019,9 +1507,10 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => {
+    const isCollector = pathname === PATHS.collector;
+    (isCollector ? wssCollector : wssConsole).handleUpgrade(req, socket, head, (ws) => {
       try {
-        if (pathname === PATHS.collector) acceptCollector(ws, req);
+        if (isCollector) acceptCollector(ws, req);
         else acceptConsole(ws, req);
       } catch (err) {
         warn('fallo aceptando conexión', err);
@@ -1050,6 +1539,10 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const pruneTimer = setInterval(() => { void store.prune(); }, 6 * 3600_000);
   pruneTimer.unref?.();
 
+  // La cadencia fija de la línea de tiempo. El anillo ya trae del disco lo que
+  // sobrevivió al reinicio, así que el scrubber tiene pasado desde el segundo 0.
+  history.start(() => world.state);
+
   /* ── arranque ───────────────────────────────────────────────────── */
 
   const port = options.port ?? Number(process.env['ORCA_PORT'] ?? PORTS.hub);
@@ -1064,7 +1557,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const actualPort = typeof address === 'object' && address !== null ? address.port : port;
 
   const hub: Hub = {
-    world, bus, store, memory: mem, auth, http,
+    world, bus, store, memory: mem, history, fleets, auth, http,
     port: actualPort,
     url: `http://${host === '0.0.0.0' ? 'localhost' : host}:${actualPort}`,
     pushCeoMessage,
@@ -1090,6 +1583,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         fromProjectId: projectId,
         toAgentId: input.scope === 'agent' ? (input.toAgentId ?? null) : null,
         toProjectId: input.scope === 'project' ? (input.toProjectId ?? null) : null,
+        toSquad: input.scope === 'squad' ? (input.toSquad ?? null) : null,
         subject: input.subject,
         body: input.body ?? null,
         files: input.files ?? [],
@@ -1110,27 +1604,29 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     acknowledgeCollision(id) {
       return world.ackCollision(id);
     },
+    capcom() {
+      return capcomRouter.live();
+    },
     dispatch(cmd) {
-      const cmdId = newId('cmd');
-      return new Promise<unknown>((resolve, reject) => {
-        localWaiters.set(cmdId, { resolve, reject });
-        dispatchCommand(cmdId, cmd, null);
-      });
+      return dispatchLocal(cmd);
     },
     counts: () => ({ collectors: collectors.size, consoles: consoles.size, pending: pending.size }),
     async close() {
       clearInterval(sweepTimer);
       clearInterval(pingTimer);
       clearInterval(pruneTimer);
+      capcomRouter.stop();
       for (const p of pending.values()) clearTimeout(p.timer);
       pending.clear();
       bus.stop();
       for (const conn of [...collectors.values(), ...orphanCollectors, ...consoles]) {
         try { conn.ws.close(1001, 'hub cerrando'); } catch { /* da igual */ }
       }
-      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => wssCollector.close(() => resolve()));
+      await new Promise<void>((resolve) => wssConsole.close(() => resolve()));
       await new Promise<void>((resolve) => http.close(() => resolve()));
       await store.close();
+      await history.close();
     },
   };
 
@@ -1140,7 +1636,11 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     console.log(`[hub]   collectors → ws://${host}:${actualPort}${PATHS.collector}`);
     console.log(`[hub]   consolas   → ws://${host}:${actualPort}${PATHS.console}`);
     console.log(`[hub]   salud      → http://localhost:${actualPort}/api/health`);
+    console.log(`[hub]   MCP        → http://localhost:${actualPort}/mcp   (las tools de CAPCOM)`);
     console.log(`[hub]   memoria    → ${mem.size} respuestas recordadas`);
+    console.log(`[hub]   comando    → ${options.apiCommand
+      ? 'CEO de API forzado (--api-command): CAPCOM no recibirá nada'
+      : 'CAPCOM cuando haya sesión viva; el CEO de API sólo si no la hay'}`);
   }
 
   return hub;
@@ -1159,6 +1659,7 @@ if (invokedDirectly) {
   const bye = (signal: string): void => {
     console.log(`\n[hub] ${signal}, cerrando…`);
     hub.store.flushSync();
+    hub.history.flushSync();
     void hub.close().then(() => process.exit(0));
     setTimeout(() => process.exit(0), 2_000).unref?.();
   };

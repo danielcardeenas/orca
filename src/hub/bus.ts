@@ -54,6 +54,7 @@ function keyOf(op: PatchOp): string {
     // (una entrega que añade un lector, un clear que la borra).
     case 'message': return `message:${op.id}`;
     case 'collision': return `collision:${op.id}`;
+    case 'artifact': return `artifact:${op.id}`;
     case 'key': return `key:${op.id}`;
     case 'feed': return 'feed';
     case 'fleet': return 'fleet';

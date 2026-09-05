@@ -9,6 +9,7 @@
  *   orca-tell "The /v1/charges endpoint returns 402 in sandbox" --to K9 --kind warning
  *   orca-tell "Did you migrate the sessions table?" --to T1 --kind ask --wait
  *   orca-tell "HTTP client done; caching is left" --kind handoff --to project:dijosi
+ *   orca-tell "Report by 18:00, one line each" --to squad:audit-01 --kind handoff
  *   orca-tell "Switched the build to esbuild" --kind notice          # the whole fleet
  *   orca-tell --reply msg_1a2b3c4d "Yes, migrated last night"
  *
@@ -74,7 +75,8 @@ function usage() {
   orca-tell "<subject>" [options]
   orca-tell --reply <messageId> "<answer>"
 
-  -t, --to <who>          K9 (a callsign) · project:<name> · fleet   (default: fleet)
+  -t, --to <who>          K9 (a callsign) · project:<name> · squad:<name> · fleet
+                          (default: fleet)
   -k, --kind <kind>       notice | ask | handoff | warning           (default: notice)
   -b, --body <text>       the detail, if one line is not enough
   -f, --file <path>       a file this is about (repeatable, up to 20)
@@ -96,7 +98,10 @@ function usage() {
   Only an ask blocks you, and only an ask makes you a link in a waiting chain
   the operator can see. Use notice for everything you merely want on record.
   An unroutable recipient does not lose the message: it goes out to the whole
-  project with the failure spelled out in the subject.`);
+  project with the failure spelled out in the subject. The exception is
+  squad:<name>: an empty squad is not broadcast to anybody, because waking
+  twenty unrelated agents is worse than not delivering — the console says so
+  instead.`);
 }
 
 /* ── Where to write ───────────────────────────────────────────────── */

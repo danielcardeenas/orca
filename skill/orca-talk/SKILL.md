@@ -1,6 +1,6 @@
 ---
 name: orca-talk
-description: Reach another agent working on the same fleet — to warn them about something they are about to walk into, hand work over with its context, tell them what you found out, or ask them something only they know. Use when the thing you need is in another agent's head or another repo, not in the human's. Also use before touching a file, to check whether someone else is already in it.
+description: Reach another agent working on the same fleet — to warn them about something they are about to walk into, hand work over with its context, tell them what you found out, or ask them something only they know. Use when the thing you need is in another agent's head or another repo, not in the human's. Also use before touching a file, to check whether someone else is already in it. Also covers squads: reporting to your lead, a lead handing work to its members, and asking ORCA to launch another agent that works for you.
 ---
 
 # Talking to the other agents
@@ -57,12 +57,74 @@ a chain** — if someone is waiting on you while you wait on them, the human see
 that chain and it counts against your project. So ask only when you truly cannot
 proceed, and never with `--wait` on something you could work around.
 
+## Showing something instead of describing it
+
+```bash
+orca-show <path> [title] [--open]
+```
+
+When what you produced is a picture — a chart, a screenshot, a generated page —
+`orca-show report.html "Bundle size, before and after"` puts it in front of the
+operator instead of a path they have to go open. ORCA already picks up most
+images, svg, html and markdown you write; use this when it matters *which* file
+is the one to look at, or when its name does not say what it is.
+
+`--open` asks for it to be opened rather than just filed. It is a request, not a
+guarantee — the console decides. Spend it on the one thing they have to see, not
+on every screenshot: an `--open` that did not need to be one teaches them to
+close the next without looking.
+
 ## Who to address
 
 - `--to K9` — one agent, by the callsign the console shows
 - `--to project:dijosi` — everyone working in that repo
+- `--to squad:audit-01` — everyone in that squad, wherever they are running
 - omit `--to` — the whole fleet. Use this sparingly; it is a broadcast, and a
   broadcast that did not need to be one trains everyone to ignore the next.
+
+## If you are in a squad
+
+You will know: your prompt ends with a short ORCA footer saying which squad you
+belong to and who leads it. If it does not, you are not in one and this section
+is not about you.
+
+**If you are a member.** Your lead is your human. Report what you find with
+`orca-tell "<one line>" --to <their callsign> --kind notice`, hand finished work
+over with `--kind handoff`, and when you are genuinely stuck on something only
+they can settle, `--kind ask --wait`. Do **not** use `orca-ask` — the person is
+your lead's to interrupt, not yours. Read `orca-read` at the start of every
+turn: the lead redirects the squad through it, and working on last turn's
+instructions is the failure mode this whole channel exists to prevent.
+
+**If you are the lead.** Your members arrive as your children and report to you.
+Hand work out one at a time with `--to <callsign> --kind handoff`, or reach all
+of them at once with `--to squad:<name>`. Need another pair of hands? Ask for
+one — see the next section — and it joins your squad as your child. Read `orca-read` every turn, unblock
+your own people with `orca-tell --reply <messageId> "<answer>"` rather than
+letting them wait, consolidate their findings into one answer, and use
+`orca-ask` only when nobody in the squad can go further. You are the squad's
+single point of contact: every question you forward is one a person has to stop
+and answer.
+
+## Asking for another agent
+
+```bash
+orca-spawn "<complete brief>"          # or: orca-spawn @briefs/charges.md
+```
+
+When a piece of your work is separable and would take you an hour, delegate it:
+`orca-spawn` asks ORCA to launch an agent that is **yours** — spawned as your
+child, in your squad if you are in one, never a lead — and prints its callsign
+so you can address it. It reports to you with `orca-tell`; read `orca-read`
+each turn to collect what it found.
+
+Write the brief the way you would for an engineer who has not seen your
+conversation: what to do, what done looks like, what not to touch. A thin brief
+is refused before anything launches. You may have at most eight live children,
+and a squad holds at most thirteen agents; past either, the answer says so and
+you hand the work to the ones you already have.
+
+Do not delegate what you could finish in the time it takes to write the brief.
 
 ## Another agent, or the human?
 

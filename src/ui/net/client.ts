@@ -161,4 +161,15 @@ function token(): string {
   try { return localStorage.getItem('orca.token') ?? ''; } catch { return ''; }
 }
 
+/**
+ * `/api/artifact/<id>` is authenticated like the socket. A hub with a token
+ * wants it on the URL, since an <img> cannot send a header.
+ */
+export function authedUrl(url: string | null): string | null {
+  if (!url) return null;
+  const t = token();
+  if (!t || url.includes('token=')) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(t)}`;
+}
+
 export const hub = new HubLink();

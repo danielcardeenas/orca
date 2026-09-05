@@ -22,20 +22,29 @@
  *   --token=<t>     token; si falta usa ORCA_TOKEN o ~/.orca/token
  *   --chaos         desconecta y reconecta máquinas al azar
  *   --speed=<n>     multiplicador de ritmo (default 1)
+ *   --agents=<n>    escala la flota hasta ~n agentes iniciales (default: 20)
+ *   --squad[=name]  añade un escuadrón (un líder + 3 hijos) en la 1ª máquina
  *   --quiet         menos ruido en stdout
  */
 
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { deflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 
 import type {
-  Agent, AgentMessage, Collision, Escalation, FeedItem, KeyDescriptor, Machine, Project,
+  Agent, AgentMessage, Artifact, ArtifactKind, Collision, Escalation, FeedItem,
+  KeyDescriptor, Machine, Project,
 } from '../src/shared/types.ts';
 import { emptyRollup } from '../src/shared/types.ts';
+import type { SpawnAck } from '../src/shared/protocol.ts';
 import type { Command, CollectorFrame, CommandFrame } from '../src/shared/protocol.ts';
-import { BEAT_INTERVAL_MS, PATHS, PORTS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
+import {
+  BEAT_INTERVAL_MS, MAX_ARTIFACT_BYTES, PATHS, PORTS, PROTOCOL_VERSION,
+  artifactMime, newId,
+} from '../src/shared/protocol.ts';
 
 /* ── azar ─────────────────────────────────────────────────────────── */
 
@@ -73,6 +82,28 @@ const TITLES: readonly string[] = [
   'Investigar por qué el VPS pierde latidos',
   'Auditar claves guardadas por proyecto',
   'Simplificar el coalescing del bus',
+];
+
+/** Lo que un líder reparte, y lo que un miembro le devuelve. Ver `formSquad`. */
+const SQUAD_TASKS: readonly string[] = [
+  'Revisar el manejo de errores del cliente HTTP.',
+  'Buscar secretos en el histórico de git.',
+  'Medir el arranque en frío y decir de dónde salen los 400ms.',
+  'Comprobar que cada endpoint valida su entrada.',
+];
+
+const SQUAD_ORDERS: readonly string[] = [
+  'Repartido: cada uno con su módulo, nadie toca src/shared',
+  'Parad lo que estéis haciendo y contadme qué habéis encontrado',
+  'El informe sale a las 18:00; mandadme una línea cada uno',
+  'Cambio de prioridad: primero los endpoints de pago',
+];
+
+const SQUAD_REPORTS: readonly string[] = [
+  'Terminado mi módulo: dos validaciones ausentes, ninguna explotable',
+  'El arranque en frío son 280ms de DNS, no de código',
+  'Encontré una key de sandbox en un commit de marzo',
+  'Sin hallazgos en mi parte; me quedan los tests',
 ];
 
 const MISSIONS: readonly string[] = [
@@ -229,6 +260,58 @@ const FLEET: readonly MachineSpec[] = [
   },
 ];
 
+/** Agentes por máquina que la escala no pasa: el hub tira por encima de 400. */
+const MAX_AGENTS_PER_FAKE_MACHINE = 250;
+
+function cloneSpec(m: MachineSpec, rep: number): MachineSpec {
+  if (rep === 0) return { ...m, projects: m.projects.map((p) => ({ ...p })) };
+  return {
+    ...m,
+    id: `${m.id}-r${rep}`,
+    hostname: `${m.hostname}-${rep}`,
+    projects: m.projects.map((p) => ({
+      ...p,
+      id: `${p.id}_r${rep}`,
+      name: `${p.name}-${rep}`,
+      code: `${p.code}${rep}`,
+      path: `${p.path}-r${rep}`,
+    })),
+  };
+}
+
+/**
+ * Escala la flota sintética hasta ~`target` agentes iniciales sin cambiar su
+ * forma: replica la topología entera (máquinas *y* proyectos) tantas veces
+ * como haga falta para no pasarse del techo por máquina, y luego reparte los
+ * agentes en la misma proporción que la flota original. Con `target` a 0 o al
+ * total por defecto devuelve la flota de siempre, así que `npm run mock` y
+ * `test/visual.ts` no cambian de comportamiento.
+ */
+export function scaleFleet(target: number, base: readonly MachineSpec[] = FLEET): MachineSpec[] {
+  const baseTotal = base.reduce((n, m) => n + m.agents, 0);
+  if (!Number.isFinite(target) || target <= 0 || target === baseTotal) {
+    return base.map((m) => cloneSpec(m, 0));
+  }
+  const want = Math.max(base.length, Math.floor(target));
+  // La máquina más poblada es la que fija cuántas réplicas hacen falta.
+  const maxW = Math.max(...base.map((m) => m.agents));
+  const reps = Math.max(1, Math.ceil((want * maxW) / (baseTotal * MAX_AGENTS_PER_FAKE_MACHINE)));
+  const out: MachineSpec[] = [];
+  for (let r = 0; r < reps; r++) for (const m of base) out.push(cloneSpec(m, r));
+
+  const weights = out.map((m) => m.agents);
+  const wTotal = weights.reduce((a, b) => a + b, 0);
+  let left = want;
+  for (let i = 0; i < out.length; i++) {
+    const rest = out.length - i - 1; // máquinas que todavía necesitan su agente
+    const share = Math.round((want * (weights[i] ?? 1)) / wTotal);
+    const n = i === out.length - 1 ? left : Math.max(1, Math.min(share, left - rest));
+    out[i]!.agents = n;
+    left -= n;
+  }
+  return out;
+}
+
 /* ── una máquina falsa ────────────────────────────────────────────── */
 
 type State = Agent['state'];
@@ -240,6 +323,130 @@ interface Local {
   /** Escalación abierta, si la hay. */
   escalationId: string | null;
   spawnBudget: number;
+}
+
+/* ── artefactos de verdad ─────────────────────────────────────────── */
+
+/**
+ * Archivos reales en un directorio temporal.
+ *
+ * No son placeholders: son bytes que existen, que se pueden leer y que viajan
+ * por el mismo `artifact:read` que usaría un collector de verdad. Sin eso, la
+ * tubería —detección, frame, caché del hub, Content-Type— se probaría contra un
+ * mock del propio transporte, que es exactamente donde suelen estar los fallos.
+ */
+export const FAKE_ARTIFACT_DIR = join(tmpdir(), 'orca-fake-artifacts');
+
+function crc32(buf: Buffer): number {
+  let c = ~0;
+  for (const byte of buf) {
+    c ^= byte;
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  }
+  return ~c >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([len, body, crc]);
+}
+
+/**
+ * Un PNG RGB de verdad, codificado a mano: firma, IHDR, IDAT deflateado, IEND.
+ * Node trae zlib, así que no hace falta ninguna dependencia para producir una
+ * imagen que cualquier navegador abre.
+ */
+export function makePng(size: number, hue: number): Buffer {
+  const raw = Buffer.alloc(size * (size * 3 + 1));
+  let o = 0;
+  for (let y = 0; y < size; y++) {
+    raw[o++] = 0;                       // filtro "none" por scanline
+    for (let x = 0; x < size; x++) {
+      // Un tablero teñido: se distingue a simple vista de qué artefacto es.
+      const on = ((x >> 3) + (y >> 3)) % 2 === 0;
+      raw[o++] = on ? (hue * 37) % 256 : 18;
+      raw[o++] = on ? (hue * 91) % 256 : 22;
+      raw[o++] = on ? (hue * 143) % 256 : 30;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(size, 0);
+  ihdr.writeUInt32BE(size, 4);
+  ihdr[8] = 8;    // 8 bits por canal
+  ihdr[9] = 2;    // color type 2 = RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+const FAKE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 120">
+  <rect width="240" height="120" fill="#0b0d10"/>
+  <path d="M8 96 L64 60 L120 74 L176 24 L232 40" fill="none" stroke="#7ad7c3" stroke-width="3"/>
+  <text x="8" y="24" fill="#8b95a1" font-family="monospace" font-size="11">tokens/s</text>
+</svg>
+`;
+
+const FAKE_HTML = `<!doctype html>
+<meta charset="utf-8">
+<title>bundle report</title>
+<style>
+  body { background:#0b0d10; color:#c9d1d9; font:13px/1.6 ui-monospace,monospace; padding:24px }
+  h1 { font-size:15px; letter-spacing:.08em; text-transform:uppercase; color:#7ad7c3 }
+  td { padding:2px 18px 2px 0 } .n { color:#e0a458; text-align:right }
+</style>
+<h1>bundle · before / after</h1>
+<table>
+  <tr><td>three.js</td><td class="n">612 kB</td><td class="n">612 kB</td></tr>
+  <tr><td>gsap</td><td class="n">71 kB</td><td class="n">0 kB</td></tr>
+  <tr><td>app</td><td class="n">148 kB</td><td class="n">96 kB</td></tr>
+</table>
+`;
+
+const FAKE_MD = `# Postmortem — el hub se quedaba sin memoria
+
+**Impacto.** Tres horas sin consola. El proceso moría con
+\`FATAL ERROR: Reached heap limit\`.
+
+**Causa.** Nada se desalojaba. De 50 a 1.289 agentes en dos minutos con una
+flota activa; cada sesión muerta seguía en el frame para siempre.
+
+**Arreglo.** Retención por edad *y* techo duro, y nunca se tira lo que
+necesita a una persona.
+`;
+
+interface FakeArtifactFile { file: string; title: string; kind: ArtifactKind; }
+
+let FAKE_FILES: FakeArtifactFile[] | null = null;
+
+/** Los escribe una vez por proceso y reutiliza. Idempotente a propósito. */
+export function fakeArtifactFiles(): FakeArtifactFile[] {
+  if (FAKE_FILES) return FAKE_FILES;
+  mkdirSync(FAKE_ARTIFACT_DIR, { recursive: true });
+  const out: FakeArtifactFile[] = [];
+  const write = (name: string, body: Buffer | string, title: string, kind: ArtifactKind): void => {
+    const file = join(FAKE_ARTIFACT_DIR, name);
+    try {
+      writeFileSync(file, body);
+      out.push({ file, title, kind });
+    } catch {
+      // Un tmpdir de sólo lectura no puede tumbar la flota sintética.
+    }
+  };
+  write('heatmap-64.png', makePng(64, 3), 'Mapa de calor de escrituras', 'image');
+  write('coverage-64.png', makePng(64, 11), 'Cobertura por módulo', 'image');
+  write('latency-96.png', makePng(96, 7), 'p95 antes y después', 'image');
+  write('tokens.svg', FAKE_SVG, 'tokens/s de la última hora', 'image');
+  write('bundle-report.html', FAKE_HTML, 'Bundle, antes y después', 'html');
+  write('postmortem.md', FAKE_MD, 'Postmortem del OOM del hub', 'text');
+  FAKE_FILES = out;
+  return out;
 }
 
 const CALLSIGN_LETTERS = 'KTZVRNMQXBFJ';
@@ -260,10 +467,19 @@ export class FakeMachine {
   private timers: ReturnType<typeof setInterval>[] = [];
   private messages = new Map<string, AgentMessage>();
   private collisions = new Map<string, Collision>();
+  private artifacts = new Map<string, Artifact>();
   private stopped = false;
   private callsignSeq = 0;
+  private squad: { name: string; leadId: string; memberIds: string[] } | null = null;
 
-  constructor(spec: MachineSpec, opts: { hub: string; token: string; quiet: boolean; speed: number }) {
+  constructor(
+    spec: MachineSpec,
+    opts: {
+      hub: string; token: string; quiet: boolean; speed: number;
+      /** Preset de escuadrón: un líder y N miembros que se hablan por squad. */
+      squad?: { name: string; size: number } | null;
+    },
+  ) {
     this.spec = spec;
     this.hubUrl = opts.hub;
     this.token = opts.token;
@@ -295,6 +511,77 @@ export class FakeMachine {
     }
 
     for (let i = 0; i < spec.agents; i++) this.spawn(null, 0);
+
+    // Antes de conectar, para que el escuadrón entero viaje en el snapshot en
+    // vez de en cuatro `agent:new` que se pierden si el socket todavía no está.
+    if (opts.squad) this.formSquad(opts.squad.name, opts.squad.size);
+  }
+
+  /**
+   * Un escuadrón sintético: un líder y N miembros colgando de él.
+   *
+   * Existe para que la consola tenga algo real que dibujar y fotografiar sin
+   * lanzar agentes de verdad. Los miembros son hijos del líder —`parentId`— y
+   * llevan la misma etiqueta `squad`, que es exactamente la forma que produce
+   * un `spawn` con `squad`/`lead` en el collector real.
+   */
+  formSquad(name: string, size = 3): { lead: Agent; members: Agent[] } {
+    const project = pick(this.projects);
+    const lead = this.spawn(null, 0, project.id,
+      `Auditar ${project.name} y consolidar en un solo informe.`, { name, lead: true });
+    lead.title = `Escuadrón ${name}: auditoría de ${project.name}`;
+    const members: Agent[] = [];
+    for (let i = 0; i < size; i++) {
+      const m = this.spawn(lead, 1, project.id, pick(SQUAD_TASKS), { name, lead: false });
+      m.title = `${name}/${i + 1}: ${m.mission ?? 'trabajo del escuadrón'}`;
+      members.push(m);
+    }
+    this.squad = { name, leadId: lead.id, memberIds: members.map((m) => m.id) };
+    this.log(`escuadrón ${name}: ${lead.callsign} + ${members.map((m) => m.callsign).join(' ')}`);
+    return { lead, members };
+  }
+
+  /**
+   * Lo que se dicen dentro del escuadrón.
+   *
+   * Dos direcciones y las dos importan: el líder reparte con `scope:'squad'`
+   * (un mensaje, todos los miembros) y cada miembro le reporta a él con
+   * `scope:'agent'`. Es la forma del tráfico que la consola tiene que saber
+   * dibujar; sin ella un escuadrón se ve igual que cuatro agentes sueltos.
+   */
+  private emitSquadTraffic(): void {
+    const sq = this.squad;
+    if (!sq) return;
+    const alive = (id: string): Agent | null => {
+      const a = this.agents.get(id)?.agent;
+      return a && a.state !== 'done' && a.state !== 'dead' ? a : null;
+    };
+    const lead = alive(sq.leadId);
+    const members = sq.memberIds.map(alive).filter((a): a is Agent => a !== null);
+    if (!lead || members.length === 0) return;
+
+    const now = Date.now();
+    const toSquad = chance(0.4);
+    const from = toSquad ? lead : pick(members);
+    if (from.state === 'blocked') return;
+    const subject = toSquad ? pick(SQUAD_ORDERS) : pick(SQUAD_REPORTS);
+
+    const msg: AgentMessage = {
+      id: newId('msg'),
+      kind: toSquad ? 'handoff' : 'notice',
+      scope: toSquad ? 'squad' : 'agent',
+      fromAgentId: from.id, fromCallsign: from.callsign, fromProjectId: from.projectId,
+      toAgentId: toSquad ? null : lead.id,
+      toProjectId: null,
+      toSquad: toSquad ? sq.name : null,
+      subject, body: null, files: [],
+      at: now, readBy: [], expiresAt: toSquad ? null : now + 900_000,
+      answer: null, answeredAt: null, answeredBy: null,
+    };
+    this.messages.set(msg.id, msg);
+    this.send({ t: 'message', machineId: this.spec.id, message: msg });
+    this.feed('info', from,
+      toSquad ? `→ squad:${sq.name}: ${subject}` : `→ ${lead.callsign}: ${subject}`);
   }
 
   private log(...args: unknown[]): void {
@@ -353,6 +640,11 @@ export class FakeMachine {
       agents: [...this.agents.values()].map((l) => l.agent),
       keys: this.keys,
     });
+    // Un artefacto es estado, no un evento: si el hub se reinició no se
+    // enteraría de lo que ya se produjo hasta que alguien produjera otro.
+    for (const a of this.artifacts.values()) {
+      this.send({ t: 'artifact', machineId: this.spec.id, artifact: a });
+    }
   }
 
   /* ── ciclo de vida ──────────────────────────────────────────────── */
@@ -369,6 +661,7 @@ export class FakeMachine {
     every(1800, () => this.emitFeed());
     every(6500, () => this.emitTraffic());
     every(11_000, () => this.churnCollisions());
+    every(9_000, () => this.emitSquadTraffic());
     this.timers.push();
   }
 
@@ -416,7 +709,10 @@ export class FakeMachine {
     return `${letter}${num}`;
   }
 
-  private spawn(parent: Agent | null, depth: number, projectId?: string, mission?: string): Agent {
+  private spawn(
+    parent: Agent | null, depth: number, projectId?: string, mission?: string,
+    squad?: { name: string; lead: boolean } | null,
+  ): Agent {
     const project = projectId
       ? this.projects.find((p) => p.id === projectId) ?? pick(this.projects)
       : (parent ? this.projects.find((p) => p.id === parent.projectId) ?? pick(this.projects) : pick(this.projects));
@@ -427,12 +723,15 @@ export class FakeMachine {
       projectId: project.id,
       title: pick(TITLES),
       callsign: this.callsign(),
+      runtime: 'claude',
       state: 'booting',
       block: null,
       parentId: parent?.id ?? null,
       depth,
       childIds: [],
       mission: mission ?? (parent ? `Subtarea: ${pick(TITLES).toLowerCase()}` : pick(MISSIONS)),
+      squad: squad?.name ?? null,
+      lead: squad?.lead === true,
       model: pick(['claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5']),
       tool: null,
       toolDetail: null,
@@ -497,7 +796,7 @@ export class FakeMachine {
       id: newId('msg'),
       kind: t.kind, scope: 'agent',
       fromAgentId: from.id, fromCallsign: from.callsign, fromProjectId: from.projectId,
-      toAgentId: to.id, toProjectId: null,
+      toAgentId: to.id, toProjectId: null, toSquad: null,
       subject: t.subject, body: null, files: t.files ? [...t.files] : [],
       at: Date.now(), readBy: [], expiresAt: t.kind === 'notice' ? Date.now() + 900_000 : null,
       answer: null, answeredAt: null, answeredBy: null,
@@ -686,6 +985,9 @@ export class FakeMachine {
       a.tool = tool;
       a.toolDetail = this.toolDetail(tool);
       a.metrics.toolCalls += 1;
+      // Un `Write` sobre algo que se mira produce un artefacto de verdad, igual
+      // que lo haría la detección del collector real sobre el transcript.
+      if (tool === 'Write' && chance(0.5)) this.produceArtifact(a);
       if (tool === 'Task' && local.spawnBudget > 0 && a.depth < 2) {
         local.spawnBudget -= 1;
         const child = this.spawn(a, a.depth + 1, a.projectId, a.toolDetail ?? undefined);
@@ -745,6 +1047,47 @@ export class FakeMachine {
         childIds: a.childIds,
       },
     });
+  }
+
+  /**
+   * Registra uno de los archivos reales del directorio temporal a nombre de un
+   * agente. Público porque una prueba necesita provocarlo cuando le toca, y no
+   * cuando el azar quiera.
+   */
+  produceArtifact(agent?: Agent): Artifact | null {
+    const files = fakeArtifactFiles();
+    if (files.length === 0) return null;
+    const a = agent ?? [...this.agents.values()]
+      .map((l) => l.agent)
+      .filter((x) => x.state !== 'done' && x.state !== 'dead')[0];
+    if (!a) return null;
+    const f = pick(files);
+    let bytes = 0;
+    try { bytes = statSync(f.file).size; } catch { return null; }
+
+    // Mismo id para la misma ruta en la misma máquina, como el collector real:
+    // regenerar la gráfica sustituye a la anterior en vez de duplicarla.
+    const id = 'art_' + createHash('sha1').update(`${this.spec.id} ${f.file}`).digest('hex').slice(0, 16);
+    const artifact: Artifact = {
+      id,
+      agentId: a.id,
+      projectId: a.projectId,
+      machineId: this.spec.id,
+      kind: f.kind,
+      path: f.file,
+      title: f.title,
+      url: null,
+      bytes,
+      width: f.file.endsWith('.png') ? (f.file.includes('96') ? 96 : 64) : null,
+      height: f.file.endsWith('.png') ? (f.file.includes('96') ? 96 : 64) : null,
+      at: Date.now(),
+      open: false,
+      placement: null,
+    };
+    this.artifacts.set(id, artifact);
+    this.send({ t: 'artifact', machineId: this.spec.id, artifact });
+    this.feed('info', a, `produjo ${f.kind}: ${f.title}`);
+    return artifact;
   }
 
   private toolDetail(tool: string): string {
@@ -830,12 +1173,22 @@ export class FakeMachine {
 
       case 'spawn': {
         const parent = cmd.parentId ? this.agents.get(cmd.parentId)?.agent ?? null : null;
-        const child = this.spawn(parent, parent ? parent.depth + 1 : 0, cmd.projectId, cmd.mission);
+        const squad = cmd.squad ? { name: cmd.squad, lead: cmd.lead === true } : null;
+        const child = this.spawn(
+          parent, parent ? parent.depth + 1 : 0, cmd.projectId, cmd.mission, squad,
+        );
         child.lastPrompt = cmd.prompt;
         child.background = cmd.background;
         this.send({ t: 'agent:new', machineId: this.spec.id, agent: child });
         this.feed('info', child, `lanzado por la consola: ${cmd.mission}`);
-        this.ack(cmdId, true, `agente ${child.callsign} lanzado`);
+        // El id va en el ack, no sólo en el frame: quien acaba de lanzar a un
+        // líder lo necesita para lanzarle miembros con `parentId`.
+        const data: SpawnAck = {
+          agentId: child.id, callsign: child.callsign, shortId: child.shortId,
+        };
+        this.send({
+          t: 'ack', cmdId, ok: true, detail: `agente ${child.callsign} lanzado`, data,
+        });
         return;
       }
 
@@ -931,6 +1284,27 @@ export class FakeMachine {
         return;
       }
 
+      case 'artifact:read': {
+        // Lista blanca por id, igual que el collector real: una ruta que este
+        // proceso no registró no se sirve, aunque exista en disco.
+        const a = this.artifacts.get(cmd.artifactId);
+        if (!a) { this.ack(cmdId, false, `artefacto desconocido: ${cmd.artifactId}`); return; }
+        try {
+          const buf = readFileSync(a.path);
+          if (buf.length > MAX_ARTIFACT_BYTES) {
+            this.ack(cmdId, false, `pesa ${buf.length}B, por encima del límite`);
+            return;
+          }
+          this.send({
+            t: 'ack', cmdId, ok: true, detail: 'artifact',
+            data: { base64: buf.toString('base64'), mime: artifactMime(a.path), bytes: buf.length },
+          });
+        } catch (err) {
+          this.ack(cmdId, false, `no pude leerlo: ${(err as Error).message}`);
+        }
+        return;
+      }
+
       case 'logs': {
         const lines = Array.from({ length: Math.min(cmd.lines, 20) }, () => `$ ${pick(BASH)}`);
         this.send({ t: 'ack', cmdId, ok: true, detail: 'logs', data: { lines } });
@@ -963,7 +1337,20 @@ export interface FakeFleetOptions {
   chaos?: boolean;
   speed?: number;
   quiet?: boolean;
+  /** Escala la topología hasta ~n agentes iniciales. Sin esto, los 20 de siempre. */
+  agents?: number;
+  /**
+   * Preset de escuadrón: un líder y tres hijos con la misma etiqueta, que se
+   * hablan por `scope:'squad'`. `true` usa el nombre por defecto. Va siempre en
+   * la primera máquina, para que quien lo busque sepa dónde mirar.
+   */
+  squad?: string | boolean;
+  /** Cuántos miembros bajo el líder. Por defecto 3. */
+  squadSize?: number;
 }
+
+/** Nombre del escuadrón del preset cuando nadie pide otro. */
+export const DEFAULT_SQUAD = 'audit-01';
 
 export function startFakeFleet(opts: FakeFleetOptions = {}): { machines: FakeMachine[]; stop: () => void } {
   const hub = opts.hub ?? `ws://localhost:${PORTS.hub}`;
@@ -971,7 +1358,14 @@ export function startFakeFleet(opts: FakeFleetOptions = {}): { machines: FakeMac
   const speed = opts.speed ?? 1;
   const quiet = opts.quiet ?? false;
 
-  const machines = FLEET.map((spec) => new FakeMachine(spec, { hub, token, quiet, speed }));
+  const specs = scaleFleet(opts.agents ?? 0);
+  const squadName = opts.squad === true ? DEFAULT_SQUAD
+    : typeof opts.squad === 'string' && opts.squad ? opts.squad : null;
+  const machines = specs.map((spec, i) => new FakeMachine(spec, {
+    hub, token, quiet, speed,
+    squad: squadName !== null && i === 0
+      ? { name: squadName, size: opts.squadSize ?? 3 } : null,
+  }));
   for (const m of machines) m.start();
 
   let chaosTimer: ReturnType<typeof setInterval> | null = null;
@@ -1000,14 +1394,20 @@ const runDirectly = (process.argv[1] ?? '').endsWith('fake-collector.ts');
 if (runDirectly) {
   const hubFlag = process.argv.find((a) => a.startsWith('--hub='));
   const speedFlag = process.argv.find((a) => a.startsWith('--speed='));
+  const agentsFlag = process.argv.find((a) => a.startsWith('--agents='));
+  const squadFlag = process.argv.find((a) => a === '--squad' || a.startsWith('--squad='));
   const fleet = startFakeFleet({
+    squad: squadFlag === undefined ? false
+      : squadFlag === '--squad' ? true : squadFlag.slice('--squad='.length) || true,
     hub: hubFlag?.slice('--hub='.length),
     token: readToken(),
     chaos: process.argv.includes('--chaos'),
     speed: speedFlag ? Number(speedFlag.slice('--speed='.length)) || 1 : 1,
+    agents: agentsFlag ? Number(agentsFlag.slice('--agents='.length)) || 0 : 0,
     quiet: process.argv.includes('--quiet'),
   });
-  console.log(`[fake] ${fleet.machines.length} máquinas, ${FLEET.reduce((n, m) => n + m.agents, 0)} agentes iniciales`);
+  const total = fleet.machines.reduce((n, m) => n + m.spec.agents, 0);
+  console.log(`[fake] ${fleet.machines.length} máquinas, ${total} agentes iniciales`);
   const bye = (): void => { fleet.stop(); process.exit(0); };
   process.on('SIGINT', bye);
   process.on('SIGTERM', bye);

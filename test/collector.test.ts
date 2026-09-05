@@ -818,8 +818,9 @@ const testPathGuard: Test = () => check('commands: isInside es la valla de rutas
 
 function fakeAgent(over: Partial<Agent> = {}): Agent {
   return {
-    id: 'a1', machineId: 'm1', projectId: 'p1', title: 't', callsign: 'K9',
+    id: 'a1', machineId: 'm1', projectId: 'p1', title: 't', callsign: 'K9', runtime: 'claude',
     state: 'idle', block: null, parentId: null, depth: 0, childIds: [], mission: null,
+    squad: null, lead: false,
     model: 'claude-opus-5', tool: null, toolDetail: null, lastPrompt: null, lastSay: null,
     startedAt: 1000, updatedAt: 2000, uptimeMs: 1000,
     metrics: {

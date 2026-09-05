@@ -60,8 +60,9 @@ function agentFixture(over: Partial<Agent> = {}): Agent {
   const now = Date.now();
   return {
     id: over.id ?? newId('sess'), machineId: 'm1', projectId: 'p1',
-    title: 'prueba', callsign: 'K1', state: 'working', block: null,
+    title: 'prueba', callsign: 'K1', runtime: 'claude', state: 'working', block: null,
     parentId: null, depth: 0, childIds: [], mission: null,
+    squad: null, lead: false,
     model: 'claude-opus-4-6', tool: 'Bash', toolDetail: 'npm run build',
     lastPrompt: null, lastSay: null, startedAt: now, updatedAt: now, uptimeMs: 0,
     metrics: {

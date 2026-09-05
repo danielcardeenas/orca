@@ -1,0 +1,39 @@
+/*
+ * Sigil glyphs (gfx/sigil.ts). Owned by column A of docs/IDENTITY.md.
+ *
+ * The glyph itself is not here: `sigilHTML()` writes the cells as inline
+ * box-shadows on the element — one shadow per filled cell, spread −0.4em so
+ * the 1em box shrinks to a 0.2em cell, offset onto its place in the 5×5 grid.
+ * All of it is in `em`, so the only thing this file decides is the box.
+ * (`image-rendering` has no say over box-shadow: the cells are rectangles, not
+ * a scaled bitmap, so they are already hard-edged.)
+ */
+
+.sigil {
+  display: inline-block;
+  position: relative;
+  width: 1em;
+  height: 1em;
+  /* No box of its own: every pixel of the glyph is a shadow of this box. */
+  background: transparent;
+  vertical-align: -0.125em;
+  flex: none;
+  /* Cells are drawn in currentColor, so the caller owns the ink. */
+}
+
+/*
+ * The lead's mark. Inversion happens in the shadow list, not here: the ink
+ * block is the glyph's complement, and the glyph cells are holes onto whatever
+ * the sigil sits on — the DOM twin of the shader's inverted lead sigil.
+ * The `background: transparent` is the guard that makes it work: an outer
+ * box-shadow paints *behind* the element's background, so any theme that gave
+ * `.sigil` a background would swallow the whole glyph.
+ */
+.sigil.is-inv {
+  background: transparent;
+}
+
+/* Squad labels wear it at double size; everything scales off font-size. */
+.sigil--lg {
+  font-size: 2em;
+}

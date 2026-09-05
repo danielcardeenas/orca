@@ -1,0 +1,294 @@
+/*
+ * The field: the whole viewport, and the only stage.
+ *
+ * Layers, bottom to top:
+ *   canvas      WebGL — ground, tiles, pipes, pulses, media quads
+ *   labels      DOM — callsigns for tiles large enough to read
+ *   surfaces    DOM — sandboxed HTML artifacts projected onto the canvas
+ *   regions     DOM — project labels that fade as tiles become readable
+ *   lasso       DOM — the selection rectangle
+ *   windows     DOM — see window.css
+ *   hud         DOM — mast, command line, tray, crosshairs
+ */
+
+#app { position: fixed; inset: 0; background: var(--bezel); }
+
+.field { position: absolute; inset: 0; overflow: hidden; opacity: 0; }
+.field.is-live { opacity: 1; transition: opacity 0.4s var(--ease-out); }
+.field.is-breach { background: var(--red-deep); }
+
+.field { touch-action: none; }
+.field__canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  touch-action: none;
+}
+.field__canvas.is-grab { cursor: none; }
+
+/* Every DOM layer over the canvas is inert unless it says otherwise. */
+.field__layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+
+/* ── Labels: the tile's interior ──────────────────────────────────── */
+
+/*
+ * A label is laid over the whole tile, not next to it, and every size inside
+ * is a multiple of `--u` — the unit labels.ts derives from the tile's width
+ * in pixels. Zooming a tile to half the screen grows its type with it.
+ *
+ * Three bands, absolutely placed against the tile rectangle, all starting at
+ * x 7 % because the shader's state stripe owns the left 4.5 % and needs air:
+ *
+ *   top    0–30 %   x  7–78 %   meta, callsign, project code, runtime chip
+ *   mid   31–68 %   x  7–66 %   the title, and the mission under it
+ *   bot   69–89 %   x  7–96 %   NOW, then cost · tok/s · uptime · turns · pill
+ *
+ * Every edge is a shader region the text keeps out of. The middle band is the
+ * narrow one because that is the band the bite crosses (x 70–100 %,
+ * y 30–70 %). The top band stops at 78 % because the sigil — the agent's 5×5
+ * mark — owns x 80–95.5 % of the top ~22 %. The bottom band stops at
+ * `bottom: 11%` because the travelling speed band runs under it. Nothing here
+ * draws a background or a box: the tile is the shader's, and a second
+ * rectangle over it is drift.
+ */
+
+.lbl {
+  position: absolute; left: 0; top: 0;
+  transform-origin: 0 0; will-change: transform;
+  overflow: hidden;
+  --u: 1;
+  --pad-x: calc(4px * var(--u));
+  --pad-y: calc(3px * var(--u));
+  line-height: 1.05;
+}
+
+.lbl__top, .lbl__mid, .lbl__bot {
+  position: absolute; box-sizing: border-box; overflow: hidden;
+  display: flex; flex-direction: column; gap: calc(1.5px * var(--u));
+}
+/* 7 → 78 %: the sigil starts at 80 % and nothing may reach it. */
+.lbl__top { left: 7%; top: 0; width: 71%; height: 30%; padding: var(--pad-y) 0 0 0; }
+/* 7 → 66 %: clear of the bite at 70 %. */
+.lbl__mid { left: 7%; top: 31%; height: 33%; width: 59%; justify-content: center; }
+/* 7 → 96 %, stopping at 11 % so the shader's speed band runs under it. */
+.lbl__bot { left: 7%; bottom: 11%; width: 89%; height: 25%; justify-content: flex-end; }
+
+.lbl__row { display: flex; align-items: baseline; gap: calc(4px * var(--u)); white-space: nowrap; }
+.lbl__cs {
+  font-family: 'Tiny5', monospace; font-size: calc(12px * var(--u)); letter-spacing: 0.12em;
+  color: var(--ink-bright); text-transform: uppercase;
+}
+.lbl__pj {
+  font-family: 'Tiny5', monospace; font-size: calc(9px * var(--u)); letter-spacing: 0.14em;
+  color: var(--ink-dimmer); text-transform: uppercase;
+}
+.lbl__rt {
+  font-family: 'Tiny5', monospace; font-size: calc(7px * var(--u)); letter-spacing: 0.12em;
+  color: var(--ink-faint); text-transform: uppercase;
+  padding: 0 calc(2px * var(--u)); border: 1px solid var(--line-soft);
+}
+/* Runtime · model · machine. The band already stops short of the sigil; this
+   only keeps a long model name from pushing the callsign off its line. */
+.lbl__meta {
+  font-family: 'Tiny5', monospace; font-size: calc(7px * var(--u)); letter-spacing: 0.16em;
+  color: var(--ink-faint); text-transform: uppercase;
+  max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lbl__title {
+  font-family: 'Geist Mono', monospace; font-size: calc(10px * var(--u)); letter-spacing: 0.01em;
+  color: var(--ink-mid);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; word-break: break-word;
+}
+/* Once the mission joins it in the middle band, the title gets one line. */
+.lbl.has-mission .lbl__title { -webkit-line-clamp: 1; }
+/* Two lines. The mission is the sentence that says why the agent exists;
+   eleven characters and an ellipsis explain nothing. */
+.lbl__mission {
+  font-family: 'Geist Mono', monospace; font-size: calc(8px * var(--u));
+  color: var(--ink-dim);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; word-break: break-word;
+}
+/* NOW lives in the bottom band: one line, the full 89 %, no bite to dodge. */
+.lbl__now {
+  font-family: 'Geist Mono', monospace; font-size: calc(9px * var(--u));
+  color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lbl__now b {
+  font-family: 'Tiny5', monospace; font-weight: 400; font-size: calc(8px * var(--u));
+  letter-spacing: 0.14em; color: var(--lime); margin-right: calc(3px * var(--u));
+  text-transform: uppercase;
+}
+
+/* The numbers along the foot: the window's `.grid4`, flat — no rules, no box.
+   The pill rides the right end of this row; the four columns are fixed so the
+   eye finds a number where it left it. */
+.lbl__foot { display: flex; align-items: flex-end; gap: calc(5px * var(--u)); min-width: 0; }
+.lbl__grid {
+  flex: 1 1 auto; min-width: 0;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: calc(4px * var(--u));
+}
+.lbl__m { display: flex; flex-direction: column; gap: calc(1px * var(--u)); min-width: 0; overflow: hidden; }
+.lbl__mv {
+  font-family: 'Tiny5', monospace; font-size: calc(7px * var(--u)); letter-spacing: 0.04em;
+  color: var(--ink-bright); font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: clip;
+}
+/* A number with no meaning in the current state is a dash, not a zero: `0`
+   reads as measured-and-none, which would be a lie. */
+.lbl__mv.is-nil { color: var(--ink-faint); }
+.lbl__mk {
+  font-family: 'Tiny5', monospace; font-size: calc(5px * var(--u)); letter-spacing: 0.10em;
+  color: var(--ink-dimmer); white-space: nowrap; overflow: hidden;
+}
+
+/*
+ * The pill left the top-right corner — that corner belongs to the sigil now —
+ * and sits at the right end of the metrics row, where the comp puts `OFFLINE`
+ * on the DEEP-SPACE RADAR ARRAY card: under the title, not over it.
+ */
+.lbl__pill.status {
+  flex: 0 0 auto; align-self: flex-end;
+  font-size: calc(7px * var(--u)); letter-spacing: 0.14em;
+  padding: calc(1.5px * var(--u)) calc(4px * var(--u));
+  border-radius: calc(1px * var(--u));
+  white-space: nowrap; max-width: 40%; overflow: hidden;
+}
+
+/* Ink on an amber tile is black; on a dark one it keeps its hierarchy. */
+.lbl.is-blocked .lbl__cs, .lbl.is-blocked .lbl__pj, .lbl.is-blocked .lbl__meta,
+.lbl.is-blocked .lbl__title, .lbl.is-blocked .lbl__mission, .lbl.is-blocked .lbl__now,
+.lbl.is-blocked .lbl__now b, .lbl.is-blocked .lbl__mv, .lbl.is-blocked .lbl__mk { color: #111; }
+.lbl.is-blocked .lbl__rt { color: #111; border-color: rgba(0,0,0,0.35); }
+/* Amber on amber says nothing; the pill inverts instead. */
+.lbl.is-blocked .lbl__pill.status { background: #111; color: var(--amber); }
+.lbl.is-dead .lbl__cs { color: var(--red); }
+.lbl.is-done .lbl__cs { color: var(--ink-faint); }
+.lbl.is-dim { opacity: 0.55; }
+
+/*
+ * Selection (§6.4): four 6 px lime ticks at the label's corners. They appear
+ * by cut and leave by cut — a selection that fades is a selection you doubt.
+ * Two of them are pseudo-elements, two are the `<i>` the label always carries;
+ * that way the selection moving across the field never rewrites an interior.
+ */
+.lbl__c { display: none; }
+.lbl.is-sel::before, .lbl.is-sel::after, .lbl.is-sel .lbl__c {
+  content: ''; display: block; position: absolute; width: 6px; height: 6px;
+  pointer-events: none; --tick: var(--lime);
+}
+.lbl.is-sel::before { left: 0; top: 0; border-left: 1px solid var(--tick); border-top: 1px solid var(--tick); }
+.lbl.is-sel::after { right: 0; top: 0; border-right: 1px solid var(--tick); border-top: 1px solid var(--tick); }
+.lbl.is-sel .lbl__c:first-of-type { left: 0; bottom: 0; border-left: 1px solid var(--tick); border-bottom: 1px solid var(--tick); }
+.lbl.is-sel .lbl__c:last-of-type { right: 0; bottom: 0; border-right: 1px solid var(--tick); border-bottom: 1px solid var(--tick); }
+/* Lime on the amber body is invisible; the ticks go to ink there, like the text. */
+.lbl.is-blocked.is-sel::before, .lbl.is-blocked.is-sel::after,
+.lbl.is-blocked.is-sel .lbl__c { --tick: #111; }
+
+/*
+ * The rung cascade (§6.4): when the zoom crosses a TIER_PX upward, the
+ * elements that rung just added appear one after another, 30 ms apart. No
+ * fade — `steps(1)` on visibility, so each one is simply not there and then
+ * there. labels.ts marks only the new elements and numbers them in `--i`;
+ * going down a rung it marks none, and the drop is a cut.
+ */
+@keyframes lbl-rung { from { visibility: hidden; } to { visibility: visible; } }
+.lbl.is-rung [data-rung] {
+  animation: lbl-rung 1ms steps(1) backwards;
+  animation-delay: calc(var(--i, 0) * 30ms);
+}
+
+/*
+ * Focus (Space). The layer carries the class, the exceptions carry the
+ * attribute: the selection and whoever is at the other end of its pipes.
+ * 120ms, the same ease the shader's uFocus runs on.
+ */
+.field__layer .lbl { transition: opacity 0.12s linear; }
+.field__layer.is-focus .lbl { opacity: 0.12; }
+.field__layer.is-focus .lbl.is-dim { opacity: 0.12; }
+.field__layer.is-focus .lbl[data-sel] { opacity: 1; }
+
+/* ── Regions ──────────────────────────────────────────────────────── */
+
+/* Region labels never sit on the mast or the command line. */
+[data-regions] { clip-path: inset(var(--hud-top, 58px) 0 66px 0); }
+
+.rgn {
+  position: absolute; left: 0; top: 0; will-change: transform;
+  display: flex; align-items: baseline; gap: 8px; white-space: nowrap;
+  padding: 3px 6px; border: 1px solid var(--line-soft); background: rgba(11,10,13,0.6);
+}
+.rgn__code { font-family: 'Tiny5', monospace; font-size: 12px; letter-spacing: 0.14em; color: var(--ink-bright); }
+.rgn__name { font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; color: var(--ink-dim); text-transform: uppercase; }
+.rgn__n { font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.12em; color: var(--ink-dimmer); }
+.rgn.has-blocked .rgn__n { color: var(--amber); }
+.rgn__open { font-family: 'Tiny5', monospace; font-size: 11px; color: var(--ink-dimmer); padding: 0 2px 0 6px; border-left: 1px solid var(--line-soft); margin-left: 2px; }
+.rgn__open:hover { color: var(--lime); }
+.rgn:hover { border-color: var(--line); }
+/* The label is the region's handle (drag moves the project); a moved one wears a lime tick. */
+.rgn.is-moved { box-shadow: -2px 0 0 0 var(--lime); }
+.rgn.is-machine { border-color: var(--line); }
+
+/* The squad rótulo, its outline legend and roster live in squad.css. */
+
+/*
+ * YOU: the terminal of every escalation raised inside a region. It only
+ * exists while something is waiting on a person, so it is always amber and
+ * never decoration — the count is the answer's blast radius.
+ */
+.you {
+  position: absolute; left: 0; top: 0; will-change: transform;
+  display: flex; align-items: baseline; gap: 6px; white-space: nowrap;
+  padding: 2px 5px; border: 1px solid var(--amber); background: rgba(11,10,13,0.72);
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.14em;
+  color: var(--amber); text-transform: uppercase;
+}
+.you__n { color: var(--ink-bright); }
+
+/* ── HTML artifact surfaces projected onto the field ──────────────── */
+
+.srf {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform;
+  background: var(--screen); border: 1px solid var(--line); overflow: hidden;
+  pointer-events: auto;
+}
+.srf iframe { display: block; border: 0; width: 100%; height: 100%; background: #fff; }
+.srf pre { margin: 0; padding: 10px; color: var(--ink-mid); white-space: pre-wrap; }
+.srf__bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 3px 8px; background: var(--shell); border-bottom: 1px solid var(--line-soft);
+}
+.srf__bar .px { font-size: 9px; }
+.srf__x { background: transparent; border: 0; color: var(--ink-dim); font-family: 'Tiny5', monospace; font-size: 10px; padding: 0 2px; }
+.srf__x:hover { color: var(--lime); }
+
+/* ── Lasso ────────────────────────────────────────────────────────── */
+
+.lasso {
+  position: absolute; border: 1px dashed var(--lime); background: rgba(192,249,74,0.05);
+  display: none;
+}
+.lasso.is-on { display: block; }
+
+/* ── Field stats, honest, bottom right ────────────────────────────── */
+
+.field__stats {
+  position: absolute; right: 62px; bottom: 24px; color: var(--ink-faint); pointer-events: none;
+  text-align: right; line-height: 1.5;
+}
+.field__hint {
+  position: absolute; left: 50%; bottom: 90px; transform: translateX(-50%);
+  color: var(--ink-faint); pointer-events: none; white-space: nowrap;
+  opacity: 0; transition: opacity 0.4s;
+}
+.field__hint.is-on { opacity: 1; }
+
+.field__nogl {
+  position: absolute; inset: 0; display: grid; place-items: center; color: var(--red);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .field.is-live { transition: none; }
+  .field__layer .lbl { transition: none; }
+  /* The rung lands whole: the information is the elements, not their order. */
+  .lbl.is-rung [data-rung] { animation: none; }
+}

@@ -6,6 +6,11 @@
  *   npm test -- hub       only suites whose filename matches "hub"
  */
 
+// El collector loguea a nivel info por diseño: es un daemon desatendido. En una
+// corrida de pruebas eso entierra los resultados bajo cientos de líneas que no
+// se están comprobando. Se puede recuperar con ORCA_LOG=info.
+process.env['ORCA_LOG'] ??= 'warn';
+
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runSuite, type TestFn, type TestModule, type TestResult } from './harness.ts';

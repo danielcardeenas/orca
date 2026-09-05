@@ -98,6 +98,60 @@ const tests = [
       r.status < 500, `http ${r.status}`);
   })),
 
+  /*
+   * La PWA. Chrome sólo instala la consola si el manifest llega con su tipo;
+   * y como manifest, iconos y fuentes tienen nombre fijo, no pueden ir como
+   * immutable o un cambio se queda pegado un año. Sin dist/ construido estas
+   * pruebas no tienen qué medir y lo dicen.
+   */
+  test('el manifest de la PWA se sirve con su tipo, no como binario', () => withHub(async (base) => {
+    const r = await fetch(`${base}/manifest.webmanifest`);
+    if (r.status === 404) return ok('el manifest de la PWA se sirve con su tipo', true, 'sin dist/, nada que medir');
+    const type = r.headers.get('content-type') ?? '';
+    const m = await r.json() as { icons?: { src: string }[]; start_url?: string };
+    return ok('el manifest de la PWA se sirve con su tipo',
+      type.startsWith('application/manifest+json') && m.start_url === '/' && (m.icons?.length ?? 0) >= 3,
+      `content-type ${type}, ${m.icons?.length ?? 0} iconos`);
+  })),
+
+  test('cada icono del manifest existe donde el manifest dice', () => withHub(async (base) => {
+    const r = await fetch(`${base}/manifest.webmanifest`);
+    if (r.status === 404) return ok('cada icono del manifest existe', true, 'sin dist/, nada que medir');
+    const m = await r.json() as { icons: { src: string; type: string }[] };
+    const missing: string[] = [];
+    for (const icon of m.icons) {
+      const ir = await fetch(`${base}${icon.src}`);
+      const type = ir.headers.get('content-type') ?? '';
+      if (ir.status !== 200 || !type.startsWith(icon.type)) missing.push(`${icon.src} (${ir.status} ${type})`);
+    }
+    return ok('cada icono del manifest existe',
+      missing.length === 0, missing.length ? missing.join(', ') : `${m.icons.length} iconos`);
+  })),
+
+  test('sólo los assets con hash son immutable; el resto se revalida', () => withHub(async (base) => {
+    const idx = await fetch(`${base}/`);
+    if (idx.status === 404) return ok('sólo los assets con hash son immutable', true, 'sin dist/, nada que medir');
+    const html = await idx.text();
+    const asset = /\/assets\/[^"']+\.js/.exec(html)?.[0];
+    const [manifest, hashed] = await Promise.all([
+      fetch(`${base}/manifest.webmanifest`),
+      asset ? fetch(`${base}${asset}`) : Promise.resolve(null),
+    ]);
+    const cc = (r: Response | null): string => r?.headers.get('cache-control') ?? '';
+    return ok('sólo los assets con hash son immutable',
+      cc(idx) === 'no-store' && !cc(manifest).includes('immutable') && (!hashed || cc(hashed).includes('immutable')),
+      `index "${cc(idx)}", manifest "${cc(manifest)}", asset "${cc(hashed)}"`);
+  })),
+
+  test('un archivo sin cambios responde 304 a If-Modified-Since', () => withHub(async (base) => {
+    const first = await fetch(`${base}/icon.svg`);
+    if (first.status === 404) return ok('un archivo sin cambios responde 304', true, 'sin dist/, nada que medir');
+    const stamp = first.headers.get('last-modified') ?? '';
+    const again = await fetch(`${base}/icon.svg`, { headers: { 'if-modified-since': stamp } });
+    return ok('un archivo sin cambios responde 304',
+      stamp !== '' && again.status === 304, `last-modified "${stamp}", segunda respuesta http ${again.status}`);
+  })),
+
   test('el websocket sigue vivo con el servido estático delante', () => withHub(async (base) => {
     const { WebSocket } = await import('ws');
     const ws = new WebSocket(base.replace('http', 'ws') + '/ws/console');

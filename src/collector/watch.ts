@@ -138,6 +138,18 @@ export class TranscriptWatcher {
     return [...this.files.values()].map((f) => f.ref);
   }
 
+  /**
+   * Busca transcripts nuevos AHORA, sin esperar al rescan periódico.
+   *
+   * Existe por un caso concreto: acabamos de lanzar una sesión y alguien está
+   * esperando su id para poder lanzarle hijos (ver el ack de `spawn`). Esperar
+   * los seis segundos del ciclo normal sería esperar por nada.
+   */
+  async refresh(): Promise<void> {
+    if (!this.running) return;
+    await this.rescan(false);
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;

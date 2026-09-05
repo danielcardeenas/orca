@@ -1,0 +1,199 @@
+{
+ "pack": "legacy",
+ "label": "LEGACY",
+ "style": "The console's first voice: eight generated takes and eleven cuts of the reference film, with the film's score still under them.",
+ "clips": [
+  {
+   "id": "interrupt",
+   "file": "gen/interrupt-1.mp3",
+   "label": "interrupt · take 1",
+   "len": 0.68
+  },
+  {
+   "id": "answer",
+   "file": "gen/answer-1.mp3",
+   "label": "answer · take 1",
+   "len": 0.48
+  },
+  {
+   "id": "spawn",
+   "file": "gen/spawn-1.mp3",
+   "label": "spawn · take 1",
+   "len": 0.6
+  },
+  {
+   "id": "launch",
+   "file": "gen/launch-1.mp3",
+   "label": "launch · take 1",
+   "len": 1.2
+  },
+  {
+   "id": "squad",
+   "file": "gen/spawn-2.mp3",
+   "label": "spawn · take 2",
+   "len": 0.6
+  },
+  {
+   "id": "dead",
+   "file": "gen/dead-1.mp3",
+   "label": "dead · take 1",
+   "len": 0.6
+  },
+  {
+   "id": "breach",
+   "file": "gen/breach-1.mp3",
+   "label": "breach · take 1",
+   "len": 1.36
+  },
+  {
+   "id": "link",
+   "file": "gen/link-1.mp3",
+   "label": "link · take 1",
+   "len": 0.88
+  },
+  {
+   "id": "artifact",
+   "file": "09-blip.m4a",
+   "label": "red square appears",
+   "len": 0.5
+  },
+  {
+   "id": "placed",
+   "file": "02-deck.m4a",
+   "label": "deck tiles light",
+   "len": 0.5
+  },
+  {
+   "id": "open.agent",
+   "file": "gen/open-1.mp3",
+   "label": "open · take 1",
+   "len": 0.48
+  },
+  {
+   "id": "open.alert",
+   "file": "gen/interrupt-2.mp3",
+   "label": "interrupt · take 2",
+   "len": 0.68
+  },
+  {
+   "id": "open.list",
+   "file": "gen/open-2.mp3",
+   "label": "open · take 2",
+   "len": 0.48
+  },
+  {
+   "id": "open.tool",
+   "file": "gen/open-1.mp3",
+   "label": "open · take 1",
+   "len": 0.48
+  },
+  {
+   "id": "open.capcom",
+   "file": "10-signal.m4a",
+   "label": "SIGNAL DETECTED",
+   "len": 0.9
+  },
+  {
+   "id": "close",
+   "file": "gen/dead-2.mp3",
+   "label": "dead · take 2",
+   "len": 0.6
+  },
+  {
+   "id": "fold",
+   "file": "gen/open-2.mp3",
+   "label": "open · take 2",
+   "len": 0.48
+  },
+  {
+   "id": "unfold",
+   "file": "gen/open-1.mp3",
+   "label": "open · take 1",
+   "len": 0.48
+  },
+  {
+   "id": "wipe",
+   "file": "06-zipper.m4a",
+   "label": "ALGN rows zip",
+   "len": 0.7
+  },
+  {
+   "id": "bookmark.save",
+   "file": "gen/answer-2.mp3",
+   "label": "answer · take 2",
+   "len": 0.48
+  },
+  {
+   "id": "fly",
+   "file": "08-beams.m4a",
+   "label": "beams sweep out",
+   "len": 0.9
+  },
+  {
+   "id": "mode.on",
+   "file": "gen/link-2.mp3",
+   "label": "link · take 2",
+   "len": 0.88
+  },
+  {
+   "id": "mode.off",
+   "file": "gen/dead-2.mp3",
+   "label": "dead · take 2",
+   "len": 0.6
+  },
+  {
+   "id": "lasso",
+   "file": "07-radar.m4a",
+   "label": "radar wakes",
+   "len": 0.8
+  },
+  {
+   "id": "select",
+   "file": "03-tick-a.m4a",
+   "label": "deck tick, high",
+   "len": 0.3
+  },
+  {
+   "id": "deck.enter",
+   "file": "02-deck.m4a",
+   "label": "deck tiles light",
+   "len": 0.5
+  },
+  {
+   "id": "deck.exit",
+   "file": "gen/open-2.mp3",
+   "label": "open · take 2",
+   "len": 0.48
+  },
+  {
+   "id": "deck.sort",
+   "file": "04-tick-b.m4a",
+   "label": "deck tick, mid",
+   "len": 0.35
+  },
+  {
+   "id": "deck.settle",
+   "file": "01-glyph.m4a",
+   "label": "password glyphs",
+   "len": 0.5
+  },
+  {
+   "id": "tick",
+   "file": "03-tick-a.m4a",
+   "label": "deck tick, high",
+   "len": 0.3
+  },
+  {
+   "id": "replay.enter",
+   "file": "05-tick-c.m4a",
+   "label": "deck tick, low",
+   "len": 0.45
+  },
+  {
+   "id": "replay.exit",
+   "file": "04-tick-b.m4a",
+   "label": "deck tick, mid",
+   "len": 0.35
+  }
+ ]
+}

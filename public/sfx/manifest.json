@@ -1,0 +1,202 @@
+[
+ {
+  "id": "gen/interrupt-1",
+  "file": "gen/interrupt-1.mp3",
+  "label": "interrupt · take 1",
+  "source": "elevenlabs",
+  "len": 0.68
+ },
+ {
+  "id": "gen/interrupt-2",
+  "file": "gen/interrupt-2.mp3",
+  "label": "interrupt · take 2",
+  "source": "elevenlabs",
+  "len": 0.68
+ },
+ {
+  "id": "gen/answer-1",
+  "file": "gen/answer-1.mp3",
+  "label": "answer · take 1",
+  "source": "elevenlabs",
+  "len": 0.48
+ },
+ {
+  "id": "gen/answer-2",
+  "file": "gen/answer-2.mp3",
+  "label": "answer · take 2",
+  "source": "elevenlabs",
+  "len": 0.48
+ },
+ {
+  "id": "gen/spawn-1",
+  "file": "gen/spawn-1.mp3",
+  "label": "spawn · take 1",
+  "source": "elevenlabs",
+  "len": 0.6
+ },
+ {
+  "id": "gen/spawn-2",
+  "file": "gen/spawn-2.mp3",
+  "label": "spawn · take 2",
+  "source": "elevenlabs",
+  "len": 0.6
+ },
+ {
+  "id": "gen/launch-1",
+  "file": "gen/launch-1.mp3",
+  "label": "launch · take 1",
+  "source": "elevenlabs",
+  "len": 1.2
+ },
+ {
+  "id": "gen/launch-2",
+  "file": "gen/launch-2.mp3",
+  "label": "launch · take 2",
+  "source": "elevenlabs",
+  "len": 1.2
+ },
+ {
+  "id": "gen/dead-1",
+  "file": "gen/dead-1.mp3",
+  "label": "dead · take 1",
+  "source": "elevenlabs",
+  "len": 0.6
+ },
+ {
+  "id": "gen/dead-2",
+  "file": "gen/dead-2.mp3",
+  "label": "dead · take 2",
+  "source": "elevenlabs",
+  "len": 0.6
+ },
+ {
+  "id": "gen/breach-1",
+  "file": "gen/breach-1.mp3",
+  "label": "breach · take 1",
+  "source": "elevenlabs",
+  "len": 1.36
+ },
+ {
+  "id": "gen/breach-2",
+  "file": "gen/breach-2.mp3",
+  "label": "breach · take 2",
+  "source": "elevenlabs",
+  "len": 1.36
+ },
+ {
+  "id": "gen/link-1",
+  "file": "gen/link-1.mp3",
+  "label": "link · take 1",
+  "source": "elevenlabs",
+  "len": 0.88
+ },
+ {
+  "id": "gen/link-2",
+  "file": "gen/link-2.mp3",
+  "label": "link · take 2",
+  "source": "elevenlabs",
+  "len": 0.88
+ },
+ {
+  "id": "gen/open-1",
+  "file": "gen/open-1.mp3",
+  "label": "open · take 1",
+  "source": "elevenlabs",
+  "len": 0.48
+ },
+ {
+  "id": "gen/open-2",
+  "file": "gen/open-2.mp3",
+  "label": "open · take 2",
+  "source": "elevenlabs",
+  "len": 0.48
+ },
+ {
+  "id": "01-glyph",
+  "file": "01-glyph.m4a",
+  "label": "password glyphs",
+  "source": "video",
+  "from": "3.72s",
+  "len": 0.5
+ },
+ {
+  "id": "02-deck",
+  "file": "02-deck.m4a",
+  "label": "deck tiles light",
+  "source": "video",
+  "from": "8.68s",
+  "len": 0.5
+ },
+ {
+  "id": "03-tick-a",
+  "file": "03-tick-a.m4a",
+  "label": "deck tick, high",
+  "source": "video",
+  "from": "9.20s",
+  "len": 0.3
+ },
+ {
+  "id": "04-tick-b",
+  "file": "04-tick-b.m4a",
+  "label": "deck tick, mid",
+  "source": "video",
+  "from": "10.40s",
+  "len": 0.35
+ },
+ {
+  "id": "05-tick-c",
+  "file": "05-tick-c.m4a",
+  "label": "deck tick, low",
+  "source": "video",
+  "from": "11.60s",
+  "len": 0.45
+ },
+ {
+  "id": "06-zipper",
+  "file": "06-zipper.m4a",
+  "label": "ALGN rows zip",
+  "source": "video",
+  "from": "13.05s",
+  "len": 0.7
+ },
+ {
+  "id": "07-radar",
+  "file": "07-radar.m4a",
+  "label": "radar wakes",
+  "source": "video",
+  "from": "15.91s",
+  "len": 0.8
+ },
+ {
+  "id": "08-beams",
+  "file": "08-beams.m4a",
+  "label": "beams sweep out",
+  "source": "video",
+  "from": "17.38s",
+  "len": 0.9
+ },
+ {
+  "id": "09-blip",
+  "file": "09-blip.m4a",
+  "label": "red square appears",
+  "source": "video",
+  "from": "20.33s",
+  "len": 0.5
+ },
+ {
+  "id": "10-signal",
+  "file": "10-signal.m4a",
+  "label": "SIGNAL DETECTED",
+  "source": "video",
+  "from": "21.55s",
+  "len": 0.9
+ },
+ {
+  "id": "11-breach",
+  "file": "11-breach.m4a",
+  "label": "SYS BREACH",
+  "source": "video",
+  "from": "23.52s",
+  "len": 1.2
+ }
+]

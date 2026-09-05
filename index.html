@@ -4,23 +4,31 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0a0d" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="robots" content="noindex, nofollow" />
-    <title>ORCA · Fleet Console</title>
+    <title>ORCA · Field</title>
     <link rel="preload" as="font" type="font/woff2" href="/fonts/tiny5.woff2" crossorigin />
     <link rel="preload" as="font" type="font/woff2" href="/fonts/geist-mono.woff2" crossorigin />
   </head>
   <body>
     <!--
       ORCA DIRECTION CONTRACT
-      THESIS: A containment console for a fleet of coding agents. The operator
-      watches a system that is already running, and the only thing allowed to
-      demand attention is an agent that needs a human.
+      THESIS: There is no dashboard. The whole viewport is the field — an
+      infinite, navigable space where every agent stands as an instrument
+      tile, wired to the agents it spawned, talks to, waits on, or collides
+      with. Everything else is a window the operator opens over it.
       OWN-WORLD: Near-black bezel #0b0a0d, one lime #c0f94a for live, one red
-      #ff2a12 for breach, amber #f5a524 for waiting-on-human. Tiny5 pixel type,
-      unsmoothed. Gold crosshairs left, blue right. CRT scanlines over all.
-      Every rectangle is an instrument; nothing is a marketing card.
-      REFUSES: dashboards that look like SaaS, cards with drop shadows,
-      rounded friendly chrome, colour used decoratively.
+      #ff2a12 for breach, amber #f5a524 for waiting-on-human. Tiny5 pixel
+      type, unsmoothed. Gold crosshairs left, blue right. CRT scanlines.
+      Notched tiles, orthogonal pipes with square ports, the radar's dot grid
+      as ground. Every rectangle is an instrument.
+      REFUSES: sidebars, rails, three-column layouts, tabs that swap the
+      stage, SaaS cards, soft shadows, gradients, decorative colour.
     -->
     <div id="app"></div>
 

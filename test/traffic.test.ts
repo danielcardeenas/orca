@@ -47,9 +47,10 @@ const TOKEN = 'test-token-traffic-000';
 function agent(id: string, patch: Partial<Agent> = {}): Agent {
   return {
     id, machineId: 'm1', projectId: 'p1',
-    title: id, callsign: id.slice(0, 2).toUpperCase(),
+    title: id, callsign: id.slice(0, 2).toUpperCase(), runtime: 'claude',
     state: 'working', block: null,
     parentId: null, depth: 0, childIds: [], mission: null,
+    squad: null, lead: false,
     model: 'claude-opus-5', tool: null, toolDetail: null,
     lastPrompt: null, lastSay: null,
     startedAt: NOW - 60_000, updatedAt: NOW, uptimeMs: 60_000,
@@ -74,7 +75,7 @@ function message(id: string, patch: Partial<AgentMessage> = {}): AgentMessage {
   return {
     id, kind: 'notice', scope: 'agent',
     fromAgentId: 'k9', fromCallsign: 'K9', fromProjectId: 'p1',
-    toAgentId: 't1', toProjectId: null,
+    toAgentId: 't1', toProjectId: null, toSquad: null,
     subject: `asunto ${id}`, body: null, files: [],
     at: NOW, readBy: [], expiresAt: null,
     answer: null, answeredAt: null, answeredBy: null,

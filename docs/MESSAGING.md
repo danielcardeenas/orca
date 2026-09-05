@@ -40,9 +40,10 @@ El agente escribe un JSON en `<project>/.orca/out/<id>.json`. El `<id>` lo elige
   // OBLIGATORIO. Qué clase de mensaje es. Ver §2: la diferencia importa.
   "kind": "notice" | "ask" | "handoff" | "warning",
 
-  // Opcional. Tres formas y nada más:
+  // Opcional. Cuatro formas y nada más:
   //   "K9"              un callsign concreto        → scope 'agent'
   //   "project:dijosi"  todos los de ese proyecto   → scope 'project'
+  //   "squad:audit-01"  todos los de ese escuadrón  → scope 'squad'
   //   "fleet" | null    todo el mundo               → scope 'fleet'
   "to": "K9",
 
@@ -112,6 +113,8 @@ quieres dejar por escrito, `notice`.
   Prefiere uno no terminado: las etiquetas se reciclan cuando un agente muere.
 - `project:<nombre>` contra el nombre, el código o el slug del proyecto, y en una
   segunda pasada por coincidencia parcial (`dijosi` encuentra `dijosi-workers-…`).
+- `squad:<nombre>` contra la etiqueta `squad` que llevan puesta los agentes. Ver
+  §3b.
 - `fleet`, `*`, `null` o ausente: toda la flota.
 
 **Si el destinatario no existe, el mensaje NO se tira.** Sale igual, degradado a
@@ -124,6 +127,68 @@ quieres dejar por escrito, `notice`.
 Un aviso mal dirigido se ignora en dos segundos. Uno que nunca se emitió cuesta
 una tarde de depuración, porque no deja ni una línea de log en ningún sitio.
 
+## 3b. Escuadrones
+
+Un **escuadrón** es un grupo de agentes con un líder: la etiqueta `squad` que
+lleva puesta un `Agent`, más el `lead: true` de uno de ellos. No hay tabla de
+escuadrones ni nada que crear o borrar — un escuadrón es, literalmente, quien
+lleva la etiqueta ahora mismo, y `squadsOf()` (en `src/shared/squads.ts`) lo
+deriva de los agentes. El que muere sale solo.
+
+La etiqueta la pone el `spawn` que creó al agente (`Command.spawn` acepta
+`squad` y `lead`) y el collector la persiste junto a `mission` en
+`~/.orca/lineage.json`, así que sobrevive a un reinicio. **No se hereda**: un
+subagente `Task` de un miembro trabaja *para su padre*, no para el escuadrón.
+
+Nombres válidos: letras, dígitos, `-` y `_`, empezando por letra o dígito, hasta
+32 caracteres (`audit-01`, `payments_migration`). Cualquier otra cosa no es un
+escuadrón y se descarta.
+
+```bash
+orca-tell "Informe a las 18:00, una línea cada uno" --to squad:audit-01 --kind handoff
+```
+
+Sale como `scope: 'squad'` con `toSquad: "audit-01"`, y el **hub** —el único que
+ve la flota entera— lo entrega a todos los agentes con esa etiqueta, estén en la
+máquina que estén. Al emisor nunca se le devuelve el suyo.
+
+Una diferencia deliberada con el resto del enrutado: un escuadrón vacío **no
+degrada a difusión**. Un `project:` que no existe se convierte en un aviso al
+proyecto del emisor, porque ahí hay gente a la que probablemente le sirva; un
+`squad:` que no existe no se le manda a nadie, porque despertar a veinte agentes
+ajenos por un typo es peor que no entregarlo. El hub lo dice en el feed:
+
+```
+K9: "Informe a las 18:00" sin entregar — nadie en el escuadrón audit-01
+```
+
+### Lo que el líder y los miembros saben
+
+El collector le pega al prompt un pie corto en el momento del spawn — el texto
+vive en `src/collector/briefs.ts`:
+
+- **líder**: sus miembros le llegan como hijos y le reportan a él; reparte con
+  `orca-tell --to <callsign>` o `--to squad:<nombre>`; consolida; y sólo usa
+  `orca-ask` cuando nadie del escuadrón puede seguir.
+- **miembro**: a qué escuadrón pertenece, quién es su líder, que reporta con
+  `orca-tell --to <líder>`, y que **no** usa `orca-ask` — el humano es del líder.
+
+Sin ese pie un miembro atascado escala a la persona, que es exactamente lo que
+un escuadrón existe para evitar.
+
+## 3c. Pedir otro agente
+
+El mismo canal, otro payload: un agente que necesita otro par de manos escribe
+`<project>/.orca/spawn/<id>.json` con `{ mission, squad?, model?, agentId }`
+(`orca-spawn "<brief>"`) y el collector contesta en `<id>.ack.json` con
+`{ ok, agentId, callsign, shortId, squad, parentId }` o `{ ok:false, reason }`.
+
+Lo que decide el collector, nunca el archivo: el hijo es hijo de quien pidió,
+entra en el escuadrón de quien pidió (un `squad` en el archivo sólo cuenta si
+el que pide no está en ninguno), y nunca es líder. Topes: 8 hijos vivos por
+agente, 13 agentes por escuadrón. Un brief de menos de 20 caracteres se rechaza
+antes de lanzar nada. El código vive en `src/collector/spawns.ts`.
+
 ## 4. Recibir
 
 El collector escribe en `<project>/.orca/in/<id>.json`, donde `<id>` es el id
@@ -133,7 +198,7 @@ que el mensaje tiene en el protocolo (`msg_…`):
 {
   "id": "msg_c27a8e9c5dd2b6a1",
   "kind": "ask",
-  "scope": "agent",
+  "scope": "agent",                   // agent | project | squad | fleet
   "from": "Z1",                       // callsign de quien lo manda
   "fromAgentId": "78b357fe-…",
   "fromProjectId": "…",

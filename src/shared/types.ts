@@ -77,6 +77,20 @@ export type BlockKind =
   | 'input'        // plain end-of-turn waiting on a prompt
   | 'error';       // needs intervention to continue
 
+/**
+ * What an agent is for.
+ *
+ * Almost every session is an `agent`: it works in a repo, it produces code, it
+ * asks questions. Exactly one session per machine may be `capcom` — the CLI
+ * session that commands the fleet on the human's behalf, whose tools are the
+ * hub's MCP server rather than a filesystem.
+ *
+ * It is a role and not a flag because the console renders it differently (its
+ * transcript IS the command window) and the hub routes to it differently (what
+ * the human types goes to it, and every escalation is offered to it first).
+ */
+export type AgentRole = 'agent' | 'capcom';
+
 export interface Agent {
   id: string;
   machineId: string;
@@ -86,6 +100,23 @@ export interface Agent {
   title: string;
   /** ORCA's callsign for this agent, e.g. "K9". Stable, short, for tiles. */
   callsign: string;
+  /**
+   * Which CLI drives it: 'claude', 'codex', 'grok', … The collector that
+   * watches the session knows; everything downstream only displays it.
+   */
+  runtime: string;
+  /**
+   * `agent` or `capcom`. Set by the collector that launched the session; never
+   * inferred from the transcript, because a session that merely talks about the
+   * fleet is not the one commanding it.
+   *
+   * Optional on the type and never optional on the wire: everything the hub
+   * hands out has been through `sanitizeAgent`, which always fills it in. It is
+   * declared optional so that reading it is `a.role === 'capcom'` — an absent
+   * field means an ordinary agent, which is the only sane default and the one a
+   * record written before this field existed should get.
+   */
+  role?: AgentRole;
 
   state: AgentState;
   /** Present only while state === 'blocked'. */
@@ -110,6 +141,22 @@ export interface Agent {
   childIds: string[];
   /** Why this agent exists — the brief it was spawned with. */
   mission: string | null;
+
+  /**
+   * The squad this agent was enlisted in, e.g. "audit-01". null = not in one.
+   *
+   * A squad is lineage with a name on it. `parentId` already says who launched
+   * whom, but a tree cannot say "these five are the audit, and that one speaks
+   * for them" — and that is the unit an operator actually thinks in. Set only
+   * by the `spawn` command that created the agent; never inferred.
+   */
+  squad: string | null;
+  /**
+   * True when this agent leads its squad: it briefs its members, consolidates
+   * what they find, and is the only one of them allowed to reach the human.
+   * Meaningless without `squad`.
+   */
+  lead: boolean;
 
   model: string | null;
   /** Which tool is running right now, e.g. "Bash", "Edit". Null when not working. */
@@ -278,6 +325,7 @@ export type MessageKind =
 export type MessageScope =
   | 'agent'     // one named agent
   | 'project'   // everyone working in one project
+  | 'squad'     // everyone enlisted in one squad, wherever they are
   | 'fleet';    // everyone, everywhere
 
 export interface AgentMessage {
@@ -293,6 +341,12 @@ export interface AgentMessage {
   toAgentId: string | null;
   /** Set when scope === 'project'. */
   toProjectId: string | null;
+  /**
+   * Set when scope === 'squad'. A name, not an id: a squad is not a record
+   * anywhere, it is whatever set of agents currently carries that label, and
+   * that set can span machines.
+   */
+  toSquad: string | null;
 
   /** One line. This is what shows on an edge in the map. */
   subject: string;
@@ -336,6 +390,67 @@ export interface Collision {
   acknowledged: boolean;
 }
 
+/* ── The world: where the operator arranges the fleet ─────────────── */
+
+/**
+ * Where an agent sits in the infinite field.
+ *
+ * Two kinds of position, and the difference matters. A *placed* agent was put
+ * there by the operator, and that arrangement is meaning: "these three are the
+ * payments work", "this cluster is what I check first". A *drifting* agent has
+ * never been touched and is laid out automatically near its project.
+ *
+ * The operator's arrangement always wins and always persists. An automatic
+ * layout that reshuffles what somebody deliberately placed destroys the only
+ * thing that makes a spatial workspace worth more than a list.
+ */
+export interface Placement {
+  agentId: string;
+  x: number;
+  y: number;
+  /** Depth. Negative is further away. Usually derived, sometimes dragged. */
+  z: number;
+  /** True once a human moved it; automatic layout stops touching it. */
+  pinned: boolean;
+  at: number;
+}
+
+export type ArtifactKind = 'image' | 'video' | 'html' | 'text' | 'file';
+
+/**
+ * Something an agent produced that is worth looking at.
+ *
+ * The point of a workspace rather than a monitor: work appears in the space
+ * where you are, next to the agent that made it, instead of being a path in a
+ * log line that you have to go open somewhere else.
+ */
+export interface Artifact {
+  id: string;
+  agentId: string;
+  projectId: string;
+  machineId: string;
+  kind: ArtifactKind;
+  /** Absolute path on the machine that made it. */
+  path: string;
+  /** One line: what this is. */
+  title: string;
+  /** Served by the hub at /api/artifact/<id>; null until it is fetched. */
+  url: string | null;
+  bytes: number;
+  /** For image/video, so the field can lay it out before loading it. */
+  width: number | null;
+  height: number | null;
+  at: number;
+  /**
+   * The agent asked for this one to be opened, not merely filed —
+   * `orca-show --open`. It is a request, never a guarantee: the console
+   * decides what "open" means and whether now is the moment.
+   */
+  open: boolean;
+  /** Set when the operator has pulled it out of its agent into the field. */
+  placement: { x: number; y: number; z: number } | null;
+}
+
 /* ── Credentials ──────────────────────────────────────────────────── */
 
 /**
@@ -366,6 +481,9 @@ export interface WorldState {
   escalations: Record<string, Escalation>;
   messages: Record<string, AgentMessage>;
   collisions: Record<string, Collision>;
+  artifacts: Record<string, Artifact>;
+  /** Operator-arranged positions, keyed by agent id. */
+  placements: Record<string, Placement>;
   keys: Record<string, KeyDescriptor>;
   ceo: {
     /** Bounded — older turns live in the hub's storage, not in the frame. */
@@ -398,6 +516,8 @@ export function emptyWorld(): WorldState {
     escalations: {},
     messages: {},
     collisions: {},
+    artifacts: {},
+    placements: {},
     keys: {},
     ceo: { messages: [], thinking: false, awaitingHuman: false },
     feed: [],

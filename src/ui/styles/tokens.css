@@ -174,6 +174,14 @@ input, textarea { cursor: text !important; }
   pointer-events: none; position: fixed; inset: 0; z-index: var(--z-vignette);
   box-shadow: inset 0 0 120px 40px var(--bezel);
 }
+/*
+ * The comp's vignette and scanlines are cinema; the field is a workplace.
+ * Once the boot hands over, the vignette shrinks to a hairline of depth at the
+ * very edge and the scanlines back off, so the glass reads clear to the corner.
+ */
+body.is-field .fx-vignette { box-shadow: inset 0 0 28px 0 rgba(11, 10, 13, 0.45); }
+body.is-field .fx-scan { opacity: 0.32; }
+body.is-field .fx-grain { opacity: 0.025; }
 .fx-grain {
   pointer-events: none; position: fixed; inset: 0; z-index: var(--z-grain); opacity: 0.04;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80'><filter id='n'><feTurbulence baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.55'/></svg>");

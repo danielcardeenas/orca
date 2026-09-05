@@ -24,9 +24,10 @@ const NOW = 1_800_000_000_000;
 function agent(id: string, patch: Partial<Agent> = {}): Agent {
   return {
     id, machineId: 'm1', projectId: 'p1',
-    title: id, callsign: id.slice(0, 2).toUpperCase(),
+    title: id, callsign: id.slice(0, 2).toUpperCase(), runtime: 'claude',
     state: 'working', block: null,
     parentId: null, depth: 0, childIds: [], mission: null,
+    squad: null, lead: false,
     model: 'claude-opus-5', tool: null, toolDetail: null,
     lastPrompt: null, lastSay: null,
     startedAt: NOW - 60_000, updatedAt: NOW, uptimeMs: 60_000,

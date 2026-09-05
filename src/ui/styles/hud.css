@@ -1,0 +1,434 @@
+/*
+ * HUD: what floats over the field and never moves.
+ *
+ *   +  ORCA LINK   [gauges…]                       FLEET CEO QUEUE FEED SPAWN  +
+ *
+ *
+ *                          (the field)
+ *
+ *
+ *   [tray tiles]           > command line                          stats
+ *   +                                                                        +
+ *
+ * No bars, no borders across the screen. Each group is an instrument sitting
+ * on the glass; the field shows through between them.
+ *
+ * The last section holds the motion this file owns (IDENTITY §6.2–6.3): the
+ * cut cascades, the toggle's band, the chip flash, the send wipe. Everything
+ * there is a `steps(1)` keyframe or a palette that cuts — a shape that eases
+ * is GSAP's job, in the `.ts` beside it — and all of it stops under
+ * `prefers-reduced-motion`.
+ */
+
+.hud { position: absolute; inset: 0; pointer-events: none; z-index: var(--z-hud); }
+.hud > * { pointer-events: auto; }
+/* The dock outranks the windows: command line, hints and tray are never covered. */
+.dock { position: absolute; inset: 0; pointer-events: none; z-index: calc(var(--z-hud) + 3); }
+.dock > * { pointer-events: auto; }
+.dock .hints { pointer-events: none; }
+
+/* Viewport crosshairs: gold left, blue right. The screen is the instrument. */
+.hud .xhair { position: fixed; pointer-events: none; }
+
+/* ── Mast ─────────────────────────────────────────────────────────── */
+
+.mast {
+  position: absolute; top: 14px; left: 62px; right: 62px;
+  display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap;
+}
+.mast__brand { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mast__brand .bmarks { position: static; margin-left: 6px; }
+.mast__brand canvas { display: block; }
+.mast__link {
+  font-size: 9px; letter-spacing: 0.18em; padding: 3px 6px; white-space: nowrap;
+  background: var(--pill-off); color: #c8c8cc;
+}
+.mast__link.is-up { background: var(--lime); color: #111; }
+.mast__link.is-down { background: var(--red); color: #1a0000; }
+
+.gauges { display: flex; align-items: stretch; margin-left: 10px; }
+.gauge {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 5px 10px; border: 1px solid var(--line-soft); border-right: 0;
+  background: rgba(11,10,13,0.55); cursor: none;
+}
+.gauge:last-child { border-right: 1px solid var(--line-soft); }
+.gauge:hover { border-color: var(--line); }
+.gauge__n { font-family: 'Tiny5', monospace; font-size: 15px; letter-spacing: 0.06em; color: var(--ink-bright); line-height: 1; font-variant-numeric: tabular-nums; }
+.gauge__k { font-size: 9px; letter-spacing: 0.16em; color: var(--ink-dimmer); white-space: nowrap; }
+.gauge.is-working .gauge__n { color: var(--lime); }
+.gauge.is-blocked .gauge__n { color: var(--amber); }
+.gauge.is-blocked.has-n { border-color: rgba(245,165,36,0.45); box-shadow: 0 0 14px rgba(245,165,36,0.18); }
+.gauge.is-dead.has-n .gauge__n { color: var(--red); }
+
+.mast__tools { margin-left: auto; display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+.tool {
+  background: rgba(11,10,13,0.55); border: 1px solid var(--line-soft); color: var(--ink-dim);
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  padding: 6px 9px; display: inline-flex; align-items: baseline; gap: 5px; line-height: 1;
+}
+.tool:hover { color: var(--lime); border-color: var(--line); }
+.tool.is-on { background: var(--lime); color: #111; border-color: var(--lime); }
+.tool__n { font-size: 10px; padding: 0 4px; background: var(--pill-off); color: #c8c8cc; }
+.tool.has-n .tool__n { background: var(--amber); color: #111; }
+/* Chords need the ⌥ ⌘ ⇧ glyphs Tiny5 does not have: the system face fills them in. */
+.tool kbd {
+  font-family: 'Tiny5', -apple-system, system-ui, sans-serif; font-size: 9px; letter-spacing: 0.08em;
+  color: var(--ink-mid); background: var(--screen-in); border: 1px solid var(--line);
+  padding: 1px 4px; line-height: 1; border-radius: 2px; margin-left: 2px;
+}
+.tool.is-on kbd { color: #111; background: rgba(17,17,17,0.12); border-color: rgba(17,17,17,0.35); }
+/* The chord echo: the cap of the key that just fired. A cut, held for a snap
+   by `hud/mast.ts`, which also owns the 2px fall. */
+.tool kbd.is-echo,
+.tool.is-on kbd.is-echo { color: #111; background: var(--lime); border-color: var(--lime); opacity: 1; }
+/* The mast's chords work with a window active too, so they never dim. */
+body.has-window .mast .tool kbd { opacity: 1; }
+/* With a window active the window owns the keyboard, so the mast's own caps
+   step back. `main.ts` puts the class on from `WmEvents.onFocus`. */
+body.has-window .tool kbd { opacity: 0.3; }
+
+/* Tele: scrambled hex, top right, like the comp. Real numbers underneath. */
+.tele {
+  flex-basis: 100%; margin-top: -8px; color: var(--ink-faint); font-size: 8px;
+  letter-spacing: 0.16em; white-space: nowrap; pointer-events: none; text-align: right;
+}
+
+/* ── Hints: the keys that work right now, above the command line ──── */
+
+.hints {
+  position: absolute; left: 50%; bottom: 66px; transform: translateX(-50%);
+  display: flex; gap: 14px; white-space: nowrap; pointer-events: none;
+  color: var(--ink-dimmer); max-width: calc(100vw - 96px); overflow: hidden;
+}
+.hints__i { display: inline-flex; align-items: center; gap: 5px; }
+.hints kbd {
+  font-family: 'Tiny5', -apple-system, system-ui, sans-serif; font-size: 9px; letter-spacing: 0.08em;
+  color: var(--ink-mid); background: var(--screen-in); border: 1px solid var(--line);
+  padding: 1px 4px; line-height: 1; border-radius: 2px;
+}
+body.has-window .hints { color: var(--ink-dim); }
+body.tray-mode .hints kbd { border-color: var(--lime); color: var(--lime); }
+
+/* ── Command line ─────────────────────────────────────────────────── */
+
+.cmd {
+  position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%);
+  width: min(720px, calc(100vw - 96px));
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px;
+  background: rgba(20,19,24,0.92); border: 1px solid var(--line);
+  padding: 6px 8px 6px 12px; border-radius: 2px;
+}
+.cmd.is-focus { border-color: var(--lime); box-shadow: 0 0 22px rgba(192,249,74,0.12); }
+.cmd__prompt { font-family: 'Tiny5', monospace; font-size: 13px; color: var(--lime); letter-spacing: 0.1em; }
+.cmd__in {
+  background: transparent; border: 0; outline: none; color: var(--ink);
+  font-family: 'Geist Mono', monospace; font-size: 12px; padding: 5px 0; width: 100%;
+}
+.cmd__in::placeholder { color: var(--ink-faint); }
+.cmd__target {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 8px;
+  border: 1px solid var(--line); color: var(--ink-mid);
+  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}
+.cmd__target.is-agent { border-color: var(--lime); color: var(--lime); }
+.cmd__target.is-project, .cmd__target.is-group, .cmd__target.is-squad { border-color: var(--st-thinking); color: var(--st-thinking); }
+.cmd__target.is-ceo { border-color: var(--line-soft); color: var(--ink-dim); }
+.cmd__target.is-bad { border-color: var(--red); color: var(--red); }
+/* One frame of ink in front of the new colour. Never on `is-bad`: red is the
+   one thing in the console that does not move, which is what makes it read. */
+.cmd__target.is-flash { background: var(--ink-bright); border-color: var(--ink-bright); color: #111; }
+
+/* A5 at line scale. The overlay sits exactly over the input, in the input's
+   own face, and a clip-path run by `hud/command.ts` reveals it left to right.
+   The native input keeps its caret and is never tweened. */
+.cmd__wipe {
+  position: absolute; display: none; align-items: center; pointer-events: none;
+  background: var(--lime); color: #1a0000;
+  font-family: 'Geist Mono', monospace; font-size: 12px; font-style: normal;
+  white-space: pre; overflow: hidden;
+}
+.cmd__wipe.is-on { display: flex; }
+
+.cmd__menu {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 4px);
+  background: rgba(20,19,24,0.97); border: 1px solid var(--line); border-radius: 2px;
+  max-height: 260px; overflow-y: auto; display: none;
+}
+.cmd__menu.is-on { display: block; }
+.cmd__item { display: grid; grid-template-columns: 80px 1fr; gap: 12px; padding: 6px 12px; align-items: baseline; cursor: none; }
+.cmd__item.is-sel, .cmd__item:hover { background: var(--screen-in); }
+.cmd__item b { font-family: 'Tiny5', monospace; font-weight: 400; font-size: 11px; letter-spacing: 0.12em; color: var(--ink-bright); text-transform: uppercase; }
+.cmd__item.is-sel b { color: var(--lime); }
+/* A1 at menu scale: one row every 30 ms, by cut. Moving the selection does not
+   re-deal the list, so this only ever runs when the items themselves changed. */
+.cmd__menu.is-cascade .cmd__item { animation: hud-cut 1ms steps(1, end) backwards; animation-delay: calc(var(--i, 0) * 30ms); }
+.cmd__item span { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Tray: folded windows as the comp's notched tiles ─────────────── */
+
+/* The whole stack lives here: open windows first, active in lime, then a
+   thin rule, then the folded ones. One row, one order, left to right. */
+.tray { position: absolute; left: 62px; bottom: 22px; display: flex; align-items: center; gap: 6px; }
+.tray .tile { width: 58px; height: 44px; flex: none; }
+.tray .tile span { position: absolute; top: 5px; left: 7px; }
+.tray .tile small { position: absolute; bottom: 5px; left: 7px; font-size: 8px; letter-spacing: 0.12em; color: currentColor; opacity: 0.7; }
+.tray .tile:hover { filter: brightness(1.2); }
+.tray__sep { width: 1px; height: 30px; background: var(--line); flex: none; margin: 0 2px; }
+
+/* ── Tray mode: the row has the keyboard ──────────────────────────
+   `` ` `` lifts the row off the glass and puts a lime edge under it, so it is
+   obvious the next key goes here and not to the field. The cursor is the
+   comp's own mark: a lime outline with the pixel `+` sitting on the tile. */
+
+/* The window layer deliberately floats above the HUD (`window.css`), so while
+   the row has the keyboard the HUD comes forward instead — a row you are
+   choosing from cannot be behind the thing you are choosing between. The HUD
+   itself takes no pointer events, so nothing else changes. */
+body.tray-mode .hud { z-index: calc(var(--z-hud) + 2); }
+
+/* The lift itself is a shape, so `hud/tray.ts` eases it with GSAP (4px in
+   `--t-snap`); everything here is a palette or a box, and cuts. */
+body.tray-mode .tray {
+  /* The extra headroom is where the cursor's `+` lives. It has to sit inside
+     the row's own box: a window whose z has climbed past the HUD would cover
+     anything that stuck out above it, and the mark that says "here" cannot be
+     the one thing on the glass that hides. */
+  padding: 15px 7px 5px;
+  background: rgba(11, 10, 13, 0.82);
+  border: 1px solid var(--lime);
+  box-shadow: 0 0 26px rgba(192, 249, 74, 0.16);
+}
+/* The slot the cursor is drawn on: the tile itself is clipped to the world's
+   notch, and a clip-path eats an outline. */
+.tray__slot { position: relative; display: block; flex: none; }
+/* A tile on its way out: out of the flow, so the row closes by cut while the
+   tile flattens to a bar (A12, short). `hud/tray.ts` sets the box and the tween. */
+.tray__slot.is-gone { position: absolute; pointer-events: none; z-index: 1; }
+.tray__slot.is-cursor { outline: 1px solid var(--lime); outline-offset: 2px; }
+.tray__slot.is-cursor::before,
+.tray__slot.is-cursor::after {
+  content: ''; position: absolute; background: var(--lime); pointer-events: none; z-index: 2;
+}
+/* The comp's pixel `+`, sitting on the tile it has chosen. */
+.tray__slot.is-cursor::before { top: -9px; left: 50%; width: 11px; height: 2px; transform: translateX(-50%); }
+.tray__slot.is-cursor::after  { top: -13px; left: 50%; width: 2px; height: 10px; transform: translateX(-50%); }
+/* The index cap, only while the mode is on. Bottom right: the callsign owns
+   the top and the kind owns the bottom left. */
+.tray .tile .tile__n {
+  position: absolute; bottom: 5px; right: 8px; font-size: 8px; color: currentColor; opacity: 0.6;
+}
+/* The tile takes the extra column the index needs, so `interrupt` and its
+   number are never the same pixels. */
+body.tray-mode .tray .tile { width: 72px; }
+
+/* ── Selection bar: appears near a lasso ──────────────────────────── */
+
+.selbar {
+  position: absolute; display: flex; gap: 2px; padding: 4px; background: rgba(20,19,24,0.95);
+  border: 1px solid var(--line); border-radius: 2px; transform: translate(-50%, 0);
+}
+.selbar[hidden] { display: none; }
+
+/* ── Minimap: the field as the radar, bottom-right ────────────────── */
+
+.mmap {
+  position: absolute; right: 62px; bottom: 60px;
+  background: rgba(11,10,13,0.72); border: 1px solid var(--line-soft);
+  padding: 4px; display: grid; gap: 2px;
+}
+.mmap canvas { display: block; }
+.mmap__k { font-size: 8px; color: var(--ink-faint); text-align: right; }
+.mmap:hover { border-color: var(--line); }
+
+/* ── Replay: the field is showing the past ────────────────────────── */
+
+.replay {
+  position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; padding: 4px 6px 4px 12px;
+  border: 1px solid var(--amber); background: rgba(11,10,13,0.85); color: var(--amber);
+}
+.replay .px { color: var(--amber); }
+.field.is-replay { filter: saturate(0.85); }
+
+/* ── Alarm treatment ──────────────────────────────────────────────── */
+
+.fx-alarm {
+  position: fixed; inset: 0; pointer-events: none; z-index: var(--z-flash);
+  box-shadow: inset 0 0 0 0 var(--amber); opacity: 0;
+}
+
+@media (max-width: 720px) {
+  .mast { left: 14px; right: 14px; flex-wrap: wrap; gap: 8px; }
+  .gauges { display: none; }
+  .tele, .field__stats, .field__hint, .mmap { display: none; }
+  .tray { left: 14px; bottom: 74px; }
+  .cmd { width: calc(100vw - 28px); bottom: 14px; }
+  .hud .xhair { display: none; }
+}
+
+/* ── Bookmarks: nine notches and the way back, under the mast ─────── */
+
+.bmarks {
+  position: absolute; top: 46px; left: 62px;
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(11,10,13,0.55); border: 1px solid var(--line-soft);
+  padding: 4px 6px;
+}
+.bmarks:hover { border-color: var(--line); }
+.bmarks__row { display: flex; gap: 3px; }
+
+.bmarks__back {
+  background: transparent; border: 1px solid var(--line); color: var(--ink-dim);
+  font-family: 'Tiny5', monospace; font-size: 10px; line-height: 1;
+  width: 16px; height: 14px; padding: 0; cursor: none;
+}
+.bmarks__back:hover:not(:disabled) { color: var(--lime); border-color: var(--lime); }
+.bmarks__back:disabled { color: var(--ink-faint); border-color: var(--line-soft); }
+
+/* An empty slot is structure; an occupied one is live, so it is lime. */
+.bmarks__c {
+  width: 14px; height: 14px; padding: 0; cursor: none;
+  background: transparent; border: 1px solid var(--line); color: var(--ink-faint);
+  font-family: 'Tiny5', monospace; font-size: 8px; line-height: 1; letter-spacing: 0;
+}
+.bmarks__c:hover { border-color: var(--lime); color: var(--lime); }
+.bmarks__c.is-on { background: var(--lime); border-color: var(--lime); color: #111; }
+.bmarks__c.is-on:hover { color: #111; }
+
+/* ── Sound: one button that says which way it is ──────────────────── */
+
+.snd { letter-spacing: 0.14em; }
+
+@media (max-width: 720px) {
+  .bmarks { display: none; }
+}
+
+/* ── Instrument motion (IDENTITY §6.2) ─────────────────────────────
+ *
+ * `controls.ts` builds `pick`, `toggle` and `fold`; `window.css` dresses
+ * them. Their gestures live here because a `pick` menu is a child of
+ * `<body>`, not of any window, and because this sheet is imported last, so
+ * these rules land on top of the dress without fighting it.
+ *
+ * One keyframe does all the cascades: `hud-cut` flips visibility once, with
+ * `steps(1)` and `backwards` fill, so a row is simply not there until its
+ * delay is up and then it *is*. No fade, no transform, nothing to composite.
+ */
+
+@keyframes hud-cut { from { visibility: hidden; } to { visibility: visible; } }
+
+/* A1 at instrument scale: one row every 20 ms, by cut. Armed for the paint
+   that follows an open and for no other, so filtering never re-deals. */
+.pick__menu.is-cascade .pick__item { animation: hud-cut 1ms steps(1, end) backwards; animation-delay: calc(var(--i, 0) * 20ms); }
+
+/* Choosing: ink for one frame, then the lime of a row that answered, then the
+   menu cuts away. `controls.ts` owns the two frames. */
+.pick__item.is-hit { background: var(--ink-bright); }
+.pick__item.is-hit b, .pick__item.is-hit span { color: #111; }
+.pick__item.is-took { background: var(--lime); border-left-color: var(--lime); }
+.pick__item.is-took b, .pick__item.is-took span { color: #111; }
+
+/* The toggle's band: A5 across 11 px in `--t-snap`. The tile's own clip-path
+   holds it inside the notch, so the band wears the world's shape for free. */
+.tgl__box { position: relative; }
+.tgl__box::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 2px;
+  background: var(--ink-bright); opacity: 0;
+}
+.tgl.is-on .tgl__box::after { background: #111; }
+.tgl__box.is-band::after { animation: tgl-band var(--t-snap) linear 1; }
+@keyframes tgl-band {
+  from { opacity: 1; transform: translateX(-2px); }
+  to   { opacity: 1; transform: translateX(11px); }
+}
+
+/* ── Cursor: the two states the field and the DOM agree on ────────── */
+
+/* Over anything the operator cannot answer from here. A palette, so it cuts;
+   `hud/cursor.ts` sets it from the DOM under the pointer and from the field's
+   own `setAmber()`. */
+.cursor.is-amber { background: var(--amber); mix-blend-mode: normal; }
+.cursor.is-target.is-amber { background: transparent; border-color: var(--amber); }
+
+/* ── Bookmarks: the frame of ink in front of the lime ─────────────── */
+
+.bmarks__c.is-hit, .bmarks__c.is-on.is-hit { background: var(--ink-bright); border-color: var(--ink-bright); color: #111; }
+
+/* ── Reduced motion ───────────────────────────────────────────────
+ * The preference removes motion, never information: every rule above ends
+ * on a state that is already the end state, so switching the animations off
+ * is the whole of it. The JS side goes through `dur()` and `REDUCE`. */
+
+@media (prefers-reduced-motion: reduce) {
+  .pick__menu.is-cascade .pick__item,
+  .cmd__menu.is-cascade .cmd__item { animation: none; }
+  .tgl__box.is-band::after { animation: none; }
+}
+
+/* ── Context menu ─────────────────────────────────────────────────── */
+/*
+ * One instrument for every right click (`hud/menu.ts`). It shares `pick`'s
+ * grammar on purpose — same glass, same row, same cascade, same two frames
+ * on choosing — so a menu and a dropdown read as one control in two places.
+ * Fixed on <body> like `.pick__menu`, above the windows and under the cursor.
+ */
+.ctx {
+  position: fixed; z-index: 90; min-width: 188px; max-width: 300px;
+  background: rgba(20,19,24,0.97); border: 1px solid var(--line); border-radius: 2px;
+  padding: 2px 0; user-select: none;
+}
+.ctx__head {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 6px 12px 5px; border-bottom: 1px solid var(--line-soft); margin-bottom: 2px;
+}
+.ctx__head b {
+  font-family: 'Tiny5', monospace; font-weight: 400; font-size: 11px; letter-spacing: 0.14em;
+  color: var(--ink-bright); text-transform: uppercase; white-space: nowrap;
+}
+.ctx__head span, .ctx__group span {
+  font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.12em; color: var(--ink-dim);
+  text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* A second subject inside the same menu: the one agent under a group's rows. */
+.ctx__group { display: flex; align-items: baseline; gap: 8px; padding: 5px 12px 2px; }
+.ctx__group b { font-family: 'Tiny5', monospace; font-weight: 400; font-size: 9px; letter-spacing: 0.16em; color: var(--ink-dimmer); text-transform: uppercase; }
+.ctx__sep { display: block; height: 1px; background: var(--line-soft); margin: 3px 0; }
+.ctx__item {
+  display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: baseline;
+  width: 100%; text-align: left; padding: 6px 10px; cursor: none;
+  background: transparent; border: 0; border-left: 2px solid transparent;
+}
+.ctx__item b {
+  font-family: 'Tiny5', monospace; font-weight: 400; font-size: 11px; letter-spacing: 0.12em;
+  color: var(--ink-bright); text-transform: uppercase; white-space: nowrap;
+}
+.ctx__item span {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.1em; color: var(--ink-dim);
+  text-transform: uppercase; white-space: nowrap;
+}
+.ctx__item kbd {
+  font-family: 'Tiny5', -apple-system, system-ui, sans-serif; font-size: 9px; letter-spacing: 0.08em;
+  color: var(--ink-mid); background: var(--screen-in); border: 1px solid var(--line);
+  padding: 1px 4px; line-height: 1; border-radius: 2px;
+}
+.ctx__item.is-sel { background: var(--screen-in); border-left-color: var(--lime); }
+.ctx__item.is-sel b { color: var(--lime); }
+.ctx__item--amber b { color: var(--amber); }
+.ctx__item--amber.is-sel { border-left-color: var(--amber); }
+.ctx__item--amber.is-sel b { color: var(--amber); }
+/* Red never animates and never turns lime: a stop stays a stop under the cursor. */
+.ctx__item--red b { color: var(--red); }
+.ctx__item--red.is-sel { border-left-color: var(--red); }
+.ctx__item--red.is-sel b { color: var(--red); }
+.ctx__item--lime b { color: var(--lime); }
+.ctx__item.is-off { pointer-events: none; }
+.ctx__item.is-off b, .ctx__item.is-off span { color: var(--ink-faint); }
+.ctx.is-cascade .ctx__item { animation: hud-cut 1ms steps(1, end) backwards; animation-delay: calc(var(--i, 0) * 20ms); }
+.ctx__item.is-hit, .ctx__item.is-hit.is-sel { background: var(--ink-bright); border-left-color: var(--ink-bright); }
+.ctx__item.is-hit b, .ctx__item.is-hit span, .ctx__item.is-hit kbd { color: #111; }
+.ctx__item.is-took, .ctx__item.is-took.is-sel { background: var(--lime); border-left-color: var(--lime); }
+.ctx__item.is-took b, .ctx__item.is-took span, .ctx__item.is-took kbd { color: #111; }
+.ctx__item--red.is-took, .ctx__item--red.is-took.is-sel { background: var(--red); border-left-color: var(--red); }

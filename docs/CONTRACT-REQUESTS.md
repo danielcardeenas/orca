@@ -440,3 +440,72 @@ consola tiene que saber desambiguar por el prefijo.
 
 **Petición:** `waitingOn?: { kind: 'agent'|'project'|'fleet'; id: string | null }`,
 o dejar la convención del prefijo escrita en `types.ts`.
+
+## 24. `claude --bg --resume` no continúa la sesión: la muda
+
+Medido contra Claude Code **2.1.261**, y es la petición al CLI que más pesa en
+CAPCOM.
+
+`claude --bg --resume <sessionId> "<texto>"` **no** continúa esa sesión bajo su
+id. Arrastra la conversación entera —turnos previos incluidos, verificado
+leyendo el `.jsonl` resultante— a una sesión **nueva**, con un `sessionId` y un
+short id nuevos, y la vieja queda terminada. El `--help` lo insinúa ("starts a
+copy and says so when the session is already running"), pero también ocurre
+después de `claude stop <id>`, que es justo el caso que la ayuda de `stop`
+sugiere que sí continuaría en su sitio.
+
+Para un agente de trabajo eso sólo ensucia el linaje. Para CAPCOM es fatal: el
+mando de la flota se identifica por `Agent.role === 'capcom'`, ese rol vive en
+`~/.orca/lineage.json` indexado por short id, y el primer mensaje del humano
+dejaría el rol pegado a una sesión ya muerta. El hub buscaría un CAPCOM vivo, no
+lo encontraría, y el collector lanzaría un segundo CAPCOM encima del que acababa
+de contestar — uno nuevo por cada frase que escribiera la persona.
+
+**Mientras tanto:** `CommandRunner.say`/`resume` detectan que el destinatario es
+CAPCOM (`CapcomChannel.owns`), leen el short id que imprime el CLI y mudan el rol
+con `adopt()`. Además, `CapcomSession.check()` no declara muerta una sesión
+recién adoptada durante `CAPCOM_GRACE_MS` (60 s): `claude agents --json` tarda
+en listarla, y sin esa ventana el vigilante lanzaría el duplicado igualmente.
+
+**Petición al CLI:** que `--resume <id>` bajo `--bg` conserve el `sessionId`, o
+que imprima explícitamente `resumed <viejo> as <nuevo>` en un formato estable.
+Hoy hay que deducirlo del último token hexadecimal de la salida.
+
+## 25. `permissions.allow` de un settings de proyecto se ignora sin confianza
+
+También 2.1.261. Un directorio recién creado por ORCA (`~/.orca/capcom/`) no está
+en la lista de workspaces de confianza, y entonces el CLI descarta las entradas
+de `permissions.allow` de su `.claude/settings.json`, diciéndolo en la salida:
+
+```
+Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace
+has not been trusted. Run Claude Code interactively here once and accept the
+trust dialog, or set projects[...].hasTrustDialogAccepted: true in ~/.claude.json
+```
+
+Una sesión `--bg` no tiene a nadie que acepte ese diálogo, así que el settings
+que ORCA escribe sería un permiso que no aplica nunca — y CAPCOM se quedaría
+parado en el primer prompt de permisos de una tool MCP, que es indistinguible de
+una flota tranquila.
+
+`enableAllProjectMcpServers: true` del mismo archivo **sí** se respeta: el
+servidor `orca` de `.mcp.json` se conectó sin aprobación en la primera prueba.
+Sólo los permisos pasan por la puerta de confianza.
+
+**Mientras tanto:** los permisos viajan en el argv, que no pasa por esa puerta —
+`--allowedTools mcp__orca --disallowedTools Bash Edit Write NotebookEdit`— junto
+con `--mcp-config <dir>/.mcp.json --strict-mcp-config`, que además evita heredar
+los servidores MCP del usuario (dos de ellos pedían autenticación y le costaban
+una vuelta a CAPCOM descubrirlo). El `settings.json` se sigue escribiendo, pero
+sólo para que un humano que abra `~/.orca/capcom` a mano vea la misma postura.
+
+**Ojo con el orden del argv:** `--allowedTools`, `--disallowedTools`,
+`--mcp-config` y `--tools` son **variádicas** — se comen todo lo que venga
+detrás hasta el siguiente `-`. Con `--bg` el prompt es posicional, así que una
+variádica delante del prompt se lo traga y la sesión arranca sin instrucción
+ninguna. En `capcom.ts` cada variádica va seguida de otra opción y el prompt
+siempre al final; hay un test que lo comprueba.
+
+**Petición al CLI:** que `--settings <ruta explícita>` no herede la puerta de
+confianza del workspace (el humano ya nombró el archivo), o una forma
+no-interactiva de confiar en un directorio.

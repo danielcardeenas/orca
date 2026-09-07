@@ -127,8 +127,10 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     freshModelSig = sig;
     freshPicker?.dispose();
     if (!choices.length) {
-      // Sin catálogo cargado no se inventa una lista: CHANGE MODEL la trae.
-      freshModelHost.textContent = active ? `${active} · CHANGE MODEL lists the others` : '';
+      // Nunca una lista inventada: o la dio el CLI, o se dice por qué no.
+      freshModelHost.textContent = freshLoading ? 'Loading models…'
+        : freshModelError ? `${active || 'current model'} · ${freshModelError}`
+        : active ? `${active} · asking the CLI for the rest…` : '';
       return;
     }
     freshPicker = pick({ name: 'capcom-fresh-model', value: freshModel || active, search: choices.length > 6,
@@ -137,10 +139,32 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     freshModelHost.replaceChildren(freshPicker.el);
   }
   let freshModelSig = '';
+  let freshLoading = false;
+  let freshModelError = '';
   fresh.addEventListener('click', () => {
     freshChoice.hidden = !freshChoice.hidden;
-    if (!freshChoice.hidden) { freshModel = ''; freshModelSig = ''; paintFreshModel(); }
+    if (freshChoice.hidden) return;
+    freshModel = ''; freshModelSig = ''; paintFreshModel();
+    // El catálogo lo llena el CLI cuando se le pregunta, y hasta entonces no
+    // hay lista que ofrecer. Preguntarlo aquí es lo que hace que la elección
+    // exista: dejarlo para el botón de al lado la escondía a quien no supiera
+    // que había que pulsarlo primero.
+    if (!(state?.choices ?? []).length) void loadFreshModels();
   });
+
+  /** Sólo el catálogo nativo: aquí no se cambia de proveedor. */
+  async function loadFreshModels() {
+    const id = agent?.id;
+    if (!id || busy || freshLoading) return;
+    freshLoading = true; freshModelSig = ''; paintFreshModel();
+    try {
+      const native = parseModelControl(await command({ k: 'model:list', agentId: id }));
+      if (disposed || agent?.id !== id) return;
+      if (native) state = native;
+    } catch (e) {
+      if (agent?.id === id) freshModelError = e instanceof Error ? e.message : String(e);
+    } finally { freshLoading = false; freshModelSig = ''; if (!disposed) paintFreshModel(); }
+  }
   freshChoice.querySelector('[data-fresh-clean]')!.addEventListener('click', () => { void newCapcom('clean'); });
   freshChoice.querySelector('[data-fresh-continuity]')!.addEventListener('click', () => { void newCapcom('continuity'); });
   freshChoice.querySelector('[data-fresh-cancel]')!.addEventListener('click', () => { freshChoice.hidden = true; });

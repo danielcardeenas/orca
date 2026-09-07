@@ -18,13 +18,27 @@ hub.cmd = async cmd => {
     return structuredClone(plan);
   }
   if (cmd.k === 'handoff:status') return structuredClone(plan);
+  // Lo que el CLI contesta cuando se le pregunta por su catálogo: la elección
+  // de New CAPCOM lo pide sola al abrirse.
+  if (cmd.k === 'model:list') return { sessionId: 'cap', runtime: 'codex', active: 'gpt-6-astra', requested: null,
+    phase: 'ready', detail: '', events: [], choices: [{ id: 'gpt-6-astra', label: 'gpt-6-astra' }, { id: 'gpt-5.6-luna', label: 'gpt-5.6-luna' }] };
   throw new Error(`Unexpected fixture command: ${cmd.k}`);
 };
 export function fail() { if (plan) plan = { ...plan, phase: 'failed', detail: 'Destination unavailable. Original CAPCOM retained; retry when ready.' }; }
 export function complete() { if (plan) plan = { ...plan, phase: 'complete', toId: 'new-capcom', detail: 'Clean CAPCOM is active and waiting for new instructions.' }; }
 export function link(up: boolean) { store.linkUp = up; store.applyPatch(store.world.rev + 1, []); }
 
-// Con catálogo cargado, la elección de New CAPCOM ofrece con qué modelo nacer.
-store.applyPatch(store.world.rev + 1, [{ o: 'agent', id: 'cap', v: { ...store.world.agents.cap!, pane: true, state: 'idle',
-  modelControl: { sessionId: 'cap', runtime: 'codex', active: 'gpt-6-astra', requested: null, phase: 'ready', detail: '', events: [],
-    choices: [{ id: 'gpt-6-astra', label: 'gpt-6-astra' }, { id: 'gpt-5.6-luna', label: 'gpt-5.6-luna' }] } } as unknown as Agent }]);
+store.applyPatch(store.world.rev + 1, [{ o: 'agent', id: 'cap', v: { ...store.world.agents.cap!, pane: true, state: 'idle' } as unknown as Agent }]);
+
+/**
+ * Un CAPCOM recién arrancado al que nadie ha preguntado por sus modelos.
+ *
+ * El catálogo lo llena el CLI cuando se le pregunta: hasta que alguien pulsa
+ * CHANGE MODEL, `choices` está vacío. La elección de New CAPCOM tiene que
+ * pedirlo ella misma o no tendría nada que ofrecer.
+ */
+export function forgetModels() {
+  store.applyPatch(store.world.rev + 1, [{ o: 'agent', id: 'cap', v: { ...store.world.agents.cap!,
+    modelControl: { sessionId: 'cap', runtime: 'codex', active: 'gpt-6-astra', requested: null,
+      phase: 'ready', detail: '', events: [], choices: [] } } as unknown as Agent }]);
+}

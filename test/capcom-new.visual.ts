@@ -24,7 +24,16 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.ok(await page.getByRole('button', { name: 'Clean context', exact: true }).isVisible());
   }
-  // Con qué modelo nace: elegirlo aquí ahorra el cambio en una operación aparte.
+  // Con qué modelo nace. Un CAPCOM al que nadie ha preguntado por sus modelos
+  // no tiene catálogo, y la elección lo pide ella misma en vez de quedarse sin
+  // nada que ofrecer — que es lo que la escondía a quien no supiera pulsar
+  // CHANGE MODEL primero.
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).forgetModels());
+  await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
+  await page.locator('[data-fresh-model] button').waitFor();
+  assert.ok(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.some((c: {k: string}) => c.k === 'model:list')),
+    'the choice asks the CLI for its catalog instead of offering nothing');
   await page.locator('[data-fresh-model] button').click();
   await page.getByRole('option', { name: /gpt-5\.6-luna/ }).click();
   await page.getByRole('button', { name: 'Clean context', exact: true }).click();

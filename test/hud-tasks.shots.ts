@@ -25,7 +25,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import type { CapcomTask } from '../src/shared/tasks.ts';
-import { GPU_ARGS, ROOT, SHOTS, UI_PORT, ensureServers, fontsReady, shutdown } from './visual.ts';
+import { GPU_ARGS, ROOT, SHOTS, ensureServers, fontsReady, shutdown, uiPort } from './visual.ts';
 
 const headed = process.argv.includes('--headed');
 const keep = process.argv.includes('--keep');
@@ -43,7 +43,7 @@ async function main() {
     // tsx compiles this file with esbuild's keepNames; the `__name` helper it
     // injects into a serialised closure does not exist in the page.
     await page.addInitScript('window.__name = (fn) => fn');
-    await page.goto(`http://127.0.0.1:${UI_PORT}/?noboot=1`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`http://127.0.0.1:${uiPort()}/?noboot=1`, { waitUntil: 'domcontentloaded' });
     // A panel with no agents cannot show a crew; wait for a fleet, then for paint.
     await page.waitForFunction(() => (window.__orca?.agentIds().length ?? 0) > 2, null, { timeout: 60_000 });
     await fontsReady(page);

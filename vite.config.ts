@@ -1,6 +1,23 @@
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { relative, resolve } from 'node:path';
 
+import { PORTS } from './src/shared/protocol.ts';
+
+/**
+ * Ports, and why they are not literals.
+ *
+ * The canonical pair lives in protocol.ts so collector, hub and UI cannot
+ * drift apart; repeating 4478/4479 here was exactly that drift waiting to
+ * happen. The env overrides exist for the visual harness: when it cannot have
+ * the canonical ports — another worktree already holds them, or two agents are
+ * shooting frames at once — it starts its own hub and Vite on free ones, and
+ * the proxy below has to follow the hub it actually started. A Vite serving
+ * this tree while proxying someone else's hub is the worst of the failures
+ * here, because the frames come out looking plausible.
+ */
+const UI_PORT = Number(process.env['ORCA_UI_PORT'] ?? PORTS.ui);
+const HUB_PORT = Number(process.env['ORCA_PORT'] ?? PORTS.hub);
+
 /**
  * The dev server never reloads the console on its own.
  *
@@ -49,7 +66,7 @@ export default defineConfig({
   root: '.',
   plugins: [updateSignal()],
   server: {
-    port: 4478,
+    port: UI_PORT,
     // Bind IPv4 explicitly: Vite 6 defaults to a localhost that resolves to ::1
     // only, which the test harness and any curl-based check cannot reach.
     host: '127.0.0.1',
@@ -57,8 +74,8 @@ export default defineConfig({
     // No automatic reloads: see updateSignal() above.
     hmr: false,
     proxy: {
-      '/ws': { target: 'ws://127.0.0.1:4479', ws: true },
-      '/api': { target: 'http://127.0.0.1:4479', changeOrigin: true },
+      '/ws': { target: `ws://127.0.0.1:${HUB_PORT}`, ws: true },
+      '/api': { target: `http://127.0.0.1:${HUB_PORT}`, changeOrigin: true },
     },
   },
   build: {

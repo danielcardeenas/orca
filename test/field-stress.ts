@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { sleep, until } from './harness.ts';
 import {
-  ensureServers, GPU_ARGS, HUB_PORT, newPage, open, SHOTS, shutdown, signalProc, spawnProc, UI_PORT, waitForFleet,
+  ensureServers, GPU_ARGS, hubPort, newPage, open, SHOTS, shutdown, signalProc, spawnProc, uiPort, waitForFleet,
 } from './visual.ts';
 
 const SIZES = [24, 120, 600, 3000];
@@ -76,12 +76,12 @@ async function run(browser: import('playwright').Browser, target: number): Promi
   console.log(`\n[stress] ${target} agents`);
   const fleet = spawnProc('fleet', 'npx', [
     'tsx', 'test/fake-collector.ts',
-    `--hub=ws://127.0.0.1:${HUB_PORT}`, `--agents=${target}`, '--quiet',
+    `--hub=ws://127.0.0.1:${hubPort()}`, `--agents=${target}`, '--quiet',
   ]);
 
   const page = await newPage(browser, 1600, 1000);
   try {
-    await open(page, `http://127.0.0.1:${UI_PORT}/?noboot=1`);
+    await open(page, `http://127.0.0.1:${uiPort()}/?noboot=1`);
     await waitForFleet(page, 3, 30_000);
 
     const want = Math.floor(target * 0.8);

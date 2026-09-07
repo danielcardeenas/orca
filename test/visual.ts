@@ -2,8 +2,9 @@
  * Visual harness.
  *
  * Brings up the hub, a synthetic fleet and Vite — or reuses the ones already
- * running, because `npm run dev` is usually up — then drives the real console
- * in a real browser and writes frames to test/shots/. Every state the console
+ * running, because `npm run dev` is usually up, unless this run has to keep to
+ * itself (see the ports block below) — then drives the real console in a real
+ * browser and writes frames to test/shots/. Every state the console
  * can be in gets a PNG, including the boot sequence sampled along its timeline
  * so the beats can be compared against the /system comp side by side.
  *
@@ -13,28 +14,101 @@
  *   npx tsx test/visual.ts mobile       just the phone
  *   npx tsx test/visual.ts --headed     watch it happen
  *   npx tsx test/visual.ts --keep       leave the servers up afterwards
+ *   npx tsx test/visual.ts --isolated   own hub, Vite and ORCA_HOME, shared with nobody
  *
  * The console frames all load with `?noboot=1`: the boot is photographed on
  * its own, and nine seconds of it in front of every other frame would be nine
  * seconds of nothing.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, readdir, unlink } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import { WebSocket } from 'ws';
 import type { Agent, Escalation, Machine, Project } from '../src/shared/types.ts';
 import { emptyRollup } from '../src/shared/types.ts';
-import { PATHS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
-import { sleep, until } from './harness.ts';
+import { PATHS, PORTS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
+import { freePort, sleep, until } from './harness.ts';
 
 export const ROOT = new URL('..', import.meta.url).pathname;
 export const SHOTS = join(ROOT, 'test', 'shots');
-export const HUB_PORT = 4479;
-export const UI_PORT = 4478;
+
+/**
+ * Ports, resolved per run rather than fixed.
+ *
+ * 4478/4479 are the machine's, not the tree's. Two runs shooting frames at
+ * once used to fight over them, and the fight was quiet: the second run found
+ * the first one's servers, decided they were `npm run dev` and photographed
+ * them — another worktree's code, under another worktree's hub — and then the
+ * first run finished and took the servers down underneath it. Frames came out
+ * looking fine. That is worse than a crash.
+ *
+ * So: the canonical pair is reused only when it is already serving, which is
+ * the case this harness was built around (a developer with `npm run dev` up
+ * wants frames without a port fight). A cold run takes free ports instead of
+ * racing for 4478 with `--strictPort`. And a run that must not share anything
+ * — see `isolated()` — takes its own ports, its own `ORCA_HOME` and therefore
+ * its own hub state, touching neither the human's nor another agent's.
+ *
+ * `ensureServers()` decides. Read the ports through these, never before it.
+ */
+let PORTS_RESOLVED: { hub: number; ui: number } | null = null;
+
+export function hubPort(): number { return resolvedPorts().hub; }
+export function uiPort(): number { return resolvedPorts().ui; }
+
+function resolvedPorts(): { hub: number; ui: number } {
+  if (!PORTS_RESOLVED) throw new Error('ports are not resolved yet: call ensureServers() first');
+  return PORTS_RESOLVED;
+}
+
+/**
+ * Does this run have to keep to itself?
+ *
+ * Explicitly, with `--isolated` or `ORCA_VISUAL_ISOLATED=1`. Or because we are
+ * in a linked git worktree, which is where ORCA puts a spawned agent: its
+ * frames have to come from its own tree, and reusing whatever is on 4478 would
+ * photograph somebody else's. Nobody has to remember the flag for that to hold.
+ */
+export function isolatedRun(
+  argv: readonly string[] = args,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = ROOT,
+): boolean {
+  if (argv.includes('--isolated') || env['ORCA_VISUAL_ISOLATED'] === '1') return true;
+  return inLinkedWorktree(cwd);
+}
+
+/** A linked worktree keeps its own git dir; the main checkout's is the common one. */
+function inLinkedWorktree(cwd: string): boolean {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--git-dir', '--git-common-dir'],
+      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const [dir, common] = out.trim().split('\n');
+    return dir !== undefined && common !== undefined && dir !== common;
+  } catch { return false; }
+}
+
+/**
+ * What this run may share, given what is already serving.
+ *
+ * Pure, and separate from `ensureServers`, because the interesting rule is not
+ * obvious and fails quietly: a canonical Vite is only reusable when we are also
+ * on the canonical hub. Vite proxies /api and /ws to one hub, fixed when it
+ * started. Borrowing someone's Vite while running our own hub gives a console
+ * that renders our tree and talks to their fleet, and it photographs fine.
+ */
+export function sharing(o: { alone: boolean; hubUp: boolean; uiUp: boolean }): { hub: 'reuse' | 'own'; ui: 'reuse' | 'own' } {
+  if (o.alone) return { hub: 'own', ui: 'own' };
+  const hub = o.hubUp ? 'reuse' : 'own';
+  return { hub, ui: hub === 'reuse' && o.uiUp ? 'reuse' : 'own' };
+}
+
+/** The throwaway `ORCA_HOME` an isolated run gives its hub, or null. */
+let TEMP_HOME: string | null = null;
 
 /**
  * Headless Chromium falls back to SwiftShader, which renders the field in
@@ -134,7 +208,7 @@ async function shootBoot(browser: Browser) {
   console.log('[visual] boot sequence');
   const page = await newPage(browser, 1600, 1000);
   const t0 = Date.now();
-  await page.goto(`http://127.0.0.1:${UI_PORT}/`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`http://127.0.0.1:${uiPort()}/`, { waitUntil: 'domcontentloaded' });
   await fontsReady(page);
 
   for (const beat of BOOT_BEATS) {
@@ -151,7 +225,7 @@ async function shootBoot(browser: Browser) {
 async function shootConsole(browser: Browser) {
   console.log('[visual] console');
   const page = await newPage(browser, 1600, 1000);
-  await open(page, `http://127.0.0.1:${UI_PORT}/?noboot=1`);
+  await open(page, `http://127.0.0.1:${uiPort()}/?noboot=1`);
 
   const ready = await waitForFleet(page, 4);
   if (!ready) console.warn('  [warn] the fleet never populated the field');
@@ -290,7 +364,7 @@ async function shootIdentity(browser: Browser) {
   }
   const page = await newPage(browser, 1600, 1000);
   try {
-    await open(page, `http://127.0.0.1:${UI_PORT}/?noboot=1`);
+    await open(page, `http://127.0.0.1:${uiPort()}/?noboot=1`);
     await waitForFleet(page, 4);
     await closeAllWindows(page);
     await page.evaluate(() => window.__orca?.frame());
@@ -508,7 +582,7 @@ const SHOWCASE_CALLSIGN = 'Z9';
  */
 export async function injectSquad(): Promise<{ close(): void } | null> {
   const token = orcaToken();
-  const ws = new WebSocket(`ws://127.0.0.1:${HUB_PORT}${PATHS.collector}?token=${encodeURIComponent(token)}`);
+  const ws = new WebSocket(`ws://127.0.0.1:${hubPort()}${PATHS.collector}?token=${encodeURIComponent(token)}`);
   const opened = await new Promise<boolean>((resolve) => {
     ws.once('open', () => resolve(true));
     ws.once('error', () => resolve(false));
@@ -607,7 +681,7 @@ export async function injectSquad(): Promise<{ close(): void } | null> {
 async function shootMobile(browser: Browser) {
   console.log('[visual] mobile');
   const page = await newPage(browser, 402, 874);
-  await open(page, `http://127.0.0.1:${UI_PORT}/?noboot=1`);
+  await open(page, `http://127.0.0.1:${uiPort()}/?noboot=1`);
   await waitForFleet(page, 4);
   await closeAllWindows(page);
   await page.evaluate(() => window.__orca?.frame());
@@ -782,7 +856,7 @@ export interface Injected { escalationId: string; agentId: string; close(): void
  */
 export async function injectEscalation(): Promise<Injected | null> {
   const token = orcaToken();
-  const ws = new WebSocket(`ws://127.0.0.1:${HUB_PORT}${PATHS.collector}?token=${encodeURIComponent(token)}`);
+  const ws = new WebSocket(`ws://127.0.0.1:${hubPort()}${PATHS.collector}?token=${encodeURIComponent(token)}`);
   const opened = await new Promise<boolean>((resolve) => {
     const done = (v: boolean): void => resolve(v);
     ws.once('open', () => done(true));
@@ -870,13 +944,31 @@ const procs: ChildProcess[] = [];
  * should not need one.
  */
 export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ hubWasUp: boolean; uiWasUp: boolean }> {
-  const hubWasUp = await httpOk(`http://127.0.0.1:${HUB_PORT}/api/health`, 1500);
+  const alone = isolatedRun();
+  if (alone && !TEMP_HOME) {
+    // Its own ORCA_HOME, so this run's hub writes its token and state where
+    // nothing else reads them. Setting it on our own env is enough: every
+    // server we start inherits it (see spawnProc), and orcaToken() below
+    // already looks there.
+    TEMP_HOME = mkdtempSync(join(tmpdir(), 'orca-visual-'));
+    process.env['ORCA_HOME'] = TEMP_HOME;
+    console.log(`[visual] isolated run: own ports and ORCA_HOME (${TEMP_HOME})`);
+  }
+
+  // Probe only what we could actually share; `sharing` holds the rule.
+  const hubUp = !alone && await httpOk(`http://127.0.0.1:${PORTS.hub}/api/health`, 1500);
+  const uiUp = hubUp && await httpOk(`http://127.0.0.1:${PORTS.ui}/`, 1500);
+  const plan = sharing({ alone, hubUp, uiUp });
+
+  const hubWasUp = plan.hub === 'reuse';
+  const hub = hubWasUp ? PORTS.hub : await freePort();
+  PORTS_RESOLVED = { hub, ui: PORTS.ui };
   if (hubWasUp) {
-    console.log(`[visual] hub already on ${HUB_PORT}, reusing it`);
+    console.log(`[visual] hub already on ${hub}, reusing it`);
   } else {
-    console.log('[visual] starting hub');
-    spawnProc('hub', 'npx', ['tsx', 'src/hub/server.ts'], { ORCA_PORT: String(HUB_PORT) });
-    if (!await waitForHttp(`http://127.0.0.1:${HUB_PORT}/api/health`, 20_000)) throw new Error('hub never came up');
+    console.log(`[visual] starting hub on ${hub}`);
+    spawnProc('hub', 'npx', ['tsx', 'src/hub/server.ts'], { ORCA_PORT: String(hub) });
+    if (!await waitForHttp(`http://127.0.0.1:${hub}/api/health`, 20_000)) throw new Error('hub never came up');
   }
 
   // The synthetic fleet is not optional scenery: several frames need agents
@@ -885,17 +977,20 @@ export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ h
   let fleetStarted = false;
   if (opts.fleet !== false && !await hasSyntheticFleet()) {
     console.log('[visual] starting synthetic fleet');
-    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${HUB_PORT}`, '--speed=3']);
+    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=3']);
     fleetStarted = true;
   }
 
-  const uiWasUp = await httpOk(`http://127.0.0.1:${UI_PORT}/`, 1500);
+  const uiWasUp = plan.ui === 'reuse';
+  const ui = uiWasUp ? PORTS.ui : await freePort();
+  PORTS_RESOLVED = { hub, ui };
   if (uiWasUp) {
-    console.log(`[visual] vite already on ${UI_PORT}, reusing it`);
+    console.log(`[visual] vite already on ${ui}, reusing it`);
   } else {
-    console.log('[visual] starting vite');
-    spawnProc('vite', 'npx', ['vite', '--port', String(UI_PORT), '--strictPort']);
-    if (!await waitForHttp(`http://127.0.0.1:${UI_PORT}/`, 30_000)) throw new Error('vite never came up');
+    console.log(`[visual] starting vite on ${ui}`);
+    spawnProc('vite', 'npx', ['vite', '--port', String(ui), '--strictPort'],
+      { ORCA_PORT: String(hub), ORCA_UI_PORT: String(ui) });
+    if (!await waitForHttp(`http://127.0.0.1:${ui}/`, 30_000)) throw new Error('vite never came up');
   }
 
   // A fleet that just connected needs a moment before it is worth photographing.
@@ -906,7 +1001,7 @@ export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ h
 /** Is one of `test/fake-collector.ts`'s machines already reporting to the hub? */
 async function hasSyntheticFleet(): Promise<boolean> {
   try {
-    const r = await fetch(`http://127.0.0.1:${HUB_PORT}/api/health`, { signal: AbortSignal.timeout(2000) });
+    const r = await fetch(`http://127.0.0.1:${hubPort()}/api/health`, { signal: AbortSignal.timeout(2000) });
     const h = await r.json() as { machines?: { list?: { id: string; online: boolean }[] } };
     return (h.machines?.list ?? []).some((m) => m.online && /^(mac-cascabel|vps-fra1|vps-nue2)/.test(m.id));
   } catch { return false; }
@@ -956,6 +1051,11 @@ export function signalProc(p: ChildProcess, sig: NodeJS.Signals = 'SIGTERM') {
 export function shutdown() {
   for (const p of procs) signalProc(p);
   procs.length = 0;
+  // An isolated run's ORCA_HOME held nothing but that run's hub state.
+  if (TEMP_HOME && !keep) {
+    rmSync(TEMP_HOME, { recursive: true, force: true });
+    TEMP_HOME = null;
+  }
 }
 
 /* ── Entry ────────────────────────────────────────────────────────── */

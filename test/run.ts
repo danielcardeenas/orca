@@ -2,8 +2,15 @@
  * Unit test runner. Discovers test/*.test.ts, runs every suite, exits non-zero
  * on any failure.
  *
- *   npm test              everything
- *   npm test -- hub       only suites whose filename matches "hub"
+ *   npm test                          everything
+ *   npm test -- hub                   suites whose filename matches "hub"
+ *   npm test -- capcom wake handoff   varios filtros, en una corrida
+ *   npm test -- --changed             solo las suites que alcanzan lo que has tocado
+ *   npm test -- --since=HEAD~1        idem, contra una referencia de git
+ *
+ * `--changed` existe porque la suite completa tarda minutos y un agente que
+ * verifica un cambio de dos ficheros no necesita las 62. La selección sale del
+ * grafo de imports (ver affected.ts), no de una lista que haya que mantener.
  */
 
 // El collector loguea a nivel info por diseño: es un daemon desatendido. En una
@@ -11,8 +18,10 @@
 // se están comprobando. Se puede recuperar con ORCA_LOG=info.
 process.env['ORCA_LOG'] ??= 'warn';
 
+import { execFileSync } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { affected } from './affected.ts';
 import { runSuite, type TestFn, type TestModule, type TestResult } from './harness.ts';
 
 /**
@@ -60,18 +69,46 @@ function adapt(file: string, mod: Record<string, unknown>): TestModule | null {
 }
 
 const DIR = new URL('.', import.meta.url).pathname;
-const filter = process.argv.slice(2).find((a) => !a.startsWith('--'));
+const ROOT = dirname(DIR.replace(/\/$/, ''));
+const ARGS = process.argv.slice(2);
+const FILTERS = ARGS.filter((a) => !a.startsWith('--'));
+const SINCE = ARGS.find((a) => a.startsWith('--since='))?.slice('--since='.length);
+
+/** Rutas tocadas: el árbol de trabajo por defecto, o un rango de git con --since. */
+function changedFiles(): string[] {
+  const git = (args: string[]) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+  if (SINCE) return git(['diff', '--name-only', SINCE]).split('\n').filter(Boolean);
+  // --porcelain para no depender del idioma ni del formato de `git status`.
+  return git(['status', '--porcelain'])
+    .split('\n').filter(Boolean)
+    // Un rename se declara `R  antes -> despues`; lo que importa es el destino.
+    .map((l) => { const p = l.slice(3); return p.includes(' -> ') ? p.slice(p.indexOf(' -> ') + 4) : p; })
+    .map((p) => p.replace(/^"|"$/g, ''));
+}
 
 async function main() {
-  const files = (await readdir(DIR))
-    .filter((f) => f.endsWith('.test.ts'))
-    .filter((f) => !filter || f.includes(filter))
-    .sort();
+  let files = (await readdir(DIR)).filter((f) => f.endsWith('.test.ts')).sort();
+  let why = 'todas las suites';
+
+  if (SINCE || ARGS.includes('--changed')) {
+    const changed = changedFiles();
+    const { suites, uncovered } = await affected(DIR, changed, ROOT);
+    files = suites;
+    why = `${changed.length} fichero(s) tocado(s) → ${suites.length} suite(s)`;
+    // Correr menos tests solo es honesto si se ve qué se ha quedado fuera.
+    if (uncovered.length) console.log(`\x1b[33msin suite que los cubra\x1b[0m (${uncovered.length}): ${uncovered.map((u) => u.slice(ROOT.length + 1)).join(', ')}`);
+  }
+
+  if (FILTERS.length) {
+    files = files.filter((f) => FILTERS.some((x) => f.includes(x)));
+    why += ` · filtro: ${FILTERS.join(', ')}`;
+  }
 
   if (!files.length) {
-    console.log(filter ? `no test files matching "${filter}"` : 'no test files');
+    console.log(`no test files (${why})`);
     return;
   }
+  if (files.length !== (await readdir(DIR)).filter((f) => f.endsWith('.test.ts')).length) console.log(`${why}: ${files.join(' ')}\n`);
 
   let pass = 0, fail = 0;
   const broken: string[] = [];

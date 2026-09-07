@@ -244,7 +244,8 @@ export type ServerFrame =
    *  asks for a resync — this is what keeps the 3D scene from tearing. */
   | { t: 'patch'; rev: number; ops: PatchOp[] }
   | { t: 'ceo:message'; message: CeoMessage }
-  | { t: 'task'; task: import('./tasks.ts').CapcomTask }
+  /** `purged` marca la que ya no existe: la consola la quita en vez de pintarla. */
+  | { t: 'task'; task: import('./tasks.ts').CapcomTask; purged?: true }
   /** Token-by-token CEO output, appended to a streaming message. */
   | { t: 'ceo:delta'; id: string; text: string }
   | { t: 'ceo:done'; id: string }
@@ -300,6 +301,13 @@ export type ClientFrame =
   /** The human said something to the CEO. */
   | { t: 'ceo:say'; text: string; id?: string; taskId?: string }
   | { t: 'task:create'; id: string; taskId: string; title: string }
+  /**
+   * Retirar una tarea de la vista (`on: false` la devuelve), o borrarla.
+   * `task:purge` sólo acepta una que ya esté archivada: lo reversible se pide
+   * una vez, lo definitivo dos.
+   */
+  | { t: 'task:archive'; id: string; taskId: string; on?: boolean }
+  | { t: 'task:purge'; id: string; taskId: string }
   /** The human answered an escalation directly, bypassing the CEO. */
   | { t: 'escalation:answer'; id: string; answer: string; rememberAs: string | null }
   /** The human acknowledged a file collision; stop showing it. */

@@ -33,6 +33,7 @@ import { hub } from '../net/client.ts';
 import type { Console } from '../console.ts';
 import { esc } from '../util.ts';
 import { squadsOf } from '../../shared/squads.ts';
+import { archivableTasks } from '../../shared/tasks.ts';
 import { getSound } from './sound.ts';
 import { EASE, REDUCE, T, dur } from '../motion.ts';
 import { toggleFullscreen } from './fullscreen.ts';
@@ -53,6 +54,7 @@ const COMMANDS: { name: string; help: string }[] = [
   { name: 'ceo', help: 'talk to CAPCOM, the command session' },
   { name: 'capcom-new', help: 'New CAPCOM · /capcom-new clean|continuity · same provider/model' },
   { name: 'capcom', help: 'talk to CAPCOM, the command session' },
+  { name: 'tasks', help: 'retire task conversations · /tasks archive|restore|purge|finished [id]' },
   { name: 'feed', help: 'telemetry' },
   { name: 'fleet', help: 'machines, projects, everyone' },
   { name: 'tilt', help: 'tilt the field to see depth' },
@@ -280,6 +282,51 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
         c.openCeo();
         window.dispatchEvent(new CustomEvent('orca:capcom-new', { detail: arg }));
         break;
+      /**
+       * Retirar conversaciones de tarea. `archive` y `restore` son el par
+       * reversible; `purge` borra, y sólo lo ya archivado. Sin id actúa sobre
+       * la conversación abierta, salvo `finished`, que retira de golpe las
+       * terminadas — que es lo que se acumula sin que nadie las mire.
+       */
+      case 'tasks': {
+        const [what = '', which = ''] = rest;
+        const verb = what.toLowerCase();
+        if (!['archive', 'restore', 'purge', 'finished'].includes(verb)) {
+          c.note('Use /tasks archive|restore|purge [task_id], or /tasks finished', 'warn'); break;
+        }
+        const tasks = store.world.tasks ?? {};
+        if (verb === 'finished') {
+          const done = archivableTasks(tasks);
+          if (!done.length) { c.note('No finished task conversations to archive'); break; }
+          void (async () => {
+            let n = 0;
+            for (const t of done) {
+              try { store.upsertTask(await hub.archiveTask(t.id)); n++; }
+              catch (err) { c.note(`Could not archive ${t.title}: ${String(err)}`, 'warn'); }
+            }
+            c.note(`${n} finished task conversation${n === 1 ? '' : 's'} archived · /tasks restore <id> brings one back`);
+          })();
+          break;
+        }
+        const id = which || store.activeTaskId || '';
+        const task = tasks[id];
+        if (!id || !task) { c.note('Open a task conversation or name one: /tasks ' + verb + ' task_…', 'warn'); break; }
+        void (async () => {
+          try {
+            if (verb === 'purge') {
+              if (!task.archivedAt) { c.note(`Archive "${task.title}" first: purging is for what you already retired`, 'warn'); return; }
+              if (!confirm(`Purge "${task.title}"?\n\nIts ${task.messages.length} messages are deleted for good. Archiving already keeps it out of the way.`)) return;
+              await hub.purgeTask(id);
+              store.upsertTask(task, true);
+              c.note(`Task purged: ${task.title}`);
+            } else {
+              store.upsertTask(await hub.archiveTask(id, verb === 'archive'));
+              c.note(verb === 'archive' ? `Task archived: ${task.title} · /tasks restore ${id} brings it back` : `Task restored: ${task.title}`);
+            }
+          } catch (err) { c.note(`Could not ${verb} task: ${String(err)}`, 'warn'); }
+        })();
+        break;
+      }
       case 'feed': c.openFeed(); break;
       case 'fleet': c.openFleet(); break;
       case 'tilt': c.field.setTilt(!c.field.tilted()); break;

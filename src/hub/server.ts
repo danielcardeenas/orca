@@ -4,7 +4,7 @@ import { RecoveryCoordinator } from './recovery.ts';
 import { HygieneRegistry, sanitizeReport } from './hygiene.ts';
 import { TaskStore } from './tasks.ts';
 import { uploadRecoveryImage } from './recovery-images.ts';
-import { taskPrompt } from '../shared/tasks.ts';
+import { taskPrompt, type CapcomTask } from '../shared/tasks.ts';
 /**
  * ORCA hub — servidor HTTP + WebSocket.
  *
@@ -676,10 +676,16 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const taskResultTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const taskResultSeen = new Map<string, string>();
   const tasks = new TaskStore(store.dir, (task) => {
-    (world.state.tasks ??= {})[task.id] = task;
-    broadcast({ t: 'task', task });
+    const purged = (task as CapcomTask & { purged?: true }).purged === true;
+    if (purged) {
+      if (world.state.tasks) delete world.state.tasks[task.id];
+      clearTimeout(taskResultTimers.get(task.id));
+      taskResultTimers.delete(task.id); taskResultSeen.delete(task.id);
+    } else (world.state.tasks ??= {})[task.id] = task;
+    broadcast({ t: 'task', task, ...(purged ? { purged: true } : {}) });
     const last = task.messages.at(-1);
-    if (task.status !== 'active' || last?.role !== 'agent' || taskResultSeen.get(task.id) === last.id) return;
+    // Una tarea retirada no despierta a CAPCOM con la actividad de sus workers.
+    if (purged || task.archivedAt || task.status !== 'active' || last?.role !== 'agent' || taskResultSeen.get(task.id) === last.id) return;
     taskResultSeen.set(task.id, last.id);
     clearTimeout(taskResultTimers.get(task.id));
     taskResultTimers.set(task.id, setTimeout(() => {
@@ -1583,6 +1589,22 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           if (typeof frame.title !== 'string' || typeof frame.taskId !== 'string') throw new Error('Invalid task');
           const task = tasks.create(frame.taskId, frame.title);
           ackTo(conn.id, frame.id, true, undefined, task);
+        } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
+      case 'task:archive': {
+        try {
+          if (typeof frame.taskId !== 'string') throw new Error('Invalid task');
+          const task = tasks.archive(frame.taskId, frame.on !== false);
+          ackTo(conn.id, frame.id, true, undefined, task);
+        } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
+      case 'task:purge': {
+        try {
+          if (typeof frame.taskId !== 'string') throw new Error('Invalid task');
+          tasks.purge(frame.taskId);
+          ackTo(conn.id, frame.id, true, undefined, { purged: frame.taskId });
         } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
         return;
       }

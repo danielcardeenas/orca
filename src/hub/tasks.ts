@@ -25,10 +25,43 @@ export class TaskStore {
     if (!task) throw new Error(`Unknown task: ${id}`);
     return structuredClone(task);
   }
+  /**
+   * Retirar una tarea de la vista, sin perder nada.
+   *
+   * Hasta aquí una tarea creada no se podía quitar de ninguna manera: el
+   * selector las mostraba todas para siempre, terminadas incluidas, y al
+   * llegar a cien el hub dejaba de poder crear tareas. Archivar es la salida
+   * barata —conserva la conversación entera y se deshace— y por eso es el
+   * gesto normal. `purge` es el que borra, y exige pasar por aquí primero.
+   */
+  archive(id: string, on = true): CapcomTask {
+    const task = this.get(id);
+    if (on === !!task.archivedAt) return task;
+    if (on) task.archivedAt = Date.now(); else delete task.archivedAt;
+    return this.save(task);
+  }
+  /**
+   * Borrar de verdad, y sólo lo que ya estaba archivado.
+   *
+   * Dos pasos deliberados: archivar es lo reversible y lo que basta para
+   * recuperar el sitio, así que lo único que llega aquí es lo que alguien
+   * decidió retirar y volvió a decidir borrar.
+   */
+  purge(id: string): void {
+    const task = this.get(id);
+    if (!task.archivedAt) throw new Error('Archive the task before purging it');
+    const next = { ...this.tasks };
+    delete next[id];
+    this.write(next);
+    this.changed({ ...task, purged: true } as CapcomTask & { purged: true });
+  }
   create(id: string, title: string): CapcomTask {
     if (!TASK_ID.test(id)) throw new Error('Invalid task id');
     if (this.tasks[id]) return this.get(id);
-    if (Object.keys(this.tasks).length >= 100) throw new Error('Task limit reached (100)');
+    // Las archivadas siguen en disco pero no ocupan sitio: si contaran, un hub
+    // con cien tareas viejas no podría crear ninguna aunque se hubieran
+    // retirado todas, que es exactamente el callejón que el archivo resuelve.
+    if (Object.values(this.tasks).filter((t) => !t.archivedAt).length >= 100) throw new Error('Task limit reached (100 active); archive some first');
     const now = Date.now();
     return this.save({ id, title: title.trim().slice(0, 100) || 'New task', status: 'active', createdAt: now, updatedAt: now, agentIds: [], messages: [] });
   }
@@ -59,7 +92,8 @@ export class TaskStore {
   }
   observe(agents: Record<string, Agent>): void {
     for (const initial of Object.values(this.tasks)) {
-      if (initial.status !== 'active') continue;
+      // Una tarea retirada no vuelve sola porque un agente suyo diga algo.
+      if (initial.status !== 'active' || initial.archivedAt) continue;
       let task = this.get(initial.id);
       // Keep both transcript segments bound to the task, including after restart.
       for (const a of Object.values(agents)) {
@@ -89,14 +123,16 @@ export class TaskStore {
   }
   private save(task: CapcomTask): CapcomTask {
     task.updatedAt = Date.now();
-    const next = { ...this.tasks, [task.id]: task };
+    this.write({ ...this.tasks, [task.id]: task });
+    this.changed(structuredClone(task));
+    return structuredClone(task);
+  }
+  private write(next: Record<string, CapcomTask>): void {
     const json = JSON.stringify(next);
     if (Buffer.byteLength(json) > 8 * 1024 * 1024) throw new Error('Task history storage limit reached');
     const temp = `${this.file}.tmp`;
     fs.writeFileSync(temp, json, { mode: 0o600 });
     fs.renameSync(temp, this.file);
     this.tasks = next;
-    this.changed(structuredClone(task));
-    return structuredClone(task);
   }
 }

@@ -9,7 +9,7 @@ export function freshCapcomCheckpoint(world: WorldState, rules: readonly MemoryE
   return [
     '# Fresh CAPCOM checkpoint',
     `Snapshot: ${new Date().toISOString()}. Call briefing before acting; snapshot is not new authorization.`,
-    section('Open hub tasks', Object.values(world.tasks ?? {}).filter(t => t.status === 'active')
+    section('Open hub tasks', Object.values(world.tasks ?? {}).filter(t => t.status === 'active' && !t.archivedAt)
       .map(t => `${t.id}: ${short(t.title)}; agents=${t.agentIds.slice(0, 12).join(',') || 'none'}; last message=${t.messages.at(-1)?.id ?? 'none'}`)),
     section('Unresolved questions', Object.values(world.escalations).filter(e => ['pending', 'with_ceo'].includes(e.status))
       .map(e => `${e.id}: ${short(e.question)}; agent=${e.agentId ?? 'operator'}`)),

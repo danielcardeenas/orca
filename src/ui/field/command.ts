@@ -94,7 +94,8 @@ export const REST: CommandState = { segments: 0, lit: 0, active: -1, notches: 0,
 /** The hub's open tasks, oldest first — the order the ring is read in, clockwise from the top. */
 export function openTasks(tasks: WorldState['tasks']): CapcomTask[] {
   return Object.values(tasks ?? {})
-    .filter((t) => t.status === 'active')
+    // Retirada por el operador: sin arco, aunque siguiera activa cuando se archivó.
+    .filter((t) => t.status === 'active' && !t.archivedAt)
     .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
 }
 

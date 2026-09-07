@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { TaskStore } from '../src/hub/tasks.ts';
-import { taskPrompt } from '../src/shared/tasks.ts';
+import { taskPrompt, visibleTasks } from '../src/shared/tasks.ts';
 import type { Agent } from '../src/shared/types.ts';
 import { startHub } from '../src/hub/server.ts';
 import { HubStore } from '../src/hub/persist.ts';
@@ -12,6 +12,7 @@ import { FleetStore } from '../src/hub/fleets.ts';
 import { AnswerMemory } from '../src/hub/memory.ts';
 import { createAuth } from '../src/hub/auth.ts';
 import { hubContext } from '../src/agents/context.ts';
+import { freshCapcomCheckpoint } from '../src/hub/capcom-checkpoint.ts';
 import { runTool } from '../src/agents/tools.ts';
 import { test, ok, until } from './harness.ts';
 
@@ -35,6 +36,58 @@ export default { suite: 'Task conversations', tests: [
       assert.equal(restored.get('task_a').title, 'Review delivery');
     });
     return ok('persistent independent conversations', true);
+  }),
+  test('archiving retires a task reversibly, frees its slot, and purging needs it archived first', () => {
+    temporary((dir) => {
+      const s = new TaskStore(dir);
+      s.create('task_a', 'Ship the console'); s.message('task_a', 'human', 'Ship the console', 'completed');
+      s.create('task_b', 'Still running');
+      // Hasta aquí una tarea creada no salía nunca de la vista, y a las cien el
+      // hub dejaba de poder crear.
+      assert.throws(() => s.purge('task_a'), /Archive the task before purging/);
+      const archived = s.archive('task_a');
+      assert.ok(archived.archivedAt && archived.messages.length === 1);
+      assert.deepEqual(visibleTasks(s.all()).map((t) => t.id), ['task_b']);
+      assert.equal(new TaskStore(dir).get('task_a').archivedAt, archived.archivedAt);
+      assert.ok(!s.archive('task_a', false).archivedAt, 'restoring brings it back whole');
+      assert.equal(s.get('task_a').messages[0]!.text, 'Ship the console');
+
+      // El tope cuenta lo que está a la vista: cien archivadas no bloquean.
+      s.archive('task_a');
+      for (let i = 0; i < 99; i++) s.create(`task_f${i}`, `Filler ${i}`);
+      assert.throws(() => s.create('task_over', 'One too many'), /Task limit reached/);
+      s.archive('task_f0');
+      assert.equal(s.create('task_over', 'Now there is room').id, 'task_over');
+
+      const purged: string[] = [];
+      const watched = new TaskStore(dir, (t) => { if ((t as { purged?: true }).purged) purged.push(t.id); });
+      watched.purge('task_a');
+      assert.throws(() => watched.get('task_a'), /Unknown task/);
+      assert.throws(() => new TaskStore(dir).get('task_a'), /Unknown task/);
+      assert.deepEqual(purged, ['task_a']);
+      assert.equal(watched.get('task_b').title, 'Still running', 'purging one leaves the rest');
+    });
+    return ok('archive is reversible and frees the slot; purge is deliberate and permanent', true);
+  }),
+  test('an archived task stops being work: no listing, no checkpoint, no waking CAPCOM', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-tasks-'));
+    try {
+      const s = new TaskStore(dir);
+      s.create('task_a', 'Retired work'); s.message('task_a', 'human', 'Retired work');
+      s.assign('task_a', ['w1']);
+      s.create('task_b', 'Live work'); s.message('task_b', 'human', 'Live work');
+      s.archive('task_a');
+      const listed = await runTool({ tasks: s } as unknown as Parameters<typeof runTool>[0], 'list_tasks', {});
+      const rows = (JSON.parse(listed.result) as { tasks: { id: string }[] }).tasks;
+      assert.deepEqual(rows.map((t) => t.id), ['task_b']);
+      const checkpoint = freshCapcomCheckpoint({ tasks: s.all(), escalations: {}, agents: {} } as never, []);
+      assert.ok(!checkpoint.includes('task_a') && checkpoint.includes('task_b'));
+      // `observe` es lo que trae resultados nuevos de los workers a la tarea.
+      const worker = { id: 'w1', state: 'done', lastSay: 'finished the retired work', updatedAt: Date.now(), startedAt: Date.now() } as Agent;
+      s.observe({ w1: worker });
+      assert.equal(s.get('task_a').messages.length, 1, 'a retired task does not collect new results');
+      return ok('archived tasks leave the listing, the checkpoint and CAPCOM alone', true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   }),
   test('lineage and delayed squads collect results once without claiming completion', () => {
     temporary((dir) => {
@@ -93,7 +146,24 @@ export default { suite: 'Task conversations', tests: [
       hub.tasks.observe({ worker: { id: 'worker', state: 'done', lastSay: 'Worker finished', startedAt: now, updatedAt: now } as unknown as Agent });
       assert(await until(() => prompts.length === 3, 2000));
       assert(prompts[2]!.includes('[ORCA TASK task_b]')); assert(prompts[2]!.includes('Worker finished'));
-      return ok('routing, explicit replies, reconnect and worker notification', true);
+
+      // Retirar y borrar por el mismo camino que usa la consola.
+      frames.length = 0;
+      ws.send(JSON.stringify({ t: 'task:purge', id: 'purge_early', taskId: 'task_a' }));
+      assert(await until(() => frames.some((f) => f.cmdId === 'purge_early'), 2000));
+      const refused = frames.find((f) => f.cmdId === 'purge_early');
+      assert.equal(refused.ok, false); assert.match(String(refused.detail), /Archive the task before purging/);
+      ws.send(JSON.stringify({ t: 'task:archive', id: 'arch_a', taskId: 'task_a' }));
+      assert(await until(() => frames.some((f) => f.t === 'task' && f.task.id === 'task_a' && f.task.archivedAt), 2000));
+      ws.send(JSON.stringify({ t: 'task:purge', id: 'purge_a', taskId: 'task_a' }));
+      assert(await until(() => frames.some((f) => f.t === 'task' && f.task.id === 'task_a' && f.purged === true), 2000));
+      assert.throws(() => hub.tasks.get('task_a'), /Unknown task/);
+      frames.length = 0; await connect();
+      assert(await until(() => frames.some((f) => f.t === 'world'), 2000));
+      const after = frames.find((f) => f.t === 'world');
+      assert.equal(after.state.tasks.task_a, undefined, 'a purged task is gone from the snapshot too');
+      assert.equal(after.state.tasks.task_b.messages[0].text, 'Request b');
+      return ok('routing, explicit replies, reconnect, worker notification, archive and purge over the wire', true);
     } finally {
       sockets.forEach((s) => s.close()); await hub.close(); rmSync(dir, { recursive: true, force: true });
     }

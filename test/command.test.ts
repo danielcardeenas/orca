@@ -70,10 +70,13 @@ export default {
         task('task_2', { status: 'completed' }),
         task('task_3'),
         task('task_4', { status: 'failed' }),
+        // Retirada por el operador aunque siguiera activa: sin arco.
+        task('task_5', { archivedAt: NOW - 1000 }),
       ]);
       const s = commandState(w, CAPCOM, none, NOW, null, ALL);
       const open = openTasks(w.tasks).map((t) => t.id);
-      return ok('two arcs for two open tasks', s.segments === 2 && open.join() === 'task_1,task_3',
+      return ok('two arcs for two open tasks; finished and archived leave the ring',
+        s.segments === 2 && open.join() === 'task_1,task_3',
         `segments=${s.segments} open=${open.join()}`);
     }),
 

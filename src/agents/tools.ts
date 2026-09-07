@@ -2340,7 +2340,10 @@ function listTasks(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
   const limit = Math.max(1, Math.min(100, Number.isFinite(Number(input.limit)) && Number(input.limit) > 0 ? Math.floor(Number(input.limit)) : 20));
   const now = Date.now();
 
+  // Una tarea archivada la retiró el operador: no es trabajo pendiente ni
+  // vuelve por listarla. Se recupera devolviéndola desde la consola.
   const all = Object.values(ctx.tasks.all())
+    .filter((t) => !t.archivedAt)
     .filter((t) => !status || t.status === status)
     .map((t) => ({ task: t, debt: taskDebt(t) }))
     .filter(({ task, debt }) => !onlyPending || taskOwed(task, debt))

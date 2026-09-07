@@ -29,7 +29,7 @@ export { mdLite } from '../markdown.ts';
  */
 
 import type { Agent, AgentMessage, Escalation, FeedItem, TalkItem } from '../../../shared/types.ts';
-import type { CapcomTask, TaskMessage } from '../../../shared/tasks.ts';
+import { visibleTasks, type CapcomTask, type TaskMessage } from '../../../shared/tasks.ts';
 import { pick, type PickHandle } from '../../controls.ts';
 import { capcomOf as sharedCapcomOf } from '../../../shared/capcom.ts';
 import { store, type OutgoingMessage } from '../../store.ts';
@@ -186,6 +186,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   body.innerHTML = `
     <div class="row capcom__top">
       <div data-task-picker style="flex:1;min-width:0"></div>
+      <button class="chip" type="button" data-archive-task hidden>ARCHIVE</button>
       <button class="chip" type="button" data-new-task>NEW TASK</button>
     </div>
     <div class="tabs" role="tablist" data-tabs>
@@ -290,8 +291,26 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     catch (err) { c.note(`Could not create task: ${String(err)}`, 'warn'); }
     finally { button.disabled = false; }
   });
+  /**
+   * Retirar la conversación abierta. Una tarea en marcha no se archiva de un
+   * clic: sus workers siguen ahí y su hilo es lo que los explica, así que se
+   * pregunta. Una terminada se va sin ceremonia, y vuelve igual de fácil.
+   */
+  body.querySelector<HTMLButtonElement>('[data-archive-task]')!.addEventListener('click', async (e) => {
+    const button = e.currentTarget as HTMLButtonElement;
+    const id = selected;
+    const task = id ? store.world.tasks?.[id] : undefined;
+    if (!id || !task) return;
+    if (task.status === 'active' && !confirm(`"${task.title}" sigue activa. Archivarla la retira de la consola; sus agentes y su conversación se conservan.\n\n¿Archivar?`)) return;
+    button.disabled = true;
+    try { store.upsertTask(await hub.archiveTask(id)); c.note(`Task archived: ${task.title}`, 'info'); }
+    catch (err) { c.note(`Could not archive task: ${String(err)}`, 'warn'); }
+    finally { button.disabled = false; }
+  });
+
   function renderPicker() {
-    const tasks = Object.values(store.world.tasks ?? {}).sort((a, b) => b.updatedAt - a.updatedAt);
+    const tasks = visibleTasks(store.world.tasks ?? {});
+    body.querySelector<HTMLButtonElement>('[data-archive-task]')!.hidden = !selected;
     const s = JSON.stringify([selected, tasks.map((t) => [t.id, t.title, t.status])]);
     if (s === pickerSig || taskPicker?.isOpen()) return;
     pickerSig = s;

@@ -89,7 +89,7 @@ class HubLink {
         }
         store.applyPatch(f.rev, f.ops);
         break;
-      case 'task': store.upsertTask(f.task); break;
+      case 'task': store.upsertTask(f.task, f.purged === true); break;
       case 'hygiene': store.putHygiene(f.reports); break;
       case 'ceo:message': store.pushCeo(f.message); break;
       case 'ceo:delta':   store.appendCeoDelta(f.id, f.text); break;
@@ -193,6 +193,16 @@ class HubLink {
   createTask(title = 'New task'): Promise<import('../../shared/tasks.ts').CapcomTask> {
     const id = newId('cmd');
     return this.request(id, { t: 'task:create', id, taskId: newId('task'), title }) as Promise<import('../../shared/tasks.ts').CapcomTask>;
+  }
+
+  archiveTask(taskId: string, on = true): Promise<import('../../shared/tasks.ts').CapcomTask> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'task:archive', id, taskId, on }) as Promise<import('../../shared/tasks.ts').CapcomTask>;
+  }
+
+  purgeTask(taskId: string): Promise<{ purged: string }> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'task:purge', id, taskId }) as Promise<{ purged: string }>;
   }
 
   say(text: string, taskId: string | undefined = store.activeTaskId ?? undefined) {

@@ -29,7 +29,7 @@ Se conserva el **runtime y modelo efectivo**, incluido Codex. No hay fallback a 
 
 Se cambia el UUID de sesión mediante un arranque nuevo preparado y un `resume` de **ese UUID nuevo** para abrir su terminal interactivo. No se reanuda la conversación antigua. El recibo de preparación forma parte del contexto técnico mínimo; «limpio» no significa una sesión sin instrucciones de rol o sin configuración MCP.
 
-Archivos de proyectos, workers, tareas, reglas persistidas, transcripts originales y conversaciones del hub no se borran. El modo limpio no carga esas reglas automáticamente: el operador puede pedir recuperar información histórica después. La política limpia continúa en una reanudación o compactación y hasta otro cambio de modo; una instrucción explícita puede pedir información histórica puntual.
+Archivos de proyectos, workers, tareas, reglas persistidas, transcripts originales y conversaciones del hub no se borran. Retirar tareas es una decisión aparte y se pide aparte, con ARCHIVE o `/tasks` ([TASK-RETENTION.md](TASK-RETENTION.md)): el registro del hub es lo que permite que la sesión sea desechable, y borrarlo como efecto colateral de un reset de contexto sería justo lo contrario. El modo limpio no carga esas reglas automáticamente: el operador puede pedir recuperar información histórica después. La política limpia continúa en una reanudación o compactación y hasta otro cambio de modo; una instrucción explícita puede pedir información histórica puntual.
 
 Cada acción crea `<capcom-dir>/handoffs/<planId>/`:
 

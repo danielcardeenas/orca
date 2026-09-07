@@ -98,8 +98,15 @@ export class Store {
     this.emit({ k: 'hygiene' });
   }
 
-  upsertTask(task: import('../shared/tasks.ts').CapcomTask) {
-    (this.world.tasks ??= {})[task.id] = task;
+  upsertTask(task: import('../shared/tasks.ts').CapcomTask, purged = false) {
+    if (purged) {
+      if (this.world.tasks) delete this.world.tasks[task.id];
+      // La que estaba abierta ya no existe: volver a la general, no a un id muerto.
+      if (this.activeTaskId === task.id) this.selectTask(null);
+    } else (this.world.tasks ??= {})[task.id] = task;
+    // Archivar la abierta la saca del selector; seguir "dentro" de ella dejaría
+    // la consola escribiendo a una conversación que ya no se ve.
+    if (!purged && task.archivedAt && this.activeTaskId === task.id) return this.selectTask(null);
     this.emit({ k: 'tasks' });
   }
   /**

@@ -25,6 +25,7 @@ import { ago, esc } from '../util.ts';
 import { REDUCE } from '../motion.ts';
 import { ZIP_SVG, algnRowIn, algnRowPulse, algnZipTo, paintBadge } from '../gfx/algn.ts';
 import { PHASE_WORD, isOpen, splitRows, taskRows, type TaskPhase, type TaskRow } from './task-status.ts';
+import { visibleTasks } from '../../shared/tasks.ts';
 
 /** Finished tasks shown in full before the rest fold. */
 export const RECENT_DONE = 3;
@@ -150,7 +151,7 @@ export function mountTasks(host: HTMLElement, c: Console, opts: { recent?: numbe
 
   function render() {
     const agentOf = (id: string) => store.knownAgent(id);
-    const all = taskRows(Object.values(store.world.tasks ?? {}), agentOf);
+    const all = taskRows(visibleTasks(store.world.tasks ?? {}), agentOf);
     const { open, done, more } = splitRows(all, recent);
     countEl.textContent = String(open.length);
     el.classList.toggle('has-open', open.length > 0);

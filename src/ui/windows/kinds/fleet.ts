@@ -13,9 +13,14 @@
  * which is the entire reason a squad has a head.
  */
 
+import { agentOrigin, originLabel, groupOrigin } from '../../../shared/origin.ts';
+import { getPref, setPref } from '../../prefs.ts';
 import type { Agent } from '../../../shared/types.ts';
 import { squadsOf, type Squad } from '../../../shared/squads.ts';
-import { store } from '../../store.ts';
+import { alive, store } from '../../store.ts';
+import { drafts, draftKey } from '../../drafts.ts';
+import { hub } from '../../net/client.ts';
+import type { ArchiveFilter } from '../../../shared/archive.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { slabBusy, slabFlash } from '../fx.ts';
@@ -28,6 +33,12 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   const scope = (p.scope ?? 'all') as Scope;
   const body = ctx.body;
   body.innerHTML = `
+    <div class="sec" data-origin-controls>
+      <div class="chips">${['orca', 'external', 'all'].map((v) => `<button class="chip" type="button" data-origin="${v}">${v.toUpperCase()}</button>`).join('')}</div>
+      <p class="mono" data-origin-counts></p>
+      <div class="chips"><button class="chip" type="button" data-cleanup>CLEAN UP INACTIVE</button><button class="chip" type="button" data-history>SHOW HISTORY</button><button class="chip" type="button" data-archive>ARCHIVE FINISHED</button></div>
+      <p class="mono">Filters apply to the field. Cleanup hides finished sessions and sessions idle for over an hour. History restores visibility; no processes are stopped. Archive removes finished sessions from the hub for every console; transcripts stay on disk and a resumed session comes back.</p>
+    </div>
     <div class="sec row row--split" style="padding:8px 12px"><span class="px px--tiny" data-sum></span><span class="px px--tiny" data-cost></span></div>
     <div class="win__scroll scroll" data-list></div>
     <div class="slab-row" style="padding:8px;border-top:1px solid var(--line-soft)">
@@ -50,7 +61,62 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   const sum = body.querySelector<HTMLElement>('[data-sum]')!;
   const cost = body.querySelector<HTMLElement>('[data-cost]')!;
   const sayIn = body.querySelector<HTMLInputElement>('[data-say]')!;
+  // The unsent line to this scope survives a reload (drafts.ts); the window key names the scope.
+  const draft = drafts.bind(sayIn, draftKey('fleet', ctx.win.spec.key));
+  draft.restore();
   const stopBtn = body.querySelector<HTMLButtonElement>('[data-stop]')!;
+  body.querySelectorAll<HTMLElement>('[data-origin]').forEach((b) => b.addEventListener('click', () => {
+    setPref('origin', b.dataset.origin as 'orca' | 'external' | 'all'); setPref('showAll', false); store.refilter();
+  }));
+  body.querySelector('[data-cleanup]')!.addEventListener('click', () => {
+    setPref('showAll', false); const n = store.cleanup(); store.refilter(); c.note(`${n} inactive sessions hidden · SHOW HISTORY restores visibility`);
+  });
+  body.querySelector('[data-history]')!.addEventListener('click', () => { setPref('showAll', !getPref('showAll')); store.refilter(); });
+  /**
+   * ARCHIVE FINISHED: the hub-side cleanup, for what this window is on. The
+   * first click asks the hub for a dry run and arms the button with the count;
+   * a second click within four seconds archives exactly that. The filter is
+   * the window's scope, not the rows on screen: a project window archives
+   * every finished agent of the project, including the ones hidden locally.
+   */
+  const archiveBtn = body.querySelector<HTMLButtonElement>('[data-archive]')!;
+  let archiveArmed = 0;
+  const disarmArchive = () => { archiveArmed = 0; archiveBtn.textContent = 'ARCHIVE FINISHED'; archiveBtn.removeAttribute('aria-pressed'); };
+  const archiveFilter = (): ArchiveFilter => {
+    switch (scope) {
+      case 'project': return { projectId: p.id ?? null };
+      case 'squad': return { squad: p.id ?? null };
+      case 'machine': return { ids: store.everyone().filter((a) => a.machineId === p.id && !alive(a)).map((a) => a.id) };
+      case 'group': return { ids: (p.ids ?? '').split(',').filter(Boolean) };
+      default: return {};
+    }
+  };
+  archiveBtn.addEventListener('click', async () => {
+    if (!store.linkUp) { c.note('no link to the hub: nothing can be archived', 'warn'); return; }
+    if (archiveArmed && Date.now() - archiveArmed < 4000) {
+      disarmArchive();
+      const done = slabBusy(archiveBtn);
+      try {
+        const out = await hub.archive(archiveFilter(), false);
+        const n = out.archived.length;
+        c.note(`archived ${n} finished agent${n === 1 ? '' : 's'}`
+          + (out.kept.length ? ` · ${out.kept.length} kept (live children)` : '')
+          + (out.squadsRetired.length ? ` · squads retired: ${out.squadsRetired.join(', ')}` : ''), 'warn');
+      } catch (err) { c.note(`could not archive: ${(err as Error).message}`, 'alert'); }
+      finally { done(); }
+      return;
+    }
+    try {
+      const out = await hub.archive(archiveFilter(), true);
+      const n = out.archived.length;
+      if (!n) { c.note(`nothing finished to archive here${out.kept.length ? ` · ${out.kept.length} kept (live children)` : ''}`); return; }
+      archiveArmed = Date.now();
+      archiveBtn.textContent = `ARCHIVE ${n} · SURE?`;
+      archiveBtn.setAttribute('aria-pressed', 'true');
+      c.note(`${n} finished agent${n === 1 ? '' : 's'} would be archived · click again to confirm`, 'warn');
+      setTimeout(() => { if (archiveArmed) disarmArchive(); }, 4000);
+    } catch (err) { c.note(`could not ask the hub: ${(err as Error).message}`, 'alert'); }
+  });
   let armed = 0;
   let sig = '';
 
@@ -83,7 +149,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
       <i class="arow__st"></i>
       ${scope === 'squad' ? `<span class="arow__lead">${lead ? 'LEAD' : ''}</span>` : ''}
       <span class="arow__cs">${esc(a.callsign)}<br/><span class="win__pj">${esc(pr?.code ?? '')}</span></span>
-      <span class="arow__t mono">${esc(a.title || a.mission || '')}<br/><span style="color:var(--ink-dim)">${a.state === 'working' && a.tool ? esc(a.tool) + ' ' + esc(a.toolDetail ?? '') : esc(stateWord(a))}</span></span>
+      <span class="arow__t mono"><span class="origin-badge" data-origin-kind="${agentOrigin(a)}">${originLabel(a)}</span><br/>${esc(a.title || a.mission || '')}<br/><span style="color:var(--ink-dim)">${a.state === 'working' && a.tool ? esc(a.tool) + ' ' + esc(a.toolDetail ?? '') : esc(stateWord(a))}</span></span>
       <span class="arow__m">${money(a.metrics.costUSD)}<br/>${ago(a.updatedAt, Date.now())}</span>
     </div>`;
   }
@@ -92,6 +158,11 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   const groupHead = (text: string) => `<div class="arow__group px px--tiny">${text}</div>`;
 
   function render() {
+    const known = store.everyone();
+    const counts = (kind: string) => known.filter((a) => agentOrigin(a) === kind).length;
+    body.querySelector('[data-origin-counts]')!.textContent = `${counts('orca')} ORCA · ${counts('external')} EXTERNAL · ${counts('unknown')} UNVERIFIED · ${store.hiddenCount()} HIDDEN`;
+    body.querySelectorAll<HTMLElement>('[data-origin]').forEach((b) => b.setAttribute('aria-pressed', String(!getPref('showAll') && getPref('origin') === b.dataset.origin)));
+    body.querySelector('[data-history]')!.textContent = getPref('showAll') ? 'HIDE HISTORY' : 'SHOW HISTORY';
     const sq = squad();
     const found = members();
     // A squad arrives ordered by lineage, and stays that way.
@@ -113,7 +184,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     } else if (scope === 'squad') {
       const lead = sq?.leaderId ? store.world.agents[sq.leaderId] : undefined;
       ctx.setCallsign((p.id ?? '??').toUpperCase().slice(0, 12));
-      ctx.setTitle(`${p.id ?? ''} · ${ms.length} · LEAD ${lead?.callsign ?? '—'}`);
+      ctx.setTitle(`${p.id ?? ''} · ${groupOrigin(ms)} · ${ms.length} · LEAD ${lead?.callsign ?? '—'}`);
     } else if (scope === 'group') {
       ctx.setCallsign(`${ms.length} AGENTS`);
       ctx.setTitle(ms.map((a) => a.callsign).join(' '));
@@ -127,7 +198,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
 
     // The squad label is part of the picture: an agent enlisted since the last
     // frame regroups the list, and a signature that ignores it would not redraw.
-    const s = ms.map((a) => `${a.id}${a.state}${a.title}${a.tool}${a.squad ?? ''}${a.lead ? '!' : ''}`).join('|') + `|${Math.floor(now / 15000)}`;
+    const s = ms.map((a) => `${a.id}${a.state}${a.title}${a.tool}${a.origin ?? ''}${a.role ?? ''}${a.squad ?? ''}${a.lead ? '!' : ''}`).join('|') + `|${Math.floor(now / 15000)}`;
     if (s === sig) return;
     sig = s;
 
@@ -140,7 +211,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
           // A squad that lost its leader is amber: it still works, but nobody
           // answers for it, and that is a thing to go and look at.
           const lead = g.leaderId ? store.world.agents[g.leaderId] : undefined;
-          return `<button class="chip" type="button" data-squad="${esc(g.name)}" style="--chip-state:${lead ? 'var(--lime)' : 'var(--amber)'}">${esc(g.name)} <small>${g.memberIds.length}</small> <small>${esc(lead?.callsign ?? 'NO LEAD')}</small></button>`;
+          return `<button class="chip" type="button" data-squad="${esc(g.name)}" style="--chip-state:${lead ? 'var(--lime)' : 'var(--amber)'}">${esc(g.name)} <small>${groupOrigin(g.memberIds.map((id) => store.world.agents[id]).filter((a): a is Agent => !!a))}</small> <small>${g.memberIds.length}</small> <small>${esc(lead?.callsign ?? 'NO LEAD')}</small></button>`;
         }).join('')}</div></div>` : ''}
         <div class="sec__k px" style="padding:10px 12px 0">AGENTS</div>`;
     }
@@ -202,6 +273,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     const ids = members().filter((a) => a.state !== 'done' && a.state !== 'dead').map((a) => a.id);
     if (!ids.length) { c.note('nobody live to say it to', 'warn'); return; }
     sayIn.value = '';
+    draft.clear();
     slabFlash(sendBtn);
     const done = slabBusy(sendBtn);
     try { await c.say(ids, t); } finally { done(); }
@@ -213,6 +285,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     const id = squad()?.leaderId;
     if (!id) { c.note('this squad has no leader to talk to', 'warn'); return; }
     sayIn.value = '';
+    draft.clear();
     slabFlash(leadBtn);
     const done = slabBusy(leadBtn);
     try { await c.say([id], t); } finally { done(); }
@@ -245,5 +318,5 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   const off = store.on((e) => { if (e.k === 'world' || e.k === 'agents' || e.k === 'projects' || e.k === 'machines') render(); });
   const tick = window.setInterval(render, 5000);
   render();
-  return { dispose() { off(); clearInterval(tick); } };
+  return { dispose() { off(); clearInterval(tick); draft.dispose(); } };
 }

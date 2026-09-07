@@ -10,7 +10,7 @@
 
 import * as THREE from 'three';
 import {
-  createPipes, laneShift, pathLength, routeGutter, routeGutterMsg, type Pt,
+  createPipes, laneShift, lodOf, LOD_FAR_PX, LOD_NEAR_PX, pathLength, routeGutter, routeGutterMsg, spanOf, SPAN_FAR, SPAN_NEAR, type Pt,
 } from '../src/ui/field/pipes.ts';
 import { GAP_X, GAP_Y, TILE_H, TILE_W } from '../src/ui/field/layout.ts';
 import { eq, near, ok, test, type TestModule } from './harness.ts';
@@ -218,6 +218,49 @@ export default {
       pipes.dispose();
       return ok('a core paints as far as its filled length, and a pulse cuts on arrival',
         len === 2 && flying > 0 && after === 0, `len ${len}, ${flying} pulse quads → ${after}`);
+    }),
+
+    test('span: neighbours are detail, long hauls and other regions are the picture', () => {
+      const adjacent = routeGutter(centres[0]!, centres[COLS]!, GAPS, 0);
+      const far = routeGutter(centres[0]!, centres[COLS * 3 + COLS - 1]!, GAPS, 0);
+      const s0 = spanOf(pathLength(adjacent), false);
+      const s1 = spanOf(pathLength(far), false);
+      const sx = spanOf(0.1, true);
+      const mid = spanOf((SPAN_NEAR + SPAN_FAR) / 2, false);
+      return ok('span: neighbours are detail, long hauls and other regions are the picture',
+        s0 === 0 && s1 === 1 && sx === 1 && mid > 0.4 && mid < 0.6,
+        `adjacent ${pathLength(adjacent).toFixed(2)} → ${s0}, far ${pathLength(far).toFixed(2)} → ${s1}, cross → ${sx}, mid → ${mid}`);
+    }),
+
+    test('lod: local wiring is gone below LOD_FAR_PX and whole above LOD_NEAR_PX', () => {
+      const far = lodOf(LOD_FAR_PX - 1), near = lodOf(LOD_NEAR_PX + 1), mid = lodOf((LOD_FAR_PX + LOD_NEAR_PX) / 2);
+      return ok('lod: local wiring is gone below LOD_FAR_PX and whole above LOD_NEAR_PX',
+        far === 0 && near === 1 && mid > 0.4 && mid < 0.6, `${far} · ${mid} · ${near}`);
+    }),
+
+    test('a local port shrinks away when the camera is far; a spanning one and YOU do not', () => {
+      const scene = new THREE.Scene();
+      const pipes = createPipes(scene);
+      const portsMesh = () => scene.children.filter((c) => c.renderOrder === -1 && (c as THREE.InstancedMesh).geometry.type === 'PlaneGeometry'
+        && ((c as THREE.InstancedMesh).geometry as THREE.PlaneGeometry).parameters.width < 1) as THREE.InstancedMesh[];
+      // Frame one at a far zoom teaches the ports the level; frame two draws with it.
+      pipes.begin(); pipes.end(0, LOD_FAR_PX / 2);
+      pipes.begin();
+      pipes.add([{ x: 0, y: 0 }, { x: 1, y: 0 }], -0.3, new THREE.Color(), 'lineage', 0, 1, 0, 0);
+      pipes.add([{ x: 0, y: 2 }, { x: 1, y: 2 }], -0.3, new THREE.Color(), 'lineage', 0, 1, 0, 1);
+      pipes.port(5, 5, 0, new THREE.Color(), 1.7);
+      pipes.end(0, LOD_FAR_PX / 2);
+      const drawnFar = portsMesh()[0]?.count ?? -1;
+      pipes.begin();
+      pipes.add([{ x: 0, y: 0 }, { x: 1, y: 0 }], -0.3, new THREE.Color(), 'lineage', 0, 1, 0, 0);
+      pipes.end(0, LOD_NEAR_PX * 2);
+      pipes.begin();
+      pipes.add([{ x: 0, y: 0 }, { x: 1, y: 0 }], -0.3, new THREE.Color(), 'lineage', 0, 1, 0, 0);
+      pipes.end(0, LOD_NEAR_PX * 2);
+      const drawnNear = portsMesh()[0]?.count ?? -1;
+      pipes.dispose();
+      return ok('a local port shrinks away when the camera is far; a spanning one and YOU do not',
+        drawnFar === 3 && drawnNear === 2, `far: ${drawnFar} ports (want 3: two spanning ends and YOU), near: ${drawnNear} (want 2)`);
     }),
 
     test('bus, core and ports draw under the tiles; pulses over them', () => {

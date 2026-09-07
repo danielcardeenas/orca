@@ -16,6 +16,7 @@
  */
 
 import type { Agent, FeedItem } from '../shared/types.ts';
+import { MAX_TALK } from '../shared/types.ts';
 import type { PatchOp } from '../shared/protocol.ts';
 
 export interface PatchFrame {
@@ -57,8 +58,13 @@ function keyOf(op: PatchOp): string {
     case 'artifact': return `artifact:${op.id}`;
     case 'key': return `key:${op.id}`;
     case 'feed': return 'feed';
+    // La charla de un agente se apila, como el feed: una clave por agente.
+    case 'talk': return `talk:${op.id}`;
+    // El texto en vivo se sobrescribe: sólo importa el último.
+    case 'talk:live': return `talk:live:${op.id}`;
     case 'fleet': return 'fleet';
     case 'ceo:thinking': return 'ceo:thinking';
+    case 'capcom:handoffs': return 'capcom:handoffs';
   }
 }
 
@@ -68,6 +74,10 @@ function merge(prev: PatchOp, next: PatchOp): PatchOp {
     const items: FeedItem[] = [...prev.v, ...next.v];
     // Un solo frame nunca lleva más feed del que la consola muestra.
     return { o: 'feed', v: items.length > 500 ? items.slice(-500) : items };
+  }
+  if (prev.o === 'talk' && next.o === 'talk') {
+    const items = [...prev.v, ...next.v];
+    return { o: 'talk', id: next.id, v: items.length > MAX_TALK ? items.slice(-MAX_TALK) : items };
   }
   if (next.o === 'agent:patch') {
     if (prev.o === 'agent:patch') {

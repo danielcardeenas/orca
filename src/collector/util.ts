@@ -90,6 +90,10 @@ export function claudeProjectsDir(): string {
   return path.join(claudeDir(), 'projects');
 }
 
+export function codexSessionsDir(): string {
+  return process.env['ORCA_CODEX_SESSIONS'] ?? path.join(home(), '.codex', 'sessions');
+}
+
 export function claudeJobsDir(): string {
   return path.join(claudeDir(), 'jobs');
 }

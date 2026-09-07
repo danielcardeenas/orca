@@ -22,6 +22,7 @@
 
 import { squadName } from '../../shared/squads.ts';
 import type { Agent, AgentState, Placement, Project } from '../../shared/types.ts';
+import { TRAY_CELLS } from './blocks.ts';
 
 /**
  * Where the operator left a squad.
@@ -66,8 +67,48 @@ export const DECK_GAP_X = 0.3;
 export const DECK_GAP_Y = 0.32;
 /** Padding between a region's tiles and its outline. */
 const RGN_PAD = 0.55;
+/**
+ * Air between a squad's tiles and its outline, and between a block's tiles
+ * and its frame. Both live inside the gutter (`GAP_X` 0.24 wide), and the
+ * block's is the smaller so that a block standing inside a squad shows two
+ * frames, not one drawn twice. A frame flush against a tile's edge read as
+ * the tile's own border, and a tile touching it read as sticking out.
+ */
+export const SQUAD_PAD = 0.15;
+export const BLOCK_PAD = 0.08;
+/**
+ * CAPCOM's tile, against a worker's. Bigger, not huge: it has to read as the
+ * command from the zoom where a region is a block, and still be one tile of
+ * the same silhouette up close — the colour does the rest (§1.3).
+ */
+export const CAPCOM_SCALE = 1.4;
+/** Air CAPCOM keeps from any region or pinned tile: about a gutter and a half. */
+export const CAPCOM_CLEAR = 0.4;
 /** Golden angle. */
 const PHI = 2.399963;
+
+/*
+ * A tray: one grid cell next to a parent, holding the children folded into
+ * its block (`blocks.ts`) as small cells — three across, two down, each a
+ * tile at `CELL_SCALE`. The header strip above them is where the field
+ * writes the parent's callsign and the count.
+ */
+export const CELL_SCALE = 0.3;
+const TRAY_INSET = 0.04;
+const TRAY_GAP = 0.02;
+
+/**
+ * How the cells fill the tray, by how many there are. One child is not a
+ * speck in an empty cell: it gets most of the tray. Six are the comp's 3 × 2
+ * at `CELL_SCALE`. The scale is what the shader, the labels and the picker
+ * see, so a lone subagent is readable two zoom steps before six would be.
+ */
+export function trayGrid(n: number): { cols: number; scale: number } {
+  if (n <= 1) return { cols: 1, scale: 0.62 };
+  if (n === 2) return { cols: 2, scale: 0.44 };
+  if (n <= 4) return { cols: 2, scale: 0.42 };
+  return { cols: 3, scale: CELL_SCALE };
+}
 
 export interface Spot {
   id: string;
@@ -77,6 +118,20 @@ export interface Spot {
   tx: number; ty: number; tz: number;
   pinned: boolean;
   projectId: string;
+  /** 1 for a tile; `CELL_SCALE` for a child standing in its parent's tray. */
+  scale: number;
+  /** The parent whose tray this spot stands in, or null for a tile. */
+  trayOf: string | null;
+}
+
+/** A parent's tray: the cell it occupies and who stands in it. */
+export interface Tray {
+  parentId: string;
+  projectId: string;
+  cx: number; cy: number;
+  hw: number; hh: number;
+  /** The children in it, in tray order. */
+  ids: string[];
 }
 
 /**
@@ -132,6 +187,8 @@ export type LayoutMode =
 export interface Layout {
   spots: Map<string, Spot>;
   regions: Region[];
+  /** Trays of folded children, one per parent (two when it has more than `TRAY_CELLS`). */
+  trays: Tray[];
   /** Spiral slot per project — persists so a project keeps its place. */
   order: Map<string, number>;
   bounds: Bounds;
@@ -146,7 +203,7 @@ export interface Layout {
 
 export function emptyLayout(): Layout {
   return {
-    spots: new Map(), regions: [], order: new Map(),
+    spots: new Map(), regions: [], trays: [], order: new Map(),
     bounds: { minX: -6, minY: -4, maxX: 6, maxY: 4 },
     gapX: GAP_X, gapY: GAP_Y,
   };
@@ -176,25 +233,55 @@ export function layoutFleet(
   mode: LayoutMode = { kind: 'field' },
   squadPlacements: Map<string, SquadPlacement> = new Map(),
   regionPlacements: Map<string, RegionPlacement> = new Map(),
+  absorbed: Map<string, string> = new Map(),
 ): Layout {
   if (mode.kind === 'deck') return layoutDeck(agents, projects, prev, mode.sort);
   const order = prev.order;
   const spots = new Map<string, Spot>();
   const regions: Region[] = [];
+  const trays: Tray[] = [];
+
+  /*
+   * Folded children (`blocks.ts`) do not take a grid cell: they stand in
+   * their parent's tray. A child the operator pinned by hand is a tile
+   * wherever the rule put it — a placement the operator made always wins.
+   */
+  const kidsOf = new Map<string, Agent[]>();
+  const folded = new Set<string>();
+  for (const a of agents) {
+    const pid = absorbed.get(a.id);
+    if (!pid || placements.get(a.id)?.pinned) continue;
+    folded.add(a.id);
+    const k = kidsOf.get(pid);
+    if (k) k.push(a); else kidsOf.set(pid, [a]);
+  }
+  for (const k of kidsOf.values()) k.sort((p, q) => p.startedAt - q.startedAt || p.id.localeCompare(q.id));
+
+  /*
+   * CAPCOM is not in a project. It is the command, and it stands at the
+   * origin of the spiral with every region around it — the one tile the
+   * operator can always find by zooming out. Its own directory on disk is a
+   * home, not a repo, so it never earns a region of its own; a worker that
+   * strayed in there still does, which is how a stray shows.
+   */
+  const capcom = agents.find((a) => a.role === 'capcom') ?? null;
 
   /* ── Group by project, lineage order inside ─────────────────────── */
   const byProject = new Map<string, Agent[]>();
   for (const a of agents) {
+    if (folded.has(a.id) || a === capcom) continue;
     const list = byProject.get(a.projectId);
     if (list) list.push(a); else byProject.set(a.projectId, [a]);
   }
+  const countOf = new Map<string, number>();
+  for (const a of agents) if (a !== capcom) countOf.set(a.projectId, (countOf.get(a.projectId) ?? 0) + 1);
   // Projects that have gone quiet keep their slot; new ones take the next.
   const ids = [...byProject.keys()].sort((p, q) => (projects.get(p)?.name ?? p).localeCompare(projects.get(q)?.name ?? q));
   for (const id of ids) if (!order.has(id)) order.set(id, order.size);
 
   /* ── Size every region first: the spiral spacing depends on the largest ── */
   const sized = ids.map((id) => {
-    const list = squadOrder(lineageOrder(byProject.get(id)!));
+    const list = withTrays(squadOrder(lineageOrder(byProject.get(id)!)), kidsOf);
     const n = list.length;
     const cols = Math.max(2, Math.min(12, Math.ceil(Math.sqrt(n * 1.35))));
     const cells = packCells(list, cols);
@@ -210,7 +297,8 @@ export function layoutFleet(
 
   for (const s of sized) {
     const slot = order.get(s.id) ?? 0;
-    const r = spacing * Math.sqrt(slot);
+    // Slot 0 is one ring out: the centre of the spiral is the command's.
+    const r = spacing * Math.sqrt(slot + 1);
     const ang = slot * PHI;
     // The spiral only places what nobody has placed.
     const placedRegion = regionPlacements.get(s.id);
@@ -224,7 +312,7 @@ export function layoutFleet(
       name: p?.name ?? s.id,
       machineId: p?.machineId ?? '',
       cx, cy, hw: s.w / 2, hh: s.h / 2,
-      count: s.list.length,
+      count: countOf.get(s.id) ?? 0,
       blocked: 0,
       squads: [],
       moved: !!placedRegion,
@@ -242,22 +330,23 @@ export function layoutFleet(
      * stop naming a block, so the box is always the *cells*, never where a
      * pinned tile wandered off to.
      */
-    const cells = s.list.map((a, i) => {
+    const cells = s.list.map((e, i) => {
       const cell = s.cells[i] ?? i;
       const col = cell % s.cols, row = Math.floor(cell / s.cols);
-      return { a, gx: x0 + col * (TILE_W + GAP_X), gy: y0 - row * (TILE_H + GAP_Y) };
+      return { e, gx: x0 + col * (TILE_W + GAP_X), gy: y0 - row * (TILE_H + GAP_Y) };
     });
     const boxes = new Map<string, { minX: number; minY: number; maxX: number; maxY: number; n: number; lead: string | null }>();
-    for (const { a, gx, gy } of cells) {
-      const sq = squadOf(a);
+    for (const { e, gx, gy } of cells) {
+      const sq = entrySquad(e);
       if (!sq) continue;
+      // A tray is in the squad's box but is not a member: it counts nobody.
+      const a = e.kind === 'tile' ? e.a : null;
       const b = boxes.get(sq);
-      if (!b) boxes.set(sq, { minX: gx, minY: gy, maxX: gx, maxY: gy, n: 1, lead: isLead(a) ? a.id : null });
+      if (!b) boxes.set(sq, { minX: gx, minY: gy, maxX: gx, maxY: gy, n: a ? 1 : 0, lead: a && isLead(a) ? a.id : null });
       else {
         b.minX = Math.min(b.minX, gx); b.maxX = Math.max(b.maxX, gx);
         b.minY = Math.min(b.minY, gy); b.maxY = Math.max(b.maxY, gy);
-        b.n++;
-        if (isLead(a)) b.lead = a.id;
+        if (a) { b.n++; if (isLead(a)) b.lead = a.id; }
       }
     }
     const shift = new Map<string, { dx: number; dy: number }>();
@@ -267,12 +356,47 @@ export function layoutFleet(
       shift.set(name, { dx: p.x - (b.minX + b.maxX) / 2, dy: p.y - (b.minY + b.maxY) / 2 });
     }
 
-    for (const { a, gx, gy } of cells) {
-      if (a.state === 'blocked' && a.block?.kind !== 'peer') region.blocked++;
-      const sq = squadOf(a);
+    for (const { e, gx, gy } of cells) {
+      const sq = entrySquad(e);
       const off = sq ? shift.get(sq) : undefined;
       let tx = gx + (off?.dx ?? 0);
       let ty = gy + (off?.dy ?? 0);
+
+      if (e.kind === 'tray') {
+        /*
+         * The tray stands in the cell the grid gave it — unless the operator
+         * pinned the parent, in which case it goes with the parent: a block
+         * whose tray stayed behind in the grid would name nobody.
+         */
+        const ps = spots.get(e.parent.id);
+        if (ps?.pinned) { tx = ps.tx + (e.index + 1) * (TILE_W + GAP_X); ty = ps.ty; }
+        trays.push({ parentId: e.parent.id, projectId: s.id, cx: tx, cy: ty, hw: TILE_W / 2, hh: TILE_H / 2, ids: e.kids.map((k) => k.id) });
+        // Cells centred in the tray, as many across as the count calls for.
+        const g = trayGrid(e.kids.length);
+        const cw = TILE_W * g.scale, ch = TILE_H * g.scale;
+        const rows = Math.ceil(e.kids.length / g.cols);
+        const gridW = g.cols * cw + (g.cols - 1) * TRAY_GAP;
+        const gridH = rows * ch + (rows - 1) * TRAY_GAP;
+        const left = tx - gridW / 2 + cw / 2;
+        const top = ty + gridH / 2 - ch / 2;
+        e.kids.forEach((k, i) => {
+          const col = i % g.cols, row = Math.floor(i / g.cols);
+          const kx = left + col * (cw + TRAY_GAP);
+          const ky = top - row * (ch + TRAY_GAP);
+          const kz = depthOf(k);
+          const old = prev.spots.get(k.id);
+          spots.set(k.id, old
+            ? { ...old, tx: kx, ty: ky, tz: kz, pinned: false, projectId: k.projectId, scale: g.scale, trayOf: e.parent.id }
+            : { id: k.id, x: kx, y: ky, z: kz, tx: kx, ty: ky, tz: kz, pinned: false, projectId: k.projectId, scale: g.scale, trayOf: e.parent.id });
+        });
+        void TRAY_INSET;
+        minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
+        minY = Math.min(minY, ty - TILE_H); maxY = Math.max(maxY, ty + TILE_H);
+        continue;
+      }
+
+      const a = e.a;
+      if (a.state === 'blocked' && a.block?.kind !== 'peer') region.blocked++;
       const tz = depthOf(a);
       const placed = placements.get(a.id);
       let pinned = false;
@@ -280,8 +404,8 @@ export function layoutFleet(
 
       const old = prev.spots.get(a.id);
       const spot: Spot = old
-        ? { ...old, tx, ty, tz, pinned, projectId: a.projectId }
-        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: a.projectId };
+        ? { ...old, tx, ty, tz, pinned, projectId: a.projectId, scale: 1, trayOf: null }
+        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: a.projectId, scale: 1, trayOf: null };
       spots.set(a.id, spot);
 
       minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
@@ -297,8 +421,8 @@ export function layoutFleet(
         leadId: b.lead,
         cx: (b.minX + b.maxX) / 2 + (off?.dx ?? 0),
         cy: (b.minY + b.maxY) / 2 + (off?.dy ?? 0),
-        hw: (b.maxX - b.minX) / 2 + TILE_W / 2,
-        hh: (b.maxY - b.minY) / 2 + TILE_H / 2,
+        hw: (b.maxX - b.minX) / 2 + TILE_W / 2 + SQUAD_PAD,
+        hh: (b.maxY - b.minY) / 2 + TILE_H / 2 + SQUAD_PAD,
         moved: !!off,
       });
     }
@@ -307,11 +431,77 @@ export function layoutFleet(
     minY = Math.min(minY, cy - s.h / 2); maxY = Math.max(maxY, cy + s.h / 2);
   }
 
+  if (capcom) {
+    /*
+     * The origin is CAPCOM's. The spiral never reaches it (slot 0 is a ring
+     * out), but a region or a tile the operator dragged can: then CAPCOM
+     * steps out of the way, straight up, to the first clear spot — it stands
+     * beside the fleet, never inside a project or a squad. Pinned by hand it
+     * goes where the hand left it: a placement the operator made always wins.
+     */
+    const placed = placements.get(capcom.id);
+    const pinned = placed?.pinned === true;
+    const hw = TILE_W / 2 * CAPCOM_SCALE + CAPCOM_CLEAR, hh = TILE_H / 2 * CAPCOM_SCALE + CAPCOM_CLEAR;
+    const boxes: { minX: number; minY: number; maxX: number; maxY: number }[] = regions
+      .map((r) => ({ minX: r.cx - r.hw, minY: r.cy - r.hh, maxX: r.cx + r.hw, maxY: r.cy + r.hh }));
+    for (const sp of spots.values()) {
+      if (!sp.pinned) continue;
+      boxes.push({ minX: sp.tx - TILE_W / 2, minY: sp.ty - TILE_H / 2, maxX: sp.tx + TILE_W / 2, maxY: sp.ty + TILE_H / 2 });
+    }
+    const covering = (x: number, y: number) =>
+      boxes.filter((b) => x + hw > b.minX && x - hw < b.maxX && y + hh > b.minY && y - hh < b.maxY);
+    let tx = pinned ? placed!.x : 0, ty = pinned ? placed!.y : 0;
+    if (!pinned) {
+      for (let i = 0; i < 32; i++) {
+        const hit = covering(tx, ty);
+        if (hit.length === 0) break;
+        ty = Math.max(...hit.map((b) => b.maxY)) + hh;
+      }
+    }
+    const tz = depthOf(capcom);
+    const old = prev.spots.get(capcom.id);
+    spots.set(capcom.id, old
+      ? { ...old, tx, ty, tz, pinned, projectId: capcom.projectId, scale: CAPCOM_SCALE, trayOf: null }
+      : { id: capcom.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: capcom.projectId, scale: CAPCOM_SCALE, trayOf: null });
+    minX = Math.min(minX, tx - hw); maxX = Math.max(maxX, tx + hw);
+    minY = Math.min(minY, ty - hh); maxY = Math.max(maxY, ty + hh);
+  }
+
   const bounds: Bounds = Number.isFinite(minX)
     ? { minX, minY, maxX, maxY }
     : { minX: -6, minY: -4, maxX: 6, maxY: 4 };
 
-  return { spots, regions, order, bounds, gapX: GAP_X, gapY: GAP_Y };
+  return { spots, regions, trays, order, bounds, gapX: GAP_X, gapY: GAP_Y };
+}
+
+/* ── Blocks: a parent's trays follow it into the grid ─────────────── */
+
+/** What takes a grid cell: a tile, or a tray of a parent's folded children. */
+type Entry =
+  | { kind: 'tile'; a: Agent }
+  | { kind: 'tray'; parent: Agent; kids: Agent[]; index: number };
+
+/** The squad an entry stands in: a tray stands in its parent's. */
+function entrySquad(e: Entry): string | null {
+  return squadOf(e.kind === 'tile' ? e.a : e.parent);
+}
+
+/**
+ * Lineage order already puts a child right after its parent; a tray goes in
+ * the same place, one per `TRAY_CELLS` children, so the block is the parent's
+ * tile and the cell (or two) beside it.
+ */
+function withTrays(list: Agent[], kidsOf: Map<string, Agent[]>): Entry[] {
+  const out: Entry[] = [];
+  for (const a of list) {
+    out.push({ kind: 'tile', a });
+    const kids = kidsOf.get(a.id);
+    if (!kids) continue;
+    for (let i = 0; i < kids.length; i += TRAY_CELLS) {
+      out.push({ kind: 'tray', parent: a, kids: kids.slice(i, i + TRAY_CELLS), index: i / TRAY_CELLS });
+    }
+  }
+  return out;
 }
 
 /* ── Deck ─────────────────────────────────────────────────────────── */
@@ -381,7 +571,7 @@ function layoutDeck(agents: Agent[], projects: Map<string, Project>, prev: Layou
   const spots = new Map<string, Spot>();
   const list = deckOrder(agents, projects, sort);
   const n = list.length;
-  if (!n) return { spots, regions: [], order: prev.order, bounds: emptyLayout().bounds, gapX: DECK_GAP_X, gapY: DECK_GAP_Y };
+  if (!n) return { spots, regions: [], trays: [], order: prev.order, bounds: emptyLayout().bounds, gapX: DECK_GAP_X, gapY: DECK_GAP_Y };
 
   const cols = Math.max(4, Math.min(40, Math.ceil(Math.sqrt(n * 1.6))));
   const rows = Math.ceil(n / cols);
@@ -396,15 +586,15 @@ function layoutDeck(agents: Agent[], projects: Map<string, Project>, prev: Layou
     const tz = depthOf(a);
     const old = prev.spots.get(a.id);
     spots.set(a.id, old
-      ? { ...old, tx, ty, tz, pinned: false, projectId: a.projectId }
-      : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned: false, projectId: a.projectId });
+      ? { ...old, tx, ty, tz, pinned: false, projectId: a.projectId, scale: 1, trayOf: null }
+      : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned: false, projectId: a.projectId, scale: 1, trayOf: null });
   });
 
   const bounds: Bounds = {
     minX: x0 - TILE_W, maxX: x0 + (cols - 1) * (TILE_W + DECK_GAP_X) + TILE_W,
     minY: y0 - (rows - 1) * (TILE_H + DECK_GAP_Y) - TILE_H, maxY: y0 + TILE_H,
   };
-  return { spots, regions: [], order: prev.order, bounds, gapX: DECK_GAP_X, gapY: DECK_GAP_Y };
+  return { spots, regions: [], trays: [], order: prev.order, bounds, gapX: DECK_GAP_X, gapY: DECK_GAP_Y };
 }
 
 /* ── Squads ───────────────────────────────────────────────────────── */
@@ -433,15 +623,15 @@ export function isLead(a: Agent): boolean {
  *
  * `squadOrder` has already made each squad contiguous in `list`.
  */
-function packCells(list: Agent[], cols: number): number[] {
+function packCells(list: Entry[], cols: number): number[] {
   const cells: number[] = [];
   let cell = 0;
   let i = 0;
   while (i < list.length) {
-    const sq = squadOf(list[i]!);
+    const sq = entrySquad(list[i]!);
     if (!sq) { cells.push(cell++); i++; continue; }
     let n = 0;
-    while (i + n < list.length && squadOf(list[i + n]!) === sq) n++;
+    while (i + n < list.length && entrySquad(list[i + n]!) === sq) n++;
     const col = cell % cols;
     if (col !== 0 && n <= cols && col + n > cols) cell += cols - col;
     for (let k = 0; k < n; k++) cells.push(cell++);

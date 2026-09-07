@@ -192,6 +192,22 @@ const tests = [
     });
   }),
 
+  test('orca archive is a dry run by flag, takes ages like 24h, and refuses a bad state', async () => {
+    return await withFleet(async (hub, code) => {
+      const dry = await orca(hub.port, ['archive', '--project', code, '--older-than', '24h', '--dry-run', '--json']);
+      const r = (dry.json?.['result'] ?? {}) as { dry_run?: boolean; count?: number; archived?: unknown[] };
+      const before = Object.keys(hub.world.state.agents).length;
+      const bad = await orca(hub.port, ['archive', '--state', 'working']);
+      return ok(
+        'orca archive --dry-run counts without touching, and --state is checked before the hub is asked',
+        dry.code === 0 && dry.json?.['ok'] === true && r.dry_run === true && r.count === (r.archived?.length ?? -1)
+          && Object.keys(hub.world.state.agents).length === before
+          && bad.code === 1 && bad.stderr.includes('--state is done or dead'),
+        `dry run: ${r.count ?? '?'} would go (exit ${dry.code}); bad state exit ${bad.code}`,
+      );
+    });
+  }),
+
   test('orca fleets lists the presets and orca tools lists every verb', async () => {
     return await withFleet(async (hub) => {
       const f = await orca(hub.port, ['fleets']);

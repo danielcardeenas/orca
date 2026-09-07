@@ -18,9 +18,35 @@ export interface Prefs {
    * where that button can be seen.
    */
   musicAutoplay: boolean;
+  /**
+   * Show every session the collectors report. Off (the default) the field
+   * holds the fleet: agents ORCA launched, plus any other session only while
+   * it is alive. A stranger that finished is history, not a tile — and a
+   * dismissed agent stays hidden until this is on.
+   */
+  showAll: boolean;
+  origin: 'orca' | 'external' | 'all';
+  /** The HUD's task panel folded to its head. A click on the head flips it. */
+  tasksFolded: boolean;
+  /*
+   * CAPCOM's halo (field/command.ts). Four pieces, each its own switch, so
+   * the command post can be read at whatever weight the fleet allows: with
+   * fifty agents the links are noise, with five they are the picture.
+   */
+  /** Segment the halo by open task: one arc per task the hub keeps, lit while it moves. */
+  capcomTasks: boolean;
+  /** Amber notches on the halo, one per question nobody has answered yet. */
+  capcomNotches: boolean;
+  /** The turn: a faster pulse and a solid outline while CAPCOM works, amber while it waits on you. */
+  capcomPulse: boolean;
+  /** Faint cyan ties from CAPCOM to every agent it launched. Off by default: fifty of them hum. */
+  capcomLinks: boolean;
 }
 
-const DEFAULTS: Prefs = { panel: 0.5, panelColor: false, musicAutoplay: false };
+const DEFAULTS: Prefs = {
+  panel: 0.5, panelColor: false, musicAutoplay: false, showAll: false, origin: 'orca', tasksFolded: false,
+  capcomTasks: true, capcomNotches: true, capcomPulse: true, capcomLinks: false,
+};
 
 function load(): Prefs {
   try {

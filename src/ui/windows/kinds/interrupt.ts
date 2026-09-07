@@ -43,6 +43,7 @@ export function mountInterrupt(ctx: WinCtx, c: Console) {
    */
   function answerAndSweep(escalationId: string, answer: string, rememberAs: string | null, btn?: HTMLElement | null) {
     if (confirming) return;
+    if (esca()?.permission) { c.answer(escalationId, answer, null); sig = ''; render(); return; }
     confirming = true;
     slabFlash(btn);
     c.answer(escalationId, answer, rememberAs);
@@ -61,17 +62,17 @@ export function mountInterrupt(ctx: WinCtx, c: Console) {
     ctx.setTitle(a?.title ?? '');
     const now = Date.now();
     const unblocks = 1 + store.dammedBehind(e.agentId).length;
-    const s = [e.status, e.ceoAttempt?.answer, Math.floor(now / 10000), unblocks].join('|');
+    const s = [e.status, e.permission?.phase, e.ceoAttempt?.answer, Math.floor(now / 10000), unblocks].join('|');
     if (s === sig) return;
     sig = s;
 
     body.innerHTML = `
       <div class="win__scroll scroll">
         <div class="block" style="margin:10px 10px 6px">
-          <div class="block__k"><span>${e.urgency === 'blocking' ? 'BLOCKING' : e.urgency.toUpperCase()} · ${ago(e.askedAt, now)}${e.status === 'with_ceo' ? ' · CEO LOOKING' : ''}</span><span>UNBLOCKS ${unblocks}</span></div>
+          <div class="block__k"><span>${e.permission?.phase === 'pending' ? 'RESPONSE PENDING · ' : ''}${e.urgency === 'blocking' ? 'BLOCKING' : e.urgency.toUpperCase()} · ${ago(e.askedAt, now)}${e.status === 'with_ceo' ? ' · CAPCOM LOOKING' : ''}</span><span>UNBLOCKS ${unblocks}</span></div>
           <div class="block__q mono">${esc(e.question)}</div>
           ${e.context ? `<div data-context style="margin-top:6px"></div>` : ''}
-          ${e.ceoAttempt ? `<div class="block__tried mono"><b>CEO TRIED · ${Math.round(e.ceoAttempt.confidence * 100)}%</b>${esc(e.ceoAttempt.answer)}<br/><span style="color:var(--ink-dimmer)">punted: ${esc(e.ceoAttempt.reason)}</span></div>` : ''}
+          ${e.ceoAttempt ? `<div class="block__tried mono"><b>CAPCOM TRIED · ${Math.round(e.ceoAttempt.confidence * 100)}%</b>${esc(e.ceoAttempt.answer)}<br/><span style="color:var(--ink-dimmer)">punted: ${esc(e.ceoAttempt.reason)}</span></div>` : ''}
           <div class="block__opts">${e.options.slice(0, 9).map((o, i) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" data-opt="${esc(o)}" data-key="${i + 1}">${esc(o)}</button>`).join('')}${e.options.slice(9).map((o) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" data-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
           ${e.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><input class="input" data-ans placeholder="type an answer" /><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-send data-key="enter">SEND</button></div>`}
           <div data-remember style="margin-top:8px"></div>
@@ -91,8 +92,9 @@ export function mountInterrupt(ctx: WinCtx, c: Console) {
       ctxHost.appendChild(fold({ label: 'CONTEXT', body: inner }));
     }
     remembering?.dispose();
-    remembering = toggle({ name: 'remember', label: 'REMEMBER · LET THE CEO ANSWER THIS NEXT TIME' });
+    remembering = toggle({ name: 'remember', label: 'REMEMBER · LET CAPCOM ANSWER THIS NEXT TIME' });
     body.querySelector<HTMLElement>('[data-remember]')!.appendChild(remembering.el);
+    if (e.permission) { remembering.el.hidden = true; if (e.permission.phase === 'pending') body.querySelectorAll<HTMLButtonElement>('[data-opt]').forEach(b => { b.disabled = true; }); }
     const remember = () => (remembering?.checked() ? e.question : null);
     body.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) => b.addEventListener('click', () => answerAndSweep(e.id, b.dataset.opt!, remember(), b)));
     const ans = body.querySelector<HTMLInputElement>('[data-ans]');

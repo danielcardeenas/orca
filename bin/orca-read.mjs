@@ -16,6 +16,7 @@
  *   0  printed (an empty inbox is not an error)
  *   1  bad usage
  *   2  ORCA is not running here
+ *   3  timed out waiting for mail
  *
  * Read your inbox when you finish a chunk of work, not mid-edit. A message
  * whose subject starts with "[no encontré a …]" was aimed at somebody ORCA
@@ -27,16 +28,20 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+import { waitFor } from './lib/wait-for.mjs';
+
 const argv = process.argv.slice(2);
 
 /* ── Arguments ────────────────────────────────────────────────────── */
 
 function parse(args) {
-  const out = { all: false, json: false, peek: false, project: null, kind: null, limit: 50 };
+  const out = { wait: false, timeout: 60, all: false, json: false, peek: false, project: null, kind: null, limit: 50 };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const next = () => args[++i];
     switch (a) {
+      case '--wait': case '-w': out.wait = true; break;
+      case '--timeout': out.timeout = Number(next()); break;
       case '--all': case '-a': out.all = true; break;
       case '--json': out.json = true; break;
       case '--peek': out.peek = true; break;
@@ -49,6 +54,10 @@ function parse(args) {
         process.exit(1);
     }
   }
+  if (!Number.isFinite(out.timeout) || out.timeout <= 0 || out.timeout > 3600) {
+    console.error('--timeout must be between 0 and 3600 seconds (exclusive of 0)');
+    process.exit(1);
+  }
   return out;
 }
 
@@ -57,6 +66,8 @@ function usage() {
 
   orca-read [options]
 
+  -w, --wait              wait for unread mail without repeated tool calls
+      --timeout <seconds>  maximum wait (default: 60); exit 3 on timeout
   -a, --all               include messages already marked read
       --peek              print without marking anything read
   -k, --kind <kind>       only notice | ask | handoff | warning
@@ -103,38 +114,47 @@ if (!orcaPresent()) {
   process.exit(2);
 }
 
-const now = Date.now();
-const items = [];
+function readItems() {
+  const now = Date.now();
+  const items = [];
 
-if (existsSync(inDir)) {
-  for (const name of readdirSync(inDir)) {
-    if (!name.endsWith('.json')) continue;
-    if (name.startsWith('.')) continue;             // a .tmp mid-rename
-    if (name.endsWith('.answer.json')) continue;    // an answer to something I asked
-    const id = name.slice(0, -'.json'.length);
-    const file = join(inDir, name);
-    let msg;
-    try {
-      msg = JSON.parse(readFileSync(file, 'utf8'));
-    } catch {
-      continue; // torn write, or somebody's stray file: not our problem
+  if (existsSync(inDir)) {
+    for (const name of readdirSync(inDir)) {
+      if (!name.endsWith('.json')) continue;
+      if (name.startsWith('.')) continue;             // a .tmp mid-rename
+      if (name.endsWith('.answer.json')) continue;    // an answer to something I asked
+      const id = name.slice(0, -'.json'.length);
+      const file = join(inDir, name);
+      let msg;
+      try {
+        msg = JSON.parse(readFileSync(file, 'utf8'));
+      } catch {
+        continue; // torn write, or somebody's stray file: not our problem
+      }
+      // An expired notice is swept here rather than by the collector: nothing
+      // else ever walks this directory, and leaving them would turn the inbox
+      // into an archive.
+      if (typeof msg.expiresAt === 'number' && msg.expiresAt < now) {
+        rmSync(file, { force: true });
+        rmSync(join(inDir, `${id}.read`), { force: true });
+        continue;
+      }
+      const readMark = join(inDir, `${id}.read`);
+      const read = existsSync(readMark);
+      if (read && !opts.all) continue;
+      if (opts.kind && msg.kind !== opts.kind) continue;
+      items.push({ id, file, readMark, read, msg });
     }
-    // An expired notice is swept here rather than by the collector: nothing
-    // else ever walks this directory, and leaving them would turn the inbox
-    // into an archive.
-    if (typeof msg.expiresAt === 'number' && msg.expiresAt < now) {
-      rmSync(file, { force: true });
-      rmSync(join(inDir, `${id}.read`), { force: true });
-      continue;
-    }
-    const readMark = join(inDir, `${id}.read`);
-    const read = existsSync(readMark);
-    if (read && !opts.all) continue;
-    if (opts.kind && msg.kind !== opts.kind) continue;
-    items.push({ id, file, readMark, read, msg });
   }
+
+  return items.length ? items : null;
 }
 
+const items = opts.wait
+  ? await waitFor(inDir, readItems, opts.timeout * 1000)
+  : readItems() ?? [];
+if (!items) { console.error('orca-read: no new mail before timeout'); process.exit(3); }
+const now = Date.now();
 items.sort((a, b) => (b.msg.at ?? 0) - (a.msg.at ?? 0));
 const shown = items.slice(0, opts.limit);
 

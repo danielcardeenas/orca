@@ -43,6 +43,10 @@
   --red-glow: rgba(255, 42, 18, 0.65);
   --amber: #f5a524;      /* waiting on a human — between lime and red */
   --amber-glow: rgba(245, 165, 36, 0.45);
+  --cyan: #4fe3ff;       /* the command. CAPCOM only: the one voice that talks back. */
+  --cyan-line: rgba(79, 227, 255, 0.95);
+  --cyan-glow: rgba(79, 227, 255, 0.40);
+  --cyan-deep: #0b2a33;
 
   /* ── Type ───────────────────────────────────────────────────────── */
   --ink: #e8e8ea;

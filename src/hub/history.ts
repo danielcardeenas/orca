@@ -21,7 +21,7 @@
  *
  * Persistencia: `~/.orca/history.jsonl`, append-only, con el patrón de
  * persist.ts (buffer en memoria, volcado cada 500 ms, volcado síncrono a la
- * salida). Se compacta al arrancar y cada 6 h reescribiendo el archivo desde el
+ * salida). Se compacta al arrancar y cada hora reescribiendo el archivo desde el
  * anillo, así el disco nunca puede crecer por encima de lo que cabe en memoria.
  *
  * ── QUÉ HAY QUE CABLEAR ────────────────────────────────────────────────
@@ -38,11 +38,12 @@
  */
 
 import { appendFile, mkdir, rename, writeFile } from 'node:fs/promises';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import type { AgentState, FeedItem, WorldState } from '../shared/types.ts';
 import { AGENT_STATES } from '../shared/types.ts';
+import { readJsonlTail } from './jsonl.ts';
 import { ORCA_DIR } from './auth.ts';
 
 export const HISTORY_FILE = join(ORCA_DIR, 'history.jsonl');
@@ -73,7 +74,8 @@ export const MAX_SUMMARY_ROWS = 50;
 export const MAX_SUMMARY_LINES = 20;
 
 const FLUSH_MS = 500;
-const COMPACT_EVERY_MS = 6 * 3600_000;
+const COMPACT_EVERY_MS = 60 * 60_000;
+export const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 
 /* ── forma ────────────────────────────────────────────────────────── */
 
@@ -138,6 +140,7 @@ export interface HistoryOptions {
   retentionMs?: number;
   maxSnapshots?: number;
   maxEntries?: number;
+  maxFileBytes?: number;
   coalesceMs?: number;
   flushMs?: number;
   now?: () => number;
@@ -272,6 +275,8 @@ export class History {
   private compactTimer: ReturnType<typeof setInterval> | null = null;
   private flushing: Promise<void> = Promise.resolve();
   private closed = false;
+  private maxFileBytes: number;
+  private diskBytes = 0;
 
   private lastMarkAt = 0;
   private lastFeedId = '';
@@ -279,6 +284,7 @@ export class History {
 
   constructor(opts: HistoryOptions = {}) {
     this.file = opts.ephemeral ? null : (opts.file ?? HISTORY_FILE);
+    this.maxFileBytes = opts.maxFileBytes ?? MAX_HISTORY_BYTES;
     this.intervalMs = opts.intervalMs ?? SNAPSHOT_INTERVAL_MS;
     this.retentionMs = opts.retentionMs ?? HISTORY_RETENTION_MS;
     this.maxSnapshots = opts.maxSnapshots ?? MAX_SNAPSHOTS;
@@ -487,7 +493,7 @@ export class History {
     const file = this.file;
     if (!file || !existsSync(file)) return;
     let text = '';
-    try { text = readFileSync(file, 'utf8'); }
+    try { this.diskBytes = statSync(file).size; text = readJsonlTail(file, this.maxFileBytes).join('\n'); }
     catch (err) { console.warn('[history] no pude leer', file, err); return; }
 
     const kept: Snapshot[] = [];
@@ -507,7 +513,7 @@ export class History {
     this.feedCursor = this.last?.feedCursor ?? 0;
     // Se reescribe siempre que se haya tirado algo: si no, el archivo crecería
     // para siempre y sólo la memoria estaría acotada.
-    if (dropped > 0) void this.compact();
+    if (dropped > 0 || this.diskBytes > this.maxFileBytes) void this.compact();
   }
 
   /**
@@ -517,30 +523,57 @@ export class History {
    * Efecto secundario deliberado: el disco hereda los tres techos de memoria y
    * no puede crecer por encima de ellos.
    */
-  async compact(): Promise<void> {
-    const file = this.file;
-    if (!file || this.closed) return;
-    this.trim(this.now());
-    await this.flush();
+  private diskBody(snaps = this.snaps): string {
+    const lines: string[] = [];
+    let bytes = 0;
+    // Leave headroom so a full file is not rewritten on every snapshot.
+    const budget = Math.floor(this.maxFileBytes * 0.75);
+    for (let i = snaps.length - 1; i >= 0; i--) {
+      const line = JSON.stringify(snaps[i]) + '\n';
+      const size = Buffer.byteLength(line);
+      if (bytes + size > budget) break;
+      lines.unshift(line); bytes += size;
+    }
+    return lines.join('');
+  }
+
+  private async rewrite(body: string): Promise<void> {
+    const file = this.file!;
     const tmp = `${file}.${process.pid}.tmp`;
-    const body = this.snaps.map((s) => JSON.stringify(s)).join('\n');
     try {
       await mkdir(dirname(file), { recursive: true });
-      await writeFile(tmp, body.length ? `${body}\n` : '', 'utf8');
+      await writeFile(tmp, body, { mode: 0o600 });
       await rename(tmp, file);
+      this.diskBytes = Buffer.byteLength(body);
     } catch (err) {
       console.warn('[history] compactación fallida', err);
-      try { rmSync(tmp, { force: true }); } catch { /* nada que hacer */ }
+      try { rmSync(tmp, { force: true }); } catch {}
     }
+  }
+
+  compact(): Promise<void> {
+    if (!this.file || this.closed) return this.flushing;
+    void this.flush();
+    this.trim(this.now());
+    const body = this.diskBody();
+    // The replacement is queued behind prior appends; future appends queue
+    // behind it. Capturing the body here prevents double-appending new samples.
+    this.flushing = this.flushing.then(() => this.rewrite(body));
+    return this.flushing;
   }
 
   flush(): Promise<void> {
     if (!this.file || this.buffer.length === 0) return this.flushing;
-    const lines = this.buffer;
+    const lines = this.buffer.join('\n') + '\n';
     this.buffer = [];
     const file = this.file;
+    const bytes = Buffer.byteLength(lines);
+    // Snapshot the ring before yielding, while it matches this batch.
+    this.trim(this.now());
+    const snapshots = this.snaps.slice();
     this.flushing = this.flushing.then(async () => {
-      try { await appendFile(file, `${lines.join('\n')}\n`, 'utf8'); }
+      if (this.diskBytes + bytes > this.maxFileBytes) { await this.rewrite(this.diskBody(snapshots)); return; }
+      try { await appendFile(file, lines, 'utf8'); this.diskBytes += bytes; }
       catch (err) { console.warn('[history] no pude escribir', file, err); }
     });
     return this.flushing;

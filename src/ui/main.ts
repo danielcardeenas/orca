@@ -15,10 +15,12 @@ import './styles/window.css';
 import './styles/hud.css';
 
 import type { Artifact, Escalation, WorldState } from '../shared/types.ts';
+import type { InterruptOutcome } from '../shared/interrupt.ts';
 import { store } from './store.ts';
 import { hub } from './net/client.ts';
 import { runBoot } from './boot.ts';
 import { createField } from './field/field.ts';
+import { mountDirector } from './director.ts';
 import { WindowManager, kbdLabel } from './windows/wm.ts';
 import { mountAgent } from './windows/kinds/agent.ts';
 import { mountInterrupt } from './windows/kinds/interrupt.ts';
@@ -29,15 +31,20 @@ import { mountFleet } from './windows/kinds/fleet.ts';
 import { mountSpawn } from './windows/kinds/spawn.ts';
 import { mountArtifact } from './windows/kinds/artifact.ts';
 import { mountBreach, mountHelp, mountSettings } from './windows/kinds/misc.ts';
+import { mountHygiene } from './windows/kinds/hygiene.ts';
 import { getPref } from './prefs.ts';
 import { mountGallery } from './windows/kinds/gallery.ts';
 import { mountLaunch } from './windows/kinds/launch.ts';
 import { mountTimeline } from './windows/kinds/timeline.ts';
+import { mountTerminal } from './windows/kinds/terminal.ts';
+import { mountFile, projectCodeOf } from './windows/kinds/file.ts';
+import { bindFileLinks } from './windows/file-links.ts';
 import { clock } from './util.ts';
 import { mountMast } from './hud/mast.ts';
 import { onFullscreen, toggleFullscreen } from './hud/fullscreen.ts';
 import { mountCommand } from './hud/command.ts';
 import { mountTray } from './hud/tray.ts';
+import { mountUpdate } from './hud/update.ts';
 import { mountMinimap } from './hud/minimap.ts';
 import { mountBookmarks } from './hud/bookmarks.ts';
 import { mountSound, getSound, openSoundFor } from './hud/sound.ts';
@@ -46,8 +53,10 @@ import { activeMusic, mountMusic } from './windows/kinds/music.ts';
 import { mountCursor } from './hud/cursor.ts';
 import { showContext } from './hud/context.ts';
 import { mountAlarm } from './hud/alarm.ts';
+import { mountTasks } from './hud/tasks.ts';
 import type { Console } from './console.ts';
 import { esc } from './util.ts';
+import { keyHold, typing as typingIn } from './keys.ts';
 import { applyToRoot, gsapDefaults } from './motion.ts';
 
 // One motion contract for CSS, GSAP and the shaders, before anything mounts.
@@ -160,6 +169,12 @@ const c: Console = {
     const p = store.world.projects[a.projectId];
     wm.open({ kind: 'agent', key: `agent:${agentId}`, callsign: a.callsign, project: p?.code, title: a.title, anchor: agentId, at: at && { x: at.x, y: at.y }, params: { agentId }, ephemeral: true });
   },
+  openTerminal(agentId, at) {
+    const a = store.world.agents[agentId];
+    if (!a) return;
+    const p = store.world.projects[a.projectId];
+    wm.open({ kind: 'terminal', key: `term:${agentId}`, callsign: a.callsign, project: p?.code, title: 'TERMINAL', anchor: agentId, at: at && { x: at.x, y: at.y }, params: { agentId }, ephemeral: true });
+  },
   openInterrupt(escalationId, at) {
     const e = store.world.escalations[escalationId];
     if (!e) return;
@@ -171,6 +186,18 @@ const c: Console = {
     if (!x) return;
     const a = store.world.agents[x.agentId];
     wm.open({ kind: 'artifact', key: `art:${artifactId}`, callsign: a?.callsign ?? '??', project: store.world.projects[x.projectId]?.code, title: x.title, at: at && { x: at.x, y: at.y }, params: { artifactId, agentId: x.agentId }, ephemeral: true });
+  },
+  openFile(file, opts) {
+    const key = `file:${file.path}${opts?.fresh ? `#${Date.now().toString(36)}` : ''}`;
+    const line = file.line ?? null;
+    const params: Record<string, string> = { path: file.path };
+    if (line !== null) params.line = String(line);
+    if (file.col != null) params.col = String(file.col);
+    if (file.agentId) params.agentId = file.agentId;
+    const project = projectCodeOf(file.agentId);
+    if (project) params.project = project;
+    const at = opts?.at;
+    wm.open({ kind: 'file', key, project, title: file.path.split('/').pop() ?? file.path, at: at && { x: at.x, y: at.y }, params });
   },
   openProject(projectId, at) {
     const p = store.world.projects[projectId];
@@ -188,6 +215,7 @@ const c: Console = {
     wm.open({ kind: 'fleet', key: `group:${ids.slice().sort().join(',')}`, callsign: `${ids.length} AGENTS`, at: at && { x: at.x, y: at.y }, params: { scope: 'group', ids: ids.join(',') }, ephemeral: true });
   },
   openCeo: () => { wm.open({ kind: 'ceo', key: 'ceo', callsign: 'CAPCOM' }); },
+  openTask(taskId) { store.selectTask(taskId); wm.open({ kind: 'ceo', key: 'ceo', callsign: 'CAPCOM' }); },
   openQueue: () => { wm.open({ kind: 'queue', key: 'queue', callsign: 'QUEUE' }); },
   openFeed: () => { wm.open({ kind: 'feed', key: 'feed', callsign: 'FEED' }); },
   openFleet: () => { wm.open({ kind: 'fleet', key: 'fleet', callsign: 'FLEET', params: { scope: 'all' } }); },
@@ -196,6 +224,7 @@ const c: Console = {
   },
   openHelp: () => { wm.open({ kind: 'help', key: 'help', callsign: 'HELP', ephemeral: true }); },
   openSettings: () => { wm.open({ kind: 'settings', key: 'settings', callsign: 'SETTINGS', ephemeral: true }); },
+  openHygiene: () => { wm.open({ kind: 'hygiene', key: 'hygiene', callsign: 'HYGIENE' }); },
   openGallery: () => { wm.open({ kind: 'gallery', key: 'gallery', callsign: 'GALLERY' }); },
   openTimeline: () => { wm.open({ kind: 'timeline', key: 'timeline', callsign: 'TIME' }); },
   openSfx: () => { wm.open({ kind: 'sfx', key: 'sfx', callsign: 'SFX' }); },
@@ -244,6 +273,23 @@ const c: Console = {
     else c.note(`said to ${ok} agent${ok === 1 ? '' : 's'}: ${text.slice(0, 60)}`);
     return { ok, failed };
   },
+  async interrupt(agentId, text) {
+    const cs = store.world.agents[agentId]?.callsign ?? agentId;
+    try {
+      const out = await hub.cmd({ k: 'interrupt', agentId, text }) as InterruptOutcome | null;
+      // Se dice lo que pasó, no lo que se quería: "sin acuse todavía" es una
+      // respuesta legítima y el operador tiene que poder distinguirla.
+      const how = out?.evidence === 'confirmed' ? 'interrupted' : 'interrupt sent';
+      const tail = out?.message === 'queued' ? ' · message queued for delivery'
+        : out?.message === 'pasted' ? ' · correction pasted'
+          : out?.message === 'unsent' ? ' · message NOT sent' : '';
+      c.note(`${how} ${cs}${tail}`, out?.evidence === 'confirmed' ? 'info' : 'warn');
+      return out ?? null;
+    } catch (err) {
+      c.note(`could not interrupt ${cs}: ${(err as Error).message}`, 'alert');
+      return null;
+    }
+  },
   async stop(agentId) {
     const cs = store.world.agents[agentId]?.callsign ?? agentId;
     try { await hub.cmd({ k: 'stop', agentId }); c.note(`stopped ${cs}`, 'warn'); }
@@ -252,6 +298,7 @@ const c: Console = {
   answer(escalationId, answer, rememberAs) {
     hub.answer(escalationId, answer, rememberAs);
     const e = store.world.escalations[escalationId];
+    if (e?.permission) { e.permission.phase = 'pending'; store.injectForTest(e); c.note('Permission response requested; confirmation pending', 'warn'); return; }
     if (e) { e.status = 'answered'; e.answer = answer; e.answeredBy = 'human'; store.injectForTest(e); }
     c.note(`answered ${store.world.agents[e?.agentId ?? '']?.callsign ?? ''}: ${answer.slice(0, 60)}`);
   },
@@ -298,15 +345,22 @@ wm.register('artifact', (ctx) => mountArtifact(ctx, c));
 wm.register('breach', (ctx) => mountBreach(ctx));
 wm.register('help', (ctx) => mountHelp(ctx));
 wm.register('settings', (ctx) => mountSettings(ctx, c));
+wm.register('hygiene', (ctx) => mountHygiene(ctx, c));
 wm.register('gallery', (ctx) => mountGallery(ctx, c));
 wm.register('launch', (ctx) => mountLaunch(ctx, c));
 wm.register('timeline', (ctx) => mountTimeline(ctx, c));
 wm.register('sfx', (ctx) => mountSfx(ctx, c));
 wm.register('music', (ctx) => mountMusic(ctx, c));
+wm.register('terminal', (ctx) => mountTerminal(ctx, c));
+wm.register('file', (ctx) => mountFile(ctx, c));
+// A path in any transcript, feed line or CAPCOM reply opens the file viewer.
+bindFileLinks(document.body, c);
 
 const mast = mountMast(hudEl, c);
 const cmd = mountCommand(dockEl, c);
 const tray = mountTray(dockEl, wm, (w, x, y) => c.menu({ kind: 'window', winId: w.id }, { x, y }));
+// A newer build never reloads the page by itself; it lights this, and the operator does.
+mountUpdate(dockEl);
 const minimap = mountMinimap(hudEl, c);
 // The mast may wrap to two rows; the field clips its labels under whatever height it has.
 {
@@ -316,7 +370,13 @@ const minimap = mountMinimap(hudEl, c);
     ro.observe(mastEl);
   }
 }
+// What CAPCOM is on, under the mast's right corner; `hud/tasks.ts` says why there.
+const tasksPanel = mountTasks(hudEl, c);
+void tasksPanel;
 const marks = mountBookmarks(hudEl, c);
+// CAPCOM's hand on the camera: `camera` frames from the hub land here.
+const director = mountDirector(c);
+void director;
 hudEl.querySelector('.mast__brand')?.appendChild(marks.el);
 const snd = mountSound();
 // The mute switch lives in the SFX window (⌥S, then M); the mast stays a row of openers.
@@ -473,10 +533,17 @@ function commitSwitch(cancel = false) {
 }
 window.addEventListener('keyup', (e) => { if (e.key === 'Alt' && switching) commitSwitch(); });
 window.addEventListener('blur', () => commitSwitch(true));
+/*
+ * Space is FOCUS for as long as it is held. The hold remembers whether the
+ * down half engaged — it does not while typing, on a repeat, or with nothing
+ * selected — so the up half releases (and sounds) only when it did. Before
+ * this, `keyup` fired `focus.off` on every space bar in every text field.
+ */
+const spaceHold = keyHold(' ');
 
 window.addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement | null;
-  const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+  const typing = typingIn(e);
   if (e.altKey && e.key === 'Tab') {
     e.preventDefault();
     if (!wm.all().length) return;
@@ -522,8 +589,8 @@ window.addEventListener('keydown', (e) => {
   if (typing) return;
   if (e.key === ' ') {
     e.preventDefault();
-    if (e.repeat) return;
-    if (field.setFocus(true)) getSound()?.play('focus.on');
+    if (e.repeat || spaceHold.held()) return;
+    if (spaceHold.down(e, () => field.setFocus(true))) getSound()?.play('focus.on');
     else { hintEl.textContent = 'SELECT AN AGENT FIRST · CLICK, OR SHIFT+DRAG A LASSO'; hintEl.classList.add('is-on'); setTimeout(() => hintEl.classList.remove('is-on'), 2500); }
     return;
   }
@@ -552,8 +619,8 @@ window.addEventListener('keydown', (e) => {
     }
   }
 });
-window.addEventListener('keyup', (e) => { if (e.key === ' ') { field.setFocus(false); getSound()?.play('focus.off'); } });
-window.addEventListener('blur', () => field.setFocus(false));
+window.addEventListener('keyup', (e) => { if (spaceHold.up(e)) { field.setFocus(false); getSound()?.play('focus.off'); } });
+window.addEventListener('blur', () => { spaceHold.cancel(); field.setFocus(false); });
 onFullscreen((on) => c.note(on ? 'fullscreen · Z or ESC to leave' : 'back in the window'));
 let tabIdx = -1;
 
@@ -668,4 +735,7 @@ void start();
   screenOf: (id: string) => field.screenOf(id),
   music: () => wm.all().find((w) => w.spec.key === 'music')?.inst?.state?.() ?? null,
   spotOf: (id: string) => field.spotOf(id),
+  // The task panel, for the visual harness: a task the hub never saw, agents it did.
+  task: (t: import('../shared/tasks.ts').CapcomTask) => store.upsertTask(t),
+  agentIds: () => Object.values(store.world.agents).filter((a) => a.role !== 'capcom' && a.state !== 'done' && a.state !== 'dead').map((a) => a.id),
 };

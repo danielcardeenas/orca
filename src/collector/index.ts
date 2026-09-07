@@ -13,9 +13,17 @@
  *   ORCA_LOG           trace|debug|info|warn|error
  *   ORCA_DIAG=1        corre contra los transcripts reales, imprime un resumen
  *                      y sale. No abre socket ni ejecuta nada.
- *   ORCA_CAPCOM=1      esta máquina lleva CAPCOM (igual que `--capcom`).
- *                      SÓLO UNA máquina de la flota debe llevarlo.
+ *   ORCA_CAPCOM        `0` / `--no-capcom` apaga CAPCOM; `1` / `--capcom` lo
+ *                      fuerza. Sin decir nada, CAPCOM arranca cuando el hub es
+ *                      local (ORCA_HUB_URL vacío o loopback) y no cuando es
+ *                      remoto. SÓLO UNA máquina de la flota debe llevarlo.
  *   ORCA_CAPCOM_DIR    dónde vive esa sesión; por defecto ~/.orca/capcom
+ *   ORCA_CAPCOM_MAX_COMPACTIONS   compactaciones a partir de las cuales se
+ *                      recicla la sesión CAPCOM por una limpia (2; 0 apaga)
+ *   ORCA_CAPCOM_MAX_TURNS         lo mismo por turnos (300; 0 apaga)
+ *   ORCA_CAPCOM_ROTATE_IDLE_MS    cuánto ha de llevar CAPCOM en silencio para
+ *                      rotarlo (30000). Nunca se rota con un turno en curso ni
+ *                      con una escalación pendiente. Ver rotation.ts.
  */
 
 import { execFile } from 'node:child_process';
@@ -25,35 +33,55 @@ import os from 'node:os';
 import path from 'node:path';
 import { WebSocket } from 'ws';
 
-import type { CollectorFrame, Command, CommandFrame } from '../shared/protocol.ts';
-import { BEAT_INTERVAL_MS, PATHS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
+import type { CollectorFrame, Command, CommandFrame, TermFrame } from '../shared/protocol.ts';
+import { BEAT_INTERVAL_MS, HYGIENE_INTERVAL_MS, PATHS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
 import type {
   Agent, AgentMessage, Artifact, Escalation, FeedItem, FeedLevel, Machine, Project,
-  SessionRollup,
+  SessionRollup, TalkItem,
 } from '../shared/types.ts';
-import { TERMINAL_STATES, emptyRollup } from '../shared/types.ts';
+import { MAX_TALK, TERMINAL_STATES, emptyRollup } from '../shared/types.ts';
+import { hiddenInWorkspace, type ExcludedWorkspace } from '../shared/workspaces.ts';
 import { ArtifactIndex } from './artifacts.ts';
-import { CapcomSession } from './capcom.ts';
+import { CapcomSession, capcomDir, wantsCapcom } from './capcom.ts';
+import { rotationConfig, rotationVerdict, type RotationConfig } from './rotation.ts';
 import type { AgentHandle, SpawnLookup } from './commands.ts';
 import { CommandRunner, resolveClaudeBin } from './commands.ts';
-import type { BlockSignal, Liveness } from './derive.ts';
+import type { BlockSignal, Deriver, Liveness } from './derive.ts';
 import { CallsignBook, SessionDeriver } from './derive.ts';
+import { CodexDeriver } from './codex.ts';
 import type { CollisionAgent } from './collisions.ts';
 import { CollisionIndex } from './collisions.ts';
 import { EscalationWatcher } from './escalate.ts';
+import { HygieneSampler } from './hygiene.ts';
+import { liveText, promptOn, permissionClosed } from './screen.ts';
+import { answerPermission, type PermissionRequest } from './permissions.ts';
 import { KeyVault } from './keys.ts';
 import { MessageWatcher } from './messages.ts';
 import { SpawnWatcher, planChild, writeAck, type SpawnRequest } from './spawns.ts';
 import { LineageIndex } from './lineage.ts';
-import { ProjectRegistry } from './projects.ts';
+import { ProjectRegistry, foldWorktreeSlug, pathToSlug } from './projects.ts';
+import { TerminalRelay } from './term.ts';
+import { TmuxHost, paneName, sessionIdOfPane, type PaneInfo } from './tmux.ts';
+import type { OutputWatch } from './tmux.ts';
 import {
   COLLECTOR_VERSION, claudeJobsDir, errText, guard, isRecord, log, num, oneLine,
   orcaDir, safeJson, sleep, str,
+  codexSessionsDir,
 } from './util.ts';
 import type { LineBatch, TranscriptRef } from './watch.ts';
 import { TranscriptWatcher } from './watch.ts';
 
 const SCOPE = 'collector';
+
+/** Un pane de CAPCOM escuchado: el cliente de control y el debounce de su lectura. */
+interface LiveWatch {
+  pane: string;
+  watch: OutputWatch;
+  timer: ReturnType<typeof setTimeout> | null;
+  lastAt: number;
+  /** Pintó otra vez mientras se leía: leer de nuevo al terminar. */
+  again: boolean;
+}
 
 const TICK_MS = 500;
 const LIVENESS_MS = 4_000;
@@ -72,6 +100,22 @@ const GIT_MS = 15_000;
  * contestarse preguntas— así que la latencia con la que se nota importa.
  */
 const CAPCOM_CHECK_MS = 10_000;
+/**
+ * El texto en vivo se lee por evento: un cliente de control de tmux avisa
+ * cuando el pane pinta y entonces se captura. Estos son sus tiempos:
+ *
+ *  - LIVE_DEBOUNCE_MS: cuánto se espera tras el primer aviso antes de leer,
+ *    para que una ráfaga de escritura sea una lectura y no veinte.
+ *  - LIVE_MIN_GAP_MS: techo de lecturas seguidas mientras la ráfaga no para.
+ *  - LIVE_MS: el sondeo de respaldo cuando no hay cliente de control (tmux
+ *    sin modo control, o el cliente cayó y aún no se relanzó), y la vuelta de
+ *    limpieza que retira el texto cuando el estado deja de ser redactar.
+ *  - LIVE_WATCH_RETRY_MS: cuánto se espera para relanzar un cliente caído.
+ */
+const LIVE_DEBOUNCE_MS = 100;
+const LIVE_MIN_GAP_MS = 80;
+const LIVE_MS = 400;
+const LIVE_WATCH_RETRY_MS = 5_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const FEED_MAX = 200;
@@ -106,6 +150,9 @@ class Collector {
   private readonly connectedAt = Date.now();
 
   private readonly watcher = new TranscriptWatcher();
+  /** Los rollouts de Codex, si esta máquina tiene Codex. Misma lectura, otro layout. */
+  private readonly codexWatcher: TranscriptWatcher | null =
+    fs.existsSync(codexSessionsDir()) ? new TranscriptWatcher({ layout: 'codex', root: codexSessionsDir() }) : null;
   private readonly projects: ProjectRegistry;
   private readonly lineage = new LineageIndex();
   private readonly keys = new KeyVault();
@@ -116,18 +163,67 @@ class Collector {
   private readonly collisions = new CollisionIndex();
   private readonly artifacts: ArtifactIndex;
   private readonly runner: CommandRunner;
+  private readonly tmux = new TmuxHost();
+  private readonly terms: TerminalRelay;
+  /** Panes vivos en el servidor tmux de ORCA, por nombre. Se refresca con la liveness. */
+  private panes = new Map<string, PaneInfo>();
   /** El mando de la flota, cuando esta máquina es la que lo lleva. */
   private capcom: CapcomSession | null = null;
+  /**
+   * What ORCA costs this machine (hygiene.ts). Built lazily on the first
+   * sample so a collector that never files one never walks a directory.
+   */
+  private hygieneSampler: HygieneSampler | null = null;
+  /**
+   * Agentes que existen pero no están en la flota, y por qué.
+   *
+   * Son los que viven en un directorio que no es un proyecto (el propio de
+   * CAPCOM, un scratchpad de sesión). Se siguen derivando y se siguen
+   * reportando —el transcript está en disco y el operador puede querer
+   * mirarlo— pero salen con `hidden: true` y el hub y la consola los dejan
+   * fuera de la flota. La sesión CAPCOM viva NO entra aquí: es lo único que
+   * ese directorio produce y que la consola quiere ver.
+   */
+  private hiddenAgents = new Map<string, ExcludedWorkspace>();
+  /** Cuándo reciclar CAPCOM (rotation.ts), leído del entorno al arrancar. */
+  private readonly rotation: RotationConfig = rotationConfig();
+  /** Último `say` pegado a CAPCOM: no se rota con un mensaje recién entregado. */
+  private lastCapcomSayAt = 0;
+  /** Se dice una vez por sesión: "toca rotar pero está ocupado". */
+  private rotationDueSaid = false;
 
-  private derivers = new Map<string, SessionDeriver>();
+  private derivers = new Map<string, Deriver>();
   private sent = new Map<string, Agent>();
   private sentProjects = new Map<string, string>(); // id → JSON de lo enviado
   private liveness = new Map<string, Liveness>();   // sessionId → liveness
   private jobStates = new Map<string, BlockSignal>(); // sessionId → bloqueo del job
+  /**
+   * Prompts vistos en la pantalla de un pane. sessionId → escalación abierta
+   * por ello. Un `--bg` no tiene pantalla y sigue con la sospecha por tiempo.
+   */
+  private screenPrompts = new Map<string, { escalation: Escalation; block: BlockSignal; request: PermissionRequest }>();
   private feed: FeedItem[] = [];
   private pendingFeed: FeedItem[] = [];
+  /** La charla ya enviada por agente CAPCOM, para reponerla tras una reconexión. */
+  private talkSent = new Map<string, TalkItem[]>();
+  /** Lo último que se mandó como texto en vivo por agente; null = nada en marcha. */
+  private liveSent = new Map<string, string | null>();
+  /**
+   * El texto de pantalla de un bloque que YA llegó por el transcript. La
+   * pantalla lo sigue mostrando mientras el turno continúa, y volver a
+   * mandarlo pintaría el mismo párrafo dos veces en la consola.
+   */
+  private liveDone = new Map<string, string>();
+  private livePolling = false;
+  /** Por agente: el cliente de control que avisa cuando su pane pinta. */
+  private liveWatches = new Map<string, LiveWatch>();
+  /** Agentes cuyo cliente cayó o no arrancó: no antes de este instante. */
+  private liveWatchRetryAt = new Map<string, number>();
+  private liveCapturing = new Set<string>();
   private escalationBySession = new Map<string, Escalation>();
   private ticks = 0;
+  private activityTimer: NodeJS.Timeout | null = null;
+  private lastActivityTick = 0;
 
   private ws: WebSocket | null = null;
   private connected = false;
@@ -143,7 +239,7 @@ class Collector {
     this.wantsCapcom = opts.capcom === true;
     this.machineId = ident.id;
     this.machineName = ident.name;
-    this.projects = new ProjectRegistry(this.machineId);
+    this.projects = new ProjectRegistry(this.machineId, capcomDir());
     this.escalations = new EscalationWatcher({
       machineId: this.machineId,
       resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
@@ -161,9 +257,16 @@ class Collector {
     this.spawns = new SpawnWatcher({
       resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
     });
+    this.terms = new TerminalRelay({
+      inputBlocked: id => this.runner?.handoffs.locked(id) ?? false,
+      tmux: this.tmux,
+      send: (f) => this.send(f),
+      agent: (id) => this.agentHandle(id),
+    });
     this.runner = new CommandRunner({
       projects: this.projects,
       keys: this.keys,
+      tmux: this.tmux,
       lineage: this.lineage,
       escalations: this.escalations,
       messages: this.messages,
@@ -172,9 +275,32 @@ class Collector {
       awaitSpawn: (want, ms) => this.awaitSpawn(want, ms),
       onResync: () => { this.sent.clear(); this.sentProjects.clear(); this.sendSnapshot(); },
       onKeysChanged: () => this.sendKeys(),
+      transfer: {
+        context: () => JSON.stringify([...this.derivers.values()].map(d => { const a = d.snapshot(); return { id: a.id, project: a.projectId, squad: a.squad, mission: a.mission, state: a.state, lastSay: a.lastSay }; }), null, 2),
+        hold: (fromId, hold, plan) => { this.capcom?.holdTransfer(hold); this.send({ t: 'capcom:transfer', machineId: this.machineId, fromId, hold, contextMode: plan?.contextMode, cutoffAt: plan?.at, ...(plan?.toId ? { toId: plan.toId } : {}) }); },
+        activate: async (plan, id) => {
+          if (!this.capcom) throw new Error('CAPCOM unavailable');
+          await this.capcom.activateHandoff(plan, id);
+          await this.pollLiveness(); await this.watcher.refresh(); await this.codexWatcher?.refresh();
+          this.tick();
+          this.sendSnapshot();
+        },
+      },
+      permissions: {
+        get: (id) => {
+          for (const [agentId, p] of this.screenPrompts) if (p.escalation.id === id) return { agentId };
+          return null;
+        },
+        answer: (id, answer) => this.answerScreenPermission(id, answer),
+      },
+      // El acuse de una interrupción: lo escribe el CLI en su transcript y el
+      // deriver lo apunta al ingerirlo. Sin esto `interrupt` no podría decir
+      // más que "mandé la tecla".
+      interruptedAt: (agentId) => this.derivers.get(agentId)?.interruptedMarkAt() ?? 0,
       // Se resuelve en cada llamada: `this.capcom` no existe hasta start().
       capcom: {
         owns: (shortId) => this.capcom?.owns(shortId) ?? false,
+        dir: () => this.capcom?.dir ?? null,
         launchArgs: () => this.capcom?.launchArgs() ?? [],
         adopt: (shortId) => this.capcom?.adopt(shortId),
       },
@@ -187,6 +313,11 @@ class Collector {
     this.watcher.onLines((b) => this.onLines(b));
     this.watcher.onGone((r) => this.onGone(r));
     await this.watcher.start();
+    if (this.codexWatcher) {
+      this.codexWatcher.onLines((b) => this.onCodexLines(b));
+      this.codexWatcher.onGone((r) => this.onGone(r));
+      await this.codexWatcher.start();
+    }
     await this.pollLiveness();
 
     if (diag) { await this.diagnose(); return; }
@@ -210,29 +341,43 @@ class Collector {
        * Sólo UNA máquina de la flota debe llevar CAPCOM: el hub entrega lo que
        * escribe el humano a la sesión con `role:'capcom'`, y dos de ellas serían
        * dos mentes triando la misma pregunta. Aquí no se puede comprobar —esta
-       * máquina no ve a las otras— así que la regla vive en el README y en el
-       * hecho de que arrancarlo es un flag explícito.
+       * máquina no ve a las otras— así que la regla vive en `wantsCapcom`: por
+       * defecto lo lleva la máquina del hub, y las demás sólo con `--capcom`.
        */
       this.capcom = new CapcomSession({
         bin: resolveClaudeBin(),
         hubUrl: this.hubUrl(),
         token: process.env['ORCA_TOKEN'] ?? '',
         lineage: this.lineage,
-        alive: (shortId) => this.shortIdAlive(shortId),
+        alive: (id) => this.shortIdAlive(id),
         note: (level, text) => this.note(level, text),
+        tmux: this.tmux,
+        // Sus directorios de trabajo adicionales: leer los repos que manda
+        // no debe abrirle un diálogo en un pane que nadie mira.
+        roots: () => this.projects.all().map((p) => p.path),
+        agentIdOf: (id) => this.capcomDeriver(id)?.id ?? null,
+        rotated: (info) => { this.send({ t: 'capcom:rotated', machineId: this.machineId, ...info }); },
       });
       log('info', SCOPE, `CAPCOM habilitado en ${this.capcom.dir}`);
       this.timers.push(setInterval(() => {
         // Sin hub no se relanza: sus herramientas viven en el hub, y un CAPCOM
         // sin tools quema una vuelta para descubrir que no puede hacer nada.
-        if (this.connected) this.capcom?.check();
+        if (!this.connected) return;
+        this.capcom?.check();
+        this.maybeRotateCapcom();
       }, CAPCOM_CHECK_MS));
     }
 
     this.timers.push(setInterval(() => this.tick(), TICK_MS));
+    this.timers.push(setInterval(() => { void this.pollLive(); }, LIVE_MS));
     this.timers.push(setInterval(() => { void this.pollLiveness(); }, LIVENESS_MS));
     this.timers.push(setInterval(() => { void this.projects.refreshGit(); }, GIT_MS));
     this.timers.push(setInterval(() => this.beat(), BEAT_INTERVAL_MS));
+    // Hygiene rides its own slow clock: it costs a bounded directory walk, and
+    // disk usage moves in minutes. The first one waits a beat so a starting
+    // collector is not competing with its own discovery for the disk.
+    this.timers.push(setInterval(() => { void this.sampleHygiene(); }, HYGIENE_INTERVAL_MS));
+    setTimeout(() => { void this.sampleHygiene(); }, 20_000).unref?.();
     for (const t of this.timers) t.unref?.();
 
     log('info', SCOPE, `máquina ${this.machineName} (${this.machineId.slice(0, 8)}) lista`);
@@ -241,8 +386,14 @@ class Collector {
 
   stop(): void {
     this.stopping = true;
+    if (this.activityTimer) clearTimeout(this.activityTimer);
+    this.activityTimer = null;
+    this.terms.closeAll();
+    for (const w of this.liveWatches.values()) { if (w.timer) clearTimeout(w.timer); w.watch.close(); }
+    this.liveWatches.clear();
     for (const t of this.timers) clearInterval(t);
     this.watcher.stop();
+    this.codexWatcher?.stop();
     this.escalations.stop();
     this.messages.stop();
     this.artifacts.stop();
@@ -261,19 +412,68 @@ class Collector {
     // él. Un lote de arranque trae ambas cosas junta.
     this.collisions.ingest(batch, d.cwd);
     if (d.cwd) {
-      const p = this.projects.ensure(batch.ref.slug, d.cwd);
-      d.setProject(p.id);
-      this.escalations.track(p.id, p.path);
-      this.messages.track(p.id, p.path);
-      this.artifacts.track(p.id, p.path);
-      this.spawns.track(p.id, p.path);
+      const p = this.projects.ensureWork(batch.ref.slug, d.cwd);
+      if (p) {
+        this.unhide(d.id);
+        d.setProject(p.id);
+        this.escalations.track(p.id, p.path);
+        this.messages.track(p.id, p.path);
+        this.artifacts.track(p.id, p.path);
+        this.spawns.track(p.id, p.path);
+      } else {
+        // El directorio no es un proyecto: ni se registra, ni se vigilan sus
+        // buzones. Sin `spawns.track` nadie puede pedir trabajo ahí dejando un
+        // archivo, que es la otra puerta además del hub.
+        this.hide(d.id, this.projects.excludes(batch.ref.slug, d.cwd));
+        d.setProject(this.projects.idForSlug(foldWorktreeSlug(batch.ref.slug)));
+      }
     }
+    this.publishActivity();
+  }
+
+  /**
+   * Un rollout de Codex. El proyecto sale del cwd que declara el session_meta
+   * —no hay slug en la ruta— así que hasta ver esa línea no hay deriver: en un
+   * archivo grande llega por el rescate hacia atrás, un batch después.
+   */
+  private onCodexLines(batch: LineBatch): void {
+    let d = this.derivers.get(batch.ref.key);
+    if (!d) {
+      const cwd = cwdFromCodexLines(batch.lines);
+      if (!cwd) return;
+      const slug = pathToSlug(cwd);
+      const project = this.projects.ensureWork(slug, cwd);
+      if (!project) this.hide(batch.ref.key, this.projects.excludes(slug, cwd));
+      const projectId = project?.id ?? this.projects.idForSlug(slug);
+      const cd = new CodexDeriver(batch.ref, this.machineId, projectId);
+      cd.setCallsign(this.callsigns.assign(projectId, batch.ref.key));
+      this.derivers.set(batch.ref.key, cd);
+      d = cd;
+    }
+    d.ingest(batch);
+    if (d.cwd) {
+      const slug = pathToSlug(d.cwd);
+      const p = this.projects.ensureWork(slug, d.cwd);
+      if (p) {
+        this.unhide(d.id);
+        d.setProject(p.id);
+        this.escalations.track(p.id, p.path);
+        this.messages.track(p.id, p.path);
+        this.artifacts.track(p.id, p.path);
+        this.spawns.track(p.id, p.path);
+      } else {
+        this.hide(d.id, this.projects.excludes(slug, d.cwd));
+        d.setProject(this.projects.idForSlug(slug));
+      }
+    }
+    this.publishActivity();
   }
 
   private onGone(ref: TranscriptRef): void {
     const d = this.derivers.get(ref.key);
     if (!d) return;
     this.derivers.delete(ref.key);
+    this.hiddenAgents.delete(ref.key);
     this.callsigns.release(d.projectId, ref.key);
     this.collisions.forget(ref.key);
     // Su `ask` abierto ya no bloquea a nadie: no hay nadie a quien bloquear.
@@ -281,21 +481,57 @@ class Collector {
       log('info', SCOPE, `mensaje ${id} retirado: su emisor desapareció`);
     }
     this.sent.delete(ref.key);
+    this.talkSent.delete(ref.key);
     this.send({ t: 'agent:gone', machineId: this.machineId, id: ref.key });
     this.note('info', `${ref.key.slice(0, 8)} desapareció del disco`, ref.key);
   }
 
-  private deriverFor(ref: TranscriptRef): SessionDeriver {
+  /** Apunta que este agente vive fuera de la flota. Sin razón, no hace nada. */
+  private hide(id: string, why: ExcludedWorkspace | null): void {
+    if (why) this.hiddenAgents.set(id, why);
+  }
+
+  /** El transcript resultó estar en un proyecto de verdad después de todo. */
+  private unhide(id: string): void {
+    this.hiddenAgents.delete(id);
+  }
+
+  /**
+   * Pone la marca de "fuera de la flota" sobre un snapshot ya derivado.
+   *
+   * Se aplica AQUÍ y no dentro del deriver porque depende de dos cosas que el
+   * deriver no conoce: dónde vive su transcript y qué rol acabó teniendo. El
+   * CAPCOM vivo queda visible aunque su directorio esté excluido, que es lo
+   * que lo distingue de los CAPCOM anteriores que quedaron en el mismo sitio.
+   */
+  private markHidden(snap: Agent, id: string): Agent {
+    const where = this.hiddenAgents.get(id) ?? null;
+    // Se escribe `false` explícito —y no se omite— cuando el sitio está
+    // excluido pero el agente es el mando: una rotación estrena sesión ahí y
+    // pasa por hidden hasta que el linaje le da el rol, y un patch con el
+    // campo ausente dejaría al hub creyendo que sigue escondido. Un agente de
+    // un proyecto normal no lleva el campo en absoluto.
+    if (where) snap.hidden = hiddenInWorkspace(where, snap.role);
+    return snap;
+  }
+
+  private deriverFor(ref: TranscriptRef): Deriver {
     let d = this.derivers.get(ref.key);
     if (d) return d;
-    const project = this.projects.ensure(ref.slug);
-    d = new SessionDeriver(ref, this.machineId, project.id);
-    d.setCallsign(this.callsigns.assign(project.id, ref.key));
+    const project = this.projects.ensureWork(ref.slug);
+    // Sin proyecto el agente conserva un id derivado del slug: el tipo lo
+    // exige y el linaje lo usa para agrupar, aunque nadie registre esa isla.
+    const projectId = project?.id ?? this.projects.idForSlug(foldWorktreeSlug(ref.slug));
+    if (!project) this.hide(ref.key, this.projects.excludes(ref.slug));
+    d = new SessionDeriver(ref, this.machineId, projectId);
+    d.setCallsign(this.callsigns.assign(projectId, ref.key));
     this.derivers.set(ref.key, d);
-    this.escalations.track(project.id, project.path);
-    this.messages.track(project.id, project.path);
-    this.artifacts.track(project.id, project.path);
-    this.spawns.track(project.id, project.path);
+    if (project) {
+      this.escalations.track(project.id, project.path);
+      this.messages.track(project.id, project.path);
+      this.artifacts.track(project.id, project.path);
+      this.spawns.track(project.id, project.path);
+    }
     return d;
   }
 
@@ -318,10 +554,29 @@ class Collector {
         name: str(row['name']),
         startedAt: num(row['startedAt'], 0) || null,
         cliState,
+        pane: false,
       });
       if (shortId) this.lineage.bind(shortId, sessionId);
     }
+
+    /*
+     * Los panes. Un pane vivo es una sesión viva aunque `claude agents` aún no
+     * la liste —tarda unos segundos tras arrancar— y es lo que dice si se
+     * puede abrir una TERMINAL sobre ella.
+     */
+    this.panes = await this.tmux.list();
+    for (const [name, info] of this.panes) {
+      const sessionId = sessionIdOfPane(name);
+      if (!sessionId || info.dead) continue;
+      const l = next.get(sessionId);
+      if (l) { l.pane = true; continue; }
+      next.set(sessionId, {
+        alive: true, background: false, shortId: null, pid: info.pid,
+        name: null, startedAt: null, cliState: null, pane: true,
+      });
+    }
     this.liveness = next;
+    await this.pollScreens();
 
     // Los background publican su propio estado en ~/.claude/jobs/<id>/state.json,
     // que es lo más cercano a "el agente dice que está bloqueado" que existe hoy.
@@ -331,6 +586,229 @@ class Collector {
       const sig = readJobBlock(l.shortId);
       if (sig) this.jobStates.set(sessionId, sig);
     }
+  }
+
+  /* ── prompts en pantalla ──────────────────────────────────────── */
+
+  /**
+   * Mira la pantalla de cada pane vivo por si hay un prompt esperando.
+   *
+   * Cada pane, en cada poll de liveness: un `capture-pane` cuesta milisegundos
+   * y no hay otra señal fiable. El transcript NO sirve de filtro: el CLI
+   * escribe el turno con el `tool_use` DESPUÉS de que el humano conteste, así
+   * que mientras el diálogo está en pantalla la sesión parece `booting` o
+   * `idle` y `gatedPending` no ve nada — medido con un heredoc de python3.
+   *
+   * Lo que se ve se convierte en lo mismo que una pregunta del agente — una
+   * escalación con `allow | deny` — así que CAPCOM la recibe por el camino de
+   * siempre, el humano la ve en la cola de interrupciones si CAPCOM no
+   * contesta, y la respuesta vuelve como teclas al pane (`permit`).
+   *
+   * Sin esto un agente hospedado en `acceptEdits` que lanza un `Bash` se
+   * queda con "Do you want to proceed?" en una pantalla que nadie mira, y la
+   * consola lo pinta como `working`. Medido en ping-pong-papas.
+   */
+  private screensPolling = false;
+  private async pollScreens(): Promise<void> {
+    if (this.screensPolling) return;
+    this.screensPolling = true;
+    try { await this.readScreens(); } finally { this.screensPolling = false; }
+  }
+
+  private async readScreens(): Promise<void> {
+    const now = Date.now();
+    // Una pantalla por sesión raíz: los subagentes comparten el pane del padre.
+    const seen = new Set<string>();
+    for (const d of this.derivers.values()) {
+      if (d.ref.agentId) continue;
+      const l = this.liveness.get(d.ref.sessionId);
+      const pane = l?.pane ? paneName(d.ref.sessionId) : null;
+      const open = this.screenPrompts.get(d.id);
+      // Sin pane no hay pantalla; si ya no está vivo, lo que hubiera se retira.
+      if (!pane || !l?.alive || seen.has(pane)) { if (open) this.withdrawPrompt(d.id, 'la sesión terminó'); continue; }
+      seen.add(pane);
+      const pending = d.gatedPending(now, 0);
+
+      const shot = await this.tmux.permissionView(pane);
+      if (!shot) continue; // unreadable is not confirmation
+      const prompt = promptOn(shot.screen);
+      if (!prompt) {
+        if (open?.request.claimed && shot.identity === open.request.identity && permissionClosed(shot.screen)) {
+          open.escalation.permission!.phase = 'confirmed';
+          open.escalation.status = 'answered';
+          open.escalation.answer = 'Dialog closure observed. Approval decision and tool success are not observable from the terminal.';
+          open.escalation.answeredAt = now;
+          this.send({ t: 'escalation', machineId: this.machineId, escalation: open.escalation });
+        }
+        if (open) this.withdrawPrompt(d.id, 'Dialog no longer observable; no approval or tool success inferred');
+        continue;
+      }
+      if (open && open.request.identity === shot.identity && open.request.fingerprint === prompt.fingerprint) continue;
+      if (open) this.withdrawPrompt(d.id, 'Permission dialog changed; previous outcome unconfirmed');
+      if (prompt.kind === 'trust') continue; // trust has no once scope
+
+      const question = `${d.callsign} requests ${prompt.runtime} permission`;
+      const e: Escalation = {
+        id: newId('esc'), agentId: d.id, projectId: d.projectId, machineId: this.machineId,
+        question, context: `${prompt.summary}\nRisk: ${prompt.summary.includes('MCP server') ? 'MCP tool may read or change external state' : 'shell execution may affect files, processes or network'}. Arguments are omitted; inspect the terminal against the mission before deciding. Allow is once only.`,
+        permission: { phase: shot.claimedFingerprint === prompt.fingerprint ? 'pending' : 'requested', fingerprint: prompt.fingerprint },
+        options: ['allow', 'deny'], optionsOnly: true,
+        urgency: 'blocking', status: 'pending', ceoAttempt: null,
+        answer: null, answeredBy: null, rememberAs: null,
+        askedAt: pending?.at ?? now, answeredAt: null, expiresAt: null,
+      };
+      this.screenPrompts.set(d.id, {
+        escalation: e,
+        request: { agentId: d.id, sessionId: d.ref.sessionId, pane, identity: shot.identity, fingerprint: prompt.fingerprint, claimed: shot.claimedFingerprint === prompt.fingerprint },
+        block: { kind: 'permission', summary: oneLine(question, 160), escalationId: e.id, since: e.askedAt },
+      });
+      this.escalationBySession.set(d.id, e);
+      this.send({ t: 'escalation', machineId: this.machineId, escalation: e });
+      this.note('alert', question, d.id);
+    }
+  }
+
+  /**
+   * Lo que CAPCOM está escribiendo, leído de su pane. Sólo CAPCOM, sólo con
+   * pane, sólo en `thinking`/`working`: fuera de eso no hay nada que leer.
+   *
+   * La lectura la dispara el pane al pintar (`ensureLiveWatch`); esta vuelta
+   * de 400 ms es el respaldo: mantiene el cliente de control vivo, retira el
+   * texto cuando el estado deja de ser redactar, y sondea sólo cuando no hay
+   * cliente —tmux sin modo control, o caído y en espera de relanzarse.
+   */
+  private async pollLive(): Promise<void> {
+    if (this.livePolling || !this.connected) return;
+    this.livePolling = true;
+    try {
+      for (const d of this.derivers.values()) {
+        const last = this.sent.get(d.id);
+        if (!last || last.role !== 'capcom') continue;
+        const l = this.liveness.get(d.ref.sessionId);
+        const pane = l?.pane && l.alive ? paneName(d.ref.sessionId) : null;
+        if (!pane) { this.dropLiveWatch(d.id); this.setLive(d.id, null); this.liveDone.delete(d.id); continue; }
+        const state = d.state();
+        const writing = state === 'thinking' || state === 'working';
+        if (!writing) { this.setLive(d.id, null); this.liveDone.delete(d.id); }
+        if (this.ensureLiveWatch(d.id, pane)) continue;   // el evento lee; aquí no
+        if (writing) await this.captureLive(d.id);
+      }
+    } finally {
+      this.livePolling = false;
+    }
+  }
+
+  /** El cliente de control del pane de este agente, creándolo si toca. Null = sin él, se sondea. */
+  private ensureLiveWatch(agentId: string, pane: string): LiveWatch | null {
+    const cur = this.liveWatches.get(agentId);
+    if (cur && cur.pane === pane) return cur;
+    if (cur) this.dropLiveWatch(agentId);
+    if ((this.liveWatchRetryAt.get(agentId) ?? 0) > Date.now()) return null;
+    const watch = this.tmux.watchOutput(pane, {
+      output: () => this.scheduleLive(agentId),
+      exit: (reason) => {
+        const w = this.liveWatches.get(agentId);
+        if (w?.pane !== pane) return;
+        if (w.timer) clearTimeout(w.timer);
+        this.liveWatches.delete(agentId);
+        this.liveWatchRetryAt.set(agentId, Date.now() + LIVE_WATCH_RETRY_MS);
+        log('debug', SCOPE, `texto en vivo de ${pane}: ${reason}; sondeo hasta relanzar`);
+      },
+    });
+    if (!watch) { this.liveWatchRetryAt.set(agentId, Date.now() + LIVE_WATCH_RETRY_MS * 6); return null; }
+    const w: LiveWatch = { pane, watch, timer: null, lastAt: 0, again: false };
+    this.liveWatches.set(agentId, w);
+    log('info', SCOPE, `texto en vivo de ${pane} por eventos de tmux`);
+    return w;
+  }
+
+  private dropLiveWatch(agentId: string): void {
+    const w = this.liveWatches.get(agentId);
+    if (!w) return;
+    if (w.timer) clearTimeout(w.timer);
+    this.liveWatches.delete(agentId);
+    w.watch.close();
+  }
+
+  /**
+   * El pane pintó: leer, pero no ahora mismo. Se espera LIVE_DEBOUNCE_MS para
+   * que una ráfaga sea una lectura, y nunca más seguido que LIVE_MIN_GAP_MS.
+   * Si mientras se leía volvió a pintar, se lee otra vez al terminar.
+   */
+  private scheduleLive(agentId: string): void {
+    const w = this.liveWatches.get(agentId);
+    if (!w) return;
+    if (w.timer) { w.again = true; return; }
+    const wait = Math.max(LIVE_DEBOUNCE_MS, w.lastAt + LIVE_MIN_GAP_MS - Date.now());
+    w.timer = setTimeout(async () => {
+      w.again = false;
+      w.lastAt = Date.now();
+      try { await this.captureLive(agentId); } finally {
+        w.timer = null;
+        if (w.again) this.scheduleLive(agentId);
+      }
+    }, wait);
+    w.timer.unref?.();
+  }
+
+  /** Una lectura del pane y su traducción a texto en vivo (o a nada). */
+  private async captureLive(agentId: string): Promise<void> {
+    const d = this.derivers.get(agentId);
+    if (!d || this.liveCapturing.has(agentId)) return;
+    const l = this.liveness.get(d.ref.sessionId);
+    const pane = l?.pane && l.alive ? paneName(d.ref.sessionId) : null;
+    const state = d.state();
+    if (!pane || (state !== 'thinking' && state !== 'working')) { this.setLive(agentId, null); this.liveDone.delete(agentId); return; }
+    this.liveCapturing.add(agentId);
+    try {
+      // 120 líneas: un párrafo largo a 100 columnas son 30; el bloque tiene
+      // que caber entero o no se sabe dónde empieza.
+      const shot = await this.tmux.capture(pane, 120);
+      const text = shot.ok ? liveText(shot.stdout) : null;
+      if (text !== null && text === this.liveDone.get(agentId)) return;
+      if (text !== null) this.liveDone.delete(agentId);
+      this.setLive(agentId, text);
+    } finally {
+      this.liveCapturing.delete(agentId);
+    }
+  }
+
+  private setLive(agentId: string, text: string | null): void {
+    const prev = this.liveSent.get(agentId) ?? null;
+    if (prev === text) return;
+    if (text === null) this.liveSent.delete(agentId); else this.liveSent.set(agentId, text);
+    this.send({ t: 'talk:live', machineId: this.machineId, agentId, text });
+  }
+
+  private withdrawPrompt(agentId: string, reason: string): void {
+    const open = this.screenPrompts.get(agentId);
+    if (!open) return;
+    this.screenPrompts.delete(agentId);
+    if (this.escalationBySession.get(agentId)?.id === open.escalation.id) {
+      this.escalationBySession.delete(agentId);
+    }
+    this.send({ t: 'escalation:withdraw', machineId: this.machineId, id: open.escalation.id, reason });
+  }
+
+  private async answerScreenPermission(id: string, answer: string): Promise<{ ok: boolean; detail: string }> {
+    const entry = [...this.screenPrompts.values()].find(p => p.escalation.id === id);
+    if (!entry) return { ok: false, detail: 'Stale permission; no key sent' };
+    const r = entry.request;
+    return answerPermission(r, answer, {
+      current: () => {
+        const d = this.derivers.get(r.agentId);
+        const a = d && this.handleOf(d);
+        return this.screenPrompts.get(r.agentId) === entry && a?.id === r.agentId && a.sessionId === r.sessionId && a.pane === r.pane && a.alive;
+      },
+      view: () => this.tmux.permissionView(r.pane),
+      key: (identity, key) => this.tmux.permissionKey(identity, key, r.fingerprint),
+      retire: reason => { if (this.screenPrompts.get(r.agentId) === entry) this.withdrawPrompt(r.agentId, reason); },
+      pending: () => {
+        entry.escalation.permission!.phase = 'pending';
+        entry.escalation.context += '\nResponse requested; waiting for terminal evidence. Do not retry. If still visible, finish manually.';
+        this.send({ t: 'escalation', machineId: this.machineId, escalation: entry.escalation });
+      },
+    });
   }
 
   /* ── escalaciones ─────────────────────────────────────────────── */
@@ -490,7 +968,7 @@ class Collector {
         if (d.ref.sessionId === hint || d.ref.agentId === hint) return d.id;
       }
     }
-    let best: SessionDeriver | null = null;
+    let best: Deriver | null = null;
     let bestAt = -1;
     for (const d of this.derivers.values()) {
       if (d.projectId !== projectId) continue;
@@ -503,7 +981,21 @@ class Collector {
 
   /* ── tick: derivar y emitir ───────────────────────────────────── */
 
+  /** Coalesce transcript events; keep the 500ms timer as reconciliation. */
+  private publishActivity(): void {
+    if (this.stopping || this.activityTimer) return;
+    const delay = Math.max(25, 250 - (Date.now() - this.lastActivityTick));
+    this.activityTimer = setTimeout(() => {
+      this.activityTimer = null;
+      if (!this.stopping) this.tick();
+    }, delay);
+    this.activityTimer.unref?.();
+  }
+
   private tick(): void {
+    if (this.activityTimer) clearTimeout(this.activityTimer);
+    this.activityTimer = null;
+    this.lastActivityTick = Date.now();
     const now = Date.now();
     this.ticks++;
     this.escalations.reapExpired(now);
@@ -517,13 +1009,17 @@ class Collector {
       const l = this.liveness.get(d.ref.sessionId);
       d.setLiveness(l ?? {
         alive: false, background: false, shortId: null, pid: null,
-        name: null, startedAt: null, cliState: null,
+        name: null, startedAt: null, cliState: null, pane: false,
       });
       // Prioridad: humano > par > job. Si un agente espera a las dos cosas, la
       // pregunta al humano es la que nadie más puede desatascar.
       const esc = this.escalationBySession.get(d.id);
       const peer = peers.get(d.id);
-      if (esc) {
+      const screen = this.screenPrompts.get(d.id);
+      if (screen) {
+        // Es una escalación, pero de tipo permiso: la consola lo pinta distinto.
+        d.setBlock(screen.block);
+      } else if (esc) {
         d.setBlock({
           kind: 'question', summary: oneLine(esc.question, 160),
           escalationId: esc.id, since: esc.askedAt,
@@ -534,7 +1030,7 @@ class Collector {
           messageId: peer.messageId, waitingOn: peer.waitingOn, since: peer.since,
         });
       } else {
-        d.setBlock(this.jobStates.get(d.ref.sessionId) ?? null);
+        d.setBlock(this.screenPrompts.get(d.id)?.block ?? this.jobStates.get(d.ref.sessionId) ?? null);
       }
       // Lo que el agente escribió y merece verse. El deriver sólo apunta la
       // ruta; aquí se le pone dueño y proyecto, que es lo que él no sabe.
@@ -557,19 +1053,44 @@ class Collector {
       if (lin) d.setLineage(lin);
     }
 
+    void this.runner.workers.reconcile().catch(e => log('warn', 'recovery', String(e)));
     // 3. diffs de agentes
     const all: Agent[] = [];
     const byProject = new Map<string, Agent[]>();
     for (const d of this.derivers.values()) {
-      const snap = d.snapshot(now);
+      const snap = this.markHidden(d.snapshot(now), d.id);
+      const handle = this.handleOf(d);
+      this.runner.models.tick(handle);
+      snap.modelControl = this.runner.models.state(handle);
+      Object.assign(snap, this.runner.workers.snapshotState(d.id));
       all.push(snap);
       const list = byProject.get(snap.projectId);
       if (list) list.push(snap); else byProject.set(snap.projectId, [snap]);
+
+      // Every agent window reads its bounded conversation stream.
+      // Va DESPUÉS del agente: el hub descarta la charla de un id que no conoce.
+      const talk = d.drainTalk();
+      const sendTalk = () => {
+        if (talk.length === 0) return;
+        this.send({ t: 'talk', machineId: this.machineId, agentId: snap.id, items: talk });
+        // Un bloque de texto que ya llegó entero: lo que la pantalla muestra
+        // de él deja de ser "en vivo", aunque siga ahí pintado.
+        if (talk.some((t) => t.kind === 'say')) {
+          const shown = this.liveSent.get(snap.id) ?? null;
+          if (shown !== null) { this.liveDone.set(snap.id, shown); this.setLive(snap.id, null); }
+        }
+        // Y a la memoria: un hub que se reinicia pierde su charla, y el
+        // snapshot de la reconexión la vuelve a mandar (el hub deduplica).
+        const ring = this.talkSent.get(snap.id) ?? [];
+        ring.push(...talk);
+        this.talkSent.set(snap.id, ring.length > MAX_TALK ? ring.slice(-MAX_TALK) : ring);
+      };
 
       const prev = this.sent.get(snap.id);
       if (!prev) {
         this.sent.set(snap.id, snap);
         this.send({ t: 'agent:new', machineId: this.machineId, agent: snap });
+        sendTalk();
         this.note('info', `${snap.callsign} ${snap.state}: ${oneLine(snap.title, 60)}`, snap.id);
         continue;
       }
@@ -582,6 +1103,7 @@ class Collector {
         this.sent.set(snap.id, snap);
         this.send({ t: 'agent', machineId: this.machineId, id: snap.id, patch });
       }
+      sendTalk();
     }
 
     // 4. rollups por proyecto
@@ -637,12 +1159,66 @@ class Collector {
     this.pendingFeed.push(item);
   }
 
+  /* ── rotación de CAPCOM ───────────────────────────────────────── */
+
+  /** El deriver de la sesión CAPCOM, nombrada por session id (hospedado) o short id (`--bg`). */
+  private capcomDeriver(id: string): Deriver | null {
+    const direct = this.derivers.get(id);
+    if (direct) return direct;
+    for (const d of this.derivers.values()) {
+      if (d.ref.sessionId === id) return d;
+      if (this.liveness.get(d.ref.sessionId)?.shortId === id) return d;
+    }
+    return null;
+  }
+
+  /**
+   * ¿Toca reciclar CAPCOM? Corre con el vigilante, cada CAPCOM_CHECK_MS.
+   *
+   * Lo que se mira es lo que este collector ve: el transcript (compactaciones,
+   * turnos, estado) y lo que él mismo le ha pegado. Una escalación de OTRA
+   * máquina llega como un `say` del hub y pone a CAPCOM a pensar, así que el
+   * silencio exigido (`idleMs`) la cubre con margen; las de esta máquina se
+   * cuentan directamente.
+   */
+  private maybeRotateCapcom(): void {
+    const cap = this.capcom;
+    const id = cap?.current();
+    if (!cap || !id) return;
+    try { if (cap.recovery()) return; } catch { return; }
+    const d = this.capcomDeriver(id);
+    if (!d) return;
+    const now = Date.now();
+    const m = d.metrics(now);
+    const pending = this.escalations.list().filter((e) => e.status === 'pending').length + this.screenPrompts.size;
+    const verdict = rotationVerdict({
+      state: d.state(now),
+      turns: m.turns,
+      compactions: m.compactions ?? 0,
+      contextTokens: m.contextTokens ?? 0,
+      lastActivityAt: d.snapshot(now).updatedAt,
+      lastDeliveryAt: this.lastCapcomSayAt,
+      pendingEscalations: pending,
+    }, this.rotation, now);
+    if (!verdict.due) { this.rotationDueSaid = false; return; }
+    if (!verdict.rotate) {
+      if (!this.rotationDueSaid) { this.rotationDueSaid = true; log('info', SCOPE, `CAPCOM: toca rotar, espero: ${verdict.reason}`); }
+      return;
+    }
+    this.rotationDueSaid = false;
+    log('info', SCOPE, `CAPCOM: rotando (${verdict.reason})`);
+    void cap.rotate({ turns: m.turns, compactions: m.compactions ?? 0, contextTokens: m.contextTokens ?? 0 });
+  }
+
   /* ── handles para commands.ts ─────────────────────────────────── */
 
   /** ¿Sigue el CLI listando esa sesión de background? Lo que usa CAPCOM. */
-  private shortIdAlive(shortId: string): boolean {
+  private shortIdAlive(id: string): boolean {
+    // Un hospedado se conoce por su session id, que es también el nombre del
+    // pane; un `--bg` sólo por el short id que imprimió el CLI.
+    if (this.liveness.get(id)?.alive) return true;
     for (const l of this.liveness.values()) {
-      if (l.shortId === shortId && l.alive) return true;
+      if (l.shortId === id && l.alive) return true;
     }
     return false;
   }
@@ -653,7 +1229,7 @@ class Collector {
     return this.handleOf(d);
   }
 
-  private handleOf(d: SessionDeriver): AgentHandle {
+  private handleOf(d: Deriver): AgentHandle {
     const l = this.liveness.get(d.ref.sessionId);
     return {
       id: d.id,
@@ -663,6 +1239,16 @@ class Collector {
       background: l?.background ?? false,
       alive: l?.alive ?? false,
       callsign: d.callsign,
+      pane: l?.pane ? paneName(d.ref.sessionId) : null,
+      runtime: d.runtime,
+      transcriptPath: d.ref.path,
+      model: d.snapshot().model,
+      state: d.snapshot().state,
+      blockKind: d.snapshot().block?.kind,
+      worktree: this.lineage.worktreeOf(d.ref.sessionId, l?.shortId ?? null),
+      mission: d.snapshot().mission,
+      cwd: d.cwd ?? undefined, origin: d.snapshot().origin,
+      parentId: d.snapshot().parentId, squad: d.snapshot().squad, lead: d.snapshot().lead, subagent: d.snapshot().subagent,
     };
   }
 
@@ -687,6 +1273,7 @@ class Collector {
       await sleep(250);
       await this.pollLiveness();
       await this.watcher.refresh();
+      await this.codexWatcher?.refresh();
     }
   }
 
@@ -699,6 +1286,11 @@ class Collector {
    * que es cierto porque `since` se toma justo antes del `spawn()`.
    */
   private findSpawned(want: SpawnLookup): AgentHandle | null {
+    if (want.sessionId) {
+      // ORCA eligió el id: o está, o todavía no escribió su transcript.
+      const d = this.derivers.get(want.sessionId);
+      return d ? this.handleOf(d) : null;
+    }
     if (want.shortId) {
       for (const [sessionId, l] of this.liveness) {
         if (l.shortId !== want.shortId) continue;
@@ -707,10 +1299,12 @@ class Collector {
       }
       return null;
     }
-    let best: SessionDeriver | null = null;
+    let best: Deriver | null = null;
+    const runtime = want.runtime ?? 'claude';
     for (const d of this.derivers.values()) {
       // Sólo sesiones raíz: un subagente no es lo que acabamos de lanzar.
       if (d.ref.metaPath !== null) continue;
+      if (d.runtime !== runtime) continue;
       if (d.projectId !== want.projectId) continue;
       if (d.firstSeenAt < want.since) continue;
       if (!best || d.firstSeenAt > best.firstSeenAt) best = d;
@@ -759,6 +1353,8 @@ class Collector {
       const was = this.connected;
       this.connected = false;
       this.ws = null;
+      // Sin hub no hay consola mirando: se sueltan los ptys, los panes siguen.
+      this.terms.closeAll('hub link lost');
       if (was) log('warn', SCOPE, 'hub desconectado, reintentando');
       this.scheduleReconnect();
     });
@@ -802,15 +1398,22 @@ class Collector {
 
   private sendSnapshot(): void {
     const now = Date.now();
-    const agents = [...this.derivers.values()].map((d) => d.snapshot(now));
+    const agents = [...this.derivers.values()].map((d) => this.markHidden({ ...d.snapshot(now), ...this.runner.workers.snapshotState(d.id), modelControl: this.runner.models.state(this.handleOf(d)) }, d.id));
     for (const a of agents) this.sent.set(a.id, a);
     const projects = this.projects.all();
     for (const p of projects) this.sentProjects.set(p.id, JSON.stringify(p));
     this.send({
       t: 'snapshot', machineId: this.machineId, projects, agents, keys: this.keys.list(),
     });
+    const handoff = this.capcom?.handoff(this.machineId);
+    if (handoff) this.send({ t: 'capcom:handoff', machineId: this.machineId, event: handoff });
     for (const e of this.escalations.list()) {
       this.send({ t: 'escalation', machineId: this.machineId, escalation: e });
+    }
+    // Los prompts de pantalla también son estado: el primer poll corre antes
+    // de conectar, y un diálogo visto entonces se perdería sin esto.
+    for (const p of this.screenPrompts.values()) {
+      this.send({ t: 'escalation', machineId: this.machineId, escalation: p.escalation });
     }
     // Un `ask` abierto y una colisión viva son estado, no eventos: si el hub se
     // reinició, no se enteraría de ellos hasta que cambiaran.
@@ -823,6 +1426,9 @@ class Collector {
     for (const a of this.artifacts.list()) {
       this.send({ t: 'artifact', machineId: this.machineId, artifact: a });
     }
+    for (const [agentId, items] of this.talkSent) {
+      if (items.length > 0) this.send({ t: 'talk', machineId: this.machineId, agentId, items });
+    }
     if (this.feed.length > 0) {
       this.send({ t: 'feed', machineId: this.machineId, items: this.feed.slice(-50) });
     }
@@ -834,7 +1440,7 @@ class Collector {
     this.send({
       t: 'snapshot', machineId: this.machineId,
       projects: this.projects.all(),
-      agents: [...this.derivers.values()].map((d) => d.snapshot()),
+      agents: [...this.derivers.values()].map((d) => this.markHidden({ ...d.snapshot(), ...this.runner.workers.snapshotState(d.id), modelControl: this.runner.models.state(this.handleOf(d)) }, d.id)),
       keys: this.keys.list(),
     });
   }
@@ -847,6 +1453,16 @@ class Collector {
 
   private async onFrame(text: string): Promise<void> {
     const frame = safeJson<CommandFrame>(text);
+    if (frame && frame.t === 'hygiene:sample') {
+      // No ack: the report itself is the reply, on the same channel.
+      void this.sampleHygiene({ force: frame.force === true });
+      return;
+    }
+    if (frame && typeof frame.t === 'string' && frame.t.startsWith('term:')) {
+      // Una terminal no es un comando: no hay ack, hay un flujo mientras dure.
+      this.terms.handle(frame as TermFrame);
+      return;
+    }
     if (!frame || frame.t !== 'cmd' || typeof frame.id !== 'string') {
       log('debug', SCOPE, 'frame entrante ignorado');
       return;
@@ -857,6 +1473,10 @@ class Collector {
       return;
     }
     log('info', SCOPE, `cmd ${cmd.k} (${frame.id})`);
+    if (cmd.k === 'say' && this.capcom) {
+      const a = this.sent.get(cmd.agentId);
+      if (a?.role === 'capcom' || this.capcom.owns(cmd.agentId) || this.capcom.owns(a?.shortId ?? null)) this.lastCapcomSayAt = Date.now();
+    }
     const res = await this.runner.execute(cmd);
     this.send({
       t: 'ack', cmdId: frame.id, ok: res.ok,
@@ -880,6 +1500,46 @@ class Collector {
       connectedAt: this.connectedAt,
       load: this.load(),
     };
+  }
+
+  /**
+   * Take a hygiene sample and file it.
+   *
+   * Cached inside the sampler, so the ten-minute clock and a panel asking at
+   * the same moment cost one walk between them. A failure here is a note, not
+   * an outage: hygiene is an observation, and a collector that cannot stat a
+   * directory still has a fleet to watch.
+   */
+  private async sampleHygiene(opts: { force?: boolean } = {}): Promise<void> {
+    try {
+      this.hygieneSampler ??= new HygieneSampler({
+        machineId: this.machineId,
+        hostname: this.machineName,
+        processes: () => this.hygieneProcesses(),
+      });
+      const report = await this.hygieneSampler.sample(opts);
+      this.send({ t: 'hygiene', machineId: this.machineId, report });
+    } catch (err) {
+      log('warn', SCOPE, `higiene: ${errText(err)}`);
+    }
+  }
+
+  /**
+   * The processes worth measuring: this collector, and every agent whose pid
+   * liveness already knows. No new discovery — if we had to go looking for
+   * processes, the measurement would cost more than the thing it measures.
+   */
+  private hygieneProcesses(): { pid: number; role: 'hub' | 'collector' | 'console' | 'agent' | 'other'; name: string }[] {
+    const out: { pid: number; role: 'hub' | 'collector' | 'console' | 'agent' | 'other'; name: string }[] = [
+      { pid: process.pid, role: 'collector', name: 'orca-collector' },
+    ];
+    for (const [sessionId, live] of this.liveness) {
+      if (!live.alive || typeof live.pid !== 'number' || live.pid <= 0) continue;
+      const d = this.derivers.get(sessionId) ?? [...this.derivers.values()].find((x) => x.ref.sessionId === sessionId);
+      out.push({ pid: live.pid, role: 'agent', name: d?.snapshot().callsign ?? 'agent' });
+      if (out.length >= 48) break;
+    }
+    return out;
   }
 
   private load(): Machine['load'] {
@@ -932,7 +1592,7 @@ class Collector {
       const l = this.liveness.get(d.ref.sessionId);
       d.setLiveness(l ?? {
         alive: false, background: false, shortId: null, pid: null,
-        name: null, startedAt: null, cliState: null,
+        name: null, startedAt: null, cliState: null, pane: false,
       });
       const lin = tree.get(d.id);
       if (lin) d.setLineage(lin);
@@ -1021,11 +1681,16 @@ export function diffAgent(prev: Agent, next: Agent): Partial<Agent> | null {
   };
 
   for (const k of ['state', 'title', 'callsign', 'model', 'tool', 'toolDetail',
-    'lastPrompt', 'lastSay', 'mission', 'squad', 'lead', 'role', 'parentId', 'depth',
-    'background', 'shortId', 'projectId'] as const) {
+    'lastPrompt', 'lastSay', 'mission', 'squad', 'lead', 'role', 'origin', 'hidden', 'parentId', 'depth',
+    // `pane` llega tarde: el transcript aparece antes de que tmux liste el
+    // pane, así que sin diffearlo el hub se queda con `false` para siempre y
+    // TERMINAL dice "no pane" sobre un agente que sí lo tiene.
+    'background', 'shortId', 'pane', 'projectId'] as const) {
     if (prev[k] !== next[k]) set(k);
   }
   if (JSON.stringify(prev.block) !== JSON.stringify(next.block)) set('block');
+  if (JSON.stringify(prev.continuation) !== JSON.stringify(next.continuation)) set('continuation');
+  if (JSON.stringify(prev.modelControl) !== JSON.stringify(next.modelControl)) set('modelControl');
   if (JSON.stringify(prev.childIds) !== JSON.stringify(next.childIds)) set('childIds');
 
   // Las métricas se mandan sólo cuando se mueven de forma perceptible: uptimeMs
@@ -1062,6 +1727,18 @@ export function rollup(agents: Agent[]): SessionRollup {
 }
 
 /** `claude agents --json`. Si el CLI no está o cambia de formato: lista vacía. */
+/** El cwd del `session_meta` (o de un `turn_context`) en un lote de Codex. */
+function cwdFromCodexLines(lines: Record<string, unknown>[]): string | null {
+  for (const line of lines) {
+    const t = line['type'];
+    if (t !== 'session_meta' && t !== 'turn_context') continue;
+    const p = isRecord(line['payload']) ? line['payload'] : null;
+    const cwd = p ? str(p['cwd']) : null;
+    if (cwd) return cwd;
+  }
+  return null;
+}
+
 function claudeAgentsJson(): Promise<Record<string, unknown>[]> {
   return new Promise((resolve) => {
     const bin = process.env['ORCA_CLAUDE_BIN'] ?? 'claude';
@@ -1119,8 +1796,7 @@ function fmtDur(ms: number): string {
 
 async function main(): Promise<void> {
   const diag = process.env['ORCA_DIAG'] === '1' || process.argv.includes('--diag');
-  const capcom = process.env['ORCA_CAPCOM'] === '1' || process.argv.includes('--capcom');
-  const collector = new Collector({ capcom });
+  const collector = new Collector({ capcom: wantsCapcom() });
 
   // Un throw suelto en un callback de fs no puede matar la observabilidad.
   process.on('uncaughtException', (err) => {

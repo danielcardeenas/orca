@@ -1,3 +1,10 @@
+import { quotaIncident } from '../shared/recovery.ts';
+import { freshCapcomCheckpoint } from './capcom-checkpoint.ts';
+import { RecoveryCoordinator } from './recovery.ts';
+import { HygieneRegistry, sanitizeReport } from './hygiene.ts';
+import { TaskStore } from './tasks.ts';
+import { uploadRecoveryImage } from './recovery-images.ts';
+import { taskPrompt } from '../shared/tasks.ts';
 /**
  * ORCA hub — servidor HTTP + WebSocket.
  *
@@ -30,10 +37,11 @@ import type {
 } from '../shared/types.ts';
 import { TERMINAL_STATES } from '../shared/types.ts';
 import type {
-  ClientFrame, CollectorFrame, Command, CommandFrame, PatchOp, ServerFrame,
+  ClientFrame, CollectorFrame, Command, CommandFrame, PatchOp, ServerFrame, TermFrame,
 } from '../shared/protocol.ts';
 import {
   MAX_ARTIFACT_BYTES, PATHS, PORTS, PROTOCOL_VERSION, artifactMime, newId,
+  TERM_ID_RE, TERM_MAX_CHUNK, TERM_MAX_COLS, TERM_MAX_ROWS,
 } from '../shared/protocol.ts';
 
 import { World } from './world.ts';
@@ -47,14 +55,23 @@ import { FleetStore } from './fleets.ts';
 import { nextSquadName, SQUAD_SEQ_FILE } from './squad-seq.ts';
 import { parsePresetList } from '../shared/fleets.ts';
 import { squadName } from '../shared/squads.ts';
+import { archivableState, type ArchiveFilter, type ArchiveOutcome } from '../shared/archive.ts';
+import { excludedWorkspace, refusalFor } from '../shared/workspaces.ts';
 import { readBody } from './mcp.ts';
 import { History, HISTORY_RETENTION_MS } from './history.ts';
 import { AnswerMemory, MEMORY_FILE } from './memory.ts';
 import { CapcomRouter, capcomOf, realTimers } from './capcom.ts';
+import { HandoffStore } from './handoffs.ts';
+import { parseHandoff, handoffText, HANDOFF_NOTICE_PREFIX } from '../shared/handoff.ts';
+import { BudgetBook, budgetConfig } from './budgets.ts';
 import type { CapcomTimer } from './capcom.ts';
 import { serveMcp } from './mcp.ts';
+import { envRoots, resolveServedPath, scratchpadRoots, streamFile } from './files.ts';
 import type { McpHttpDeps } from './mcp.ts';
 import { hubContext } from '../agents/context.ts';
+import { AgentLifecycle } from './lifecycle.ts';
+import { createAutonomy } from './autonomy.ts';
+import type { AutonomyApi } from './autonomy.ts';
 
 /* ── constantes de operación ──────────────────────────────────────── */
 
@@ -149,30 +166,27 @@ export interface HubOptions {
   /** Dónde viven los presets de flotilla. Por defecto ~/.orca/fleets. */
   fleets?: FleetStore;
   /**
-   * Gancho para el runtime del CEO, que vive fuera del hub. Si no está, el hub
-   * guarda el mensaje del humano y contesta que no hay CEO conectado.
-   */
-  onCeoSay?: (text: string, hub: Hub) => void;
-  /**
-   * Un agente hizo una pregunta. El runtime del CEO la intercepta aquí e
-   * intenta contestarla antes de que llegue al humano; si no hay runtime, la
-   * pregunta va directa a la cola de interrupciones, que es el comportamiento
-   * correcto sin CEO — nunca se pierde.
+   * Lo que el humano dijo al mando y ningún CAPCOM vivo recibió.
    *
-   * Sólo se llama cuando NO hay una sesión CAPCOM viva: el mando de la flota es
-   * uno, o dos mentes triarían la misma pregunta a la vez.
+   * Es una mirilla para las pruebas, que así observan qué prompt habría llegado
+   * al mando sin levantar un collector. En producción no se pasa: no hay
+   * segunda mente, el mensaje se guarda y el hub dice en voz alta que no hay
+   * mando conectado.
    */
-  onEscalation?: (escalationId: string, hub: Hub) => void;
-  /**
-   * `--api-command`: manda el CEO de API aunque haya una sesión CAPCOM viva.
-   * Es la salida para quien no tenga CLI, no el camino normal — por defecto el
-   * hub prefiere CAPCOM y no gasta un solo token de API.
-   */
-  apiCommand?: boolean;
+  onUnrouted?: (text: string, hub: Hub) => void;
   /** Cuánto se le da a CAPCOM para contestar. Las pruebas lo acortan. */
   capcomAnswerMs?: number;
   /** Reloj inyectable para esa cuenta atrás. Sin él, `setTimeout` de verdad. */
   capcomTimer?: (fn: () => void, ms: number) => CapcomTimer;
+  /**
+   * Raíces extra bajo las que `/api/file` puede servir, además de los
+   * proyectos que el mundo conoce y del scratchpad de los agentes. Las
+   * pruebas se dan un directorio temporal; en producción llega de
+   * `ORCA_FILE_ROOTS`. Ver files.ts.
+   */
+  fileRoots?: string[];
+  /** El libro de presupuestos. Una prueba inyecta el suyo, con reloj propio. */
+  budgets?: BudgetBook;
 }
 
 /** Lo que el CEO necesita decir para meter un mensaje en la flota. */
@@ -216,6 +230,24 @@ export interface Hub {
   url: string;
   /** Publica un mensaje del CEO a todas las consolas y lo persiste. */
   pushCeoMessage(msg: CeoMessage): void;
+  tasks: TaskStore;
+  /**
+   * Higiene: el último informe de cada máquina y el total de la flota. En
+   * memoria, fuera del mundo. `refresh` pide muestra fresca a cada collector
+   * conectado y devuelve a cuántos llegó — la petición es un frame propio, no
+   * un `Command`: no cambia nada en la máquina, sólo la mide.
+   */
+  hygiene: {
+    all(): import('../shared/hygiene.ts').HygieneReport[];
+    get(machineId: string): import('../shared/hygiene.ts').HygieneReport | undefined;
+    fleet(): import('./hygiene.ts').FleetHygiene;
+    refresh(force?: boolean): number;
+  };
+  /**
+   * Presupuestos por agente, escuadrón y tarea. El hub los vigila en cada
+   * sweep: avisa a CAPCOM al 80 %, y al 100 % para a quien no progresa.
+   */
+  budgets: BudgetBook;
   /**
    * Lanza un comando desde dentro del proceso y espera su ack. Es el canal del
    * runtime del CEO, que no es una consola y no tiene a quién devolverle un
@@ -242,12 +274,20 @@ export interface Hub {
   /** Marca una colisión como vista, desde la consola o desde el CEO. */
   acknowledgeCollision(id: string): Collision | null;
   /**
+   * Archiva agentes terminados (done/dead) que cumplan el filtro: salen del
+   * mundo y quedan con lápida para que el collector no los devuelva. Con
+   * `dryRun` sólo cuenta. Nunca toca un agente vivo.
+   */
+  archiveAgents(filter: ArchiveFilter, opts: { dryRun?: boolean; by?: string }): ArchiveOutcome;
+  /**
    * La sesión CAPCOM viva de esta flota, o null.
    *
    * Es lo que decide quién manda: con CAPCOM arriba, lo que escribe el humano y
    * cada pregunta de un agente van a esa sesión y la API no se toca.
    */
   capcom(): Agent | null;
+  /** Las piezas del squad autonomy (wake, verify, land, budget, journal). Ver autonomy.ts. */
+  autonomy: AutonomyApi;
   broadcast(frame: ServerFrame): void;
   counts(): { collectors: number; consoles: number; pending: number };
   close(): Promise<void>;
@@ -281,9 +321,12 @@ function tokenFromRequest(req: IncomingMessage): string | null {
 /** Nunca logueamos el valor de una credencial: sólo la forma del comando. */
 function describeCommand(cmd: Command): string {
   switch (cmd.k) {
+    case 'model:list': return `model:list ${cmd.agentId}`;
+    case 'model:set': return `model:set ${cmd.agentId} ${cmd.model ?? 'cancel'}`;
     case 'spawn': return `spawn ${cmd.projectId}`
       + (cmd.squad ? ` [${cmd.squad}${cmd.lead ? ' lead' : ''}]` : '');
     case 'say': return `say ${cmd.agentId}`;
+    case 'interrupt': return `interrupt ${cmd.agentId}${cmd.text ? ' +message' : ''}`;
     case 'permit': return `permit ${cmd.agentId} allow=${cmd.allow}`;
     case 'stop': return `stop ${cmd.agentId}`;
     case 'resume': return `resume ${cmd.agentId}`;
@@ -296,6 +339,9 @@ function describeCommand(cmd: Command): string {
     case 'artifact:read': return `artifact:read ${cmd.artifactId}`;
     case 'resync': return 'resync';
     case 'logs': return `logs ${cmd.agentId}`;
+    case 'autonomy': return `autonomy ${cmd.op} ${cmd.agentId}`;
+    case 'land': return `land ${cmd.agentId}`;
+    case 'discard': return `discard ${cmd.agentId}`;
     default: return 'desconocido';
   }
 }
@@ -304,8 +350,9 @@ function isCommand(v: unknown): v is Command {
   if (typeof v !== 'object' || v === null) return false;
   const k = (v as { k?: unknown }).k;
   return typeof k === 'string' && [
-    'spawn', 'say', 'permit', 'stop', 'resume', 'remove', 'answer', 'deliver',
-    'reply', 'key:set', 'key:remove', 'artifact:read', 'resync', 'logs',
+    'spawn', 'say', 'interrupt', 'permit', 'stop', 'resume', 'remove', 'answer', 'deliver',
+    'reply', 'key:set', 'key:remove', 'artifact:read', 'resync', 'logs', 'autonomy',
+    'recovery:settings', 'recovery:status', 'recovery:decide', 'land', 'discard', 'model:list', 'model:set', 'capcom:new', 'handoff:models', 'handoff:prepare', 'handoff:commit', 'handoff:status', 'handoff:history',
   ].includes(k);
 }
 
@@ -467,6 +514,11 @@ function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse
   return true;
 }
 
+function clampInt(v: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const quiet = options.quiet ?? false;
   const log = (...args: unknown[]): void => { if (!quiet) console.log('[hub]', ...args); };
@@ -477,19 +529,40 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const mem = options.memory ?? new AnswerMemory(MEMORY_FILE);
   const history = options.history ?? new History();
   const artifactCache = options.artifactCache ?? ARTIFACT_CACHE_DIR;
+  const fileRoots = options.fileRoots ?? [];
   const fleets = options.fleets ?? new FleetStore();
 
   const collectors = new Map<string, CollectorConn>();   // machineId → conn
   const orphanCollectors = new Set<CollectorConn>();     // aún sin hello
   const consoles = new Set<ConsoleConn>();
   const pending = new Map<string, Pending>();
+  /**
+   * Terminales abiertas: termId → quién mira y en qué máquina está el pane.
+   * El hub no entiende los bytes; sólo sabe a quién pertenecen.
+   */
+  const terms = new Map<string, { consoleId: string; machineId: string; agentId: string }>();
+  /** Terminales que una consola puede tener abiertas a la vez. */
+  const MAX_TERMS_PER_CONSOLE = 12;
 
   /* ── mundo + bus ────────────────────────────────────────────────── */
 
+  // Ciclo de vida tipado para el squad autonomy; se alimenta desde onEvent.
+  const lifecycle = new AgentLifecycle();
+
   const world = new World({
     onOps: (ops: PatchOp[]) => bus.push(ops),
+    // Las lápidas van a disco en cuanto se ponen: un hub que reinicia sin
+    // ellas vería volver, en el primer snapshot, todo lo que se archivó.
+    onArchived: (entries) => store.appendArchived(entries),
+    onUnarchived: (id, at) => store.appendUnarchived(id, at),
     onEvent: (ev: WorldEvent) => {
       store.logEvent(ev);
+      lifecycle.feed(ev, ev.agentId ? world.state.agents[ev.agentId] : null);
+      // Un archivado que reaparece vivo llegó como patch, sin registro entero:
+      // se le pide a la máquina el snapshot que lo trae.
+      if (ev.kind === 'agent:unarchived' && (ev.data as { resync?: boolean } | undefined)?.resync) {
+        queueMicrotask(() => { dispatchLocal({ k: 'resync' }).catch((err) => warn('resync tras desarchivar falló:', err)); });
+      }
       // Una transición a blocked o a dead es uno de los dos instantes que el
       // operador va a querer encontrar exactamente en la línea de tiempo. La
       // rejilla de 20 s se los perdería la mitad de las veces, así que se marca
@@ -519,11 +592,9 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         // Fuera del camino crítico: el mundo no espera al mando para publicar.
         queueMicrotask(() => {
           try {
-            // CAPCOM primero. Si se la queda, el CEO de API ni se entera: dos
-            // mentes triando la misma pregunta acabarían contestándola dos
-            // veces, y una de las dos respuestas sería la que el agente ignora.
-            if (capcomRouter.offer(escId)) return;
-            options.onEscalation?.(escId, hub);
+            // Se le ofrece a CAPCOM. Si no hay CAPCOM vivo la pregunta se queda
+            // en la cola del humano, que es donde iba a acabar de todos modos.
+            capcomRouter.offer(escId);
           } catch (err) { warn('triaje de escalación falló:', err); }
         });
       }
@@ -544,9 +615,8 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
    * El mando de la flota.
    *
    * Si hay una sesión con `role:'capcom'` viva, ella recibe lo que escribe el
-   * humano y cada pregunta que levanta un agente. Si no la hay, todo sigue como
-   * antes: el CEO de API si hay clave, el guionizado si no. `--api-command`
-   * fuerza el segundo camino aunque exista CAPCOM.
+   * humano y cada pregunta que levanta un agente. Si no la hay, no manda nadie:
+   * el mensaje se guarda, la pregunta va a la cola del humano, y el hub lo dice.
    */
   const capcomRouter = new CapcomRouter({
     capcom: () => capcomOf(world.state.agents),
@@ -567,16 +637,145 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     },
     setTimer: options.capcomTimer ?? realTimers(),
   }, {
-    enabled: options.apiCommand !== true,
     ...(options.capcomAnswerMs !== undefined ? { answerMs: options.capcomAnswerMs } : {}),
   });
 
-  // La conversación con el CEO sobrevive a los reinicios del hub.
+  /*
+   * Autonomía del mando: despertador, verificación, aterrizaje, presupuestos
+   * y diario. Todo inyectado, igual que el router: los tests le dan su reloj.
+   */
+  const autonomy = createAutonomy({
+    agents: () => Object.values(world.state.agents),
+    agent: (id) => world.state.agents[id],
+    projects: () => Object.values(world.state.projects),
+    project: (id) => world.state.projects[id],
+    tasks: () => tasks.all(),
+    capcom: () => capcomRouter.live(),
+    contextCutoff: () => capcomRouter.contextCutoff(),
+    sayToCapcom: (text) => capcomRouter.humanSays(text),
+    dispatch: (cmd) => dispatchLocal(cmd),
+    stopAgent: (agentId) => dispatchLocal({ k: 'stop', agentId }),
+    dir: store.dir,
+    env: process.env,
+    now: () => Date.now(),
+    setTimer: options.capcomTimer ?? realTimers(),
+    setInterval: (fn, ms) => {
+      const h = setInterval(fn, ms);
+      h.unref?.();
+      return { cancel: () => clearInterval(h) };
+    },
+    log: (text) => log(text),
+    note: (text) => {
+      world.pushFeed('', [{ id: newId('f_auto'), at: Date.now(), level: 'info', source: 'AUTONOMY', text }]);
+    },
+    lifecycle,
+  });
+
+  const taskResultTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const taskResultSeen = new Map<string, string>();
+  const tasks = new TaskStore(store.dir, (task) => {
+    (world.state.tasks ??= {})[task.id] = task;
+    broadcast({ t: 'task', task });
+    const last = task.messages.at(-1);
+    if (task.status !== 'active' || last?.role !== 'agent' || taskResultSeen.get(task.id) === last.id) return;
+    taskResultSeen.set(task.id, last.id);
+    clearTimeout(taskResultTimers.get(task.id));
+    taskResultTimers.set(task.id, setTimeout(() => {
+      taskResultTimers.delete(task.id);
+      const current = tasks.get(task.id);
+      if (current.status !== 'active') return;
+      const cutoff = capcomRouter.contextCutoff();
+      const sourceAt = last.agentId ? world.state.agents[last.agentId]?.updatedAt : undefined;
+      if (cutoff !== null && (last.at <= cutoff || (sourceAt !== undefined && sourceAt <= cutoff))) return;
+      const prompt = cutoff === null ? `Worker results arrived. Review them and report progress or completion to this task.\n${taskPrompt(current)}`
+        : `[ORCA TASK ${current.id}] New worker message; historical context is not attached. Use report_task(task_id="${current.id}") for replies.\n${last.text}`;
+      const sent = capcomRouter.humanSays(prompt, (agentId, text) => {
+        void dispatchLocal({ k: 'say', agentId, text }).catch((err) => {
+          log(`task ${task.id}: worker update delivery failed: ${String(err)}`);
+        });
+      }, (reason) => { tasks.message(task.id, 'system', `Delivery failed: ${reason}`); });
+      if (!sent) options.onUnrouted?.(prompt, hub);
+    }, 750));
+  });
+  world.state.tasks = tasks.all();
+  const recovery = new RecoveryCoordinator({
+    dir: store.dir, agents: () => Object.values(world.state.agents), dispatch: dispatchLocal,
+    automatic: process.env.ORCA_RECOVERY_AUTO === '1',
+    budgetBlock: a => budgets.agentStatus(a, world.state.agents, tasks.all()).level === 'over' ? 'Recovery cannot bypass the work budget. Review the budget or wait.' : null,
+    notifyAllowed: (supervisor, a) => supervisor.role !== 'capcom' || capcomRouter.contextCutoff() === null || (quotaIncident(a)?.since ?? 0) > capcomRouter.contextCutoff()!,
+    notify: async (supervisor, text) => {
+      try { await dispatchLocal({ k: 'say', agentId: supervisor.id, text }); return true; }
+      catch { return false; }
+    },
+    note: (text, agentId) => world.pushFeed('', [{ id: newId('f_recovery'), at: Date.now(), level: 'info', source: 'RECOVERY', agentId, text }]),
+  });
+
+  /*
+   * Presupuestos.
+   *
+   * El libro decide; aquí sólo se reparte lo que dice: la línea a CAPCOM por
+   * el mismo canal por el que le llega todo lo demás, una entrada en el feed,
+   * y —cuando toca— el `stop` al collector. Se evalúa en el sweep de dos
+   * segundos, que ya es el pulso al que el hub mira la flota.
+   */
+  /*
+   * Higiene: el último informe de cada máquina, en memoria y fuera del mundo.
+   * Son unos kilobytes por máquina en su propio reloj y ninguna baldosa
+   * depende de ellos; meterlos en `WorldState` los metería en cada patch por
+   * el bien de una ventana que casi nunca está abierta.
+   */
+  const hygiene = new HygieneRegistry(() => Date.now());
+  /** Pide muestra a cada collector vivo. Devuelve a cuántos les llegó. */
+  const refreshHygiene = (force = false): number => {
+    let sent = 0;
+    for (const conn of collectors.values()) {
+      if (!conn.authed) continue;
+      send(conn, { t: 'hygiene:sample', ...(force ? { force: true } : {}) });
+      sent++;
+    }
+    return sent;
+  };
+
+  const budgets = options.budgets ?? new BudgetBook(store.dir, budgetConfig());
+  const budgetNote = (level: 'warn' | 'alert', text: string, agentId: string | null): void => {
+    world.pushFeed('', [{
+      id: newId('f_bud'), at: Date.now(), level, source: 'BUDGET', text,
+      ...(agentId ? { agentId, projectId: world.state.agents[agentId]?.projectId } : {}),
+    }]);
+  };
+  const budgetSweep = (): void => {
+    const events = budgets.tick(world.state.agents, tasks.all());
+    for (const ev of events) {
+      const first = ev.kind === 'stop' ? ev.agentId : ev.agentIds[0] ?? null;
+      budgetNote(ev.kind === 'warn' ? 'warn' : 'alert', ev.text, first);
+      log(ev.text);
+      const sent = capcomRouter.humanSays(ev.text);
+      if (!sent) options.onUnrouted?.(ev.text, hub);
+      if (ev.kind === 'stop') {
+        void dispatchLocal({ k: 'stop', agentId: ev.agentId }).catch((err) => {
+          const cs = world.state.agents[ev.agentId]?.callsign ?? ev.agentId;
+          budgetNote('alert', `[BUDGET STOP] ${cs}: the stop did not go through (${String(err)})`, ev.agentId);
+        });
+      }
+    }
+  };
+
+  // La conversación con CAPCOM sobrevive a los reinicios del hub.
+  const archivedBefore = store.loadArchived();
+  if (archivedBefore.length > 0) {
+    world.hydrateArchived(archivedBefore);
+    log(`agentes archivados recuperados: ${archivedBefore.length}`);
+  }
+
   const priorCeo = store.loadCeo();
   if (priorCeo.length > 0) {
     world.hydrateCeo(priorCeo);
-    log(`conversación del CEO recuperada: ${priorCeo.length} mensajes`);
+    log(`conversación con CAPCOM recuperada: ${priorCeo.length} mensajes`);
   }
+  const handoffs = new HandoffStore(store.dir);
+  world.state.capcomHandoffs = handoffs.all();
+  const lastContext = handoffs.all().at(-1);
+  if (lastContext) capcomRouter.setContext(lastContext.contextMode, lastContext.cutoffAt);
 
   /* ── envío ──────────────────────────────────────────────────────── */
 
@@ -625,11 +824,21 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   /** A qué máquina pertenece un comando, mirando el mundo. */
   function targetOf(cmd: Command): { machineId: string | null; broadcast: boolean; error?: string } {
     switch (cmd.k) {
+      case 'recovery:settings': return { machineId: null, broadcast: false };
       case 'resync':
         return { machineId: null, broadcast: true };
       case 'spawn':
       case 'key:set':
       case 'key:remove': {
+        /*
+         * El directorio de CAPCOM ya no se registra como proyecto, así que un
+         * spawn ahí fallaría de todas formas — pero con "proyecto desconocido",
+         * que le dice a quien lo pidió que lo intente con otro id en vez de que
+         * ahí no se lanza. El id de proyecto es `<máquina>/<slug>`, y el slug
+         * basta para reconocer el sitio aunque nadie lo haya registrado.
+         */
+        const why = excludedWorkspace(cmd.projectId.slice(cmd.projectId.indexOf('/') + 1));
+        if (why) return { machineId: null, broadcast: false, error: refusalFor(why) };
         const p = world.state.projects[cmd.projectId];
         return p ? { machineId: p.machineId, broadcast: false }
           : { machineId: null, broadcast: false, error: `proyecto desconocido: ${cmd.projectId}` };
@@ -661,6 +870,28 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     }
   }
 
+  /**
+   * Archivar terminados. El filtro viene de la red (consola, MCP, CLI), así
+   * que se copia campo a campo: un objeto ajeno no entra al mundo tal cual.
+   */
+  function archiveAgents(raw: unknown, opts: { dryRun?: boolean; by?: string }): ArchiveOutcome {
+    const f = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+    const filter: ArchiveFilter = {
+      projectId: typeof f['projectId'] === 'string' && f['projectId'] ? f['projectId'] : null,
+      squad: typeof f['squad'] === 'string' && f['squad'] ? f['squad'] : null,
+      olderThanMs: typeof f['olderThanMs'] === 'number' && f['olderThanMs'] > 0 ? f['olderThanMs'] : null,
+      state: archivableState(f['state']),
+      ids: Array.isArray(f['ids']) ? f['ids'].filter((x): x is string => typeof x === 'string').slice(0, 2_000) : null,
+      hidden: f['hidden'] === true ? true : null,
+    };
+    const out = world.archiveAgents(filter, opts);
+    if (!out.dryRun && out.archived.length > 0) {
+      log(`archivados ${out.archived.length} agente(s) por ${opts.by ?? '?'}`
+        + (out.squadsRetired.length ? `; squads retirados: ${out.squadsRetired.join(', ')}` : ''));
+    }
+    return out;
+  }
+
   /** Comandos lanzados dentro del proceso (el CEO), esperando su ack. */
   const localWaiters = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
@@ -690,8 +921,59 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   }
 
   function dispatchCommand(cmdId: string, cmd: Command, consoleId: string | null): void {
+    if (cmd.k === 'recovery:settings') {
+      try {
+        const data = Object.hasOwn(cmd, 'automatic') ? recovery.setAutomatic(cmd.automatic!) : recovery.settings();
+        ackTo(consoleId, cmdId, true, undefined, data);
+      } catch (e) { ackTo(consoleId, cmdId, false, String(e)); }
+      return;
+    }
+    if (cmd.k === 'recovery:status' || cmd.k === 'recovery:decide') {
+      const request = cmd;
+      void Promise.resolve().then<unknown>(() => request.k === 'recovery:status' ? recovery.status(request.agentId) : recovery.decide(request.agentId, request.decision))
+        .then(data => ackTo(consoleId, cmdId, true, undefined, data)).catch(e => ackTo(consoleId, cmdId, false, String(e)));
+      return;
+    }
+    if (cmd.k === 'say' || cmd.k === 'deliver') {
+      const seen = new Set<string>();
+      while (!seen.has(cmd.agentId)) {
+        seen.add(cmd.agentId);
+        const previousId: string = cmd.agentId;
+        const capNext = (world.state.capcomHandoffs ?? []).find(h => h.fromId === previousId)?.toId;
+        const next: Agent | undefined = (capNext ? world.state.agents[capNext] : undefined) ?? Object.values(world.state.agents).find(a => a.continuation?.fromId === previousId);
+        if (!next || next.machineId !== world.state.agents[previousId]?.machineId) break;
+        cmd = { ...cmd, agentId: next.id };
+      }
+    }
+    if ((cmd.k === 'say' || cmd.k === 'deliver') && capcomRouter.holdingFor(cmd.agentId)) {
+      const held = cmd;
+      capcomRouter.humanSays('', agentId => { dispatchCommand(newId('cmd'), { ...held, agentId }, null); });
+      ackTo(consoleId, cmdId, true, 'CAPCOM transition: message retained', { delivery: 'queued' });
+      return;
+    }
+    if (cmd.k === 'capcom:new') {
+      const a = world.state.agents[cmd.agentId];
+      if (!a || a.role !== 'capcom') { ackTo(consoleId, cmdId, false, 'An active CAPCOM is required.'); return; }
+      cmd = { ...cmd, checkpoint: cmd.mode === 'continuity' ? freshCapcomCheckpoint(world.state, mem.all()) : '' };
+    }
+    if (cmd.k === 'handoff:prepare') {
+      const id = cmd.agentId; const a = world.state.agents[id]; const cap = a?.role === 'capcom';
+      cmd = { ...cmd, checkpoint: JSON.stringify({ agent: a,
+        tasks: Object.values(world.state.tasks ?? {}).filter(t => cap || t.agentIds.includes(id)),
+        escalations: Object.values(world.state.escalations).filter(e => cap || e.agentId === id),
+        messages: Object.values(world.state.messages).filter(m => cap || m.fromAgentId === id || m.toAgentId === id || (!!a?.squad && m.toSquad === a.squad)) }, null, 2) };
+    }
     const target = targetOf(cmd);
     if (target.error) { ackTo(consoleId, cmdId, false, target.error); return; }
+    // El diario atribuye el lanzamiento que viene: una consola es el humano;
+    // sin consola detrás es el mando (MCP) o un caller en proceso.
+    if (cmd.k === 'spawn') {
+      try {
+        autonomy.journal.spawnRequested({
+          by: consoleId ? 'human' : 'capcom', projectId: cmd.projectId, mission: cmd.mission, squad: cmd.squad ?? null,
+        });
+      } catch (err) { warn('journal.spawnRequested falló:', err); }
+    }
 
     if (target.broadcast) {
       let sent = 0;
@@ -729,6 +1011,79 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     ackTo(p.consoleId, cmdId, ok, detail, data);
   }
 
+  /* ── terminales ─────────────────────────────────────────────────── */
+
+  function sendToConsole(consoleId: string, frame: ServerFrame): void {
+    for (const conn of consoles) {
+      if (conn.id === consoleId) { send(conn, frame); return; }
+    }
+  }
+
+  /**
+   * Consola → collector. El hub valida la forma y decide la máquina; el
+   * contenido —cols, filas, teclas— va tal cual. Un `term:open` sobre un agente
+   * que no existe se contesta aquí con `term:exit`, que es lo único que una
+   * ventana negra puede enseñar.
+   */
+  function relayTermDown(conn: ConsoleConn, frame: TermFrame): void {
+    const termId = frame.termId;
+    if (typeof termId !== 'string' || !TERM_ID_RE.test(termId)) return;
+    const exit = (reason: string): void => { send(conn, { t: 'term:exit', termId, reason }); };
+
+    if (frame.t === 'term:open') {
+      if (terms.has(termId)) { exit('that terminal id is already in use'); return; }
+      let mine = 0;
+      for (const t of terms.values()) if (t.consoleId === conn.id) mine++;
+      if (mine >= MAX_TERMS_PER_CONSOLE) { exit(`this console already has ${MAX_TERMS_PER_CONSOLE} terminals open`); return; }
+      const a = typeof frame.agentId === 'string' ? world.state.agents[frame.agentId] : undefined;
+      if (!a) { exit('unknown agent'); return; }
+      const target = collectors.get(a.machineId);
+      if (!target || target.ws.readyState !== WebSocket.OPEN) { exit('the agent’s machine is not connected'); return; }
+      const cols = clampInt(frame.cols, 2, TERM_MAX_COLS, 120);
+      const rows = clampInt(frame.rows, 2, TERM_MAX_ROWS, 36);
+      terms.set(termId, { consoleId: conn.id, machineId: a.machineId, agentId: a.id });
+      if (!send(target, { t: 'term:open', termId, agentId: a.id, cols, rows })) {
+        terms.delete(termId);
+        exit('could not reach the collector');
+      }
+      store.logEvent({ at: Date.now(), kind: 'cmd', machineId: a.machineId, text: `terminal on ${a.callsign}` });
+      return;
+    }
+
+    const t = terms.get(termId);
+    if (!t || t.consoleId !== conn.id) return;         // no es suya: se ignora en silencio
+    const target = collectors.get(t.machineId);
+    if (frame.t === 'term:close') {
+      terms.delete(termId);
+      if (target) send(target, { t: 'term:close', termId });
+      return;
+    }
+    if (!target) return;
+    if (frame.t === 'term:input') {
+      if (typeof frame.data !== 'string' || !frame.data.length) return;
+      send(target, { t: 'term:input', termId, data: frame.data.length > TERM_MAX_CHUNK ? frame.data.slice(0, TERM_MAX_CHUNK) : frame.data });
+      return;
+    }
+    if (frame.t === 'term:resize') {
+      send(target, { t: 'term:resize', termId, cols: clampInt(frame.cols, 2, TERM_MAX_COLS, 120), rows: clampInt(frame.rows, 2, TERM_MAX_ROWS, 36) });
+    }
+  }
+
+  /** Collector → consola. Sólo la máquina dueña del pane puede hablar por ese termId. */
+  function relayTermUp(machineId: string, frame: Extract<CollectorFrame, { t: 'term:data' | 'term:exit' }>): void {
+    const termId = frame.termId;
+    if (typeof termId !== 'string') return;
+    const t = terms.get(termId);
+    if (!t || t.machineId !== machineId) return;
+    if (frame.t === 'term:exit') {
+      terms.delete(termId);
+      sendToConsole(t.consoleId, { t: 'term:exit', termId, reason: typeof frame.reason === 'string' ? frame.reason.slice(0, 300) : 'closed' });
+      return;
+    }
+    if (typeof frame.data !== 'string' || !frame.data.length) return;
+    sendToConsole(t.consoleId, { t: 'term:data', termId, data: frame.data.length > TERM_MAX_CHUNK ? frame.data.slice(0, TERM_MAX_CHUNK) : frame.data });
+  }
+
   /* ── tráfico entre agentes ──────────────────────────────────────── */
 
   /**
@@ -757,9 +1112,16 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
 
     switch (msg.scope) {
       case 'agent': {
-        const to = msg.toAgentId ? world.state.agents[msg.toAgentId] : undefined;
+        let to = msg.toAgentId ? world.state.agents[msg.toAgentId] : undefined;
+        const visited = new Set<string>();
+        while (to && !visited.has(to.id)) {
+          visited.add(to.id);
+          const successor = (world.state.capcomHandoffs ?? []).find(h => h.fromId === to!.id)?.toId;
+          if (!successor || !world.state.agents[successor]) break;
+          to = world.state.agents[successor];
+        }
         if (!to) return { delivered: [], skipped: 1, reason: `destinatario desconocido: ${msg.toAgentId ?? '?'}` };
-        if (!canReceive(to)) {
+        if (!canReceive(to) && !capcomRouter.holdingFor(to.id)) {
           return { delivered: [], skipped: 1, reason: `${to.callsign} ya terminó (${to.state})` };
         }
         targets = [to];
@@ -819,6 +1181,10 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     const delivered: string[] = [];
     const unreachable: string[] = [];
     for (const a of targets) {
+      const cutoff = capcomRouter.contextCutoff();
+      if (cutoff !== null && msg.at <= cutoff && (a.role === 'capcom' || capcomRouter.holdingFor(a.id))) {
+        skipped++; reason = 'Historical message preserved in the hub; clean CAPCOM does not replay it.'; continue;
+      }
       const conn = collectors.get(a.machineId);
       if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
         skipped += 1;
@@ -953,9 +1319,77 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           resolveAck(frame.cmdId, Boolean(frame.ok), frame.detail, frame.data);
           return;
         }
+        if (frame.t === 'term:data' || frame.t === 'term:exit') {
+          relayTermUp(machineId, frame);
+          return;
+        }
         if (frame.t === 'hello') return;   // un segundo hello no re-autentica
 
+        if (frame.t === 'capcom:transfer') {
+          const source = world.state.agents[frame.fromId];
+          const destination = frame.toId ? world.state.agents[frame.toId] : undefined;
+          if (source?.machineId !== machineId && destination?.machineId !== machineId) return;
+          if (frame.hold && source?.role === 'capcom') capcomRouter.beginTransfer(frame.fromId, frame.contextMode, frame.cutoffAt);
+          else if (!frame.hold) capcomRouter.releaseTransfer(frame.toId);
+          return;
+        }
+        if (frame.t === 'capcom:handoff') {
+          const h = parseHandoff(frame.event);
+          if (!h || h.machineId !== machineId) return;
+          const target = world.state.agents[h.toId];
+          if (!target || target.machineId !== machineId || target.role !== 'capcom') return;
+          capcomRouter.setContext(h.contextMode, h.cutoffAt);
+          const saved = handoffs.add(h);
+          if (!saved) return;
+          world.setCapcomHandoffs(handoffs.all());
+          const text = handoffText(saved);
+          pushCeoMessage({ id: saved.id, at: saved.at, role: 'system', text, actions: [] });
+          world.pushFeed(machineId, [{ id: saved.id, at: saved.at, level: 'info', source: 'CAPCOM', agentId: saved.toId, text }]);
+          // Best-effort immediate notice; briefing always retains the durable fact.
+          if (h.contextMode !== 'clean') capcomRouter.humanSays(`${HANDOFF_NOTICE_PREFIX}\n${text}\nCall briefing first and reconcile pending obligations and persistent rules. Preserve this history reference without loading the full conversation. This notice does not authorize new work or retries; acknowledge it briefly.`);
+          return;
+        }
+
+        if (frame.t === 'capcom:rotated') {
+          /*
+           * Un reciclado a propósito, no una caída: el router retiene el correo
+           * hasta que aparezca la sesión nueva, y el feed lo dice con las
+           * cifras que lo motivaron. Se anota antes de que el viejo muera, así
+           * que nunca hay un instante en que "no hay CAPCOM".
+           */
+          if (typeof frame.fromId !== 'string' || !frame.fromId) return;
+          capcomRouter.rotating(frame.fromId);
+          const text = `CAPCOM rotado: ${Math.round(Number(frame.turns) || 0)} turnos, `
+            + `${Math.round(Number(frame.compactions) || 0)} compactaciones`
+            + (Number(frame.contextTokens) > 0 ? `, ${Math.round(Number(frame.contextTokens) / 1000)}k tokens de contexto` : '');
+          log(text);
+          world.pushFeed(machineId, [{ id: newId('f_cap'), at: Date.now(), level: 'info', source: 'CAPCOM', text }]);
+          try {
+            autonomy.journal.rotated({
+              fromId: frame.fromId, machineId,
+              turns: Number(frame.turns) || 0, compactions: Number(frame.compactions) || 0,
+              contextTokens: Number(frame.contextTokens) || 0,
+            });
+          } catch (err) { warn('journal.rotated falló:', err); }
+          return;
+        }
+
+        if (frame.t === 'hygiene') {
+          // El machineId es el de la conexión, nunca el del frame: un collector
+          // autenticado como una máquina no puede declarar por otra.
+          const report = sanitizeReport(frame.report);
+          if (!report) { warn(`informe de higiene inválido de ${machineId}`); return; }
+          const held = hygiene.put(machineId, report);
+          broadcast({ t: 'hygiene', reports: [held] });
+          return;
+        }
+
         world.applyCollector(frame, machineId);
+        if (frame.t === 'agent' || frame.t === 'agent:new' || frame.t === 'snapshot') {
+          tasks.observe(world.state.agents);
+          // Si un CAPCOM nuevo acaba de aparecer, lo retenido durante la rotación sale ahora.
+          capcomRouter.flush();
+        }
       } catch (err) {
         warn('error procesando frame de collector', conn.machineId, err);
       }
@@ -973,6 +1407,11 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       // No borramos nada: offline + agentes vivos a 'dead'. El humano tiene que
       // poder ver qué se cayó y con qué estaba.
       world.markMachineOffline(machineId, `collector desconectado (${code})`);
+      for (const [termId, t] of terms) {
+        if (t.machineId !== machineId) continue;
+        terms.delete(termId);
+        sendToConsole(t.consoleId, { t: 'term:exit', termId, reason: 'the machine disconnected' });
+      }
       for (const [cmdId, p] of pending) {
         if (p.machineId !== machineId) continue;
         clearTimeout(p.timer);
@@ -1054,6 +1493,13 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     ws.on('close', () => {
       if (conn.helloTimer) clearTimeout(conn.helloTimer);
       consoles.delete(conn);
+      // Sus terminales se sueltan en la máquina: nadie las mira ya.
+      for (const [termId, t] of terms) {
+        if (t.consoleId !== conn.id) continue;
+        terms.delete(termId);
+        const target = collectors.get(t.machineId);
+        if (target) send(target, { t: 'term:close', termId });
+      }
       // Los comandos que pidió quedan huérfanos: su ack ya no tiene destino.
       for (const p of pending.values()) if (p.consoleId === conn.id) p.consoleId = null;
       log(`consola desconectada: ${conn.id}`);
@@ -1105,9 +1551,72 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         return;
       }
 
+      case 'term:open': case 'term:input': case 'term:resize': case 'term:close':
+        relayTermDown(conn, frame);
+        return;
+
+      case 'agents:archive': {
+        if (typeof frame.id !== 'string') return;
+        try {
+          const out = archiveAgents(frame.filter, { dryRun: frame.dryRun === true, by: 'console' });
+          ackTo(conn.id, frame.id, true, undefined, out);
+        } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
+      case 'hygiene:get': {
+        /*
+         * `refresh` pide muestra fresca y contesta con lo que hay ahora: los
+         * informes nuevos llegan solos por el push de `t:'hygiene'`, así que
+         * la consola no espera a nadie y el panel se actualiza cuando cada
+         * máquina termina su paseo.
+         */
+        const asked = frame.refresh === true ? refreshHygiene(true) : 0;
+        ackTo(conn.id, frame.id, true, undefined, {
+          reports: hygiene.all(), fleet: hygiene.fleet(), asked,
+        });
+        return;
+      }
+      case 'task:create': {
+        try {
+          if (typeof frame.title !== 'string' || typeof frame.taskId !== 'string') throw new Error('Invalid task');
+          const task = tasks.create(frame.taskId, frame.title);
+          ackTo(conn.id, frame.id, true, undefined, task);
+        } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
       case 'ceo:say': {
         const text = typeof frame.text === 'string' ? frame.text : '';
         if (!text.trim()) return;
+        if (frame.taskId !== undefined) {
+          const requestId = typeof frame.id === 'string' ? frame.id : newId('cmd');
+          try {
+            const task = tasks.message(frame.taskId, 'human', text, 'active');
+            const prompt = capcomRouter.contextCutoff() === null ? taskPrompt(task)
+              : `[ORCA TASK ${task.id}] New operator instruction. Use report_task(task_id="${task.id}") for replies. Historical context is not attached.\n${text}`;
+            const cap = capcomRouter.live();
+            if (cap) {
+              void dispatchLocal({ k: 'say', agentId: cap.id, text: prompt }).then(
+                (data) => ackTo(conn.id, requestId, true, undefined, data),
+                (err) => {
+                  tasks.message(task.id, 'system', `Delivery unconfirmed: ${String(err)}`);
+                  ackTo(conn.id, requestId, false, String(err));
+                },
+              );
+            } else if (capcomRouter.inRotation()) {
+              // CAPCOM se está reciclando: el prompt espera a la sesión nueva.
+              capcomRouter.humanSays(prompt, (agentId, message) => {
+                void dispatchLocal({ k: 'say', agentId, text: message }).catch((err) => {
+                  tasks.message(task.id, 'system', `Delivery unconfirmed: ${String(err)}`);
+                });
+              }, (reason) => { tasks.message(task.id, 'system', `Delivery failed: ${reason}`); });
+              ackTo(conn.id, requestId, true, 'CAPCOM rotating: queued', { delivery: 'queued' });
+            } else if (options.onUnrouted) {
+              options.onUnrouted(prompt, hub);
+              ackTo(conn.id, requestId, true, undefined, { delivery: 'accepted' });
+            } else throw new Error('No CAPCOM connected. Message saved in this task.');
+          } catch (err) { ackTo(conn.id, requestId, false, err instanceof Error ? err.message : String(err)); }
+          return;
+        }
         const msg: CeoMessage = {
           id: newId('msg'), role: 'human', text, at: Date.now(), actions: [],
         };
@@ -1119,15 +1628,35 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
          * lista es el historial de la línea de comandos, y tiene que seguir
          * siendo legible aunque el mando cambie de sitio a mitad de la sesión.
          */
-        if (capcomRouter.humanSays(text)) return;
-        if (options.onCeoSay) {
-          options.onCeoSay(text, hub);
+        const requestId = typeof frame.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(frame.id) ? frame.id : null;
+        // Entregado más tarde (tras una rotación) va sin recibo: el de la
+        // consola ya se dio al encolar, y su conexión puede haberse ido.
+        let immediate = true;
+        const outcome = capcomRouter.humanSays(text, (agentId, message) => {
+          const withReceipt = immediate && requestId !== null;
+          dispatchCommand(withReceipt ? requestId : newId('cmd'), { k: 'say', agentId, text: message }, withReceipt ? conn.id : null);
+        }, (reason) => {
+          pushCeoMessage({
+            id: newId('msg'), role: 'system', at: Date.now(), actions: [],
+            text: `${reason}. Tu mensaje quedó guardado; cuando vuelva, díselo otra vez o arranca uno con \`orca capcom\`.`,
+          });
+        });
+        immediate = false;
+        if (outcome === 'queued') {
+          if (requestId) ackTo(conn.id, requestId, true, 'CAPCOM rotating: queued', { delivery: 'queued' });
+          return;
+        }
+        if (outcome) return;
+        if (options.onUnrouted) {
+          options.onUnrouted(text, hub);
+          if (requestId) ackTo(conn.id, requestId, true, 'no CAPCOM: observed unrouted', { delivery: 'accepted' });
         } else {
+          if (requestId) ackTo(conn.id, requestId, false, 'No CAPCOM connected. Your message was saved.');
           // Sin mando conectado, decirlo es mejor que el silencio.
           pushCeoMessage({
             id: newId('msg'), role: 'system', at: Date.now(), actions: [],
-            text: 'No hay comando conectado a este hub: ni sesión CAPCOM ni CEO de API. '
-              + 'Tu mensaje quedó guardado. Arranca una con `orca capcom` en la máquina que deba llevarlo.',
+            text: 'No hay CAPCOM conectado a este hub. '
+              + 'Tu mensaje quedó guardado. Arranca uno con `orca capcom` en la máquina que deba llevarlo.',
           });
         }
         return;
@@ -1161,6 +1690,17 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   ): void {
     const before = world.state.escalations[id];
     if (!before) { ackTo(consoleId, id, false, 'escalación desconocida'); return; }
+    if (before.permission) {
+      if (!['pending', 'with_ceo'].includes(before.status) || before.permission.phase !== 'requested') {
+        ackTo(consoleId, id, false, 'Permission stale or response already pending'); return;
+      }
+      if (!/^(allow|once|deny)$/i.test(answer.trim()) || rememberAs) {
+        ackTo(consoleId, id, false, 'Permission accepts allow (once) or deny; cannot remember'); return;
+      }
+      world.requestPermissionAnswer(id);
+      dispatchCommand(newId('cmd'), { k: 'answer', escalationId: id, answer, rememberAs: null }, consoleId);
+      return;
+    }
     const e = world.answerEscalation(id, answer, by, rememberAs);
     if (!e) return;
     store.saveAnswered(e);
@@ -1298,6 +1838,39 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   }
 
   /**
+   * Un archivo de un proyecto, para el visor de la consola.
+   *
+   * `GET /api/file?path=/abs/ruta[&token=…]`. La política —qué raíces, cómo se
+   * contiene, qué cabeceras— vive en files.ts; aquí sólo se juntan las raíces
+   * del momento y se pone la misma puerta que `/api/artifact`: es contenido de
+   * la máquina de alguien, así que exige el token igual que el socket.
+   *
+   * Las raíces se recalculan por petición a propósito: un proyecto que acaba
+   * de aparecer en el mundo es servible en cuanto aparece, sin reiniciar.
+   */
+  function serveFile(url: URL, req: IncomingMessage, res: ServerResponse): void {
+    const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
+    if (!allowed.ok) {
+      text(res, 401, `no autorizado (${allowed.reason ?? 'falta token'}). `
+        + 'Añade ?token=<ORCA_TOKEN> a la url, igual que hace el websocket.');
+      return;
+    }
+    const requested = url.searchParams.get('path') ?? '';
+    const roots = [
+      join(ORCA_DIR, 'recovery-images'),
+      join(ORCA_DIR, 'capcom', 'handoffs'),
+      join(ORCA_DIR, 'worker-recovery', 'handoffs'),
+      ...Object.values(world.state.projects).map((p) => p.path),
+      ...scratchpadRoots(),
+      ...envRoots(),
+      ...fileRoots,
+    ];
+    const r = resolveServedPath(requested, roots);
+    if (!r.ok) { text(res, r.status, r.reason); return; }
+    streamFile(req, res, r);
+  }
+
+  /**
    * Lo que el servidor MCP necesita del hub.
    *
    * El contexto se construye en cada llamada a propósito: entre una tool y la
@@ -1325,6 +1898,12 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     try {
       const url = new URL(req.url ?? '/', 'http://hub.local');
       switch (url.pathname) {
+        case '/api/recovery-images': {
+          const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
+          if (!allowed.ok) { json(res, 401, { error: 'Image upload requires a valid ORCA access token.' }); return; }
+          void uploadRecoveryImage(req, res, join(ORCA_DIR, 'recovery-images'));
+          return;
+        }
         case '/api/health':
           json(res, 200, {
             ...world.health(),
@@ -1451,6 +2030,10 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           }
           return;
         }
+        case '/api/file': {
+          serveFile(url, req, res);
+          return;
+        }
         case '/api/memory': {
           // Útil para ver por qué el CEO decidió no preguntar.
           const q = url.searchParams.get('q');
@@ -1475,7 +2058,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
             ok: false, error: 'no such route',
             routes: [
               '/api/health', '/api/world', '/api/traffic?project=&kind=&limit=',
-              '/api/memory?q=', '/api/artifact/<id>', 'POST /mcp (fleet command, MCP)',
+              '/api/memory?q=', '/api/artifact/<id>', '/api/file?path=', 'POST /mcp (fleet command, MCP)',
               '/api/history?from=&to=&step=', '/api/history/summary?since=',
               '/api/fleets (GET, PUT)', 'POST /api/squads/next?base=',
             ],
@@ -1523,6 +2106,12 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
 
   const sweepTimer = setInterval(() => {
     try { world.sweep(); } catch (err) { warn('sweep falló', err); }
+    // Lo que quedó pendiente sin que nadie lo triara —CAPCOM no estaba cuando
+    // llegó— se le ofrece ahora que sí está.
+    try { capcomRouter.flush(); capcomRouter.sweep(Object.values(world.state.escalations)); }
+    catch (err) { warn('sweep de CAPCOM falló', err); }
+    void recovery.tick().catch(err => warn('recovery sweep failed', err));
+    try { budgetSweep(); } catch (err) { warn('sweep de presupuestos falló', err); }
   }, SWEEP_INTERVAL_MS);
   sweepTimer.unref?.();
 
@@ -1561,7 +2150,16 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     port: actualPort,
     url: `http://${host === '0.0.0.0' ? 'localhost' : host}:${actualPort}`,
     pushCeoMessage,
+    tasks,
+    budgets,
+    autonomy,
     broadcast,
+    hygiene: {
+      all: () => hygiene.all(),
+      get: (machineId) => hygiene.get(machineId),
+      fleet: () => hygiene.fleet(),
+      refresh: (force) => refreshHygiene(force === true),
+    },
     answerEscalationLocal(id, answer, by) {
       // Una respuesta del CEO no se guarda en memoria: la memoria es lo que
       // dijo el humano. Recordar lo que el CEO dedujo la contaminaría.
@@ -1576,10 +2174,11 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         id: newId('m'),
         kind: input.kind,
         scope: input.scope,
-        // El CEO no es un agente y no tiene máquina: se identifica como tal
-        // para que el destinatario sepa que esto no viene de un compañero.
+        // El mando no es un compañero de flota: se identifica como CAPCOM para
+        // que el destinatario sepa de dónde viene. El id interno sigue siendo
+        // `ceo` porque así está en el tráfico persistido.
         fromAgentId: 'ceo',
-        fromCallsign: 'CEO',
+        fromCallsign: 'CAPCOM',
         fromProjectId: projectId,
         toAgentId: input.scope === 'agent' ? (input.toAgentId ?? null) : null,
         toProjectId: input.scope === 'project' ? (input.toProjectId ?? null) : null,
@@ -1610,12 +2209,18 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     dispatch(cmd) {
       return dispatchLocal(cmd);
     },
+    archiveAgents(filter, opts) {
+      return archiveAgents(filter, opts);
+    },
     counts: () => ({ collectors: collectors.size, consoles: consoles.size, pending: pending.size }),
     async close() {
+      for (const timer of taskResultTimers.values()) clearTimeout(timer);
+      taskResultTimers.clear();
       clearInterval(sweepTimer);
       clearInterval(pingTimer);
       clearInterval(pruneTimer);
       capcomRouter.stop();
+      autonomy.stop();
       for (const p of pending.values()) clearTimeout(p.timer);
       pending.clear();
       bus.stop();
@@ -1638,9 +2243,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     console.log(`[hub]   salud      → http://localhost:${actualPort}/api/health`);
     console.log(`[hub]   MCP        → http://localhost:${actualPort}/mcp   (las tools de CAPCOM)`);
     console.log(`[hub]   memoria    → ${mem.size} respuestas recordadas`);
-    console.log(`[hub]   comando    → ${options.apiCommand
-      ? 'CEO de API forzado (--api-command): CAPCOM no recibirá nada'
-      : 'CAPCOM cuando haya sesión viva; el CEO de API sólo si no la hay'}`);
+    console.log('[hub]   comando    → CAPCOM cuando haya sesión viva; sin ella, nadie');
   }
 
   return hub;
@@ -1656,10 +2259,12 @@ const invokedDirectly = (() => {
 
 if (invokedDirectly) {
   const hub = await startHub();
+  let closing = false;
   const bye = (signal: string): void => {
+    if (closing) return;
+    closing = true;
     console.log(`\n[hub] ${signal}, cerrando…`);
-    hub.store.flushSync();
-    hub.history.flushSync();
+    // close() drains the serialized write queues, including compaction.
     void hub.close().then(() => process.exit(0));
     setTimeout(() => process.exit(0), 2_000).unref?.();
   };

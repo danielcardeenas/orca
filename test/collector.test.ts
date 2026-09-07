@@ -115,11 +115,11 @@ function promptLine(at: number, text: string): Record<string, unknown> {
 
 const ALIVE = {
   alive: true, background: false, shortId: null, pid: 1234,
-  name: 'test', startedAt: null, cliState: 'running',
+  name: 'test', startedAt: null, cliState: 'running', pane: false,
 };
 const DEAD = {
   alive: false, background: false, shortId: null, pid: null,
-  name: null, startedAt: null, cliState: null,
+  name: null, startedAt: null, cliState: null, pane: false,
 };
 
 /* ── 1. máquina de estados ────────────────────────────────────────── */
@@ -215,6 +215,28 @@ const testBlockedByPermission: Test = () => check('derive: tool gated colgado >9
   assert.strictEqual(s.state, 'blocked');
   assert.strictEqual(s.block?.kind, 'permission');
   assert.ok(s.block?.summary.includes('rm -rf build'), s.block?.summary);
+});
+
+const testAcceptEditsStillGatesBash: Test = () => check('derive: acceptEdits aprueba ediciones, pero un Bash colgado sí es permiso', () => {
+  const now = Date.now();
+  const r = ref(SID, '/tmp/x.jsonl');
+  const d = new SessionDeriver(r, 'm1', 'p1');
+  d.setLiveness(ALIVE);
+  d.ingest(batch(r, [
+    { type: 'permission-mode', permissionMode: 'acceptEdits', sessionId: SID },
+    assistantLine({ at: now, stop: 'tool_use', tool: { id: 't', name: 'Bash', input: { command: 'magick -size 1200x600' } } }),
+  ]));
+  assert.strictEqual(d.gatedPending(now + 2_000)?.name, 'Bash', 'candidato a mirar la pantalla a los 2s');
+  assert.strictEqual(d.snapshot(now + 95_000).block?.kind, 'permission');
+
+  const e = new SessionDeriver(ref('s-edit', '/tmp/y.jsonl'), 'm1', 'p1');
+  e.setLiveness(ALIVE);
+  e.ingest(batch(ref('s-edit', '/tmp/y.jsonl'), [
+    { type: 'permission-mode', permissionMode: 'acceptEdits', sessionId: 's-edit' },
+    assistantLine({ at: now, stop: 'tool_use', tool: { id: 't2', name: 'Edit', input: { file_path: 'a.ts' } } }),
+  ]));
+  assert.strictEqual(e.gatedPending(now + 2_000), null, 'una edición en acceptEdits no pregunta');
+  assert.strictEqual(e.state(now + 600_000), 'working');
 });
 
 const testNotBlockedInAutoMode: Test = () => check('derive: en modo auto un tool largo NO es bloqueo', () => {
@@ -614,6 +636,23 @@ const testProbeSlug: Test = () => check('projects: la sonda prefiere el segmento
   assert.strictEqual(probeSlug('-no-existe-nada', exists), null);
 });
 
+const testProbeSlugDots: Test = () => check('projects: la sonda recupera los puntos (~/.orca/capcom, next.config.js)', () => {
+  const real = new Set([
+    '/Users', '/Users/dan', '/Users/dan/.orca', '/Users/dan/.orca/capcom',
+    '/Users/dan/.config', '/Users/dan/.config/next.config.js',
+    '/Users/dan/projects', '/Users/dan/projects/jk-detailing', '/Users/dan/projects/jk-detailing/.git',
+  ]);
+  const exists = (p: string): boolean => real.has(p);
+  // Doble guión: el nombre empieza por punto. Es el slug real de CAPCOM.
+  assert.strictEqual(probeSlug('-Users-dan--orca-capcom', exists), '/Users/dan/.orca/capcom');
+  // Puntos dentro del nombre, y un guión de verdad justo antes de un oculto.
+  assert.strictEqual(probeSlug('-Users-dan--config-next-config-js', exists), '/Users/dan/.config/next.config.js');
+  assert.strictEqual(probeSlug('-Users-dan-projects-jk-detailing--git', exists), '/Users/dan/projects/jk-detailing/.git');
+  // El guión sigue ganando cuando ambos existirían.
+  assert.strictEqual(probeSlug('-Users-dan-projects-jk-detailing', exists), '/Users/dan/projects/jk-detailing');
+  assert.strictEqual(probeSlug('---', exists), null);
+});
+
 const testMatchesSlug: Test = () => check('projects: un cwd de subdirectorio no mueve la raíz del proyecto', () => {
   const slug = '-Users-dan-projects-samuhomes';
   assert.strictEqual(matchesSlug('/Users/dan/projects/samuhomes', slug), '/Users/dan/projects/samuhomes');
@@ -686,6 +725,25 @@ const testLineageSpawn: Test = () => check('lineage: spawn de ORCA persiste el p
   assert.strictEqual(tree.get('sess-hija')?.depth, 1);
   assert.strictEqual(tree.get('sess-hija')?.mission, 'Extraer el card renderer');
   assert.deepStrictEqual(tree.get('sess-padre')?.childIds, ['sess-hija']);
+});
+
+const testLineageOneCapcom: Test = () => check('lineage: sólo una sesión lleva role capcom, y demote la retira', () => {
+  const store = path.join(tmp('lineage-capcom'), 'lineage.json');
+  const idx = new LineageIndex(store);
+  idx.noteSpawn('aaaa1111', null, 'mando', null, false, 'capcom');
+  idx.noteSpawn('bbbb2222', null, 'mando', null, false, 'capcom');
+  const inputs = [
+    { key: 's-a', sessionId: 's-a', agentId: null, metaPath: null, shortId: 'aaaa1111' },
+    { key: 's-b', sessionId: 's-b', agentId: null, metaPath: null, shortId: 'bbbb2222' },
+  ];
+  let tree = new LineageIndex(store).resolve(inputs);
+  assert.strictEqual(tree.get('s-a')?.role, 'agent');
+  assert.strictEqual(tree.get('s-b')?.role, 'capcom');
+  assert.strictEqual(tree.get('s-a')?.mission, 'mando', 'retirar el rol no borra la misión');
+
+  idx.demote('bbbb2222');
+  tree = new LineageIndex(store).resolve(inputs);
+  assert.strictEqual(tree.get('s-b')?.role, 'agent');
 });
 
 const testLineageNoParent: Test = () => check('lineage: sin atribución posible, parentId null y depth 0', () => {
@@ -845,6 +903,11 @@ const testDiff: Test = () => check('index: diffAgent sólo emite cambios percept
   assert.strictEqual(st.tool, 'Bash');
   assert.ok(st.updatedAt !== undefined && st.uptimeMs !== undefined);
 
+  // El pane aparece después del transcript: ese cambio tiene que viajar, o la
+  // consola nunca sabe que puede abrir una TERMINAL.
+  const pane = diffAgent(a, fakeAgent({ pane: true }));
+  assert.ok(pane && pane.pane === true, 'pane: false → true es un patch');
+
   // Un temblor de tps por debajo del umbral no viaja.
   const m = fakeAgent().metrics;
   assert.strictEqual(diffAgent(a, fakeAgent({ metrics: { ...m, tokensPerSec: 1.2 } })), null);
@@ -901,14 +964,14 @@ const testJunkTolerance: Test = () => check('robustez: basura en el transcript n
 
 const TESTS: Test[] = [
   testBooting, testThinking, testWorking, testWorkingToIdle,
-  testBlockedByAsk, testBlockedByPermission, testNotBlockedInAutoMode,
+  testBlockedByAsk, testBlockedByPermission, testAcceptEditsStillGatesBash, testNotBlockedInAutoMode,
   testBlockedByEscalation, testDoneVsDead, testNoPrematureReap,
   testCostState, testTokensPerSec, testTurnsAndUptime, testToolDetail,
   testCallsigns,
   testParseLines, testIncrementalTail, testWatcherDiscovery,
   testVaultRoundTrip, testVaultTamper, testVaultSecretChange, testVaultCorrupt,
-  testProbeSlug, testMatchesSlug,
-  testLineage, testLineageSpawn, testLineageNoParent,
+  testProbeSlug, testProbeSlugDots, testMatchesSlug,
+  testLineage, testLineageSpawn, testLineageOneCapcom, testLineageNoParent,
   testEscalation, testEscalationExpiry,
   testShortId, testPathGuard,
   testDiff, testRollup,

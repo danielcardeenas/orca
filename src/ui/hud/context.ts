@@ -87,6 +87,7 @@ function agentMenu(d: CtxDeps, id: string, selection: string[], at: At) {
       { label: 'CLEAR SELECTION', run: () => c.field.select([]) },
       { sep: true },
       { label: 'STOP ALL', hint: String(live.length), tone: 'red', key: 'x', off: !live.length, run: () => { for (const x of live) void c.stop(x); } },
+      { label: 'DISMISS ALL', hint: 'HIDE', key: 'h', run: () => { const n = store.dismiss(group); c.field.select([]); c.note(`dismissed ${n} agent${n === 1 ? '' : 's'} · SETTINGS shows them again`); } },
       { sep: true },
       { head: a.callsign, sub: stateWord(a) },
     );
@@ -99,6 +100,7 @@ function agentMenu(d: CtxDeps, id: string, selection: string[], at: At) {
 
   items.push({ label: 'OPEN', key: group ? undefined : 'o', run: () => c.openAgent(id, at) });
   if (esc0) items.push({ label: 'ANSWER…', hint: 'NEEDS YOU', tone: 'amber', key: 'a', run: () => c.openInterrupt(esc0.id, at) });
+  items.push({ label: 'TERMINAL', key: group ? undefined : 't', off: !a.pane, hint: a.pane ? undefined : 'NO PANE', run: () => c.openTerminal(id, at) });
   items.push(
     { label: 'FLY TO', key: group ? undefined : 'f', run: () => c.go(id) },
     { label: 'SAY…', key: group ? undefined : 's', off: !alive(a), hint: alive(a) ? undefined : stateWord(a), run: () => d.sayTo([id]) },
@@ -115,7 +117,11 @@ function agentMenu(d: CtxDeps, id: string, selection: string[], at: At) {
   if (p) items.push({ label: 'PROJECT', hint: p.code, key: 'p', run: () => c.openProject(p.id, at) });
   if (pinned) items.push({ sep: true }, { label: 'RETURN TO FORMATION', hint: 'UNPIN', run: () => c.field.unplace(id) });
   if (!group) {
-    items.push({ sep: true }, { label: 'STOP', tone: 'red', key: 'x', off: !alive(a), hint: alive(a) ? undefined : stateWord(a), run: () => void c.stop(id) });
+    items.push(
+      { sep: true },
+      { label: 'DISMISS', hint: 'HIDE FROM THE FIELD', key: 'h', run: () => { store.dismiss([id]); c.note(`dismissed ${a.callsign} · SETTINGS shows it again`); } },
+      { label: 'STOP', tone: 'red', key: 'x', off: !alive(a), hint: alive(a) ? undefined : stateWord(a), run: () => void c.stop(id) },
+    );
   }
   return { title: group ? `${group.length} AGENTS` : a.callsign, sub: group ? undefined : `${p?.code ?? ''} · ${stateWord(a)}`, items };
 }

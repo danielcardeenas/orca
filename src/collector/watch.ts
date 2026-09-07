@@ -25,6 +25,16 @@ import path from 'node:path';
 
 import { claudeProjectsDir, errText, guardAsync, log, safeJson } from './util.ts';
 
+/**
+ * Dónde y cómo viven los transcripts de cada CLI. La lectura incremental es la
+ * misma para todos; sólo cambia cómo se descubren los archivos y qué marcadores
+ * merece la pena rescatar del principio de un archivo grande.
+ *
+ *   claude   ~/.claude/projects/<slug>/<session>.jsonl (+ subagents/)
+ *   codex    ~/.codex/sessions/YYYY/MM/DD/rollout-<fecha>-<uuid>.jsonl
+ */
+export type TranscriptLayout = 'claude' | 'codex';
+
 const SCOPE = 'watch';
 
 /** Identidad de un transcript. `agentId` no nulo ⇒ es un subagente. */
@@ -75,6 +85,14 @@ export interface WatchOptions {
    * para ser un archivo. 0 desactiva el filtro.
    */
   maxAgeMs?: number;
+  /** Qué CLI escribe estos archivos. Por defecto Claude Code. */
+  layout?: TranscriptLayout;
+  /**
+   * Líneas que se rescatan hacia atrás si la cola de arranque no las trajo.
+   * Claude: el último `cost-state` y el `ai-title`. Codex: el `session_meta`,
+   * que es la primera línea del archivo y la única que dice el cwd.
+   */
+  deepTypes?: string[];
 }
 
 interface FileState {
@@ -104,6 +122,8 @@ export class TranscriptWatcher {
   private readonly deepScanBytes: number;
   private readonly deepScanMaxAgeMs: number;
   private readonly maxAgeMs: number;
+  private readonly layout: TranscriptLayout;
+  private readonly deepTypes: string[];
 
   private files = new Map<string, FileState>();
   private watchers: fs.FSWatcher[] = [];
@@ -117,7 +137,9 @@ export class TranscriptWatcher {
   private deepBusy = false;
 
   constructor(opts: WatchOptions = {}) {
+    this.layout = opts.layout ?? 'claude';
     this.root = opts.root ?? claudeProjectsDir();
+    this.deepTypes = opts.deepTypes ?? (this.layout === 'codex' ? ['session_meta'] : ['cost-state', 'ai-title']);
     this.pollMs = opts.pollMs ?? 1500;
     this.rescanMs = opts.rescanMs ?? 6000;
     this.bootstrapBytes = opts.bootstrapBytes ?? DEFAULT_BOOTSTRAP_BYTES;
@@ -158,7 +180,7 @@ export class TranscriptWatcher {
     this.timers.push(setInterval(() => { void this.poll(); }, this.pollMs));
     this.timers.push(setInterval(() => { void this.rescan(false); }, this.rescanMs));
     for (const t of this.timers) t.unref?.();
-    log('info', SCOPE, `vigilando ${this.files.size} transcripts en ${this.root}`);
+    log('info', SCOPE, `vigilando ${this.files.size} transcripts (${this.layout}) en ${this.root}`);
   }
 
   stop(): void {
@@ -227,6 +249,30 @@ export class TranscriptWatcher {
       if (stat.mtimeMs < cutoff) { skipped++; return; }
       out.push(ref);
     };
+    if (this.layout === 'codex') {
+      // YYYY/MM/DD/rollout-<fecha>-<uuid>.jsonl. Sólo los días que caen dentro
+      // de la ventana de flota merecen un readdir; el resto es archivo.
+      const dayCutoff = cutoff > 0 ? new Date(cutoff - 24 * 3600_000) : null;
+      for (const y of await readdirQuiet(this.root)) {
+        if (!y.isDirectory() || !/^\d{4}$/.test(y.name)) continue;
+        if (dayCutoff && Number(y.name) < dayCutoff.getUTCFullYear()) continue;
+        for (const m of await readdirQuiet(path.join(this.root, y.name))) {
+          if (!m.isDirectory() || !/^\d{2}$/.test(m.name)) continue;
+          for (const d of await readdirQuiet(path.join(this.root, y.name, m.name))) {
+            if (!d.isDirectory() || !/^\d{2}$/.test(d.name)) continue;
+            if (dayCutoff && Date.UTC(Number(y.name), Number(m.name) - 1, Number(d.name)) < dayCutoff.getTime() - 24 * 3600_000) continue;
+            const dayDir = path.join(this.root, y.name, m.name, d.name);
+            for (const f of await readdirQuiet(dayDir)) {
+              if (!f.isFile()) continue;
+              const ref = codexRef(dayDir, f.name);
+              if (ref) await keep(ref);
+            }
+          }
+        }
+      }
+      this.skippedAsHistory = skipped;
+      return out;
+    }
     for (const slugEnt of await readdirQuiet(this.root)) {
       if (!slugEnt.isDirectory()) continue;
       const slug = slugEnt.name;
@@ -341,6 +387,20 @@ export class TranscriptWatcher {
     // dar el estado reciente.
     const want = Math.min(this.bootstrapBytes, size);
     const lines = await this.readTail(st.ref.path, size, want);
+    // Codex identity is the first line, not a recent marker. Read it before
+    // publishing the tail so the collector can ingest that same first batch.
+    if (this.layout === 'codex' && want < size && !lines.some((l) => l['type'] === 'session_meta')) {
+      const fh = await fsp.open(st.ref.path, 'r');
+      try {
+        const buf = Buffer.alloc(Math.min(size, 1024 * 1024));
+        const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+        const nl = buf.indexOf(0x0a, 0);
+        if (nl >= 0 && nl < bytesRead) {
+          const meta = safeJson<Record<string, unknown>>(buf.toString('utf8', 0, nl));
+          if (meta?.['type'] === 'session_meta') lines.unshift(meta);
+        }
+      } finally { await fh.close(); }
+    }
     st.offset = size;
     st.partial = '';
     st.bootstrapped = true;
@@ -351,7 +411,7 @@ export class TranscriptWatcher {
     // retrasar el momento en que el collector empieza a ver la flota. Llega
     // como un segundo batch, y el deriver lo aplica igual.
     if (want < size && this.recent(st.mtimeMs)) {
-      const missing = ['cost-state', 'ai-title']
+      const missing = this.deepTypes
         .filter((t) => !lines.some((l) => l['type'] === t));
       if (missing.length > 0) {
         this.deepQueue.push({ st, upTo: size - want, types: missing });
@@ -503,6 +563,19 @@ async function readdirQuiet(dir: string): Promise<import('node:fs').Dirent[]> {
     }
     return [];
   }
+}
+
+/** `rollout-2026-09-05T22-46-01-<uuid>.jsonl` → la sesión es el uuid del final. */
+export function codexRef(dir: string, name: string): TranscriptRef | null {
+  const m = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(name);
+  if (!m) return null;
+  const sessionId = m[1]!.toLowerCase();
+  return {
+    path: path.join(dir, name),
+    slug: '',            // el cwd sale del session_meta; el slug se deriva de él
+    sessionId, agentId: null, metaPath: null, workflowId: null,
+    key: sessionId,
+  };
 }
 
 function subagentRef(

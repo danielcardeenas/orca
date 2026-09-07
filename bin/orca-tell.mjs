@@ -33,6 +33,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync 
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+import { waitFor } from './lib/wait-for.mjs';
+
 const argv = process.argv.slice(2);
 
 const KINDS = ['notice', 'ask', 'handoff', 'warning'];
@@ -203,21 +205,9 @@ if (!opts.wait) {
 
 /* ── Waiting ──────────────────────────────────────────────────────── */
 
-const deadline = Date.now() + opts.timeoutMin * 60_000;
-let notified = false;
-
-while (Date.now() < deadline) {
-  const answer = readAnswer(inDir, id);
-  if (answer) { emit(answer, opts); process.exit(0); }
-
-  // One line to stderr the first time, so a human tailing the agent's terminal
-  // knows why it went quiet. stdout stays clean for the answer.
-  if (!notified) {
-    notified = true;
-    process.stderr.write(`orca-tell: waiting on ${opts.to ?? 'the fleet'} (${id})\n`);
-  }
-  await sleep(1500);
-}
+process.stderr.write(`orca-tell: waiting on ${opts.to ?? 'the fleet'} (${id})\n`);
+const answer = await waitFor(inDir, () => readAnswer(inDir, id), opts.timeoutMin * 60_000);
+if (answer) { emit(answer, opts); process.exit(0); }
 
 console.error(`orca-tell: no answer within ${opts.timeoutMin} min.`);
 console.error('State the assumption you are making, proceed, and flag it in your summary.');
@@ -242,8 +232,4 @@ function emit(answer, o) {
   if (answer.answeredByCallsign) {
     console.error(`\n[answered by ${answer.answeredByCallsign}]`);
   }
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
 }

@@ -34,6 +34,7 @@ import path from 'node:path';
 
 import type { Command } from '../shared/protocol.ts';
 import { squadName } from '../shared/squads.ts';
+import { excludedWorkspace } from '../shared/workspaces.ts';
 import { errText, guardAsync, log, oneLine, safeJson, str } from './util.ts';
 
 const SCOPE = 'spawns';
@@ -127,7 +128,8 @@ export function planChild(
       ...(squad ? { squad, lead: false } : {}),
       ...(req.model ? { model: req.model } : {}),
       background: true,
-      permissionMode: 'acceptEdits',
+      // `auto`: que no se quede colgado en un prompt que nadie mira.
+      permissionMode: 'auto',
     },
   };
 }
@@ -190,7 +192,18 @@ export class SpawnWatcher {
     this.watchers.clear();
   }
 
+  /**
+   * Vigilar el buzón de un proyecto. Un directorio que no es un proyecto no se
+   * vigila: dejar un archivo en `~/.orca/capcom/.orca/spawn/` sería la puerta
+   * de atrás para lanzar trabajo donde el hub ya no deja, y el buzón lo puede
+   * escribir cualquier agente que pase por ahí.
+   */
   track(projectId: string, projectPath: string): void {
+    if (excludedWorkspace(projectPath)) {
+      this.untrack(projectId);
+      log('debug', SCOPE, `no vigilo ${projectPath}: no es un proyecto`);
+      return;
+    }
     const cur = this.tracked.get(projectId);
     if (cur && cur.projectPath === projectPath) return;
     this.untrack(projectId);

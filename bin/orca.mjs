@@ -21,9 +21,17 @@
  *   orca say K9 "<text>"                       text into a running agent
  *   orca tell "<subject>" --to squad:audit-01 --kind warning [--body ...]
  *   orca stop K9 --reason "<why>"              stop one; `squad:<name>` stops all
+ *   orca land K9 [--no-tests] [--message "…"]  a worker's branch into the project's (ORCA_WORKTREES=1)
+ *   orca discard K9 [--force]                  drop a worker's worktree and branch
+ *   orca archive [--project AX] [--squad s] [--older-than 24h] [--state done|dead] [--dry-run]
+ *                                              archive finished agents (done/dead) on the hub
  *   orca traffic [--waiting]                   what the agents say to each other
  *   orca recall "<question>"                   what the human already answered
  *   orca remember "<question>" "<rule>"        a standing rule
+ *   orca journal [--project AX --squad s --kind end --since 24h --text "..."]
+ *                                              the fleet journal: launches, ends, escalations, rotations
+ *   orca journal --stats [--project AX --since 7d]
+ *                                              cost and duration per project, done vs dead, briefs that escalated
  *   orca tools                                 every verb the hub serves
  *   orca health                                is the hub up, and who is on it
  *
@@ -59,7 +67,7 @@ function parse(args) {
   const opts = {};
   const pos = [];
   const multi = new Set(['member']);
-  const flags = new Set(['json', 'blocked', 'waiting', 'full', 'fg', 'help', 'h']);
+  const flags = new Set(['json', 'blocked', 'waiting', 'full', 'fg', 'help', 'h', 'dry-run', 'hidden', 'stats', 'asc', 'no-tests', 'force']);
   // `--lead` is a flag on `spawn` and carries the lead's brief on `squad`.
   const maybe = new Set(['lead']);
   for (let i = 0; i < args.length; i++) {
@@ -87,7 +95,7 @@ function usage() {
 
   orca ls [--blocked]                          projects, who is blocked, squads
   orca inspect <K9 | squad:name>               one agent or one squad, in full
-  orca spawn <project> "<brief>"               one agent · --squad s [--lead] --parent K9 --model m --fg
+  orca spawn <project> "<brief>"               one agent · --squad s [--lead] --parent K9 --model m --runtime codex --fg
   orca squad <name> --project <p> --lead "<brief>" --member "<brief>" [--member ...]
                                                a squad: lead first, members hanging off it
   orca fleets [--full]                         the saved presets (~/.orca/fleets)
@@ -95,8 +103,19 @@ function usage() {
   orca say <K9> "<text>"                       text into a running agent
   orca tell "<subject>" --to <K9|project:p|squad:s> [--kind notice|handoff|warning] [--body "..."]
   orca stop <K9 | squad:name> --reason "<why>"
+  orca land <K9 | squad:name> [--no-tests] [--message "<title>"]
+                                               rebase a worker's branch onto the project's, run the suite, one commit
+  orca discard <K9 | squad:name> [--force]     drop a worker's worktree and branch; --force even with unlanded work
+  orca archive [--project <p>] [--squad <s>] [--older-than 24h|2d] [--state done|dead] [--hidden] [--dry-run]
+                                               archive finished agents on the hub; --dry-run only counts;
+                                               --hidden only the ones left in CAPCOM's directory or a scratchpad
   orca traffic [--waiting] [--project <p>]
   orca recall "<question>"  ·  orca remember "<question>" "<rule>" [--project <p>]
+  orca journal [--project <p>] [--squad <s>] [--task <id>] [--agent <K9>] [--kind launch|end|escalation|answer|rotation|landing]
+               [--since 24h|2d|<iso>] [--until ...] [--state done|dead] [--by human|capcom|agent] [--text "..."]
+               [--limit 50] [--asc] [--full]         what the fleet has done, newest first
+  orca journal --stats [--project <p>] [--squad <s>] [--since 7d]
+                                               cost and duration per project, done vs dead, briefs that escalated
   orca tools  ·  orca health
 
   A <project> is its code (AX), its name, or its id. A brief beginning with @
@@ -301,6 +320,103 @@ function printTraffic(r) {
   }
 }
 
+function printArchive(r, summary) {
+  console.log(summary);
+  const ago = (s) => s >= 86400 ? `${Math.round(s / 86400)}d` : s >= 3600 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 60)}m`;
+  for (const a of r.archived ?? []) {
+    console.log(`  ${pad(a.callsign, 5)} ${pad(a.state, 5)} ${pad(a.project, 4)} ${pad(a.squad ?? '', 14)} ${pad(`${ago(a.finished_ago_sec)} ago`, 8)} ${a.mission ?? ''}`);
+  }
+  for (const k of r.kept ?? []) console.log(`  ${pad(k.callsign, 5)} kept  ${k.reason}`);
+  if (r.squads_retired?.length) console.log(`  squads retired: ${r.squads_retired.join(', ')}`);
+  if (r.next) console.log(`  ${r.next}`);
+}
+
+/* ── Journal ──────────────────────────────────────────────────────── */
+
+const when = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(5, 16);
+const span = (ms) => {
+  const s = Math.round(Number(ms ?? 0) / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  const rest = Math.round((s % 3600) / 60);
+  return `${Math.floor(s / 3600)}h${rest ? `${rest}m` : ''}`;
+};
+const oneLine = (s, n) => {
+  if (typeof s !== 'string') return '';
+  const t = s.replace(/\s+/g, ' ').trim();
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+};
+
+/** One line per entry: when, what, who, and the part of it a person scans for. */
+function printJournal(r) {
+  const entries = r?.entries ?? [];
+  if (!entries.length) return console.log('journal: nothing matches');
+  for (const e of entries) {
+    const who = `${pad(e.callsign ?? e.agentId ?? '?', 6)} ${pad(e.project ? `[${e.project}]` : '', 6)}`;
+    let tail = '';
+    switch (e.kind) {
+      case 'launch':
+        tail = `by ${e.by ?? '?'}${e.squad ? ` · ${e.squad}${e.lead ? ' (lead)' : ''}` : ''}${e.taskId ? ` · ${e.taskId}` : ''} · ${e.runtime ?? '?'}${e.model ? `/${e.model}` : ''}: ${oneLine(e.brief, 100)}`;
+        break;
+      case 'end':
+        tail = `${e.state}${e.late ? ' (late)' : ''} · ${money(e.costUSD)} · ${span(e.durationMs)}`
+          + (e.lines && (e.lines.added || e.lines.removed) ? ` · +${e.lines.added}/-${e.lines.removed}` : '')
+          + (e.taskId ? ` · ${e.taskId}` : '') + (e.lastSay ? `: ${oneLine(e.lastSay, 100)}` : '');
+        break;
+      case 'escalation':
+        tail = `asked${e.urgency === 'blocking' ? ' (BLOCKING)' : ''}: ${oneLine(e.question, 110)}${e.options?.length ? ` [${e.options.join(' | ')}]` : ''}`;
+        break;
+      case 'answer':
+        tail = `answered by ${e.answeredBy ?? '?'}${e.waitedMs != null ? ` after ${span(e.waitedMs)}` : ''}: ${oneLine(e.answer, 80)}${e.question ? `  (re: ${oneLine(e.question, 60)})` : ''}`;
+        break;
+      case 'rotation':
+        tail = `CAPCOM rotated ${e.fromId ?? '?'} → ${e.toId ?? '(never came back)'}`
+          + (e.turns != null ? ` · ${e.turns} turns, ${e.compactions ?? 0} compactions` : '') + (e.note ? ` · ${e.note}` : '');
+        break;
+      case 'landing':
+        tail = `${e.ok === false ? 'FAILED to land' : 'landed'}${e.branch ? ` ${e.branch}` : ''}${e.target ? ` → ${e.target}` : ''}${e.commit ? ` @${e.commit}` : ''}${e.detail ? `: ${oneLine(e.detail, 80)}` : ''}`;
+        break;
+      default:
+        tail = oneLine(e.note ?? '', 100);
+    }
+    console.log(`${when(e.at)}  ${pad(e.kind, 10)} ${who} ${tail}`);
+  }
+}
+
+function printJournalStats(s) {
+  const pct = (x) => (x === null || x === undefined ? '—' : `${Math.round(x * 100)}%`);
+  console.log(`launches ${s.launches} (human ${s.byLauncher?.human ?? 0}, capcom ${s.byLauncher?.capcom ?? 0}, agent ${s.byLauncher?.agent ?? 0})`
+    + ` · done ${s.ends?.done ?? 0} / dead ${s.ends?.dead ?? 0} (${pct(s.doneRate)} done)`
+    + ` · ${money(s.cost?.totalUSD)} total, ${s.cost?.avgUSD != null ? money(s.cost.avgUSD) : '—'} avg, ${s.duration?.avgMs != null ? span(s.duration.avgMs) : '—'} avg`
+    + ` · escalations ${s.escalations?.asked ?? 0} (capcom ${s.escalations?.answeredByCapcom ?? 0}, human ${s.escalations?.answeredByHuman ?? 0}, open ${s.escalations?.unanswered ?? 0})`
+    + ` · rotations ${s.rotations ?? 0} · landings ${s.landings?.ok ?? 0} ok / ${s.landings?.failed ?? 0} failed`);
+  if (s.byProject?.length) {
+    console.log(`\n${pad('project', 8)} ${pad('launch', 6)} ${pad('done', 5)} ${pad('dead', 5)} ${pad('rate', 5)} ${pad('total', 9)} ${pad('avg $', 8)} ${pad('avg time', 9)} esc`);
+    for (const p of s.byProject) {
+      console.log(`${pad(p.project ?? p.projectId ?? '?', 8)} ${pad(p.launches, 6)} ${pad(p.done, 5)} ${pad(p.dead, 5)} ${pad(pct(p.doneRate), 5)} ${pad(money(p.totalCostUSD), 9)} ${pad(p.avgCostUSD != null ? money(p.avgCostUSD) : '—', 8)} ${pad(p.avgDurationMs != null ? span(p.avgDurationMs) : '—', 9)} ${p.escalations}`);
+    }
+  }
+  if (s.escalatedBriefs?.length) {
+    console.log('\nbriefs that ended in an escalation — write these better next time:');
+    for (const b of s.escalatedBriefs) {
+      console.log(`  ${pad(b.callsign ?? b.agentId ?? '?', 6)} ${pad(b.project ? `[${b.project}]` : '', 6)} ${b.state ?? 'running'} · asked "${oneLine(b.question, 70)}" → ${b.answeredBy ?? 'unanswered'}`);
+      if (b.brief) console.log(`         brief: ${oneLine(b.brief, 110)}`);
+    }
+  }
+}
+
+/**
+ * `--older-than 24h`, `2d`, `90m`, or a bare number of hours → hours. The hub
+ * takes hours; a shell wants to say "a day".
+ */
+function hoursOf(v) {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(h|hours?|d|days?|m|min|minutes?)?\s*$/i.exec(String(v));
+  if (!m) fail(1, `--older-than takes hours like 24, 24h, 2d or 90m (not "${v}")`);
+  const n = Number(m[1]);
+  const unit = (m[2] ?? 'h').toLowerCase();
+  return unit.startsWith('d') ? n * 24 : unit.startsWith('m') ? n / 60 : n;
+}
+
 /* ── Commands ─────────────────────────────────────────────────────── */
 
 const cmd = pos[0];
@@ -342,6 +458,8 @@ async function main() {
         background: opts.fg !== true,
         squad: opts.squad ?? null,
         lead: opts.lead === true,
+        runtime: opts.runtime ?? null,
+        model: opts.model ?? null,
       });
       if (json || out.isError) return print(out);
       const s = out.result?.spawned ?? {};
@@ -360,6 +478,7 @@ async function main() {
         squad: name,
         lead_mission: brief(opts.lead),
         lead_model: opts['lead-model'] ?? null,
+        runtime: opts.runtime ?? null,
         members: members.map((m) => ({ mission: m, model: opts.model ?? null })),
         background: opts.fg !== true,
       });
@@ -410,6 +529,44 @@ async function main() {
       }));
     }
 
+    case 'land': {
+      const ref = pos[1];
+      if (!ref) fail(1, 'orca land <K9 | squad:name> [--no-tests] [--message "<title>"]');
+      const sq = squadOf(ref);
+      const out = await tool('land', {
+        agent_id: sq ? null : ref, squad: sq,
+        run_tests: opts['no-tests'] !== true,
+        message: opts.message ?? null,
+      });
+      if (json) return print(out);
+      // The summary is one line; a refusal is the part worth reading in full.
+      const r = out.result && typeof out.result === 'object' ? out.result : {};
+      console.log(out.summary);
+      for (const l of r.landed ?? []) console.log(`  ${l.callsign}  ${String(l.commit).slice(0, 8)} on ${l.onto}  ${(l.files ?? []).length} file(s)${l.tests ? `  tests ok (${l.tests.command}, ${l.tests.seconds}s)` : l.note ? `  ${l.note}` : ''}`);
+      for (const f of r.refused ?? []) {
+        console.log(`  ${f.callsign}  ${f.reason}: ${f.detail}`);
+        for (const c of f.conflicts ?? []) console.log(`      conflict: ${c}`);
+        if (f.tests?.output) console.log(`      ${String(f.tests.output).split('\n').slice(-12).join('\n      ')}`);
+      }
+      if (r.next) console.log(`  next: ${r.next}`);
+      if (out.isError) process.exit(3);
+      return;
+    }
+
+    case 'discard': {
+      const ref = pos[1];
+      if (!ref) fail(1, 'orca discard <K9 | squad:name> [--force]');
+      const sq = squadOf(ref);
+      const out = await tool('discard', { agent_id: sq ? null : ref, squad: sq, force: opts.force === true });
+      if (json) return print(out);
+      const r = out.result && typeof out.result === 'object' ? out.result : {};
+      console.log(out.summary);
+      for (const k of r.kept ?? []) console.log(`  ${k.callsign}  kept: ${k.detail}`);
+      if (r.next) console.log(`  next: ${r.next}`);
+      if (out.isError) process.exit(3);
+      return;
+    }
+
     case 'stop': {
       const ref = pos[1];
       if (!ref) fail(1, 'orca stop <K9 | squad:name> --reason "<why>"');
@@ -419,6 +576,24 @@ async function main() {
       return print(sq
         ? await tool('stop_squad', { squad: sq, reason })
         : await tool('stop_agent', { agent_id: ref, reason }));
+    }
+
+    case 'archive': case 'cleanup': {
+      const state = opts.state ?? null;
+      if (state && state !== 'done' && state !== 'dead') fail(1, `--state is done or dead (not ${state})`);
+      const out = await tool('archive_agents', {
+        project_id: opts.project ? await projectId(opts.project) : null,
+        squad: squadOf(opts.squad) ?? opts.squad ?? null,
+        older_than_hours: opts['older-than'] !== undefined ? hoursOf(opts['older-than']) : null,
+        state,
+        // Lo que quedó fuera de la flota por vivir donde no hay proyecto: el
+        // directorio de CAPCOM, un scratchpad de sesión. El campo va siempre,
+        // porque el schema de la herramienta lo pide siempre.
+        hidden: opts.hidden === true,
+        dry_run: opts['dry-run'] === true,
+      });
+      if (json || out.isError) return print(out);
+      return printArchive(out.result, out.summary);
     }
 
     case 'traffic': {
@@ -447,6 +622,26 @@ async function main() {
       return print(await tool('remember', {
         question: q, answer: rule, project_id: opts.project ? await projectId(opts.project) : null,
       }));
+    }
+
+    case 'journal': case 'log': {
+      const project = opts.project ? await projectId(opts.project) : null;
+      const squad = squadOf(opts.squad) ?? opts.squad ?? null;
+      if (opts.stats === true) {
+        const out = await tool('journal_stats', { project, squad, since: opts.since ?? null, until: opts.until ?? null });
+        if (json || out.isError) return print(out);
+        return printJournalStats(out.result);
+      }
+      const out = await tool('journal', {
+        project, squad,
+        task_id: opts.task ?? null, agent: opts.agent ?? null, kind: opts.kind ?? null,
+        since: opts.since ?? null, until: opts.until ?? null,
+        state: opts.state ?? null, by: opts.by ?? null, text: opts.text ?? null,
+        limit: opts.limit !== undefined ? Number(opts.limit) : null,
+        newest_first: opts.asc !== true, full: opts.full === true,
+      });
+      if (json || out.isError) return print(out);
+      return printJournal(out.result);
     }
 
     case 'tools': {

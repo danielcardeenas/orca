@@ -1,3 +1,4 @@
+import { groupOrigin } from '../../shared/origin.ts';
 /**
  * The field — the only stage.
  *
@@ -46,12 +47,15 @@ import { FieldCamera } from './camera.ts';
 import { createGround, GROUND_Z } from './ground.ts';
 import { createLabels, rememberMachine, rememberProjectCode, rememberProjectName, type LabelItem } from './labels.ts';
 import { createMedia } from './media.ts';
-import { createPipes, laneShift, pathLength, routeGutter, routeGutterMsg, routeLineage, routeMessage, type Pt } from './pipes.ts';
+import { createPipes, laneShift, pathLength, routeGutter, routeGutterMsg, routeLineage, routeMessage, spanOf, type Pt } from './pipes.ts';
+import { absorbedChildren } from './blocks.ts';
 import { createSwarm } from './swarm.ts';
+import { commandLinked, commandState, createCommandHalo, REST as COMMAND_REST, RING_OFF, sameState, type CommandFlags, type CommandState } from './command.ts';
+import { getPref } from '../prefs.ts';
 import { beats, dur, EASE, REDUCE, T } from '../motion.ts';
 import * as anim from './anim.ts';
 import { getSound } from '../hud/sound.ts';
-import { emptyLayout, isLead, layoutFleet, squadKey, squadOf, TILE_H, TILE_W, type Layout, type LayoutMode, type Region, type RegionPlacement, type SquadBlock, type SquadPlacement, type Spot } from './layout.ts';
+import { emptyLayout, isLead, layoutFleet, squadKey, squadOf, TILE_H, TILE_W, type Layout, type LayoutMode, type Region, type RegionPlacement, type SquadBlock, type SquadPlacement, type Spot, BLOCK_PAD, CAPCOM_SCALE } from './layout.ts';
 
 /**
  * What the pointer is over when the operator asks for a menu. The field
@@ -145,6 +149,11 @@ export interface FieldHandle {
    */
   frameAround(agentId: string): boolean;
   /**
+   * Frame the smallest rectangle that holds these agents' tiles. One agent
+   * is a flight to it; none on the field is false and the camera stays.
+   */
+  frameAgents(agentIds: string[]): boolean;
+  /**
    * Focus mode: hold everything the selection is not wired to at arm's
    * length. Selected tiles keep alpha 1, whoever is at the other end of one
    * of their pipes drops to 0.45, everyone else to 0.12 with no glow; the
@@ -193,6 +202,8 @@ const C_RGN = new THREE.Color(0x22252d);
 /** A squad's outline: one step brighter than a region's, `--line`. */
 const C_SQUAD = new THREE.Color(0x2a2e38);
 const C_AMBER = new THREE.Color(0xf5a524);
+/** A command tie: CAPCOM's cyan at 60 %, so the post stays the brightest cyan thing. */
+const C_CYAN_DIM = new THREE.Color(0x4fe3ff).multiplyScalar(0.6);
 const C_BLUE = new THREE.Color(0x8fb8ff);
 const C_RED = new THREE.Color(0xff2a12);
 const C_WHITE = new THREE.Color(0xf2f4f0);
@@ -291,6 +302,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   const camera = new FieldCamera();
   const swarm = createSwarm(scene);
   const pipes = createPipes(scene);
+  const halo = createCommandHalo(scene);
   const ground = createGround(scene);
   const labels = createLabels(labelsLayer);
   const media = createMedia(scene, surfacesLayer, camera, (id) => ev.onUnplaceArtifact(id));
@@ -345,10 +357,34 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   const flashAt = new Map<string, number>();
   /** Agents with an escalation you can actually answer from here. */
   const pendingAgents = new Set<string>();
+  /** child id → parent id for every child folded into its parent's block this feed. */
+  let absorbed = new Map<string, string>();
   /** How many of those each project holds — the number on its YOU node. */
   const pendingByProject = new Map<string, number>();
   const byCallsign = new Map<string, string>();
   const regionById = new Map<string, Region>();
+
+  /* ── The command post (command.ts) ──────────────────────────────── */
+  /** CAPCOM's id this feed, or null: the one tile the halo and the links hang off. */
+  let capcomId: string | null = null;
+  /** The four preferences, read once a frame: four property reads off a cached object. */
+  const cmdFlags: CommandFlags = { tasks: true, notches: true, pulse: true, links: false };
+  let cmdState: CommandState = COMMAND_REST;
+  /** Clock instant of the last `commandState`. A task cools by the clock alone, so it is redone once a second. */
+  let cmdAt = -1e9;
+  function readCommandFlags() {
+    cmdFlags.tasks = getPref('capcomTasks');
+    cmdFlags.notches = getPref('capcomNotches');
+    cmdFlags.pulse = getPref('capcomPulse');
+    cmdFlags.links = getPref('capcomLinks');
+  }
+  function refreshCommand() {
+    cmdAt = clock;
+    const cap = capcomId ? byId.get(capcomId) ?? null : null;
+    // The open task is the live console's; a replayed world has none.
+    const next = commandState(world(), cap, (id) => byId.get(id), Date.now(), replay ? null : store.activeTaskId, cmdFlags);
+    if (!sameState(next, cmdState)) cmdState = next;
+  }
 
   /* ── Squads ───────────────────────────────────────────────────── */
   /** Squad name → the agent marked `lead`, when there is one. */
@@ -445,6 +481,24 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
    * tiles wide with a proportional bite would stop quoting the tile and start
    * being some other shape.
    */
+  /* ── Slabs: the plate a block stands on ─────────────────────────── */
+  const SLAB_Z = -0.3;
+  const slabMat = new THREE.MeshBasicMaterial({ color: 0x141721, transparent: true, opacity: 1, depthWrite: false });
+  const slabGeo = new THREE.PlaneGeometry(1, 1);
+  const slabs: THREE.Mesh[] = [];
+  function slab(i: number, cx: number, cy: number, w: number, h: number, z: number) {
+    let m = slabs[i];
+    if (!m) {
+      m = new THREE.Mesh(slabGeo, slabMat);
+      m.renderOrder = -2;
+      slabs.push(m);
+      scene.add(m);
+    }
+    m.visible = true;
+    m.position.set(cx, cy, z);
+    m.scale.set(w, h, 1);
+  }
+
   function squadOutline(q: SquadBlock): Pt[] {
     const x0 = q.cx - q.hw, x1 = q.cx + q.hw, y0 = q.cy - q.hh, y1 = q.cy + q.hh;
     const w = Math.min(SQ_STEP_W, q.hw), h = Math.min(SQ_STEP_H, q.hh);
@@ -492,6 +546,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     byId.clear();
     byCallsign.clear();
     for (const a of agents) { byId.set(a.id, a); byCallsign.set(a.callsign.toUpperCase(), a.id); }
+    capcomId = agents.find((a) => a.role === 'capcom')?.id ?? null;
 
     // Which blocks a person can actually clear, resolved once per feed: the
     // shader asks this per tile and the YOU nodes ask it per region.
@@ -503,12 +558,20 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       const pid = byId.get(e.agentId)?.projectId ?? e.projectId;
       pendingByProject.set(pid, (pendingByProject.get(pid) ?? 0) + 1);
     }
+    readCommandFlags();
+    refreshCommand();
 
     const placements = new Map<string, Placement>();
     for (const [id, p] of Object.entries(w.placements ?? {})) placements.set(id, p);
     for (const p of loadLocalPlacements()) placements.set(p.agentId, p);
 
-    layout = layoutFleet(agents, projects, placements, layout, lmode, squadPlaced, regionPlaced);
+    /*
+     * Blocks (`blocks.ts`): a child that only talks to its parent stands in
+     * the parent's tray, not in a cell of its own, and no pipe joins them.
+     * The deck lists everyone — order is its whole point — so it folds nobody.
+     */
+    absorbed = lmode.kind === 'field' ? absorbedChildren(agents, Object.values(w.messages ?? {})) : new Map();
+    layout = layoutFleet(agents, projects, placements, layout, lmode, squadPlaced, regionPlaced, absorbed);
     // The router reads the gutters off the layout: the deck's are wider.
     gaps.x = layout.gapX; gaps.y = layout.gapY;
     regionById.clear();
@@ -556,7 +619,11 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
          * A squad member waits for its beat first, so five of them read as a
          * squadron forming instead of a paste.
          */
-        if (!first && layout.spots.has(a.id) && !reduce) {
+        if (!first && layout.spots.has(a.id) && !reduce && absorbed.has(a.id)) {
+          // A cell in its parent's tray: no pipe to grow down, so it simply arrives.
+          anim.set(`tile:${a.id}`, 0);
+          anim.grow(`tile:${a.id}`, { dur: T.quick, ease: EASE.arrive });
+        } else if (!first && layout.spots.has(a.id) && !reduce) {
           const sq = squadOf(a);
           const leadId = sq && !isLead(a) ? squadLead.get(sq) : undefined;
           const off = leadId && leadId !== a.id ? burstOffset(sq!) : 0;
@@ -723,6 +790,24 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   /* ── Region labels (DOM) ────────────────────────────────────────── */
   const regionEls = new Map<string, HTMLElement>();
   const youEls = new Map<string, HTMLElement>();
+  /**
+   * CAPCOM's rótulo (§1.3): the word CAPCOM over its tile, the way a region
+   * wears its code. It is there at the zooms where the tile is too small to
+   * carry its own label, and steps aside once the tile can say it itself.
+   * Click opens the conversation, which is what the word is an invitation to.
+   */
+  const capcomEl = document.createElement('button');
+  capcomEl.type = 'button';
+  capcomEl.className = 'rgn rgn--capcom';
+  capcomEl.style.pointerEvents = 'auto';
+  capcomEl.style.display = 'none';
+  capcomEl.innerHTML = '<span class="rgn__code">CAPCOM</span><span class="rgn__name">COMMAND</span>';
+  capcomEl.addEventListener('click', (e) => {
+    if (swallowClick) { swallowClick = false; return; }
+    const cap = agents.find((a) => a.role === 'capcom');
+    if (cap) ev.onOpen(cap.id, e.clientX, e.clientY);
+  });
+  regionsLayer.appendChild(capcomEl);
   /** One rótulo per squad block, keyed the same way `squadBlocks` is. */
   const squadEls = new Map<string, HTMLElement>();
   /**
@@ -782,7 +867,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     const sig = sigilHTML(sigilBits(q.name));
     let html = `<span class="squad__sigil sigil--lg">${sig}</span><span class="squad__roster">${roster}</span>`;
     if (tier >= 2) {
-      html += `<span class="squad__k">${esc(q.name)}</span><span class="squad__n">${q.count}</span>`;
+      html += `<span class="squad__k">${esc(q.name)} · ${groupOrigin(agents.filter((a) => a.projectId === q.projectId && squadOf(a) === q.name))}</span><span class="squad__n">${q.count}</span>`;
     }
     if (tier >= 3) {
       if (lead) html += `<span class="squad__lead">LEAD ${esc(lead.callsign)}</span>`;
@@ -953,6 +1038,26 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       el.style.opacity = '1';
       el.style.transform = `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0) translateY(-50%)`;
     }
+    // CAPCOM's rótulo sits over its tile at every zoom, like a squad's
+    // legend and unlike a region's label: it names the one tile that must
+    // always be findable, and it never yields to a collision or to `fade`.
+    {
+      const sp = capcomId ? layout.spots.get(capcomId) : undefined;
+      // Centred over the tile, not hung off its corner like a region's: the
+      // tile is one cell wide and the word should sit on it, not beside it.
+      const p = sp ? camera.project(sp.x, sp.y + TILE_H / 2 * sp.scale, sp.z) : null;
+      if (!sp || !p || !p.visible || lmode.kind === 'deck') capcomEl.style.display = 'none';
+      else {
+        // It sits on the halo's top edge (command.ts), a legend on its
+        // fieldset — and never lower than clear of the tile, which from afar
+        // the ring is not.
+        const ring = camera.project(sp.x, sp.y + TILE_H / 2 * sp.scale + RING_OFF, sp.z);
+        const cy = Math.min(ring.y, p.y - 13);
+        capcomEl.style.display = '';
+        capcomEl.style.opacity = '1';
+        capcomEl.style.transform = `translate3d(${Math.round(p.x)}px, ${Math.round(cy)}px, 0) translate(-50%, -50%)`;
+      }
+    }
     // YOU labels ride their node, not the region's corner, and never yield to
     // a collision: the count is the one number worth the overlap.
     for (const [id, el] of youEls) {
@@ -987,9 +1092,12 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   /**
    * A tile the operator pinned has broken the grid on purpose: there is no
    * gutter to its cell any more, so its pipes go back to the direct routes.
+   * CAPCOM never had a cell — it stands at the origin, outside every region
+   * (layout.ts) — so anything tied to it takes the direct route too.
    */
   const offGrid = (a: Pt, b: Pt) =>
-    (a as Partial<Spot>).pinned === true || (b as Partial<Spot>).pinned === true;
+    (a as Partial<Spot>).pinned === true || (b as Partial<Spot>).pinned === true
+    || (a as Partial<Spot>).scale === CAPCOM_SCALE || (b as Partial<Spot>).scale === CAPCOM_SCALE;
 
   /**
    * The region a point stands in, when it is a tile at all.
@@ -1202,6 +1310,19 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       if (!sq) continue;
       for (const m of squadByName.get(sq)?.memberIds ?? []) focusNear.add(m);
     }
+    // The command links are a relationship too, while they are drawn: focus
+    // on CAPCOM holds up what it launched, and focus on one of those holds
+    // up CAPCOM.
+    if (cmdFlags.links && capcomId) {
+      if (selected.has(capcomId)) {
+        for (const a of agents) if (commandLinked(a, capcomId)) focusNear.add(a.id);
+      } else {
+        for (const id of selected) {
+          const a = byId.get(id);
+          if (a && commandLinked(a, capcomId)) { focusNear.add(capcomId); break; }
+        }
+      }
+    }
     for (const id of selected) focusNear.delete(id);
 
     // `dammedBehind` reads the live store, which a replayed world is not.
@@ -1230,21 +1351,30 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
    * is what makes a newborn's empty cell legible before it has a tile.
    */
   function tie(a: Agent, fromId: string, p: Spot, c: Spot, z: number, bus: number, core: number) {
+    // A child standing in its parent's tray is part of the parent: no pipe.
+    if (absorbed.has(a.id) && c.trayOf === fromId) return;
     const pts = lineageRoute(p, c, fromId);
     const touch = selected.has(a.id) || selected.has(fromId);
     const hot = touch || hover === a.id || hover === fromId;
     const sel = touch ? 1 : 0;
-    const len = pipes.add(pts, z, C_LINE, 'lineage', 0, bus, sel);
+    /*
+     * How far the tie reaches decides whether it survives a zoom-out: a lazo
+     * between fleets or across a region is the picture from afar, one between
+     * neighbours is detail you zoom in for. A tie the operator is looking at
+     * — selected or hovered — is never detail.
+     */
+    const span = hot ? 1 : spanOf(pathLength(pts), regionOf(p) !== regionOf(c));
+    const len = pipes.add(pts, z, C_LINE, 'lineage', 0, bus, sel, span);
 
     const gone = a.state === 'done' || a.state === 'dead';
     const fill = gone ? 0 : anim.get(`core:${a.id}`, 1);
     if (fill > 0) {
-      pipes.add(pts, z + 0.002, hot || a.state === 'working' ? C_LIME : C_LIME_55, 'core', fill * len, core, sel);
+      pipes.add(pts, z + 0.002, hot || a.state === 'working' ? C_LIME : C_LIME_55, 'core', fill * len, core, sel, span);
     }
     const head = pts[0]!, tail = pts[pts.length - 1]!;
     const landed = fill >= 1;
-    pipes.port(head.x, head.y, z + 0.003, C_INK, 1, sel);
-    pipes.port(tail.x, tail.y, z + 0.003, landed ? C_INK : C_INK_DIM, 1, sel, !landed);
+    pipes.port(head.x, head.y, z + 0.003, C_INK, 1, sel, false, 1 - span);
+    pipes.port(tail.x, tail.y, z + 0.003, landed ? C_INK : C_INK_DIM, 1, sel, !landed, 1 - span);
   }
 
   function buildPipes(now: number) {
@@ -1253,7 +1383,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     // Region outlines: the comp's thin panel border.
     for (const r of layout.regions) {
       const x0 = r.cx - r.hw, x1 = r.cx + r.hw, y0 = r.cy - r.hh, y1 = r.cy + r.hh;
-      pipes.add([{ x: x0, y: y1 }, { x: x1, y: y1 }, { x: x1, y: y0 }, { x: x0, y: y0 }, { x: x0, y: y1 }], -0.4, C_RGN, 'lineage', 0, 0.4);
+      pipes.add([{ x: x0, y: y1 }, { x: x1, y: y1 }, { x: x1, y: y0 }, { x: x0, y: y0 }, { x: x0, y: y1 }], -0.4, C_RGN, 'frame', 0, 0.4);
     }
     /*
      * Squad outlines: a tile made of tiles (§3.1). Same silhouette, same step
@@ -1267,14 +1397,35 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       const pts = squadPaths.get(k);
       if (!pts) continue;
       const lit = clock < (squadLit.get(k) ?? -1);
-      const len = pipes.add(pts, SQ_Z, C_SQUAD, 'lineage', 0, 0.4);
+      const len = pipes.add(pts, SQ_Z, C_SQUAD, 'frame', 0, 0.4);
       const t = anim.get(`sq:${k}`, 1);
-      if (t < 1) pipes.add(pts, SQ_Z + 0.002, C_LIME, 'core', t * len, 0.4);
+      if (t < 1) pipes.add(pts, SQ_Z + 0.002, C_LIME, 'core', t * len, 0.4, 0, 1);
       // The port on the top edge: where a `toSquad` message lands and where
       // the fan leaves from. Ink while one is in the air, `--ink-dim` after.
       const port = squadPortAt(q);
       pipes.port(port.x, port.y, SQ_Z + 0.004, lit ? C_INK : C_INK_DIM, 1.3, 0);
     }
+    /*
+     * Blocks (`blocks.ts`): the parent's tile and its tray share one frame,
+     * so from afar they are one shape, and inside it the folded children are
+     * cells with no pipe to anyone. The frame follows the tray, which follows
+     * the parent when the operator pinned it.
+     */
+    let slabN = 0;
+    for (const t of layout.trays) {
+      const p = layout.spots.get(t.parentId);
+      if (!p) continue;
+      const x0 = Math.min(p.x, t.cx) - TILE_W / 2 - BLOCK_PAD, x1 = Math.max(p.x, t.cx) + TILE_W / 2 + BLOCK_PAD;
+      const y0 = Math.min(p.y, t.cy) - TILE_H / 2 - BLOCK_PAD, y1 = Math.max(p.y, t.cy) + TILE_H / 2 + BLOCK_PAD;
+      // The slab: a filled plate under parent and tray, one step up from the
+      // ground. It says "one piece" without adding a line to a field that
+      // already has the region's and the squad's; the outline appears only
+      // when the block is selected.
+      slab(slabN++, (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0, SLAB_Z);
+      const sel = selected.has(t.parentId) || t.ids.some((id) => selected.has(id));
+      if (sel) pipes.add([{ x: x0, y: y1 }, { x: x1, y: y1 }, { x: x1, y: y0 }, { x: x0, y: y0 }, { x: x0, y: y1 }], SLAB_Z + 0.01, C_LIME, 'frame', 0, 0.5, 1);
+    }
+    for (let i = slabN; i < slabs.length; i++) slabs[i]!.visible = false;
     /*
      * Lineage, the comp's way: a grey **bus** that says the child exists, and
      * a lime **core** inside it that says the child is working. The bus never
@@ -1284,9 +1435,30 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
      */
     for (const a of agents) {
       if (!a.parentId) continue;
+      // A child of CAPCOM's is a command link while those are drawn.
+      if (cmdFlags.links && a.parentId === capcomId) continue;
       const p = layout.spots.get(a.parentId), c = layout.spots.get(a.id);
       if (!p || !c) continue;
       tie(a, a.parentId, p, c, Math.min(p.z, c.z) - 0.03, 1.0, 0.42);
+    }
+    /*
+     * Command links (command.ts): CAPCOM to what it launched, faint cyan and
+     * under everything. Direct routes — CAPCOM has no cell, so its pipes never
+     * had a gutter — dimmed to a third once the agent is done. A preference,
+     * off by default: with fifty agents they are the noise the halo is not.
+     */
+    if (cmdFlags.links && capcomId) {
+      const p = layout.spots.get(capcomId);
+      if (p) {
+        for (const a of agents) {
+          if (!commandLinked(a, capcomId)) continue;
+          const c = layout.spots.get(a.id);
+          if (!c || c.trayOf !== null) continue;
+          const gone = a.state === 'done' || a.state === 'dead';
+          const sel = selected.has(a.id) || selected.has(capcomId) ? 1 : 0;
+          pipes.add(routeLineage(p, c), Math.min(p.z, c.z) - 0.06, C_CYAN_DIM, 'command', gone ? 0.35 : 1, 0.7, sel, 1);
+        }
+      }
     }
     /*
      * Squad ties. Lineage already draws the lead→child pipes; a member the
@@ -1316,7 +1488,11 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       if (!path) continue;
       if (m.toAgentId) drawn.add(`${m.fromAgentId}>${m.toAgentId}`);
       const hot = selected.has(m.fromAgentId) || (m.toAgentId ? selected.has(m.toAgentId) : false);
-      pipes.add(path.pts, path.z, hot ? C_LIME : path.color, open ? 'ask' : hot ? 'hot' : 'notice', age, 1, hot ? 1 : 0);
+      // A notice between neighbours is detail; one across the fleet is news from afar.
+      const to = m.toAgentId ? layout.spots.get(m.toAgentId) : undefined;
+      const a = layout.spots.get(m.fromAgentId);
+      const span = spanOf(pathLength(path.pts), !to || !a || regionOf(a) !== regionOf(to));
+      pipes.add(path.pts, path.z, hot ? C_LIME : path.color, open ? 'ask' : hot ? 'hot' : 'notice', age, 1, hot ? 1 : 0, span);
     }
     /*
      * An answer arriving (§5.3): one frame of full lime down the whole pipe,
@@ -1444,12 +1620,36 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   /** Whether the press that started a region gesture landed on the label's ▸. */
   let downOnOpen = false;
   let dragId: string | null = null;
+  /** What the pointer went down on, when it differs from the drag handle (a cell of a block). */
+  let clickId: string | null = null;
   let dragMoved = false;
   let lastX = 0, lastY = 0, downX = 0, downY = 0, downAt = 0;
   const pointers = new Map<number, { x: number; y: number }>();
   let pinchDist = 0;
   /** Everything that moves with the dragged tile. */
   let dragSet: string[] = [];
+  /**
+   * What moves with it without being pinned: the cells of a dragged block.
+   * A block is one piece — a hand on the parent or on any cell moves parent,
+   * trays and cells together — but only the parent is placed: the layout
+   * stands the trays beside a pinned parent, and a pinned cell would be a
+   * tile again (`blocks.ts`), so the block would explode in the hand.
+   */
+  let dragFollow: string[] = [];
+
+  /** The parent of a block, given any of its agents: itself, or the tray it stands in. */
+  function blockParentOf(id: string): string | null {
+    const s = layout.spots.get(id);
+    if (!s) return null;
+    if (s.trayOf) return s.trayOf;
+    return layout.trays.some((t) => t.parentId === id) ? id : null;
+  }
+  /** Every cell in a parent's trays. */
+  function cellsOf(parentId: string): string[] {
+    const out: string[] = [];
+    for (const t of layout.trays) if (t.parentId === parentId) out.push(...t.ids);
+    return out;
+  }
 
   /**
    * Gestures live on the field root, not the canvas: a region label or a
@@ -1486,8 +1686,14 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     const hit = rotulo && squadBlocks.has(rotulo) ? { kind: 'squad' as const, id: rotulo } : pickAt(e.clientX, e.clientY);
     if (hit?.kind === 'agent') {
       mode = 'agent';
-      dragId = hit.id;
-      dragSet = selected.has(hit.id) ? [...selected] : [hit.id];
+      const block = blockParentOf(hit.id);
+      // A hand on a block is a hand on the whole block; the parent is the handle.
+      dragId = block ?? hit.id;
+      dragSet = selected.has(hit.id) ? [...selected].map((id) => blockParentOf(id) ?? id) : [dragId];
+      dragSet = [...new Set(dragSet)].filter((id) => !layout.spots.get(id)?.trayOf);
+      dragFollow = dragSet.flatMap(cellsOf);
+      // A click, though, is on what was clicked: a cell can be selected and opened.
+      clickId = hit.id;
     } else if (hit?.kind === 'media') {
       mode = 'media';
       dragId = hit.id;
@@ -1546,6 +1752,13 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         t.x += dx * per; t.y -= dy * per; t.tx = t.x; t.ty = t.y; t.pinned = true;
         // Live, like a squad's: a feed mid-drag must not ease the tile back.
         store.world.placements[id] = { agentId: id, x: t.x, y: t.y, z: t.z, pinned: true, at: Date.now() };
+        // The block goes with its parent: trays and cells by the same delta, unpinned.
+        for (const tr of layout.trays) if (tr.parentId === id) { tr.cx += dx * per; tr.cy -= dy * per; }
+      }
+      for (const id of dragFollow) {
+        const t = layout.spots.get(id);
+        if (!t) continue;
+        t.x += dx * per; t.y -= dy * per; t.tx = t.x; t.ty = t.y;
       }
     } else if (mode === 'media' && dragId) {
       const m = media.rects().find((r) => r.id === dragId);
@@ -1614,15 +1827,18 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
           ev.onPlace(id, s.x, s.y, s.z);
         }
       } else if (!dragMoved && quick) {
+        const id = clickId ?? dragId;
         if (e.shiftKey || e.metaKey || e.ctrlKey) {
-          if (selected.has(dragId)) selected.delete(dragId); else selected.add(dragId);
+          if (selected.has(id)) selected.delete(id); else selected.add(id);
         } else {
           selected.clear();
-          selected.add(dragId);
+          selected.add(id);
         }
         selRev++;
         ev.onSelect([...selected], at);
       }
+      clickId = null;
+      dragFollow = [];
     } else if (mode === 'media' && dragId) {
       const m = media.rects().find((r) => r.id === dragId);
       if (dragMoved && m) ev.onPlaceArtifact(dragId, m.x, m.y, m.z);
@@ -1804,6 +2020,12 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     if (selRevDone !== selRev) recomputeSelection();
     swarm.setFocus(focusV);
     pipes.setFocus(focusV);
+    halo.setFocus(focusV);
+    // The command post: the flags every frame (a toggle takes on the next
+    // frame), the state once a second — a task cools by the clock alone.
+    readCommandFlags();
+    if (clock - cmdAt > 1) refreshCommand();
+    swarm.setCommand(cmdState.turn, cmdState.waiting, cmdFlags.pulse ? 1 : 0);
 
     // Ease every spot toward its target.
     const k = reduce ? 1 : 1 - Math.pow(0.004, dt);
@@ -1829,6 +2051,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
 
     swarm.ensure(agents.length);
     let slot = 0;
+    let haloDrawn = false;
     labelItems.length = 0;
     for (const a of agents) {
       const s = layout.spots.get(a.id);
@@ -1842,7 +2065,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
        * the field when the console opened and therefore never arrived in front
        * of anyone. `die:` rides on top as the sink's bump.
        */
-      let scale = anim.get(`tile:${a.id}`, 1), alpha = 1;
+      let scale = anim.get(`tile:${a.id}`, 1) * s.scale, alpha = 1;
       const dying = anim.get(`die:${a.id}`, 1);
       if (dying < 1) scale *= 1 + Math.sin(dying * Math.PI) * 0.18;
       const peer = a.state === 'blocked' && a.block?.kind === 'peer';
@@ -1856,16 +2079,38 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
        */
       const alert = !peer && a.state === 'blocked' ? (pendingAgents.has(a.id) ? 1 : 0.5) : 0;
       const speed = a.state === 'working' ? Math.min(1, a.metrics.tokensPerSec / 80) + 0.05 : a.state === 'thinking' ? 0.08 : 0;
-      alpha = a.state === 'done' ? 0.35 : a.state === 'dead' ? 0.55 : a.state === 'idle' ? 0.8 : 1;
+      // CAPCOM idle is CAPCOM listening: it never fades the way a worker does.
+      alpha = a.state === 'done' ? 0.35 : a.state === 'dead' ? 0.55 : a.state === 'idle' && a.role !== 'capcom' ? 0.8 : 1;
       const isSel = selected.has(a.id);
       const sel = isSel ? 2 : hover === a.id ? 1 : 0;
       const near = focusNear.has(a.id);
       const focusA = isSel ? FOCUS_A.sel : near ? FOCUS_A.near : FOCUS_A.far;
+      /*
+       * The form (§2.3): what the silhouette says. A child wears the bite —
+       * the port its parent's pipe lands in; a root is a whole rectangle. A
+       * parent grows a tab under its bottom edge where its ties leave. A
+       * squad member stands on a plate, a lead on two. A session ORCA did
+       * not launch has a dashed outline: in the fleet, not of it. A cell in a
+       * tray is too small for any of it and says only its state.
+       */
+      const cell = s.trayOf !== null;
+      const hasParent = !cell && !!a.parentId && byId.has(a.parentId);
+      const hasKids = !cell && a.childIds.some((id) => byId.has(id));
+      const plates = cell ? 0 : squadOf(a) ? (isLead(a) ? 2 : 1) : 0;
+      const topo = (hasParent ? 1 : 0) + (hasKids ? 2 : 0) + (!cell && a.origin === 'external' ? 4 : 0);
+      const life = a.state === 'done' ? 1 : a.state === 'dead' ? 2 : 0;
       swarm.write(
         slot, s.x, s.y, s.z, Math.max(0.001, scale), color, alert, speed, sel, alpha, hash(a.id),
         flashAt.get(a.id) ?? -9e3, focusA, isLead(a) ? 1 : 0, sigilOf(a), runtimeOf(a),
+        [Math.max(0.001, scale), plates, topo, life],
       );
       slot++;
+      // The halo rides CAPCOM's tile, at its eased spot and scale. Not in the
+      // deck: a ring in a strict grid would lie across its neighbours.
+      if (a.role === 'capcom' && lmode.kind !== 'deck') {
+        halo.write(s.x, s.y, s.z, scale, cmdState, alpha, focusA, isSel ? 1 : 0);
+        haloDrawn = true;
+      }
 
       /*
        * Label if the tile is readable. The label is the tile's whole interior
@@ -1885,6 +2130,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       }
     }
     swarm.commit(slot, clock, ppu);
+    if (!haloDrawn) halo.hide();
+    halo.commit(clock, ppu);
     drawn = slot;
     labels.update(labelItems);
 
@@ -2051,6 +2298,17 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       }, 1.15);
       return true;
     },
+    frameAgents(ids) {
+      const spots = ids.map((id) => layout.spots.get(id)).filter((s): s is Spot => !!s);
+      if (!spots.length) return false;
+      if (spots.length === 1) { userMoved = true; camera.flyTo(spots[0]!.x, spots[0]!.y, 4.2); return true; }
+      userMoved = true;
+      camera.frame({
+        minX: Math.min(...spots.map((s) => s.x)) - TILE_W, maxX: Math.max(...spots.map((s) => s.x)) + TILE_W,
+        minY: Math.min(...spots.map((s) => s.y)) - TILE_H, maxY: Math.max(...spots.map((s) => s.y)) + TILE_H,
+      }, 1.3);
+      return true;
+    },
     viewRect() {
       const w = camera.width, h = camera.height;
       const pts = [camera.screenToWorld(0, 0), camera.screenToWorld(w, 0), camera.screenToWorld(0, h), camera.screenToWorld(w, h)];
@@ -2093,7 +2351,9 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       for (const t of squadBeat.values()) clearTimeout(t);
       squadBeat.clear();
       anim.sweep(() => false);
-      swarm.dispose(); pipes.dispose(); ground.dispose(); labels.dispose(); media.dispose();
+      swarm.dispose(); pipes.dispose(); halo.dispose(); ground.dispose(); labels.dispose(); media.dispose();
+      for (const m of slabs) scene.remove(m);
+      slabGeo.dispose(); slabMat.dispose();
       renderer.dispose();
     },
   };

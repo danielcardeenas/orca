@@ -14,7 +14,8 @@
  */
 
 import gsap from 'gsap';
-import { drawBits, drawDotted, stackORCA, inlineORCA, sizeOf } from './gfx/logo.ts';
+import { drawDotted, stackORCA } from './gfx/logo.ts';
+import { ZIP_SVG, paintBadge, paintBits } from './gfx/algn.ts';
 import { createRadar } from './gfx/radar.ts';
 import { store } from './store.ts';
 
@@ -60,7 +61,7 @@ const STATUS_LINES = [
   'BUS TRAFFIC: LOW',
   'COALESCE 10HZ',
   '',
-  'CEO BOOT: STG 02',
+  'CAPCOM BOOT: STG 02',
   'SYNC_WAIT: 0x0F',
   'BUS LOCKED: YES',
 ];
@@ -111,7 +112,7 @@ export function runBoot(mount: HTMLElement): BootHandle {
 
   paintDotted(logoDot, 148);
   paintSolid(logoHi, 16);
-  paintBits(logoBadge, inlineORCA(), 2.2, '#e8ece4');
+  paintBadge(logoBadge);
 
   const radar = createRadar(radarCanvas);
   const waveCtx = wave.getContext('2d')!;
@@ -351,26 +352,6 @@ function paintSolid(canvas: HTMLCanvasElement, cell: number) {
   paintBits(canvas, stackORCA(), cell, '#f4f6f8', true);
 }
 
-function paintBits(
-  canvas: HTMLCanvasElement, bits: string[], cell: number, color: string, glow = false,
-) {
-  const { w, h } = sizeOf(bits, cell);
-  const pad = cell * 0.5;
-  const dpr = Math.min(2, devicePixelRatio || 1);
-  canvas.width = Math.round((w + pad * 2) * dpr);
-  canvas.height = Math.round((h + pad * 2) * dpr);
-  canvas.style.width = w + pad * 2 + 'px';
-  canvas.style.height = h + pad * 2 + 'px';
-  const ctx = canvas.getContext('2d')!;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w + pad * 2, h + pad * 2);
-  if (glow) {
-    ctx.shadowColor = 'rgba(255,255,255,0.55)';
-    ctx.shadowBlur = cell * 1.4;
-  }
-  drawBits(ctx, bits, pad, pad, cell, color, 0.08);
-}
-
 function drawWave(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, t: number) {
   const r = canvas.getBoundingClientRect();
   const w = r.width, h = r.height;
@@ -540,13 +521,7 @@ function markup(): string {
               <div class="algn-row" data-algn-row>
                 <span class="px px--tiny">+ SYNC ${String(n === 8 ? 7 : n).padStart(2,'0')}</span>
                 <div class="algn-bar">
-                  <div class="algn-zip" data-algn-fill>
-                    <svg viewBox="0 0 200 16" preserveAspectRatio="none">
-                      <rect x="52" y="0" width="36" height="7" fill="#c0f94a"/>
-                      <rect x="112" y="0" width="36" height="7" fill="#c0f94a"/>
-                      <rect x="70" y="9" width="60" height="7" fill="#c0f94a"/>
-                    </svg>
-                  </div>
+                  <div class="algn-zip" data-algn-fill>${ZIP_SVG}</div>
                 </div>
                 <span class="px px--tiny">SYNC ${String(n).padStart(2,'0')} +</span>
               </div>`).join('')}

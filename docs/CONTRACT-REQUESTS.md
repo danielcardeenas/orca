@@ -467,9 +467,18 @@ con `adopt()`. Además, `CapcomSession.check()` no declara muerta una sesión
 recién adoptada durante `CAPCOM_GRACE_MS` (60 s): `claude agents --json` tarda
 en listarla, y sin esa ventana el vigilante lanzaría el duplicado igualmente.
 
-**Petición al CLI:** que `--resume <id>` bajo `--bg` conserve el `sessionId`, o
-que imprima explícitamente `resumed <viejo> as <nuevo>` en un formato estable.
-Hoy hay que deducirlo del último token hexadecimal de la salida.
+**Resuelto para los agentes de trabajo (2026-09-05):** ya no se lanzan con
+`--bg`. Viven en un pane de tmux como sesión interactiva normal, con
+`--session-id <uuid>` elegido por ORCA; `say` es un paste con bracketed paste
+en su prompt, y `resume` es `claude --resume <id>` interactivo, que sí conserva
+el id. Ver `src/collector/tmux.ts` y el README, "Terminals". CAPCOM sigue en
+`--bg` con el `adopt()` de arriba, porque sus tools van en el argv y el rol se
+identifica por short id; mudarlo a un pane es el siguiente paso natural.
+
+**Petición al CLI (sigue en pie para `--bg`):** que `--resume <id>` bajo `--bg`
+conserve el `sessionId`, o que imprima explícitamente `resumed <viejo> as
+<nuevo>` en un formato estable. Hoy hay que deducirlo del último token
+hexadecimal de la salida.
 
 ## 25. `permissions.allow` de un settings de proyecto se ignora sin confianza
 

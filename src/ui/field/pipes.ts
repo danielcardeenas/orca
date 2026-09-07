@@ -20,6 +20,21 @@
  * when the core reaches them, **hollow** when it has not — a second quad in the
  * body colour, at half the scale, painted over the port.
  *
+ * **Nothing structural is a solid line.** The bus and its core are dashes that
+ * drift from parent to child, slowly and about eighteen pixels long at any
+ * zoom; an ask's dashes are faster, longer and amber, so the two motions never
+ * read as one. Only `hot` (the selection), `frame` (a region's or a squad's
+ * outline) and the retracting answer stay solid.
+ *
+ * **Zoom decides what is wiring and what is noise.** Every segment carries a
+ * `span`: 1 for a pipe that leaves its region or reaches a distant tile, 0
+ * for one between neighbours. Pulled back to where a tile is narrower than
+ * `LOD_FAR_PX`, only the spanning pipes remain — the ties between fleets and
+ * the long hauls — and the local wiring is gone with them, ports included.
+ * Between `LOD_FAR_PX` and `LOD_NEAR_PX` it comes back in proportion, and the
+ * ports grow out of nothing rather than popping. Traffic that needs a person
+ * (`ask`, `hot`, `collision`) never hides at any zoom.
+ *
  * Segments are instanced quads: two thousand pipes are one draw call, and the
  * width is clamped to a minimum of pixels so a pipe never vanishes when the
  * camera pulls back.
@@ -37,8 +52,38 @@ import * as THREE from 'three';
 import { TILE_W, TILE_H } from './layout.ts';
 import { dur, shaderMotion, T } from '../motion.ts';
 
-export type PipeKind = 'lineage' | 'notice' | 'ask' | 'collision' | 'hot' | 'core';
-const KIND_ID: Record<PipeKind, number> = { lineage: 0, notice: 1, ask: 2, collision: 3, hot: 4, core: 5 };
+/**
+ * `command` is CAPCOM's (field/command.ts): a faint cyan tie from the post to
+ * an agent it launched, with no ports and, for `age`, how much of it is left
+ * — 1 while the agent lives, less once it is done.
+ */
+export type PipeKind = 'lineage' | 'notice' | 'ask' | 'collision' | 'hot' | 'core' | 'frame' | 'command';
+const KIND_ID: Record<PipeKind, number> = { lineage: 0, notice: 1, ask: 2, collision: 3, hot: 4, core: 5, frame: 6, command: 7 };
+
+/**
+ * Tile width in pixels below which only spanning pipes are drawn, and above
+ * which everything is. `labels.ts`'s tiers are the reference: at 112 px a
+ * tile shows its callsign and nothing else, at 190 it shows what the agent is
+ * doing — and that is where its wiring is worth seeing too.
+ */
+export const LOD_FAR_PX = 100;
+export const LOD_NEAR_PX = 190;
+/** Path length, in world units, past which a same-region tie counts as a long haul. */
+export const SPAN_NEAR = 1.4;
+export const SPAN_FAR = 3.2;
+
+/** 0 for a tie between neighbours, 1 for one that reaches across the fleet. */
+export function spanOf(len: number, crossRegion: boolean): number {
+  if (crossRegion) return 1;
+  const t = Math.min(1, Math.max(0, (len - SPAN_NEAR) / (SPAN_FAR - SPAN_NEAR)));
+  return t * t * (3 - 2 * t);
+}
+
+/** 1 close, 0 far: how much of the local wiring the zoom shows. */
+export function lodOf(pxPerUnit: number): number {
+  const t = Math.min(1, Math.max(0, (pxPerUnit - LOD_FAR_PX) / (LOD_NEAR_PX - LOD_FAR_PX)));
+  return t * t * (3 - 2 * t);
+}
 
 export interface Pt { x: number; y: number }
 
@@ -51,14 +96,14 @@ const VERT = /* glsl */ `
   attribute float iZ;
   attribute vec3 iColor;
   attribute vec4 iMeta; // kind, age (or filled length for a core), offset along path, thickness multiplier
-  attribute float iSel;  // 1 when the pipe touches the selection
+  attribute vec2 iSel;  // x: 1 when the pipe touches the selection · y: span, 0 local → 1 across the fleet
   uniform float uThick;
   uniform float uMinPx;
   uniform float uPxPerUnit;
   varying vec3 vColor;
   varying vec4 vMeta;
   varying float vAlong;
-  varying float vSel;
+  varying vec2 vSel;
   void main() {
     vec2 d = iB - iA;
     float len = length(d);
@@ -80,33 +125,55 @@ const FRAG = /* glsl */ `
   uniform float uTime;
   uniform float uReduce;
   uniform float uFar;   // 1 close, → 0.3 when the camera is far: quiet pipes recede
+  uniform float uLod;   // 1 close, 0 far: how much of the local wiring shows
+  uniform float uPxPerUnit;
   uniform float uFocus;
   varying vec3 vColor;
   varying vec4 vMeta;
   varying float vAlong;
-  varying float vSel;
+  varying vec2 vSel;
   void main() {
     float kind = vMeta.x;
     float age = vMeta.y;
     float a = 1.0;
+    // Structure is drawn in dashes about eighteen pixels long that drift from
+    // parent to child at forty pixels a second, whatever the zoom. The bus
+    // and its core share the phase so they read as one dashed line.
+    float period = clamp(18.0 / uPxPerUnit, 0.08, 0.5);
+    float drift = (40.0 / uPxPerUnit) * (1.0 - uReduce);
+    float dash = fract((vAlong - uTime * drift) / period) < 0.55 ? 1.0 : 0.0;
+    // Local wiring exists in proportion to the zoom; a spanning pipe always does.
+    float local = mix(uLod, 1.0, vSel.y);
     if (kind < 0.5) {
-      a = 0.9 * uFar;
+      a = 0.8 * uFar * dash * local;
     } else if (kind < 1.5) {
-      a = max(0.12, 1.0 - age / 60.0) * uFar;
+      a = max(0.12, 1.0 - age / 60.0) * uFar * dash * local;
     } else if (kind < 2.5) {
+      // An ask: faster, longer, and toward whoever owes the answer.
       float ph = fract((vAlong - uTime * 1.6 * (1.0 - uReduce)) / 0.7);
       a = ph < 0.55 ? 1.0 : 0.22;
     } else if (kind < 3.5) {
       a = fract(vAlong / 0.26) < 0.5 ? 1.0 : 0.0;
     } else if (kind < 4.5) {
       a = 1.0;
-    } else {
+    } else if (kind < 5.5) {
       // Core: iMeta.y is the filled length in world units, not an age. The
       // core exists only as far as it has grown out of the parent.
-      a = vAlong < age ? 1.0 : 0.0;
+      a = (vAlong < age ? 1.0 : 0.0) * dash * local;
+    } else if (kind < 6.5) {
+      // Frame: a region's or a squad's outline. Structure you steer by from
+      // any distance, so it neither dashes nor hides.
+      a = 0.9 * uFar;
+    } else {
+      // Command: CAPCOM to what it launched. Dashes twice the bus's length
+      // at a third of its weight, drifting out from the post; age is what
+      // is left of it once the agent is done. It spans the fleet, so the
+      // zoom never hides it — the preference does.
+      float ph = fract((vAlong - uTime * drift) / (period * 2.0));
+      a = age * mix(0.30, 0.65, vSel.x) * uFar * (ph < 0.6 ? 1.0 : 0.0);
     }
     // In focus, only what the selection is wired to keeps its weight.
-    a *= mix(1.0, mix(0.12, 1.0, vSel), uFocus);
+    a *= mix(1.0, mix(0.12, 1.0, vSel.x), uFocus);
     gl_FragColor = vec4(vColor, a);
     #include <colorspace_fragment>
   }
@@ -175,6 +242,8 @@ interface Pulse {
   hist: Trace[];
 }
 
+const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+
 /** power2.inOut, the same curve `EASE.inout` names for GSAP. */
 function easeInOut(x: number): number {
   return x < 0.5 ? 2 * x * x : 1 - ((-2 * x + 2) ** 2) / 2;
@@ -198,14 +267,23 @@ export interface PipesHandle {
    * For `kind: 'core'`, `age` is the **filled length** in world units: the
    * core paints only up to it. Returns the total length of the path, so the
    * caller can pass `fill * len` next frame.
+   *
+   * `span` (0 → 1, see `spanOf`) says how far the pipe reaches. A local pipe
+   * of kind `lineage`, `core` or `notice` fades out as the camera pulls back
+   * past `LOD_NEAR_PX`; a spanning one, and every other kind, stays. The
+   * ports at its ends follow the same rule.
    */
-  add(points: Pt[], z: number, color: THREE.Color, kind: PipeKind, age: number, thick?: number, sel?: number): number;
+  add(points: Pt[], z: number, color: THREE.Color, kind: PipeKind, age: number, thick?: number, sel?: number, span?: number): number;
   /**
    * A lone square port — a terminal that is not an agent, such as YOU, or a
    * child's cell before it has a tile. `hollow` punches the body colour out of
    * the middle: the comp's NULL box, waiting for a core to arrive.
+   *
+   * `local` (0 → 1) is how much the port belongs to the local wiring: at 1 it
+   * grows in with the zoom like a tie's port does, at 0 (the default, for YOU
+   * and a squad's port) it is always its full size.
    */
-  port(x: number, y: number, z: number, color: THREE.Color, scale?: number, sel?: number, hollow?: boolean): void;
+  port(x: number, y: number, z: number, color: THREE.Color, scale?: number, sel?: number, hollow?: boolean, local?: number): void;
   end(time: number, pxPerUnit: number): void;
   /** Send a pulse along a path: a 0.35-unit segment with a trail behind it. */
   pulse(points: Pt[], z: number, color: THREE.Color): void;
@@ -229,6 +307,7 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
       uMinPx: { value: 1.2 },
       uPxPerUnit: { value: 60 },
       uFar: { value: 1 },
+      uLod: { value: 1 },
       uFocus: { value: 0 },
       uReduce: { value: shaderMotion().reduce ? 1 : 0 },
     },
@@ -252,7 +331,7 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
     aZ = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
     aC = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
     aM = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
-    aS = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
+    aS = new THREE.InstancedBufferAttribute(new Float32Array(cap * 2), 2);
     for (const a of [aA, aB, aZ, aC, aM, aS]) a.setUsage(THREE.DynamicDrawUsage);
     g.setAttribute('iA', aA);
     g.setAttribute('iB', aB);
@@ -343,6 +422,12 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
    * float as squares over pipes that are no longer there.
    */
   let focus = 0;
+  /**
+   * Last frame's zoom level, for the ports: they are composed while `add()`
+   * runs, before `end()` learns this frame's `pxPerUnit`. One frame of lag on
+   * a 120 ms ease is nothing.
+   */
+  let lod = 1;
   const cPort = new THREE.Color();
   const dimPort = (c: THREE.Color, sel: number): THREE.Color =>
     (sel > 0.5 || focus <= 0) ? c : cPort.copy(c).multiplyScalar(1 - focus * 0.88);
@@ -365,7 +450,11 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
     scene.add(ports, holes);
   }
 
-  function drawPort(x: number, y: number, z: number, color: THREE.Color, scale: number, sel: number, hollow: boolean) {
+  function drawPort(x: number, y: number, z: number, color: THREE.Color, scale: number, sel: number, hollow: boolean, local: number) {
+    // Ports have no alpha, so a local one grows in with the zoom instead of
+    // fading: nothing to draw when the zoom says there is nothing there.
+    scale *= mix(1, lod, local);
+    if (scale < 0.02) return;
     ensurePorts(Math.max(portN, holeN) + 1);
     m4.compose(vPort.set(x, y, z + 0.001), qPort, sPort.set(scale, scale, 1));
     ports.setMatrixAt(portN, m4);
@@ -404,8 +493,10 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
   return {
     begin() { n = 0; portN = 0; holeN = 0; },
 
-    add(pts, z, color, kind, age, thick = 1, sel = 0) {
+    add(pts, z, color, kind, age, thick = 1, sel = 0, span = 0) {
       if (pts.length < 2) return 0;
+      const fades = kind === 'lineage' || kind === 'core' || kind === 'notice';
+      const local = fades ? 1 - span : 0;
       ensure(n + pts.length - 1);
       let off = 0;
       for (let i = 0; i < pts.length - 1; i++) {
@@ -415,16 +506,17 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
         aZ.setX(n, z);
         aC.setXYZ(n, color.r, color.g, color.b);
         aM.setXYZW(n, KIND_ID[kind], age, off, thick);
-        aS.setX(n, sel);
+        aS.setXY(n, sel, span);
         off += Math.hypot(b.x - a.x, b.y - a.y);
         n++;
       }
-      for (const p of [pts[0]!, pts[pts.length - 1]!]) drawPort(p.x, p.y, z, color, 1, sel, false);
+      // A command tie has no ports: it is not a pipe anything travels down.
+      if (kind !== 'command') for (const p of [pts[0]!, pts[pts.length - 1]!]) drawPort(p.x, p.y, z, color, 1, sel, false, local);
       return off;
     },
 
-    port(x, y, z, color, scale = 1, sel = 0, hollow = false) {
-      drawPort(x, y, z, color, scale, sel, hollow);
+    port(x, y, z, color, scale = 1, sel = 0, hollow = false, local = 0) {
+      drawPort(x, y, z, color, scale, sel, hollow, local);
     },
 
     end(time, pxPerUnit) {
@@ -433,6 +525,8 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
       mat.uniforms.uTime!.value = time;
       mat.uniforms.uPxPerUnit!.value = pxPerUnit;
       mat.uniforms.uFar!.value = Math.max(0.3, Math.min(1, pxPerUnit / 40));
+      lod = lodOf(pxPerUnit);
+      mat.uniforms.uLod!.value = lod;
       pulseMat.uniforms.uPxPerUnit!.value = pxPerUnit;
       ports.count = portN;
       ports.instanceMatrix.needsUpdate = true;

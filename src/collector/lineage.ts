@@ -57,8 +57,19 @@ interface SpawnRecord {
    * agent and the console would lose its command window.
    */
   role: AgentRole;
+  /**
+   * El worktree en el que se lanzó y su rama, cuando el collector corre con
+   * ORCA_WORKTREES=1. Misma procedencia que `mission`: lo dijo el spawn, y sin
+   * apuntarlo aquí un reinicio del collector no sabría qué aterrizar ni qué
+   * tirar. Ver worktrees.ts.
+   */
+  worktree: string | null;
+  branch: string | null;
   at: number;
 }
+
+/** Lo que el spawn dice del worktree del agente, si lo tiene. */
+export interface SpawnWorktree { path: string; branch: string }
 
 /** Lo que el índice necesita saber de cada agente vivo para resolver el árbol. */
 export interface LineageInput {
@@ -144,14 +155,73 @@ export class LineageIndex {
   noteSpawn(
     shortId: string, parentId: string | null, mission: string | null,
     squad: string | null = null, lead = false, role: AgentRole = 'agent',
+    worktree: SpawnWorktree | null = null,
   ): void {
+    // Volver a apuntar el mismo spawn (CAPCOM se readopta en cada arranque del
+    // collector) no puede perder el sessionId que `bind` ya había resuelto.
+    const previous = this.spawns.find((s) => s.shortId === shortId);
     this.spawns = this.spawns.filter((s) => s.shortId !== shortId);
+    // Un solo mando. Apuntar un CAPCOM nuevo retira al anterior aunque nadie
+    // lo haya pedido: un collector que se reinicia readopta el actual y así
+    // limpia un rol viejo que quedó en disco de antes de que esto existiera.
+    if (role === 'capcom') {
+      for (const s of this.spawns) if (s.role === 'capcom') s.role = 'agent';
+    }
     this.spawns.push({
-      shortId, sessionId: null, parentId, mission: mission ? oneLine(mission, 240) : null,
+      shortId, sessionId: previous?.sessionId ?? null, parentId, mission: mission ? oneLine(mission, 240) : null,
       squad, lead: squad ? lead : false, role,
+      // Readoptar (CAPCOM en cada arranque) sin decir worktree no borra el
+      // que ya se sabía: el worktree no cambia de sitio porque el collector
+      // se reinicie.
+      worktree: worktree?.path ?? previous?.worktree ?? null,
+      branch: worktree?.branch ?? previous?.branch ?? null,
       at: Date.now(),
     });
     this.trimSpawns();
+    this.dirty = true;
+    this.save();
+  }
+
+  /**
+   * El worktree de una sesión, por cualquiera de sus nombres: el session id
+   * que `bind` resolvió, el short id del CLI, o —hospedado— el id que ORCA
+   * eligió y que es las dos cosas.
+   */
+  worktreeOf(sessionId: string, shortId: string | null = null): SpawnWorktree | null {
+    const rec = this.spawns.find(
+      (s) => s.sessionId === sessionId || s.shortId === sessionId
+        || (shortId !== null && s.shortId === shortId),
+    );
+    return rec?.worktree && rec.branch ? { path: rec.worktree, branch: rec.branch } : null;
+  }
+
+  /** Transfer an ORCA root and its children, with a rollback before cutover. */
+  replaceSession(fromId: string, toId: string, a: { parentId?: string | null; mission?: string | null; squad?: string | null; lead?: boolean; worktree?: SpawnWorktree | null }): () => void {
+    const previous = structuredClone(this.spawns);
+    const source = this.spawns.find(s => s.sessionId === fromId || s.shortId === fromId);
+    if (source?.role === 'capcom') throw new Error('Use the CAPCOM activation path');
+    const persist = () => {
+      fs.mkdirSync(path.dirname(this.storePath), { recursive: true });
+      fs.writeFileSync(this.storePath + '.tmp', JSON.stringify({ spawns: this.spawns }), { mode: 0o600 });
+      fs.renameSync(this.storePath + '.tmp', this.storePath);
+    };
+    this.spawns = this.spawns.filter(s => s.sessionId !== toId && s.shortId !== toId);
+    this.spawns.push({ shortId: toId, sessionId: toId, parentId: a.parentId ?? null, mission: a.mission ?? null,
+      squad: a.squad ?? null, lead: a.lead ?? false, role: 'agent', worktree: a.worktree?.path ?? null, branch: a.worktree?.branch ?? null, at: Date.now() });
+    for (const s of this.spawns) if (s.parentId === fromId) s.parentId = toId;
+    if (source) { source.lead = false; source.worktree = null; source.branch = null; }
+    try { persist(); } catch (e) { this.spawns = previous; throw e; }
+    return () => { this.spawns = previous; persist(); };
+  }
+
+  /** El worktree se fue (land + discard, o discard a secas): que el registro no lo siga nombrando. */
+  clearWorktree(worktreePath: string): void {
+    let changed = false;
+    for (const s of this.spawns) {
+      if (s.worktree !== worktreePath) continue;
+      s.worktree = null; s.branch = null; changed = true;
+    }
+    if (!changed) return;
     this.dirty = true;
     this.save();
   }
@@ -161,6 +231,24 @@ export class LineageIndex {
     const rec = this.spawns.find((s) => s.shortId === shortId);
     if (!rec || rec.sessionId === sessionId) return;
     rec.sessionId = sessionId;
+    this.dirty = true;
+    this.save();
+  }
+
+  /**
+   * Esta sesión deja de tener un rol especial: vuelve a ser un agente.
+   *
+   * Existe por CAPCOM. Cada mensaje que se le manda pasa por `--bg --resume`,
+   * que crea una sesión NUEVA con la conversación entera dentro, y la vieja
+   * sigue listada un rato. Las dos con `role:'capcom'` —y con el mismo
+   * `startedAt`, porque el transcript reanudado arrastra el primero— dejan al
+   * hub eligiendo a ciegas, y eligió la vieja: lo que escribía el humano se
+   * reanudaba sin herramientas en sesiones huérfanas. Medido en vivo.
+   */
+  demote(shortId: string): void {
+    const rec = this.spawns.find((s) => s.shortId === shortId);
+    if (!rec || rec.role === 'agent') return;
+    rec.role = 'agent';
     this.dirty = true;
     this.save();
   }
@@ -188,6 +276,8 @@ export class LineageIndex {
         squad,
         lead: squad !== null && raw['lead'] === true,
         role: raw['role'] === 'capcom' ? 'capcom' : 'agent',
+        worktree: str(raw['worktree']),
+        branch: str(raw['branch']),
         at: typeof raw['at'] === 'number' ? raw['at'] : Date.now(),
       });
     }
@@ -217,11 +307,13 @@ export class LineageIndex {
    */
   resolve(inputs: LineageInput[]): Map<string, Lineage> {
     const known = new Set(inputs.map((i) => i.key));
+    const launched = new Set<string>();
     const parent = new Map<string, string | null>();
     const mission = new Map<string, string | null>();
     const squad = new Map<string, string | null>();
     const lead = new Map<string, boolean>();
     const role = new Map<string, AgentRole>();
+    const worktree = new Map<string, SpawnWorktree>();
     const hintDepth = new Map<string, number>();
 
     for (const inp of inputs) {
@@ -252,11 +344,16 @@ export class LineageIndex {
       }
 
       // Sesión raíz: sólo puede tener padre si ORCA la lanzó.
+      // Tres formas de reconocer un spawn: por el sessionId que `bind`
+      // resolvió, por el short id que imprimió `--bg`, o —hospedado, id
+      // elegido por ORCA— porque el "short id" ES el session id.
       const spawn = this.spawns.find(
         (s) => s.sessionId === inp.sessionId
+          || s.shortId === inp.sessionId
           || (inp.shortId !== null && s.shortId === inp.shortId),
       );
       if (spawn) {
+        launched.add(inp.key);
         if (spawn.mission) mission.set(inp.key, spawn.mission);
         // El escuadrón no se hereda ni se adivina: o lo dijo el spawn, o no
         // hay escuadrón. Un subagente `Task` de un miembro trabaja PARA su
@@ -271,12 +368,25 @@ export class LineageIndex {
         // role:'capcom' sería un hub que no sabe a cuál entregarle lo que
         // escribe el humano.
         if (spawn.role === 'capcom') role.set(inp.key, 'capcom');
+        // El worktree tampoco baja a los subagentes: un `Task` corre en el
+        // cwd de su padre, y aterrizar es cosa de la sesión que lo pidió.
+        if (spawn.worktree && spawn.branch) worktree.set(inp.key, { path: spawn.worktree, branch: spawn.branch });
         if (spawn.parentId && known.has(spawn.parentId) && spawn.parentId !== inp.key) {
           parent.set(inp.key, spawn.parentId);
         }
       }
     }
 
+    // Resolve ancestry after all roots, including children that precede them.
+    const owned = (key: string): boolean => {
+      const seen = new Set<string>();
+      let current: string | null = key;
+      while (current && !seen.has(current)) {
+        if (launched.has(current)) return true;
+        seen.add(current); current = parent.get(current) ?? null;
+      }
+      return false;
+    };
     const out = new Map<string, Lineage>();
     const children = new Map<string, string[]>();
     for (const [key, p] of parent) {
@@ -288,6 +398,7 @@ export class LineageIndex {
     for (const inp of inputs) {
       const key = inp.key;
       out.set(key, {
+        origin: owned(key) ? 'orca' : 'external',
         parentId: parent.get(key) ?? null,
         depth: depthOf(key, parent, hintDepth),
         childIds: (children.get(key) ?? []).sort(),
@@ -295,6 +406,8 @@ export class LineageIndex {
         squad: squad.get(key) ?? null,
         lead: lead.get(key) ?? false,
         role: role.get(key) ?? 'agent',
+        worktree: worktree.get(key)?.path ?? null,
+        branch: worktree.get(key)?.branch ?? null,
       });
     }
     return out;

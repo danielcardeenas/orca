@@ -36,6 +36,7 @@ import { squadsOf } from '../../shared/squads.ts';
 import { getSound } from './sound.ts';
 import { EASE, REDUCE, T, dur } from '../motion.ts';
 import { toggleFullscreen } from './fullscreen.ts';
+import { drafts, draftKey } from '../drafts.ts';
 
 interface Target {
   kind: 'ceo' | 'agent' | 'project' | 'squad' | 'group' | 'bad' | 'cmd';
@@ -46,9 +47,11 @@ interface Target {
 const COMMANDS: { name: string; help: string }[] = [
   { name: 'spawn', help: 'launch an agent · /spawn [project]' },
   { name: 'find', help: 'fly to an agent · /find K9' },
+  { name: 'term', help: 'open an agent’s terminal · /term K9' },
   { name: 'frame', help: 'frame the fleet, or a project · /frame [LZ]' },
   { name: 'queue', help: 'what is waiting on you' },
   { name: 'ceo', help: 'talk to CAPCOM, the command session' },
+  { name: 'capcom-new', help: 'New CAPCOM · /capcom-new clean|continuity · same provider/model' },
   { name: 'capcom', help: 'talk to CAPCOM, the command session' },
   { name: 'feed', help: 'telemetry' },
   { name: 'fleet', help: 'machines, projects, everyone' },
@@ -61,8 +64,10 @@ const COMMANDS: { name: string; help: string }[] = [
   { name: 'sfx', help: 'the sound board · audition and assign clips' },
   { name: 'music', help: 'background music · bandcamp or spotify' },
   { name: 'stop', help: 'stop an agent · /stop K9 sure' },
+  { name: 'dismiss', help: 'hide from the field · /dismiss K9 · /dismiss finished · /dismiss clear' },
   { name: 'clear', help: 'drop the selection' },
   { name: 'settings', help: 'the console’s knobs · panel brightness' },
+  { name: 'hygiene', help: 'what ORCA costs this machine · disk, load, what could be reclaimed' },
   { name: 'help', help: 'keys and commands' },
 ];
 
@@ -88,6 +93,9 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
   const chip = el.querySelector<HTMLElement>('[data-target]')!;
   const menu = el.querySelector<HTMLElement>('[data-menu]')!;
   const wipe = el.querySelector<HTMLElement>('[data-wipe]')!;
+  // The unsent line survives a reload (drafts.ts); paintTarget() below reads it.
+  const draft = drafts.bind(input, draftKey('command'));
+  draft.restore();
   let selection: string[] = [];
   const history: string[] = [];
   let hIdx = -1;
@@ -225,6 +233,7 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
     const m = menuItems[i];
     if (!m) return;
     input.value = m.insert;
+    draft.save();
     menuItems = [];
     menu.classList.remove('is-on');
     menuWas = '';
@@ -256,8 +265,21 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
       case 'spawn': { const p = arg ? projects().find((x) => x.code.toUpperCase() === arg.toUpperCase()) : undefined; c.openSpawn(p?.id); break; }
       case 'find': { const t = resolve(arg); if (t.kind === 'agent' && t.ids[0]) { c.go(t.ids[0]); c.openAgent(t.ids[0]); } else c.note(`no agent called ${arg}`, 'warn'); break; }
       case 'frame': { c.pushView(); const p = arg ? projects().find((x) => x.code.toUpperCase() === arg.toUpperCase()) : undefined; if (p) c.field.frameProject(p.id); else c.field.frameAll(); break; }
+      case 'term': case 'terminal': {
+        const t = resolve(arg);
+        if (t.kind !== 'agent' || !t.ids[0]) { c.note(`no agent called ${arg}`, 'warn'); break; }
+        const a = store.world.agents[t.ids[0]];
+        if (!a?.pane) { c.note(`${a?.callsign ?? arg} has no pane to attach to`, 'warn'); break; }
+        c.openTerminal(t.ids[0]);
+        break;
+      }
       case 'queue': c.openQueue(); break;
       case 'ceo': case 'capcom': c.openCeo(); break;
+      case 'capcom-new':
+        if (arg && !['clean', 'continuity'].includes(arg)) { c.note('Use /capcom-new clean or /capcom-new continuity', 'warn'); break; }
+        c.openCeo();
+        window.dispatchEvent(new CustomEvent('orca:capcom-new', { detail: arg }));
+        break;
       case 'feed': c.openFeed(); break;
       case 'fleet': c.openFleet(); break;
       case 'tilt': c.field.setTilt(!c.field.tilted()); break;
@@ -265,12 +287,29 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
       case 'deck': { const s = arg.toLowerCase(); c.deck((['state', 'project', 'cost', 'age'] as const).find((x) => x === s)); break; }
       case 'help': c.openHelp(); break;
       case 'settings': c.openSettings(); break;
+      case 'hygiene': c.openHygiene(); break;
       case 'gallery': c.openGallery(); break;
       case 'timeline': c.openTimeline(); break;
       case 'launch': if (arg) getSound()?.play('launch'); c.openLaunch(arg || undefined, !!arg); break;
       case 'sfx': c.openSfx(); break;
       case 'music': c.openMusic(); break;
       case 'clear': c.field.select([]); setSelection([]); break;
+      case 'dismiss': {
+        const [what = ''] = rest;
+        if (what.toLowerCase() === 'clear') { const n = store.undismissAll(); c.note(`${n} agent${n === 1 ? '' : 's'} back on the field`); break; }
+        if (what.toLowerCase() === 'finished' || what.toLowerCase() === 'done') {
+          const ids = agents().filter((a) => !live(a)).map((a) => a.id);
+          const n = store.dismiss(ids);
+          c.note(`dismissed ${n} finished agent${n === 1 ? '' : 's'}`);
+          break;
+        }
+        const t = resolve(what);
+        if (!t.ids.length) { c.note(`nothing called ${what} · /dismiss K9 · /dismiss finished · /dismiss clear`, 'warn'); break; }
+        const n = store.dismiss(t.ids);
+        c.field.select([]);
+        c.note(`dismissed ${n} agent${n === 1 ? '' : 's'} · SETTINGS shows them again`);
+        break;
+      }
       case 'stop': {
         const [who = '', sure] = rest;
         const t = resolve(who);
@@ -302,6 +341,7 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
       const v = input.value;
       if (!v.trim()) return;
       history.unshift(v); if (history.length > 50) history.pop(); hIdx = -1;
+      draft.clear();
       menuItems = [];
       menu.classList.remove('is-on');
       menuWas = '';
@@ -311,9 +351,9 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
       void run(v);
       return;
     }
-    if (e.key === 'ArrowUp' && !menuItems.length) { e.preventDefault(); hIdx = Math.min(history.length - 1, hIdx + 1); input.value = history[hIdx] ?? ''; paintTarget(); return; }
-    if (e.key === 'ArrowDown' && !menuItems.length) { e.preventDefault(); hIdx = Math.max(-1, hIdx - 1); input.value = hIdx < 0 ? '' : history[hIdx] ?? ''; paintTarget(); return; }
-    if (e.key === 'Escape') { input.value = ''; paintTarget(); input.blur(); }
+    if (e.key === 'ArrowUp' && !menuItems.length) { e.preventDefault(); hIdx = Math.min(history.length - 1, hIdx + 1); input.value = history[hIdx] ?? ''; draft.save(); paintTarget(); return; }
+    if (e.key === 'ArrowDown' && !menuItems.length) { e.preventDefault(); hIdx = Math.max(-1, hIdx - 1); input.value = hIdx < 0 ? '' : history[hIdx] ?? ''; draft.save(); paintTarget(); return; }
+    if (e.key === 'Escape') { input.value = ''; draft.clear(); paintTarget(); input.blur(); }
     e.stopPropagation();
   });
   chip.addEventListener('click', () => { if (selection.length) { c.field.select([]); setSelection([]); } });

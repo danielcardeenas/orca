@@ -121,6 +121,10 @@
 .win.is-blocked .win__btn:hover { color: #000; }
 .win.is-blocked .win__xh--tl { color: #111; }
 .win.is-dead .win__cs { color: var(--red); }
+/* The command's window: its name in cyan, and the focus line in cyan too. The
+   same colour its tile wears on the field; the one window that talks back. */
+.win.is-ceo .win__cs { color: var(--cyan); text-shadow: 0 0 6px var(--cyan-glow); }
+.win.is-ceo.is-focus .win__head::after { background: var(--cyan); }
 
 /* ── Body ─────────────────────────────────────────────────────────── */
 
@@ -345,7 +349,8 @@ select.input option { background: var(--shell); color: var(--ink); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .band::after, .ceo__text.is-streaming::after, .ceo__act.is-running i { animation: none; }
+  .band::after, .ceo__text.is-streaming::after, .ceo__act.is-running i,
+  .talk__text.is-streaming::after, .talk__step.is-run summary i, .talk__dot { animation: none; }
   /* The preference removes motion, never information: the busy band stays on
      the slab's edge and the focus rule stays under the header. Both stop. */
   .slab-btn.is-busy::after { animation: none; }
@@ -587,6 +592,105 @@ select.input option { background: var(--shell); color: var(--ink); }
 .capcom__acts { padding-top: 0; }
 /* A message body or a feed source under its line. Never competes with it. */
 .capcom__note2 { margin-top: 3px; color: var(--ink-dimmer); font-size: 10px; word-break: break-word; }
+
+/* The picker row. Tight: the conversation is what gets the height. */
+.capcom__top { gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); }
+
+/* Tabs: TALK · WORK · EVENTS. A cut between them, never a slide. */
+.tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--line-soft); flex-shrink: 0; }
+.tab {
+  background: transparent; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  color: var(--ink-dim); font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em;
+  text-transform: uppercase; padding: 8px 10px 7px; line-height: 1;
+}
+.tab:hover { color: var(--ink-bright); }
+.tab.is-on { color: var(--ink-bright); border-bottom-color: var(--lime); }
+.tab__n { color: var(--ink-dimmer); }
+.tab.is-hot .tab__n { color: var(--amber); }
+
+/* The conversation. Reading size, not tile size. */
+.talk {
+  padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 14px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.talk__g { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; min-width: 0; }
+.talk__who { font-size: 8px; letter-spacing: 0.16em; color: var(--ink-dimmer); padding-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.talk__t { font-size: 8px; color: var(--ink-faint); letter-spacing: 0.08em; }
+.talk__g.is-human .talk__who { color: var(--lime); }
+.talk__g.is-capcom .talk__who { color: var(--cyan); }
+.talk__g.is-fleet .talk__who { color: var(--amber); }
+.talk__g.is-task .talk__who, .talk__g.is-system .talk__who { color: var(--st-thinking); }
+.talk__body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.talk__text { color: var(--ink); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.talk__g.is-human .talk__text { color: var(--ink-bright); }
+.talk__g.is-capcom .talk__text { white-space: normal; }
+.talk__text.is-streaming::after { content: '▮'; color: var(--lime); animation: blink 0.9s steps(1) infinite; }
+.talk__text code { font-family: inherit; color: var(--lime); background: var(--screen-in); padding: 0 3px; }
+.talk__text b, .talk__text strong { color: var(--ink-bright); font-weight: 600; }
+/* A callsign or squad name CAPCOM wrote: a place on the field. Click flies, ⌘click opens. */
+.talk__text .ref { color: var(--lime); text-decoration: none; border-bottom: 1px dotted var(--lime); cursor: pointer; }
+.talk__text .ref:hover { background: var(--lime); color: var(--screen); border-bottom-color: transparent; }
+.talk__text .ref--squad { color: var(--amber); border-bottom-color: var(--amber); }
+.talk__text .ref--squad:hover { background: var(--amber); }
+.talk__ul { margin: 2px 0; padding-left: 16px; }
+.talk__ul li { margin: 1px 0; }
+.talk__h { color: var(--ink-bright); font-weight: 600; margin-top: 4px; }
+.talk__table { border-collapse: collapse; margin: 4px 0; font-size: 11px; max-width: 100%; display: block; overflow-x: auto; }
+.talk__table th, .talk__table td { padding: 2px 8px; border: 1px solid var(--line-soft); text-align: left; white-space: nowrap; }
+.talk__table th { font-family: 'Tiny5', monospace; font-weight: 400; font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-dim); }
+.talk__gap { height: 6px; }
+.talk__pre { margin: 4px 0; padding: 6px 8px; background: var(--screen-in); border: 1px solid var(--line-soft); overflow-x: auto; white-space: pre; font-size: 11px; line-height: 1.45; }
+.talk__ctx { color: var(--ink-dim); font-size: 11px; }
+.talk__echo { font-size: 8px; letter-spacing: 0.16em; margin-top: 3px; }
+.talk__g.is-echo .talk__text { color: var(--ink-mid); }
+.talk__g.is-live .talk__text { color: var(--ink-mid); white-space: pre-wrap; }
+
+/* A step CAPCOM took: a thought or a tool. One dim row; unfold for what came back. */
+.talk__step { border-left: 2px solid var(--line-soft); margin: 0; }
+.talk__step summary {
+  display: grid; grid-template-columns: 8px auto minmax(0, 1fr); gap: 7px; align-items: baseline;
+  padding: 2px 0 2px 8px; color: var(--ink-dim); font-size: 10px; cursor: none; list-style: none;
+}
+.talk__step summary::-webkit-details-marker { display: none; }
+.talk__step summary:hover { color: var(--ink-mid); }
+.talk__step summary i { width: 6px; height: 6px; background: var(--line); display: block; align-self: center; }
+.talk__step.is-ok summary i { background: var(--lime); }
+.talk__step.is-err summary i { background: var(--red); }
+.talk__step.is-run summary i { background: var(--st-thinking); animation: blink 0.8s steps(1) infinite; }
+.talk__step.is-thinking summary i { background: var(--st-thinking); opacity: 0.6; }
+.talk__step summary b { font-family: 'Tiny5', monospace; font-weight: 400; font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-mid); }
+.talk__step summary span { font-family: 'Geist Mono', monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.talk__step[data-empty] summary { cursor: default; }
+.talk__step-body { margin: 4px 0 6px 21px; padding: 6px 8px; max-height: 220px; overflow: auto; color: var(--ink-dim); font-size: 10px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--screen-in); border: 1px solid var(--line-soft); }
+.talk__step.is-thinking .talk__step-body { font-style: italic; }
+
+/* CAPCOM is on it: glyphs while it composes, a blinking dot and the tool while it works. */
+.talk__live { display: flex; align-items: center; gap: 8px; min-height: 18px; min-width: 0; }
+.talk__live .mono { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.talk__dot { width: 6px; height: 6px; background: var(--lime); display: block; animation: blink 0.8s steps(1) infinite; }
+
+/* The one line under the conversation: what CAPCOM is doing right now. */
+.capcom__status {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line-soft);
+  flex-shrink: 0; min-height: 30px; overflow: hidden; white-space: nowrap;
+}
+.capcom__status .status { align-self: center; padding: 3px 8px; font-size: 9px; }
+.capcom__now { color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.capcom__stat { white-space: nowrap; }
+.capcom__acts { display: flex; gap: 4px; margin-left: auto; }
+/* Quick orders in one line: the conversation gets the height they used to take. */
+.ceo__orders--strip {
+  flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; border-top: 0; padding-top: 0;
+  /* The row scrolls; the fade says so where a cut chip would say "broken". */
+  mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+}
+.ceo__orders--strip::-webkit-scrollbar { display: none; }
+.ceo__orders--strip .chip { white-space: nowrap; flex-shrink: 0; }
+.ceo__orders[hidden] { display: none; }
+.capcom__worker { padding: 8px 12px; }
+.capcom__mission { margin-top: 4px; color: var(--ink-mid); }
 
 /* ── squads ───────────────────────────────────────────────────────── */
 
@@ -999,3 +1103,213 @@ kbd.key.is-echo { color: var(--lime); }
 .set__lab { color: var(--ink-dimmer); letter-spacing: 0.18em; }
 .set__hint { margin: 10px 0 0; color: var(--ink-faint); letter-spacing: 0.14em; line-height: 1.6; }
 .lvl { display: flex; align-items: center; gap: 8px; }
+
+/* ── Terminal ─────────────────────────────────────────────────────── */
+
+/*
+ * The pane itself, on the glass. xterm paints the bytes; this only makes the
+ * frame ours: the same recessed screen every window has, the CLI's own
+ * colours inside it, and a status line for the moments the stream is not
+ * there — attaching, detached, no pane.
+ */
+.win.is-terminal .win__body { background: var(--bezel); }
+.term { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.term__host { flex: 1; min-height: 0; padding: 6px 2px 6px 8px; }
+.term__host .xterm { height: 100%; }
+.term__host .xterm-viewport { background: transparent !important; }
+.term__host .xterm-viewport::-webkit-scrollbar { width: 6px; }
+.term__host .xterm-viewport::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.term__host .xterm .xterm-screen { cursor: text; }
+.term__note {
+  position: relative; flex: 0 0 auto;
+  padding: 6px 10px; border-top: 1px solid var(--line-soft);
+  background: var(--screen); color: var(--ink-dim); font-size: 10px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.term__note.is-live { color: var(--lime); }
+.term__note.is-off { color: var(--amber); }
+.term__note.is-dead { color: var(--red); }
+.term__note[hidden] { display: none; }
+.term.is-idle .term__host { opacity: 0.55; }
+
+/* Receipt history stays visible while transcripts are still catching up. */
+.delivery { max-height: 120px; overflow: auto; flex-shrink: 0; border-top: 1px solid var(--line-soft); padding: 6px 12px; }
+.delivery[hidden] { display: none; }
+.delivery__message { padding: 4px 0; overflow-wrap: anywhere; }
+
+.origin-badge { display: inline-block; font-size: 10px; line-height: 1.4; padding: 1px 4px; border: 1px solid currentColor; color: var(--ink-dim); }
+.origin-badge[data-origin-kind="orca"] { color: var(--lime); }
+.origin-badge[data-origin-kind="external"] { color: var(--cyan, #7cceea); }
+[data-origin-controls] .chip[aria-pressed="true"] { color: var(--bg, #111); background: var(--lime); }
+
+/* Agent workspace: conversation first; operational details stay one tab away. */
+.agent-workspace [hidden] { display: none !important; }
+.agent-workspace__status { padding: 12px 16px; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; border-bottom: 1px solid var(--line-soft); }
+.agent-workspace__conversation, .agent-workspace__terminal { flex: 1; position: relative; min-height: 0; display: flex; flex-direction: column; }
+.agent-thread { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; }
+.agent-thread__activity { color: var(--ink); font-size: 12px; line-height: 1.6; }
+.agent-thread__activity .row { margin-top: 8px; flex-wrap: wrap; }
+.agent-thread__latest { align-self: center; margin: 6px; }
+.agent-workspace > .row { flex-wrap: wrap; gap: 6px; }
+.agent-workspace > .row > .row { flex-wrap: wrap; gap: 6px; }
+.agent-workspace button:focus-visible, .agent-workspace summary:focus-visible, .agent-workspace textarea:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+.agent-workspace button:disabled { opacity: 0.5; cursor: default; }
+
+/* Markdown uses the same palette in CAPCOM and every agent transcript. */
+.talk__text p { margin: 0 0 8px; }
+.talk__text > :last-child { margin-bottom: 0; }
+.talk__text .talk__h { font: inherit; font-weight: 600; margin: 14px 0 6px; color: var(--ink-bright); }
+.talk__text > .talk__h:first-child { margin-top: 0; }
+.talk__text a { color: var(--st-thinking); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; overflow-wrap: anywhere; cursor: pointer; }
+.talk__text a:hover { color: var(--lime); }
+.talk__text a:focus-visible { outline: 1px solid var(--lime); outline-offset: 3px; }
+.talk__file { color: var(--lime); overflow-wrap: anywhere; }
+.talk__text .talk__ul { margin: 6px 0; }
+.talk__text .talk__ul li { margin: 3px 0; }
+.talk__text .talk__ul p { margin-bottom: 4px; }
+.talk__quote { margin: 8px 0; padding: 4px 12px; border-left: 1px solid var(--line); color: var(--ink-dim); }
+.talk__text hr { border: 0; border-top: 1px solid var(--line-soft); margin: 12px 0; }
+.talk__text .talk__table { margin: 10px 0; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.talk__text .talk__table th, .talk__text .talk__table td { padding: 6px 10px; }
+.talk__text .talk__table th { background: var(--screen-in); color: var(--ink-mid); }
+.talk__text .talk__table tbody tr:hover { background: var(--screen-in); }
+.talk__text .talk__pre code { color: var(--ink); background: transparent; padding: 0; font-size: inherit; }
+.talk__pre[data-language]::before { content: attr(data-language); display: block; margin-bottom: 6px; font-size: 9px; color: var(--ink-dim); }
+.talk__pre .hljs-keyword, .talk__pre .hljs-selector-tag, .talk__pre .hljs-literal { color: var(--st-thinking); }
+.talk__pre .hljs-string, .talk__pre .hljs-addition, .talk__pre .hljs-attr { color: var(--lime); }
+.talk__pre .hljs-number, .talk__pre .hljs-built_in, .talk__pre .hljs-type { color: var(--amber); }
+.talk__pre .hljs-title, .talk__pre .hljs-name, .talk__pre .hljs-attribute { color: var(--ink-bright); }
+.talk__pre .hljs-comment, .talk__pre .hljs-meta { color: var(--ink-dim); }
+.talk__pre .hljs-deletion { color: var(--red); }
+
+/* ── File links and the file viewer (paths.ts, kinds/file.ts) ─────── */
+/* A path in prose: same dotted underline as a callsign ref, in the ink of
+   the text so a transcript full of paths does not turn lime. */
+.ref--file { color: var(--ink-bright, var(--ink)); text-decoration: none; border-bottom: 1px dotted var(--ink-dim); cursor: pointer; overflow-wrap: anywhere; }
+.ref--file:hover { color: var(--lime); border-bottom-color: var(--lime); background: transparent; }
+.talk__text .ref--file, .talk__step-body .ref--file, .feed__txt .ref--file { color: inherit; }
+.talk__text .ref--file:hover, .talk__step-body .ref--file:hover, .feed__txt .ref--file:hover { color: var(--lime); background: transparent; }
+.talk__pre .ref--file { border-bottom-color: var(--line); }
+
+.file-workspace { display: flex; flex-direction: column; }
+.file__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); min-width: 0; }
+.file__bar .row { flex: none; gap: 6px; align-items: center; }
+.file__bar .btn { height: 26px; padding: 0 8px; }
+/* The path clips at its START, so the file name always survives: the line is
+   laid out right-to-left and each piece isolated, which is why file.ts writes
+   the pieces in reverse order (line, name, directory). */
+.file__path { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; font-size: 11px; min-width: 0; }
+.file__path > * { direction: ltr; unicode-bidi: isolate; }
+.file__path b { font-weight: 400; color: var(--ink); }
+.file__at { color: var(--amber); }
+.file__tools { padding: 4px 10px; gap: 6px; border-bottom: 1px solid var(--line-soft); }
+.file__tools .chip { height: 22px; padding: 0 8px; }
+.file__view { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; background: var(--screen); }
+.file__msg { padding: 14px 12px; color: var(--ink-dim); }
+.file__msg.is-warn { color: var(--amber); }
+
+/* image: FIT letterboxes; any zoom scrolls. Click toggles fit and 1:1. */
+.file__img { flex: 1; min-height: 0; overflow: auto; background: #000; display: block; cursor: zoom-in; }
+.file__img img { display: block; image-rendering: auto; }
+.file__img.is-fit { display: grid; place-items: center; overflow: hidden; cursor: zoom-in; }
+.file__img.is-fit img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+.file__img:not(.is-fit) { cursor: zoom-out; }
+
+/* code: gutter and source share one line height, so line N sits at (N-1)·lh. */
+.file__code { --file-lh: 18px; flex: 1; min-height: 0; overflow: auto; position: relative; display: grid; grid-template-columns: auto 1fr; align-items: start; font-size: 12px; line-height: var(--file-lh); }
+.file__code pre { margin: 0; padding: 8px 0; font-size: inherit; line-height: var(--file-lh); white-space: pre; tab-size: 4; }
+.file__gutter { position: sticky; left: 0; padding: 8px 10px 8px 12px !important; text-align: right; color: var(--ink-dimmer); background: var(--screen); border-right: 1px solid var(--line-soft); user-select: none; z-index: 1; }
+.file__src { padding-left: 12px !important; padding-right: 16px !important; color: var(--ink); min-width: 0; }
+.file__src code { background: transparent; padding: 0; color: inherit; font-size: inherit; }
+.file__code.is-wrap .file__src { white-space: pre-wrap; overflow-wrap: anywhere; }
+.file__code.is-wrap .file__gutter, .file__code.is-wrap .file__mark { visibility: hidden; }
+.file__mark { position: absolute; left: 0; right: 0; height: var(--file-lh); margin-top: 8px; background: color-mix(in srgb, var(--amber) 16%, transparent); border-left: 2px solid var(--amber); pointer-events: none; }
+.file__src .hljs-keyword, .file__src .hljs-selector-tag, .file__src .hljs-literal { color: var(--st-thinking); }
+.file__src .hljs-string, .file__src .hljs-addition, .file__src .hljs-attr { color: var(--lime); }
+.file__src .hljs-number, .file__src .hljs-built_in, .file__src .hljs-type { color: var(--amber); }
+.file__src .hljs-comment, .file__src .hljs-deletion { color: var(--ink-dim); font-style: italic; }
+.file__src .hljs-title, .file__src .hljs-function { color: var(--ink-bright, var(--ink)); }
+
+.file__md { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+.file__frame { flex: 1; width: 100%; height: 100%; border: 0; background: #fff; }
+.file__media { flex: 1; min-height: 0; width: 100%; background: #000; object-fit: contain; }
+.file__audio { display: grid; place-items: center; flex: 1; padding: 20px; }
+.file__audio audio { width: 100%; max-width: 480px; }
+/* A coordinator handoff remains visible above the new session's transcript. */
+.capcom__handoff {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--screen-in);
+  color: var(--ink);
+}
+.capcom__handoff-title { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; color: var(--ink-mid); }
+.capcom__handoff-models { margin-top: 6px; overflow-wrap: anywhere; }
+.capcom__handoff p { margin: 6px 0 10px; font-size: 12px; line-height: 1.5; }
+.capcom__handoff-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.capcom__handoff-actions .chip { white-space: normal; text-align: left; }
+.capcom__model { padding: 8px 12px; border-top: 1px solid var(--line); flex-shrink: 0; }
+.capcom__model[hidden] { display: none; }
+.capcom__model-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.capcom__model-row > [data-active] { overflow-wrap: anywhere; flex: 1 1 160px; font-size: 11px; }
+.capcom__model-row > [data-picker] { min-width: 0; max-width: 100%; }
+.capcom__model-detail { font-size: 11px; line-height: 1.5; color: var(--ink-dim); overflow-wrap: anywhere; margin-top: 4px; }
+.pick__group { padding: 8px 10px 4px; color: var(--ink-dim); border-top: 1px solid var(--line); }
+.capcom__transfer { padding-top: 10px; margin-top: 8px; border-top: 1px solid var(--line); }
+.capcom__transfer[hidden] { display: none; }
+.capcom__transfer p { font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.capcom__transfer .row { flex-wrap: wrap; gap: 6px; }
+.capcom__archive { padding: 10px 12px; }
+.capcom__archive > p { font-size: 11px; overflow-wrap: anywhere; }
+.capcom__archive-text { margin-top: 14px; overflow-wrap: anywhere; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; }
+.capcom__archive-text h2 { font-family: inherit; font-size: 11px; line-height: 1.5; color: var(--ink-dim); margin: 20px 0 8px; }
+.capcom__archive-text p, .capcom__archive-text li { font-size: 11px; line-height: 1.6; }
+.capcom__archive-text pre { overflow-x: auto; max-width: 100%; }
+.capcom__archive-boundary { margin: 16px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--ink-dim); font-size: 11px; }
+
+[data-recovery-setting] .set__hint { color: var(--ink-dim); letter-spacing: normal; }
+
+/* ── HYGIENE ──────────────────────────────────────────────────────── */
+/*
+ * What ORCA costs the machine. Three marks carry the whole grammar of this
+ * window and they are colour-coded but never colour-ONLY: a floor keeps its
+ * `≥` and an unmeasurable keeps its dash, so the meaning survives a
+ * greyscale screen and a colour-blind operator.
+ */
+.hyg__legend { padding: 6px 12px; border-bottom: 1px solid var(--line-soft); color: var(--ink-dimmer); letter-spacing: 0.12em; }
+/* The legend shows each mark in the face the numbers use. In the pixel font a
+ * tilde and an em dash are the same three lit pixels, and a legend that cannot
+ * tell its own marks apart is worse than none. */
+.hyg__legend .hyg__n { font-family: 'Geist Mono', ui-monospace, monospace; letter-spacing: 0; }
+.hyg__machine { border-bottom: 1px solid var(--line); }
+.hyg__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 10px 12px 2px; }
+.hyg__host { font-size: 11px; letter-spacing: 0.14em; }
+.hyg__when { color: var(--ink-dimmer); }
+.hyg__when.is-stale { color: var(--amber); }
+.hyg__warn { padding: 2px 12px 0; color: var(--amber); letter-spacing: 0.12em; }
+
+.hyg__row { display: grid; grid-template-columns: 1fr 64px auto; align-items: center; gap: 8px; padding: 3px 0; font-size: 11px; }
+.hyg__row--sub { padding-left: 12px; color: var(--ink-dim); }
+/* No bar in this row: the value takes the space the bar would have had,
+ * instead of being squeezed into the 64px meant for it and clipped. */
+.hyg__row--pair { grid-template-columns: 1fr auto; }
+.hyg__k { color: var(--ink-dim); overflow-wrap: anywhere; letter-spacing: 0.08em; }
+.hyg__k small { color: var(--ink-faint); font-size: 9px; letter-spacing: 0.12em; }
+.hyg__v { text-align: right; font-family: 'Geist Mono', ui-monospace, monospace; white-space: nowrap; }
+.hyg__v small { color: var(--ink-dimmer); font-size: 9px; }
+
+.hyg__bar { display: block; height: 4px; background: var(--line-soft); overflow: hidden; }
+.hyg__bar > i { display: block; height: 100%; background: var(--ink-dimmer); }
+
+/* Counted reads plain. A bound keeps its ≥ or ≤, an estimate its ~, an
+ * unmeasurable its dash — the mark is in the text, so these classes only tune
+ * the weight and nothing here needs colour to be read. All of them are
+ * hoverable, because the reason is the other half of the number. */
+.hyg__n { color: var(--ink); }
+.hyg__n.is-bound { color: var(--ink-dim); cursor: help; }
+.hyg__n.is-approx { color: var(--ink-dim); cursor: help; font-style: italic; }
+.hyg__n.is-none { color: var(--ink-faint); cursor: help; }
+
+.hyg__cand { padding: 4px 0; border-top: 1px solid var(--line-soft); }
+.hyg__cand:first-of-type { border-top: 0; }
+.hyg__why { font-size: 10px; line-height: 1.5; color: var(--ink-dimmer); overflow-wrap: anywhere; }
+.hyg__hint { color: var(--ink-faint); letter-spacing: 0.12em; line-height: 1.6; margin-top: 6px; }

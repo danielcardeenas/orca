@@ -17,13 +17,17 @@ import type { WinCtx } from '../wm.ts';
 import { slabBusy, slabFlash } from '../fx.ts';
 import { pick, toggle, type PickHandle, type ToggleHandle } from '../../controls.ts';
 
-const MODELS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'];
+const MODELS: Record<string, string[]> = {
+  claude: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
+  codex: ['gpt-6-astra'],
+};
 const RUNTIMES: { id: string; label: string; ready: boolean }[] = [
   { id: 'claude', label: 'CLAUDE CODE', ready: true },
-  { id: 'codex', label: 'CODEX', ready: false },
+  { id: 'codex', label: 'CODEX', ready: true },
   { id: 'grok', label: 'GROK', ready: false },
 ];
-const PERMS = ['acceptEdits', 'auto', 'plan', 'manual'];
+/** `auto` first: it is the default, and the only one that never waits on a screen. */
+const PERMS = ['auto', 'acceptEdits', 'plan', 'manual'];
 
 export function mountSpawn(ctx: WinCtx, c: Console) {
   const p = ctx.win.spec.params ?? {};
@@ -74,8 +78,19 @@ export function mountSpawn(ctx: WinCtx, c: Console) {
       hint: store.world.machines[pr.machineId]?.hostname ?? '',
     })),
   }));
+  let modelPicker: PickHandle | null = null;
+  const renderModels = (runtime: string) => {
+    modelPicker?.dispose();
+    slot('model').replaceChildren();
+    modelPicker = pick({ name: 'model', options: [
+      ...(MODELS[runtime] ?? []).map((m) => ({ value: m, label: m })),
+      { value: '', label: 'RUNTIME DEFAULT' },
+    ] });
+    slot('model').appendChild(modelPicker.el);
+  };
   mount('runtime', pick({
     name: 'runtime',
+    onChange: renderModels,
     options: RUNTIMES.map((r) => ({
       value: r.id,
       label: r.label,
@@ -83,8 +98,8 @@ export function mountSpawn(ctx: WinCtx, c: Console) {
       disabled: !r.ready,
     })),
   }));
-  mount('model', pick({ name: 'model', options: MODELS.map((m) => ({ value: m, label: m })) }));
-  mount('background', toggle({ name: 'background', label: 'BACKGROUND · SURVIVES THIS TAB', checked: true }));
+  renderModels('claude');
+  mount('background', toggle({ name: 'background', label: 'HOSTED · TMUX PANE, SURVIVES THIS TAB, HAS A TERMINAL', checked: true }));
   mount('perm', pick({ name: 'perm', options: PERMS.map((x) => ({ value: x, label: x })) }));
 
   const status = body.querySelector<HTMLElement>('[data-status]')!;
@@ -104,7 +119,7 @@ export function mountSpawn(ctx: WinCtx, c: Console) {
         projectId,
         prompt: String(fd.get('prompt')),
         mission: String(fd.get('mission')),
-        model: String(fd.get('model')),
+        ...(fd.get('model') ? { model: String(fd.get('model')) } : {}),
         runtime: String(fd.get('runtime') || 'claude'),
         parentId: p.parentId ?? null,
         background: fd.get('background') === 'on',
@@ -120,5 +135,5 @@ export function mountSpawn(ctx: WinCtx, c: Console) {
   });
   setTimeout(() => form.querySelector<HTMLInputElement>('[name=mission]')?.focus(), 80);
 
-  return { dispose() { controls.forEach((x) => x.dispose()); } };
+  return { dispose() { modelPicker?.dispose(); controls.forEach((x) => x.dispose()); } };
 }

@@ -21,10 +21,10 @@ import type { CeoContext } from './tools.ts';
 /**
  * How a caller wants the shared fleet context bent.
  *
- * There are two callers and they differ in exactly two places, both about
- * `ask_human`: the API CEO is nobody in the fleet, while CAPCOM *is* a session
- * in it, so a question it raises should be attributed to it and should land on
- * the record it was already handed.
+ * The MCP server bends it in exactly two places, both about `ask_human`:
+ * CAPCOM *is* a session in the fleet, so a question it raises should be
+ * attributed to it and should land on the record it was already handed. The
+ * bare context (no options) is what tests and in-process callers use.
  */
 export interface HubContextOptions {
   /** Who to blame for an `ask_human` that names no agent. */
@@ -40,21 +40,33 @@ export interface HubContextOptions {
 /**
  * Everything a fleet command can touch, wired to a live hub.
  *
- * Shared on purpose between the API CEO and the MCP server: the two commands
- * differ in where they run and who pays for them, and in nothing else. One
- * implementation of `spawn_agent` is how they stay that way.
+ * One implementation of every tool, behind the MCP server and behind any
+ * in-process caller (tests, `hub.relayMessage`): the fleet has exactly one
+ * set of levers, whoever is pulling them.
  */
 export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext {
   const world = hub.world;
 
   const ctx: CeoContext = {
+    handoffs: () => world.state.capcomHandoffs ?? [],
+    autonomy: hub.autonomy,
+    tasks: hub.tasks,
     agents: () => Object.values(world.state.agents),
     projects: () => Object.values(world.state.projects),
     agent: (id) => world.state.agents[id],
     project: (id) => world.state.projects[id],
     escalation: (id) => world.state.escalations[id],
+    escalations: () => Object.values(world.state.escalations),
+    // Newest first: after a restart the last thing the operator said is the
+    // thing most likely to still apply.
+    rules: (limit) => [...hub.memory.all()]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, Math.max(1, limit))
+      .map((e) => ({ question: e.question, answer: e.rememberAs ?? e.answer, projectId: e.projectId, at: e.at })),
 
     dispatch: (_machineId, cmd) => hub.dispatch(cmd),
+
+    hygiene: hub.hygiene,
 
     fleets: () => hub.fleets.list(),
 
@@ -82,8 +94,8 @@ export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext 
       /*
        * Quién pregunta, cuando el que llama no lo dijo.
        *
-       * Para el CEO de API la respuesta es "nadie": no es un agente. Para
-       * CAPCOM es él mismo, y eso importa: la consola agrupa la escalación en
+       * Sin opciones la respuesta es "nadie". Para CAPCOM es él mismo, y eso
+       * importa: la consola agrupa la escalación en
        * la ventana del agente al que pertenece, así que sin esto una pregunta
        * del mando aparecería sin dueño en ninguna parte.
        */
@@ -167,6 +179,26 @@ export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext 
     answerPeer: (messageId, answer) => hub.replyToMessageLocal(messageId, answer, 'ceo'),
 
     acknowledgeCollision: (id) => hub.acknowledgeCollision(id),
+
+    archiveAgents: (filter, opts) => hub.archiveAgents(filter, opts),
+
+    // El libro de presupuestos, con la flota ya atada: las herramientas piden
+    // "cuánto lleva K9" y no tienen que saber de dónde salen los agentes.
+    budgets: {
+      set: (scope, limit) => hub.budgets.set(scope, limit),
+      get: (scope) => hub.budgets.get(scope),
+      setPendingByShortId: (shortId, limit) => hub.budgets.setPendingByShortId(shortId, limit),
+      agentStatus: (agent) => hub.budgets.agentStatus(agent, world.state.agents, hub.tasks.all()),
+      scopeStatus: (scope) => hub.budgets.scopeStatus(scope, world.state.agents, hub.tasks.all()),
+      config: () => hub.budgets.cfg,
+    },
+
+    // La cámara vive en la consola: el hub sólo reparte la orden y cuenta
+    // quién la oyó, para que CAPCOM pueda decir "no hay nadie mirando".
+    show(directive) {
+      hub.broadcast({ t: 'camera', directive });
+      return hub.counts().consoles;
+    },
   };
 
   return ctx;

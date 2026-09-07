@@ -10,6 +10,7 @@ import { store } from '../../store.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { clock, esc } from '../../util.ts';
+import { linkPaths } from '../paths.ts';
 
 const MAX = 250;
 
@@ -34,8 +35,11 @@ export function mountFeed(ctx: WinCtx, c: Console) {
   list.addEventListener('scroll', () => { pinned = list.scrollTop + list.clientHeight >= list.scrollHeight - 24; });
 
   function line(f: FeedItem): string {
-    return `<div class="feed__line is-${f.level}" ${f.agentId ? `data-agent="${esc(f.agentId)}"` : ''}>
-      <span class="feed__t mono">${clock(f.at)}</span><span class="feed__src">${esc(f.source)}</span><span class="feed__txt mono">${esc(f.text)}</span></div>`;
+    // A path in a line opens the file; the click stops there and does not fly to the agent.
+    const a = f.agentId ? store.knownAgent(f.agentId) : undefined;
+    const scope = { root: store.world.projects[a?.projectId ?? '']?.path ?? null };
+    return `<div class="feed__line is-${f.level}" ${f.agentId ? `data-agent="${esc(f.agentId)}" data-file-agent="${esc(f.agentId)}"` : ''}>
+      <span class="feed__t mono">${clock(f.at)}</span><span class="feed__src">${esc(f.source)}</span><span class="feed__txt mono">${linkPaths(esc(f.text), scope)}</span></div>`;
   }
 
   function render(full = false) {

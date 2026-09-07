@@ -46,6 +46,7 @@ import { getSound } from '../../hud/sound.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { esc, money } from '../../util.ts';
+import { typing } from '../../keys.ts';
 import {
   fetchHistory, fetchSummary, nearestSnapshot, worldFromSnapshot,
 } from '../../history.ts';
@@ -255,8 +256,7 @@ export function mountTimeline(ctx: WinCtx, c: Console) {
   // is a scrubber the operator has to close.
   const onKey = (e: KeyboardEvent) => {
     if (!ctx.win.focused || ctx.win.minimized) return;
-    const t = e.target as HTMLElement | null;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    if (typing(e)) return;
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
     select((idx < 0 ? snaps.length - 1 : idx) + (e.key === 'ArrowLeft' ? -1 : 1));

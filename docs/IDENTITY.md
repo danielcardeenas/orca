@@ -86,9 +86,62 @@ cien trazos.
 
 ### 1.3 CAPCOM
 
-Uno solo por flota y siempre importa: su tile lleva el contorno lima a 1 px
-**permanente** (hoy sólo la selección lo tiene) y el sigilo es la `C` de
-`gfx/logo.ts` en vez de un hash. No hay más excepciones por rol.
+Uno solo por flota, y es la voz que contesta. Es la única excepción por rol,
+y es una excepción de **color**, no de forma (revisado 2026-09-06):
+
+- **Cyan** (`--cyan`, `#4fe3ff`). El contorno es cyan permanente, el halo es
+  cyan y respira despacio aunque el tile esté en reposo, el sigilo (la `C` de
+  `gfx/logo.ts`) es tinta cyan, y el cuerpo lleva un 7 % de cyan sobre el
+  oscuro. Un **trazo** cruza el tile de arriba abajo cada ~6 s con una estela
+  corta, como el haz de un osciloscopio; con `prefers-reduced-motion` se queda
+  quieto. Nada más en el campo puede vestir este color: lima es la flota,
+  ámbar es la persona, cyan es el mando.
+- **Fuera de los proyectos.** No vive en ninguna región: está en el origen de
+  la espiral (`layout.ts`, la ranura 0 pasa a un anillo fuera) con las
+  regiones alrededor, a escala `CAPCOM_SCALE` (1,4). Su carpeta en disco es
+  su casa, no un repo, y no gana región; un trabajador extraviado ahí sí, y
+  así se ve el extravío. Sus tuberías van en ruta directa, como las de un
+  tile fijado a mano.
+- **Dos rótulos.** Sobre el tile, centrado en su borde superior, un chip
+  `CAPCOM · COMMAND` en cyan (`.rgn--capcom`), el equivalente al rótulo de
+  una región o al de una flotilla; como el de una flotilla, no se oculta a
+  ningún zoom ni cede ante una colisión, y un clic abre la conversación.
+  Dentro del tile, `CAPCOM` donde iría el callsign, y `HL · COMMAND` donde un
+  trabajador lleva su proyecto y su origen, con una baliza delante que
+  respira al mismo ritmo. En reposo no se atenúa: CAPCOM idle es CAPCOM
+  escuchando. En la consola, el chip de destino de la línea de comandos, el
+  nombre de su ventana y su voz en TALK llevan el mismo cyan.
+- **Holgura.** Si una región o un tile arrastrados a mano cubren el origen,
+  CAPCOM se aparta hacia arriba hasta el primer hueco libre (`CAPCOM_CLEAR`):
+  nunca queda dentro de un proyecto ni de una flotilla.
+- **Un cuerpo, no varios** (revisado 2026-09-06). CAPCOM sigue siendo *un*
+  tile: partirlo en bloques lo haría indistinguible de una flotilla (§3). Lo
+  que dice que es el puesto de mando es lo que lleva alrededor, y eso vive en
+  `field/command.ts` — un solo quad, un solo shader, un `draw call`:
+  - **El anillo.** Un contorno redondeado a `RING_OFF` del borde del tile,
+    partido en un arco por tarea abierta (`WorldState.tasks`, estado
+    `active`). El arco está encendido mientras la tarea se mueve —
+    conversación fresca (`TASK_HOT_MS`) o algún agente suyo trabajando— y
+    apagado mientras espera; la que el operador tiene abierta va con el trazo
+    al doble. Una tarea completada desaparece del anillo. Sin tareas, el
+    anillo es una línea tenue continua: el puesto está, y no sostiene nada.
+  - **Las muescas.** Ticks ámbar en la parte baja del anillo, uno por
+    escalación que nadie ha contestado (`pending` o `with_ceo`). Es la carga
+    que el operador va a tener que tomar, y por eso es ámbar y no cyan.
+  - **El turno.** En reposo el núcleo respira como siempre; en turno
+    (`thinking`/`working`) late 2,6× más rápido y su contorno se hace sólido;
+    esperando al operador, el halo y el brillo se tiñen de ámbar. Llega al
+    shader del tile como el uniform `uCap`: hay un solo CAPCOM, así que no
+    cuesta un atributo por instancia.
+  - **Los vínculos.** Tuberías cyan tenues (`PipeKind` `command`, sin puertos)
+    de CAPCOM a lo que lanzó — hijo suyo, o raíz con `origin: 'orca'` — que
+    bajan a un tercio cuando el agente termina. Con cincuenta agentes son
+    ruido, así que son preferencia y están apagados por defecto.
+
+  Las cuatro piezas son banderas de `prefs.ts` (`capcomTasks`,
+  `capcomNotches`, `capcomPulse`, `capcomLinks`) y cada una apagada devuelve
+  el campo a lo que dibujaba antes. El anillo no se dibuja en el deck: un aro
+  alrededor de un tile en una rejilla estricta cruzaría a sus vecinos.
 
 ---
 
@@ -100,21 +153,43 @@ Las tres bandas se quedan; cambian sus bordes y su reparto.
 
 ```
  ┌─────────────────────────────────────┐
- │▌ top  0–30 %   x 7–94 %   LL  AX ·CX │▒▒▒│  ← sigilo en 80–95 %
- │▌ mid 31–68 %   x 7–66 %          ▐████│  ← muesca 70–100 %
- │▌                                  ▐████│
- │▌ bot 69–89 %   x 7–96 %  NOW ─────────│
+ │▌ top  auto     x 7–78 %   LL  AX ·CX │▒▒▒│  ← sigilo en 80–95 %
+ │▌ mid  flex 1   x 7–66 %          ▐████│  ← muesca 70–100 %, sólo < 320 px
+ │▌               (x 7–96 % desde 320 px) │
+ │▌ bot  auto     x 7–96 %  NOW ─────────│
  │▌               $  TOK/S  UP  TURNS  [PILL]│
  │▌ (banda del shader, 0–10 %)            │
  └─────────────────────────────────────┘
 ```
 
 - `left: 7%` en las tres: la franja mide 4,5 % y necesita aire.
-- `bot` termina en `bottom: 11%`: por debajo corre la banda de velocidad.
+- La columna termina en `bottom: 11%`: por debajo corre la banda de velocidad.
+- **Las bandas son una columna flex, no tres cajas a altura fija.** La de
+  abajo mide lo que contiene y la del medio se queda con el resto y recorta
+  sus líneas. Con alturas en porcentaje, NOW y las métricas se cortaban a un
+  zoom y sobraban a otro; ahora no se cortan a ninguno. (Los porcentajes van
+  en una columna absoluta dentro del tile, `.lbl__col`: un `padding` en
+  porcentaje sobre `.lbl` se resuelve contra la capa entera, no contra el
+  tile.)
+- **La muesca se retira al acercarse.** Cita la tarjeta del comp de un
+  vistazo, pero en un tile donde ya cabe una frase sólo se come palabras. El
+  shader la desliza fuera del borde derecho entre 260 y 320 px; desde el
+  tier 4 la banda media tiene todo el ancho.
 - La **píldora de estado** deja la esquina superior derecha (ahora es del
   sigilo) y se pone al final de la fila de métricas, alineada a la derecha.
   Es donde el comp pone `OFFLINE` en la tarjeta DEEP-SPACE RADAR ARRAY: bajo
   el título, no sobre él.
+
+### 2.1b El contorno del tile
+
+**Decisión.** El borde de un tile es una **banda de 2 px de pantalla** en
+`#4a5262` —un paso por encima de `--line`—, no la línea de 1 px de `--line`
+sobre un cuerpo dos tonos más oscuro que no se encontraba. La banda sigue la
+silueta, bocado incluido: el shader muestrea la forma a 2 px en las cuatro
+direcciones y pinta donde el interior no llega (`uLinePx`). Selección, hover
+y CAPCOM conservan sus colores de línea; sólo cambia el reposo. El contorno
+de ventana sigue en `--line`: se dibuja una vez alrededor de un panel, no
+cuarenta veces sobre el suelo con ruido.
 
 ### 2.2 Qué va en cada banda, y la escalera
 
@@ -132,10 +207,20 @@ Reglas nuevas:
   66 %. Abajo tiene el 89 % del tile y una sola línea.
 - **La misión gana dos líneas** (`-webkit-line-clamp: 2`). Es la frase que
   explica por qué existe el agente; once caracteres no explican nada.
+- **El título es un nombre, no el brief.** El collector cae al primer prompt
+  cuando la sesión no tiene `ai-title`, así que media squad se titulaba `Eres
+  el agente A en una prueba corta de saludo…`. `nameOf()` (`ui/util.ts`):
+  si el título mide 56+ caracteres o abre diciéndole al agente quién es
+  (`Eres…`, `You are…`, `Actúa como…`), o es un id de sesión pelado
+  (`9585cb99`), y la misión es más corta, se pinta la misión. La ventana del
+  agente usa la misma regla para su cabecera.
 - **Título repetido, título fuera.** Si `title` empieza por el nombre o el
   código del proyecto (caso `axolots-25`), no se pinta y la misión ocupa su
   sitio. Si no hay misión, se pinta el título aunque repita: mejor un dato
   redundante que un hueco.
+- **Sin markdown.** `**No he podido escribir**`, `## Recomendación`, `- ` de
+  lista, `[texto](url)` y las comillas de código se quitan antes de pintar
+  (`plain()`); quedan las palabras en su orden. `snake_case` no es cursiva.
 - **Métricas honestas, columnas fijas.** Las cuatro columnas no se mueven
   para que el ojo las encuentre; un valor sin sentido en el estado actual
   (TOK/S en idle) se pinta `—` en `--ink-faint`, no `0`.
@@ -144,6 +229,84 @@ Reglas nuevas:
 
 Nada de esto cambia el sistema de unidad `--u` ni la regla de que sólo el
 cruce de un peldaño reescribe el interior.
+
+### 2.3 La forma dice algo
+
+**Decisión.** Cada rasgo de la silueta responde a una pregunta que el
+operador se hace de lejos. Nada es adorno; el bocado deja de serlo.
+
+| Rasgo | Significa | Quién lo lleva |
+|---|---|---|
+| Bocado a la derecha | "tengo padre": es el puerto donde aterriza su tubería | sólo los hijos; una raíz es un rectángulo entero |
+| Pestaña bajo el borde inferior (x 0,11–0,25) | "tengo hijos": por ahí salen mis lazos | padres |
+| Una placa detrás, un tono más clara, un paso abajo-derecha | miembro de escuadrón | miembros |
+| Dos placas | líder de escuadrón | líderes |
+| Contorno a guiones largos (28 px, 72 % lleno) | sesión que ORCA no lanzó: en la flota, no de la flota | `origin: 'external'` |
+| Línea de perforación en el margen inferior (y 0,09, bajo la columna de texto) | `done`: el ticket ya se usó; la línea de corte del talón | terminados |
+| Hueco: contorno y sigilo, sin cuerpo | `dead`, como el puerto que se vacía cuando su núcleo drena | muertos |
+
+**Técnica.** Un atributo `iForm` por instancia: escala, placas (0–2), bits de
+topología (1 hijo · 2 padre · 4 externo) y vida (0 · 1 done · 2 dead). La
+silueta es una función `shape(t, bk, tab)` que el shader muestrea también
+para el borde de 2 px y para las placas, así todo sigue la misma forma. El
+píxel se calcula con la escala de la instancia, porque una celda de bandeja
+es el mismo shader a 0,3.
+
+Se descartó el hueco en el borde para `blocked`: el tile ya se invierte a
+ámbar, y una segunda señal de forma para lo mismo sería ruido sobre lo único
+que debe gritar.
+
+### 2.4 Bloques: el padre y los hijos que sólo hablan con él
+
+**Decisión.** Un hijo cuyo único interlocutor es su padre no es un nodo del
+grafo: es parte del padre. Se pliega en el **bloque** del padre: una
+**bandeja** —una celda de la rejilla junto al tile del padre— con hasta seis
+celdas, sin tubería entre ellas. Padre y bandeja se apoyan en una **losa**:
+un plano relleno un paso más claro que el suelo (`#141721`), sin contorno.
+La losa dice "una pieza" sin añadir una línea a un campo que ya tiene la de
+la región y la del escuadrón; el contorno (lima) aparece sólo con el bloque
+seleccionado. De lejos, una silueta; de cerca, callsign y estado de cada
+celda. Un séptimo hijo abre una segunda bandeja.
+
+**Las celdas crecen según cuántas son** (`trayGrid`): un hijo solo ocupa casi
+toda la bandeja (escala 0,62), dos van a 0,44, tres o cuatro a 0,42 en 2 × 2,
+cinco o seis a 0,3 en 3 × 2. Una celda sola no es una mota en una bandeja
+vacía; su callsign se lee dos pasos de zoom antes que el de seis. Su borde
+es de 1 px, no de 2: con dos, el borde sería casi toda la celda.
+
+**El bloque se mueve como una pieza.** Arrastrar al padre o cualquier celda
+arrastra padre, bandejas y celdas juntos. Sólo el padre queda anclado: el
+layout pone la bandeja al lado de un padre anclado, y una celda anclada
+volvería a ser tile (`blocks.ts`), así que el bloque estallaría en la mano.
+Un clic sobre una celda sigue siendo un clic sobre esa celda.
+
+**Aire.** El contorno de escuadrón deja `SQUAD_PAD` (0,15) entre los tiles y
+la línea; la losa deja `BLOCK_PAD` (0,08). Ambos caben en la cuneta (0,24) y
+son distintos para que un bloque dentro de un escuadrón enseñe dos cosas y no
+una línea dibujada dos veces. Un marco pegado al borde del tile se leía como
+borde del tile, y un tile que lo tocaba, como salido.
+
+**Quién se pliega** (`blocks.ts`, `absorbedChildren`):
+
+- todo subagente `Task` de Claude Code (`Agent.subagent`, nuevo campo que el
+  collector saca de la ruta `subagents/` del transcript), siempre;
+- un hijo lanzado por ORCA (`origin: 'orca'`) mientras su único tráfico sea
+  con su padre. El primer mensaje a o de cualquier otro —o a un proyecto, un
+  escuadrón o la flota— lo saca del bloque: gana tile y tubería. Es una
+  promoción visible: "este hijo ya habla con el mundo".
+
+**Nunca se pliega:** un hijo bloqueado en una persona (el ámbar se ve), uno
+con hijos propios, uno alistado en un escuadrón (el escuadrón es su bloque),
+uno de otro proyecto, uno cuyo padre no está en el campo, ni uno que el
+operador ancló a mano. El deck no pliega a nadie: su orden es la información.
+
+**Técnica.** `layoutFleet` recibe el mapa hijo → padre y mete una entrada
+`tray` justo detrás del padre en el orden de linaje; la bandeja hereda el
+escuadrón del padre para el empaquetado y sigue al padre si éste está
+anclado. Cada hijo plegado tiene su `Spot` con `scale: 0.3` y `trayOf`, así
+la selección, las ventanas y las etiquetas funcionan igual. `tie()` no dibuja
+el lazo de un hijo que está en la bandeja de su padre, y su nacimiento es
+una celda que crece, no un núcleo bajando por una tubería.
 
 ---
 
@@ -266,18 +429,48 @@ escala 0,5 encima del puerto; `port(x, y, z, color, scale, sel, hollow)`.
 
 ### 4.4 Jerarquía de pesos y colores
 
-| Relación | Color | Grosor | Movimiento |
-|---|---|---|---|
-| Región (contorno) | `--line-soft` | 0,4 | — |
-| Escuadrón (contorno) | `--line` | 0,4 | se traza al nacer |
-| Linaje, bus | `C_LINE` | 1,0 | — |
-| Linaje, núcleo | lima / lima 55 % | 0,42 | crece al nacer, drena al morir |
-| Lazo líder→miembro | igual que linaje | 0,8 / 0,35 | igual |
-| `ask` abierto | ámbar | 1,0 | guión hacia quien debe |
-| Espera entre pares | azul | 1,0 | guión hacia quien debe |
-| `notice` | azul | 0,7 | se apaga en 60 s |
-| Colisión | rojo | 1,0 | punteado, **quieto** |
-| Hot (selección) | lima plena | 1,2 | — |
+| Relación | Color | Grosor | Movimiento | ¿Se ve de lejos? |
+|---|---|---|---|---|
+| Región (contorno) | `--line-soft` | 0,4 | — | sí |
+| Escuadrón (contorno) | `--line` | 0,4 | se traza al nacer | sí |
+| Linaje, bus | `C_LINE` | 1,0 | guiones lentos padre→hijo | sólo si cruza región o es largo |
+| Linaje, núcleo | lima / lima 55 % | 0,42 | mismos guiones, en fase con el bus | igual que el bus |
+| Lazo líder→miembro | igual que linaje | 0,8 / 0,35 | igual | igual |
+| `ask` abierto | ámbar | 1,0 | guión rápido hacia quien debe | siempre |
+| Espera entre pares | azul | 1,0 | guión rápido hacia quien debe | siempre |
+| `notice` | azul | 0,7 | guiones lentos; se apaga en 60 s | sólo si cruza región o es largo |
+| Colisión | rojo | 1,0 | punteado, **quieto** | siempre |
+| Hot (selección) | lima plena | 1,2 | — (sólida) | siempre |
+
+**Nada estructural es una línea sólida.** El bus y su núcleo son guiones de
+unos 18 px que derivan del padre al hijo a 40 px/s, al zoom que sea (el
+periodo y la velocidad se calculan en píxeles, no en unidades de mundo). Un
+`ask` lleva guiones más largos y más rápidos, en ámbar, así que los dos
+movimientos nunca se leen como uno. Sólo la selección (`hot`), los contornos
+(`frame`) y la respuesta que se retrae siguen sólidos.
+
+### 4.5 El zoom decide qué es cableado y qué es ruido
+
+**Decisión.** De lejos, la consola enseña **qué flotilla habla con cuál**; de
+cerca, **quién cuelga de quién**. Con cincuenta agentes y doscientas tuberías
+sólidas a la vista no se leía ninguna de las dos cosas.
+
+Cada segmento lleva un **alcance** (`span`, 0 → 1, `spanOf`): 1 si la tubería
+sale de su región o recorre más de `SPAN_FAR` (3,2) unidades; 0 si une
+vecinos (menos de `SPAN_NEAR`, 1,4); una rampa suave entre ambos. Un lazo
+seleccionado o bajo el cursor es siempre alcance 1: lo que el operador mira
+nunca es detalle.
+
+El zoom entra como `uLod` (`lodOf`): 0 cuando un tile mide menos de
+`LOD_FAR_PX` (100 px), 1 desde `LOD_NEAR_PX` (190 px, el peldaño de
+`labels.ts` en que el tile enseña qué está haciendo). El alfa de una tubería
+local de `lineage`, `core` o `notice` se multiplica por `mix(uLod, 1, span)`.
+Los puertos no tienen alfa, así que un puerto local **crece** con el zoom
+desde nada (`port(…, local)`), en vez de aparecer de golpe; los de YOU y los
+de escuadrón siempre están a su tamaño.
+
+Lo que necesita a una persona no se esconde a ningún zoom: `ask`, `hot` y
+colisión ignoran el alcance. El ámbar sigue siendo el ámbar.
 
 El ámbar sigue reservado a lo que sólo una persona puede resolver
 (PLAN.md §5); nada aquí lo toca.

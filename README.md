@@ -26,26 +26,20 @@ npm install
 
 npx tsx src/orca.ts                    # the hub              (prints your token)
 npx tsx src/collector/index.ts         # on each machine with agents
-npx tsx src/collector/index.ts --capcom  # on ONE of them: the fleet's command
 npx vite                               # console → http://127.0.0.1:4478
 ```
 
-Or the first three at once: `npm run dev`.
+Or all three at once: `npm run dev`.
 
-`--capcom` starts **CAPCOM**, the one voice that speaks to the fleet on your
-behalf. It is a Claude Code session like any other, so it runs on your
-subscription and commanding a fleet costs no API spend at all. Run it on
-exactly one machine. See [CAPCOM](#capcom).
+The collector on the hub's machine also starts **CAPCOM**, the one voice that
+speaks to the fleet on your behalf. It is a Claude Code session like any other,
+so it runs on your subscription and commanding a fleet costs no API spend at
+all. Exactly one machine carries it: the hub's by default, another one with
+`--capcom`, none with `--no-capcom`. See [CAPCOM](#capcom).
 
-Without CAPCOM and without an Anthropic key ORCA still runs: a scripted
-fallback takes over, which recalls past answers and routes everything else to
-you.
-
-```bash
-npx tsx src/orca.ts --api-command      # force the API CEO even if CAPCOM is up
-npx tsx src/orca.ts --no-ceo           # fleet monitor only, no model calls
-npx tsx src/orca.ts --fake-ceo         # scripted fallback, spends nothing
-```
+Without CAPCOM ORCA still runs as a fleet monitor: nothing commands, what you
+type is recorded with a line saying so, and every agent question goes straight
+to you. The hub itself never calls a model.
 
 ## What it shows
 
@@ -103,6 +97,24 @@ The console also **speaks**: one dry terminal voice per event, muted until `S`,
 remapped and auditioned from the SFX window — which also keeps the eleven cuts
 of the reference film, score and all, for anyone who wants them.
 
+## Who is on the field
+
+The collectors report every session on the machine; the console decides who
+gets a tile. By default that is the fleet: every agent ORCA launched (a
+finished one lingers a day, then leaves), plus any other session only while
+it works or needs you — an idle one that has not said a line in an hour is a
+tab someone left open, not an agent, and goes. `DISMISS` on an agent (H in
+its menu, `/dismiss K9`, `/dismiss finished` for every finished one) hides
+it now; SETTINGS › SHOW ALL reveals everyone, dismissed included, and BRING
+BACK clears the dismissals. Nothing here touches disk: a hidden session is
+still watched, and the first thing it does puts it back on the field.
+
+The rule lives in one place, `store.ts`, and every consumer — the field, the
+mast counts, the windows, the command line — reads the filtered view.
+`updatedAt` is the last line that was conversation (a prompt, a reply, a tool
+result), not the file's mtime: an idle Claude Code session appends
+housekeeping every half hour, which used to make forty of them look awake.
+
 ## The loop that matters
 
 ```
@@ -136,8 +148,63 @@ it out into a CLI session does three things at once:
 ### Start it
 
 ```bash
-npx tsx src/collector/index.ts --capcom     # or: node bin/orca-capcom.mjs
+npx tsx src/collector/index.ts              # on the hub's machine: on by default
+npx tsx src/collector/index.ts --capcom     # on another machine (or: node bin/orca-capcom.mjs)
+npx tsx src/collector/index.ts --no-capcom  # this machine must not carry it
 ```
+
+The default follows the hub: with `ORCA_HUB_URL` unset or pointing at loopback
+the collector brings CAPCOM up on its own, because a console with nobody
+listening is the most confusing thing ORCA can show. Dialing a remote hub, it
+stays off unless asked.
+
+### Where it runs
+
+With tmux on the machine, CAPCOM is hosted like any other agent ORCA launches:
+one interactive session in a pane named `orca-<sessionId>`, id chosen up front.
+What you type in the CAPCOM window is pasted into its prompt, so the session
+never changes identity, and **TERMINAL** on that window is the whole
+conversation, live, straight from the CLI, with a keyboard into it. From a
+shell: `tmux -L orca attach -t orca-<sessionId>`.
+
+The first time on a machine the CLI would ask whether to trust
+`~/.orca/capcom`. The collector answers that in `~/.claude.json` for its own
+directory before launching, so the session comes up without a dialog. If it
+could not (no config file yet), the dialog shows in TERMINAL and you accept it
+once.
+
+Without tmux it falls back to `claude --bg`: every message is then a
+`--bg --resume`, which makes a new session each time, and the window shows
+only the last exchange. Install tmux and restart the collector: a remembered
+`--bg` CAPCOM is stopped and relaunched hosted on the next start.
+
+### It can move your camera
+
+"Show me K9", "where is the audit squad", "take me to the agent running the
+tests", "zoom out": CAPCOM has a `show` tool that points every open console
+at one agent, several, a squad, a project, or the whole fleet. The console
+flies there, selects it, and says who asked in the feed; Backspace brings you
+back where you were. Anything CAPCOM launches — `spawn_agent`, `launch_squad`
+— is followed the same way without asking, and a target that has not reached
+the field yet (the session that just went up) is waited for, up to 45
+seconds, then let go.
+
+Its replies are places too. Every callsign, agent id and squad name CAPCOM
+writes is a link in its window: click flies the camera there, ⌘-click (Ctrl on
+a PC) opens the agent or the squad as well. Ask it to list the agents you
+launched today and the list is the map.
+
+### Permission prompts
+
+A hosted agent that hits "Do you want to proceed?" is not stuck in silence. The
+collector reads its pane, raises it as an escalation with the options
+`allow | deny`, and the usual path takes over: CAPCOM answers it (its brief
+says when to allow and when to deny), the human sees it in the interrupt queue
+if CAPCOM does not answer within 90 seconds, and either answer goes back into
+the pane as keystrokes. The agent window shows ALLOW / DENY too. Agents CAPCOM
+spawns run in `auto` permission mode, so most of them never ask at all; a
+`--bg` session has no screen to read, and there the 90-second suspicion in
+`derive.ts` is all ORCA has.
 
 **One machine only.** The hub delivers what you type to the session with
 `role: 'capcom'`, so two of them would be two minds triaging the same question
@@ -154,10 +221,100 @@ a process bomb.
 The hub serves `POST /mcp` — Streamable HTTP, MCP 2025-03-26, JSON in and JSON
 out — carrying the fleet's verbs:
 
-`list_fleet` · `inspect_agent` · `spawn_agent` · `launch_squad` · `list_fleets` ·
-`inspect_squad` · `stop_squad` · `send_to_agent` · `stop_agent` ·
-`recall` · `remember` · `answer_agent` · `ask_human` · `read_traffic` · `relay` ·
-`answer_peer` · `resolve_collision`
+`briefing` · `list_fleet` · `inspect_agent` · `list_agents` · `show` ·
+`list_tasks` · `inspect_task` · `report_task` · `spawn_agent` · `launch_squad` ·
+`list_fleets` · `inspect_squad` · `stop_squad` · `send_to_agent` ·
+`interrupt_agent` · `stop_agent` ·
+`archive_agents` · `recall` · `remember` · `answer_agent` · `ask_human` ·
+`read_traffic` · `relay` · `answer_peer` · `resolve_collision` ·
+`verify_agent` · `agent_diff` · `screenshot`
+
+Three of them exist so that CAPCOM never has to remember anything:
+
+| Tool | What it answers |
+|---|---|
+| `briefing {hours}` | the situation in one screen — blocked agents and what they ask, tasks waiting on a reply, workers finished in the last `hours` (6) whose result nobody reported, squads with no live member, projects with activity, the latest `remember` rules. Capped per section, text not JSON |
+| `list_tasks {status, only_pending, limit}` | the task conversations (NEW TASK on the console), newest activity first, each with its agents and whether it is waiting on CAPCOM |
+| `inspect_task {task_id}` | one task in full: the conversation, every agent with its last result, and exactly what is still owed |
+
+The brief tells CAPCOM to call `briefing` first in every new session and again
+after every context compaction. The hub is the record; the session is not.
+
+### Interrupting a turn
+
+Three verbs, and they are not interchangeable. `send_to_agent` waits: what you
+write arrives when the agent finishes what it is doing, which on a ten-minute
+detour arrives ten minutes late. `stop_agent` ends the session. In between sat
+the thing an operator does without thinking — press Esc, say something else —
+and until now ORCA could not do it at all.
+
+`interrupt_agent {agent_id, text, reason}` is that Esc, at a distance. The
+session, its id, its context and everything it already wrote survive; only the
+turn in flight is dropped. `text` rides along so cancelling and correcting are
+one action, which matters more than it sounds: **the two CLIs need the two
+halves in opposite orders**, and both orders were measured against real panes,
+not assumed.
+
+| | Claude Code 2.1.263 | Codex CLI 0.153.4 |
+|---|---|---|
+| While working, the bar says | `esc to interrupt` | `esc to interrupt` |
+| Order that works | Escape, then the message | the message (it queues), then Escape |
+| What one Escape does | cuts the turn mid-sentence | with a queued message, cuts and delivers it; **with nothing queued it did not cut at all** |
+| The CLI's own record | a `user` line reading `[Request interrupted by user]` | `turn_aborted` with `reason: "interrupted"` |
+
+That last row is the whole reason the answer can be trusted. ORCA does not
+report "interrupted" because it sent a key — a pane accepts any key without
+saying what it did with it. It waits for the CLI's own mark to appear in the
+transcript, and only then says `evidence: "confirmed"`. `"pending"` means the
+key went out and the acknowledgement has not arrived; it never means failure,
+and nothing anywhere claims the agent has *read* your correction, because no
+transcript says that.
+
+The message is reported just as carefully. After pasting, ORCA reads the pane:
+if the screen shows the CLI's queue marker, the answer says `queued` rather
+than `pasted`, because a queued correction is one the agent will see after
+finishing the very thing you were interrupting. This is not hypothetical — at a
+600 ms gap between the cancel and the paste, the cut landed and the text still
+went to the queue. The gap is 1 s for that reason.
+
+**Only a session ORCA hosts in a pane can be interrupted.** A `claude --bg`
+session has no key to press and its CLI offers no cancel: `claude stop` ends
+the session, which is a different thing entirely. Those answer `unsupported`
+with the reason, and stopping is explicitly not offered as a fallback — no
+kill, no double Ctrl-C, no relaunch, no delete. Losing a turn is reversible;
+losing the session, its uuid and its context is not.
+
+On the console, the agent window has INTERRUPT next to STOP. Type a correction
+first and it becomes INTERRUPT + SEND. Unlike STOP it is not armed with a
+confirm click: interrupting by mistake costs one turn, and the seconds an
+arming click would cost are the seconds the correction was for.
+
+### Verifying an agent's work
+
+An agent's report is a claim. Three tools check it against the disk instead:
+
+| Tool | What it answers |
+|---|---|
+| `verify_agent {agent_id}` | the summary: files the agent actually wrote (its `Edit`/`Write` calls, read from the transcript), `git diff --stat` of its working tree or worktree, the untracked count, and `last_test_run {command, ok, tail, at}` — the last `npm test` / `pytest` / `go test` / `cargo test` / `vitest` it ran, its exit, and the tail of its output. `ok: null` means it is still running |
+| `agent_diff {agent_id, files, max_bytes, only_touched}` | the patch itself, against `HEAD`, plus untracked files. `files` narrows it to paths under the repo root; `only_touched` to what the agent wrote; `max_bytes` (64 KiB by default, 1 MiB at most) caps it, and a truncated patch says so on its last line |
+| `screenshot {what, refs, open, wait_ms}` | a PNG of the console as the operator sees it, saved under `~/.orca/hub/shots/`. `what`/`refs` move the camera first, exactly like `show` |
+
+The diff runs on the collector that owns the agent, never on the hub: `git` is
+invoked read-only (`rev-parse`, `diff`, `status`), without a shell, and only
+inside a project root the collector already discovered — the agent's `cwd`
+from its transcript when that falls inside one (a `--bg` worktree does), the
+project root otherwise. The tree git reports is checked against the same
+roots before anything else runs. Paths in `files` go after `--` and anything
+that escapes the tree is dropped and listed back as `ignored`.
+
+`screenshot` drives a headless Chromium through Playwright, which is a
+devDependency: on a hub that lacks it the tool says what to install
+(`npm i -D playwright && npx playwright install chromium`). It opens
+`ORCA_CONSOLE_URL` when set, else the console the hub serves (`dist/`), else
+Vite on 4478, with the hub token, waits for the field to have its fleet, moves the camera,
+lets it settle for `wait_ms` (1.8 s) and shoots. The page it opens is one more
+console: a `show` sent before it exists is a `show` it never hears, which is
+why the camera moves from inside the capture.
 
 They are the same tools, from the same file, that the API command uses: one
 implementation, so the two can never drift into being able to do different
@@ -172,11 +329,31 @@ start, so a changed token or port never leaves a session with no tools:
 |---|---|
 | `CLAUDE.md` | its brief — who it is, the loop, the standing rules |
 | `.mcp.json` | `{"mcpServers":{"orca":{"type":"http","url":"…/mcp?token=…"}}}` |
-| `.claude/settings.json` | approves that server, denies `Bash`/`Edit`/`Write` |
+| `.claude/settings.json` | approves that server, `auto` mode, every tool available |
 
-The denials are the CEO doctrine made enforceable: CAPCOM commands a fleet, it
-does not edit repos. If it wants something changed it spawns an agent with a
-real brief. The brief lives in `src/collector/briefs.ts` and is meant to be
+**That directory is not a project.** Everything under `~/.orca/capcom` (or
+`ORCA_CAPCOM_DIR`) is the command post, so the collector never registers it as
+one: it produces no island, no two-letter code and no rollup. The live CAPCOM
+session is still reported — with `role: 'capcom'`, drawn apart on the field
+under its own CAPCOM · COMMAND label, and carrying a project id nobody
+registered. Everything else that lives in there — the CAPCOM sessions that came
+before this one, and anything somebody launched inside by mistake — is reported
+with `hidden: true` and left out of `list_fleet`, `list_agents`, the field and
+every counter. Nothing on disk is touched: the transcripts stay, `list_agents
+{include_hidden: true}` shows them, SHOW ALL puts them back on the field, and
+`archive_agents {hidden: true}` clears the ones that already finished. Session
+scratchpads (`/tmp/claude-<uid>/…`) are excluded the same way and for the same
+reason. Launching work in there is refused at every door — `spawn_agent`,
+`launch_squad`, a console spawn and the `.orca/spawn` mailbox — because a worker
+started there reads CAPCOM's `CLAUDE.md` and wakes up believing it is the
+commander. The rule lives in `src/shared/workspaces.ts`.
+
+CAPCOM has Bash, Edit and Write, and the brief tells it when to use them: small,
+immediate things it does itself in its own directory; real work in a repo goes
+to an agent with a proper brief, launched with whatever `permission_mode` the
+mission needs. Those tools used to be denied, and the day that was measured
+(2026-09-06) writing one log file took a squad, two sub-agents and eight
+minutes. The brief lives in `src/collector/briefs.ts` and is meant to be
 edited — it is the product, not configuration.
 
 ### The loop it runs
@@ -191,19 +368,42 @@ marked `capcom did not answer in time`. Handing a question to a session that
 might be wedged is otherwise indistinguishable from a quiet fleet, and an agent
 would wait behind it forever with nobody watching.
 
-### Fallbacks
+### It is recycled before it forgets
 
-No path leaves the fleet without a command.
+A CLI session compacts its context when it fills up, and it does so for ever:
+after the third or fourth compaction the commander works from a summary of a
+summary, and nothing errors — answers just get vaguer. So the collector
+**rotates** it: once the session has compacted `ORCA_CAPCOM_MAX_COMPACTIONS`
+times (2) or run `ORCA_CAPCOM_MAX_TURNS` turns (300), and only when it is idle
+— no turn in progress, no escalation pending on that machine, nothing
+delivered to it for `ORCA_CAPCOM_ROTATE_IDLE_MS` (30 s) — it is stopped and a
+fresh session starts with the same brief and a prompt that says to call
+`briefing` and pick up what is owed. Compactions are the signal because each
+one is an observed loss of memory; turns are the safety net for a CLI that
+never writes the boundary line. `0` turns either off.
+
+It is not a resume (a `--bg --resume` would carry the whole context along,
+which is the thing being shed) and the hub does not see it as a death: the
+collector announces the rotation first, the hub holds anything addressed to
+CAPCOM — what you type, task prompts — for up to three minutes, and hands it to
+the new session the moment it shows. The feed says
+`CAPCOM rotado: N turnos, M compactaciones`. Rotations do not count against
+the five-relaunches-an-hour cap. The policy is `src/collector/rotation.ts`.
+
+### Without CAPCOM
+
+There is one mind, and it is CAPCOM. There used to be a second one — an
+API-driven "CEO" inside the hub that took over when no CAPCOM was live — and
+it was removed on 2026-09-06: two minds with two names commanding one fleet
+was exactly the thing an operator could not tell apart.
 
 | Situation | Who commands |
 |---|---|
 | a live CAPCOM session | CAPCOM — no API spend |
-| no CAPCOM, an Anthropic key present | the API CEO in the hub |
-| no CAPCOM, no key | the scripted fallback: recalls, and routes the rest to you |
-| `--api-command` | the API CEO, even with CAPCOM up |
+| no CAPCOM | nobody: you get a line saying so, and every question goes to you |
 
-The hub says which one is active on startup, and again in the feed the first
-time CAPCOM takes something.
+The hub says so on startup, and again in the feed the first time CAPCOM takes
+something.
 
 ## From a shell
 
@@ -218,7 +418,12 @@ orca squad payments --project AX \
 orca fleets          ·  orca launch audit --project AX
 orca say K9 "<text>" ·  orca tell "<subject>" --to squad:audit-01 --kind warning
 orca stop K9 --reason "<why>"  ·  orca stop squad:audit-01 --reason "<why>"
+orca archive --older-than 24h --dry-run   # finished agents that would go
+orca archive --project AX  ·  orca archive --squad audit-01  ·  orca archive --state dead
+orca land K9 --message "charges: new schema"   # rebase, suite, one commit on the project branch
+orca land squad:payments-01 --no-tests  ·  orca discard K9 --force   # worktrees, see Squads
 orca traffic --waiting  ·  orca recall "<q>"  ·  orca remember "<q>" "<rule>"
+orca journal --project AX --since 24h   ·  orca journal --kind escalation  ·  orca journal --stats
 orca tools           ·  orca health
 ```
 
@@ -298,6 +503,55 @@ message, and the hub delivers it to every agent carrying that label on any
 machine. Unlike a bad `project:`, an empty squad does *not* degrade to a
 broadcast: waking twenty unrelated agents over a typo is worse than not
 delivering, so it is reported undelivered in the feed instead.
+
+**Where they write.** By default every worker runs on the project's own
+working tree, uncommitted, and two of them editing the same file overwrite
+each other. Opt in with `ORCA_WORKTREES=1` on the *collector* and each worker
+gets a git worktree of its own instead:
+
+```
+<project>/.claude/worktrees/<short id>/     its files      (the same place `claude --bg` uses)
+orca/<short id>                             its branch, cut from the project's HEAD
+```
+
+The agent record carries both (`worktree`, `branch`; `inspect_agent` shows
+them), persisted in `~/.orca/lineage.json` like its mission. A squad launched
+with `shared_worktree: true` shares one worktree and one branch named after
+the squad, for members that are meant to edit the same files; without it,
+one per member. The collector links `node_modules` into a new worktree when
+the project has one and git ignores it, so a suite can run there. Without the
+env var nothing changes: agents already running keep their working tree.
+
+**Landing.** `land` (over MCP, or `orca land K9` / `orca land squad:payments-01`)
+integrates a worker's branch into the project's branch, in this order:
+
+1. whatever the worker left uncommitted is committed on *its* branch;
+2. the branch is rebased onto the project's current branch, inside the
+   worktree — a conflict is aborted there, the files are named, and the
+   project branch has not been touched;
+3. the project's suite runs in the rebased worktree, which is exactly what the
+   project is about to become. The command is detected: `scripts.test` in
+   package.json, a `test` target in the Makefile, Cargo, Go, pytest — or
+   `{ "test": "npm run test:ci" }` (or `false`) in `<project>/.orca/land.json`;
+4. if it passes, `git merge --squash` puts ONE commit on the project branch,
+   titled `land <callsign>: <mission>` (or `--message`), with the worker's
+   commit subjects and the suite result in the body. The worker's branch is
+   then reset to the project branch, so it can keep working from there.
+
+Rebase rather than merge, so history stays linear and a conflict shows up
+where the worker can see it; squash rather than fast-forward, so the commit
+says who and why instead of ten "wip"s. The project's working tree may be
+dirty — the operator works there — and that is fine unless a dirty file is one
+the branch changes, which is reported as a conflict; a project *index* with
+staged changes refuses the landing outright. A failing suite or a conflict
+lands nothing and returns why, so CAPCOM can send the files back to the
+worker, resolve them, or `discard`.
+
+`discard` removes a worker's worktree and branch, and refuses while it holds
+unlanded work — uncommitted changes, or commits the project branch does not
+have — unless `force`. A worker that is archived (`archive_agents`, `orca
+archive`) or removed loses its worktree on its own when there is nothing to
+lose; with unlanded work it stays, and the result says so.
 
 `npm run mock -- --squad` adds a synthetic squad — one leader, three children,
 talking to each other — to the fake fleet.
@@ -419,19 +673,102 @@ agent's disk is never touched.
 
 ORCA is a console for coding agents, not a Claude Code console. Everything
 above the collector — the hub, the protocol, the agent↔agent channel, the
-escalations, the artifacts — is files and frames, and any CLI that can write a
-file can use it. What is runtime-specific is the collector's reading of a
-CLI's transcripts and its `spawn` / `say` / `stop` / `logs`, and that lives
-behind `src/collector/runtime.ts`.
+escalations, the artifacts, the tmux pane and the terminal on it — is files,
+frames and a pty, and any CLI with a prompt can use it. What is
+runtime-specific is small: where the CLI writes its session, how those lines
+become an `Agent`, and the argv that launches it. That lives in
+`src/collector/runtime.ts` (which binaries this machine has), `derive.ts`
+(Claude) and `codex.ts` (Codex).
 
 | Runtime | Status |
 |---|---|
-| `claude` | ready — `~/.claude/projects` transcripts, `claude --bg` spawn |
-| `codex` | adapter pending — needs `~/.codex/sessions/*.jsonl` reader and `codex exec` spawn |
+| `claude` | ready — `~/.claude/projects` transcripts; `claude --session-id <uuid> <prompt>` in a pane, `--bg` without tmux |
+| `codex` | ready — `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; `codex -C <cwd> <prompt>` in a pane |
 | `grok` | adapter pending — needs its session format and a headless entry point |
 
-Every agent carries `runtime`; the tile shows it when it is not Claude, and a
-`spawn` naming a runtime this collector cannot drive is refused with the reason.
+Both run on their subscriptions — Claude Max and ChatGPT — never on API keys;
+ORCA only ever launches the CLI you already log into. Every agent carries
+`runtime`; the tile shows `CX` for Codex, the spawn form has a picker, the
+CLI takes `--runtime codex`, and CAPCOM's `spawn_agent` tool takes `runtime`.
+A `spawn` naming a runtime this machine cannot drive is refused with the
+reason.
+
+What is different about Codex, and why:
+
+- **the id comes after the process.** Codex does not accept a session id up
+  front, so its pane is born as `orca-cx-<nonce>` and renamed to
+  `orca-<sessionId>` the moment the rollout appears (a second or two). The
+  ack waits for that like it waits for a Claude transcript.
+- **the project is the rollout's `cwd`.** There is no per-project directory;
+  the first line of the rollout says where it ran, and that maps onto the
+  same project Claude sessions of that directory belong to.
+- **approvals are not in the rollout.** A pending exec approval lives in the
+  TUI only, so ORCA applies the same suspicion it applies to Claude — a tool
+  open for 90 s under a policy that can ask is reported blocked on
+  permission — and the TERMINAL is where you answer it. `plan` maps to
+  `-s read-only`, `manual` to `-a untrusted`, the default to
+  `-a on-request -s workspace-write`.
+- **cost is zero and tokens are real.** `token_count` gives input, cached,
+  output and reasoning tokens per thread; there is no dollar figure because
+  there is no bill.
+- **a Codex session you started yourself has no liveness.** Claude's
+  `claude agents --json` lists every session; Codex has no equivalent the
+  collector reads yet, so a non-hosted Codex session is "alive" while its
+  rollout moves and `done` a minute after it stops. Hosted ones are alive as
+  long as their pane is. `say`, `stop` and `logs` need a pane and say so.
+
+Codex 0.153 also ships a local app-server daemon (JSON-RPC over a socket or
+websocket, `codex app-server generate-ts` for typed bindings), `codex agents`,
+`codex queue --thread`, `codex exec --json` and remote-control pairing. None
+of it is used yet; the daemon is the obvious source for live approvals and
+liveness when this adapter grows.
+
+## Terminals
+
+An agent ORCA launches hosted does not run as a detached `--bg` job. It runs
+as an ordinary interactive CLI inside a tmux pane on ORCA's own server
+(`tmux -L orca`, session `orca-<sessionId>`), and that pane is what the
+console attaches to when you open a TERMINAL: `TERM` on an agent's window,
+`T` in its menu, or `/term K9`. What you see is the CLI itself — its prompts,
+its permission questions, its `/commands` — streamed byte for byte, and what
+you type goes straight back. Closing the window detaches; the agent never
+notices.
+
+Why a pane and not a job:
+
+- **it survives ORCA.** tmux is its own daemon. Restart the collector, close
+  the lid, and the fleet is still there; `resume` only exists for panes that
+  actually died.
+- **`say` is a paste, not a fork.** `claude --bg --resume` moves the
+  conversation to a new session id (docs/CONTRACT-REQUESTS.md §24). Into a
+  pane, text is pasted at the prompt with bracketed paste, so the session
+  keeps its id, its history and its place in the lineage.
+- **the id is chosen up front.** The collector launches with
+  `--session-id <uuid>` and names the pane after it, so the ack names the
+  agent without waiting for a short id to be printed and matched.
+- **any CLI fits.** Codex, Grok, anything with a prompt is "that binary in a
+  pane"; the terminal, `say`, `stop` and `logs` are the same for all of them.
+
+What it needs: `tmux` on the machine (`brew install tmux`) and `node-pty`,
+which `npm install` brings. Without tmux the collector says so at start and
+every spawn falls back to `--bg`; the TERMINAL button reads NO PANE. The
+spawn form's HOSTED toggle, `pane: false` on the `spawn` command, or a
+machine without tmux are the three ways to get a `--bg` job instead.
+
+Wire: the console sends `term:open {termId, agentId, cols, rows}`; the hub
+looks up the agent's machine and forwards it; the collector attaches a pty
+running `tmux attach` and streams `term:data` up. `term:input` and
+`term:resize` go down the same id; `term:close` from either side, or either
+socket dropping, ends it. Bytes are capped per frame, attachments per
+machine and per console, and a `term:data` for an id that machine does not
+own is dropped. The pane uses `window-size latest`, so the console that
+resized last sets its size.
+
+`stop` on a hosted agent is two Ctrl-C — the way you leave the CLI by hand —
+and a `kill-session` six seconds later if it is still there. `logs` is
+`capture-pane`: the screen as tmux has it composed, no escapes to strip.
+Sessions you start from your own shell are watched like any other but have no
+pane: they can be seen, not attached to.
 
 ## History
 
@@ -467,6 +804,35 @@ Both are authenticated like the socket: `?token=`, `Authorization: Bearer`, or
 `X-Orca-Token`, with the same loopback-without-token concession as everything
 else in development.
 
+## Journal
+
+`remember` keeps the human's rules; the journal keeps the fleet's **results**.
+Every launch (who launched it — human, CAPCOM or another agent — the project,
+squad and task, the full brief, runtime and model), every end (`done` or
+`dead`, cost, duration, tokens, lines changed, the last thing it said), every
+escalation and who answered it (CAPCOM or the human, and what they said),
+every CAPCOM rotation and every landing goes to
+`~/.orca/hub/journal/journal.jsonl`, one JSON line per fact, append-only. It
+survives hub restarts: a collector's snapshot after a restart never journals
+an agent twice, and an agent that finished while the hub was down gets its
+end written when it reappears, marked `late`.
+
+The file rotates by size — over `ORCA_JOURNAL_MAX_BYTES` (8 MiB) it is renamed
+`journal.<date>.<n>.jsonl` and a fresh one starts; the newest
+`ORCA_JOURNAL_KEEP` (6) rotated files are kept, the oldest go. Whole files
+leave, never single lines.
+
+Two MCP tools read it, and `orca journal` from a shell:
+
+| Tool | What it answers |
+|---|---|
+| `journal {project, squad, task_id, agent, kind, since, until, state, by, text, limit, newest_first, full}` | entries matching the filters, newest first, compact (brief and messages clipped to 200 chars unless `full`). `since`/`until` take `24h`, `3d`, an ISO date or epoch ms; `text` matches brief, last message, question and answer with accents and case ignored |
+| `journal_stats {project, squad, since, until}` | launches by who launched them, done vs dead and the rate, total and average cost and duration overall and per project, escalations and who answered, rotations, landings — and the briefs that ended in an escalation, which are the ones to write better next time |
+
+`briefing` shows a new CAPCOM what finished since the last briefing it was
+given, so a session born after a rotation starts from results, not from
+nothing. The rest is one `journal` call away.
+
 ## Bounds
 
 ORCA is meant to be left running. Everything it holds is bounded, and each
@@ -483,12 +849,77 @@ bound exists because something actually broke without it:
 | history snapshots | 24h, or 6,000 | a day is what you scrub; past that, the log |
 | history entries | 250,000 agent×snapshot | a 300-agent fleet keeps fewer hours instead of taking the hub down |
 | telemetry feed | 500 lines | |
-| CEO conversation | 100 turns in the frame | the rest is on disk |
+| CAPCOM conversation | 100 turns in the frame | the rest is on disk |
 
 Nothing that needs a person is ever dropped: a `blocked` agent survives the
 per-machine cap even as the oldest one there, a `blocking` question never
 expires from overflow, and a dead parent with a live child stays so the lineage
 graph has something to point at.
+
+### Budgets
+
+A worker that is still going at $40 is either doing something big or going in
+circles, and from the outside those look the same. A budget is how CAPCOM
+tells them apart without watching: a ceiling in dollars, in minutes, or both,
+on one agent, on a whole squad (shared by every member) or on an ORCA task
+(shared by every agent assigned to it). `spawn_agent` and `launch_squad` take
+`budget_usd` / `budget_min` (per agent) and `launch_squad` also
+`squad_budget_usd` / `squad_budget_min` (the squad together); `set_budget`
+puts one on anything already running, changes it, or removes it. With
+`ORCA_DEFAULT_BUDGET_USD` / `ORCA_DEFAULT_BUDGET_MIN` set, every worker
+without a budget of its own gets that one; CAPCOM itself never does.
+
+The hub checks every two seconds and says two things, once each, on the
+channel CAPCOM already reads and in the feed:
+
+```
+[BUDGET 80%] K9 · task task_ab12 · squad audit-01 · $4.10 of $5.00 (82%) · 12m of 30m (40%) · 82% used
+[BUDGET 100%] K9 · task task_ab12 · $5.10 of $5.00 (102%) · still making progress (K9 40s ago); not stopped. Use stop_agent, or raise it with set_budget.
+```
+
+At 100 % an agent that has made progress — a tool call or a changed line in
+the last `ORCA_BUDGET_PROGRESS_MIN` minutes — is reported, not stopped:
+stopping a worker mid-edit to save forty cents is a bad trade. One that is
+over budget *and* has gone quiet is stopped, with the reason where CAPCOM
+reads it (`[BUDGET STOP] …`), unless `ORCA_BUDGET_ACTION=warn`. Raising the
+budget re-arms the warnings, which is how CAPCOM lets an agent go on.
+
+Spend is what the CLI reports, and Claude Code writes `costUSD` at the end of
+a turn, so a live agent often shows $0 while burning tokens. While the cost is
+still zero the hub estimates from the tokens it has seen at a flat
+`ORCA_BUDGET_USD_PER_MTOK`, and marks the number `~$`. `inspect_agent`,
+`inspect_squad` and `list_fleet` all show budget against spend; the
+limits live in `budgets.json` next to the hub's other files and survive a
+restart, as does the memory of what was already said.
+
+### Archiving finished agents
+
+Retention only postpones the pile: every transcript still on disk is an agent
+to the collector, and the next snapshot brings every `done` and `dead` session
+straight back. Archiving is the explicit version — "I am finished with these"
+— and it exists in three places that do the same thing:
+
+| Where | How |
+|---|---|
+| CAPCOM | `archive_agents {project_id, squad, older_than_hours, state, dry_run}` |
+| the console | **ARCHIVE FINISHED** in any FLEET window: the first click is a dry run that arms the button with the count, the second archives |
+| a shell | `orca archive [--project AX] [--squad s] [--older-than 24h] [--state done\|dead] [--dry-run]` |
+
+Filters combine with AND; none of them means every finished agent. What it
+never does: touch a live agent (`booting`, `thinking`, `working`, `blocked`,
+`idle`), whatever the filter says; archive a finished parent whose children
+are still alive (it is kept and reported); or delete anything on disk. A
+squad whose last member is archived disappears with it — a squad is only the
+label its members carry.
+
+**Archived, not deleted.** The hub keeps no agent table; the agents are
+rebuilt from the collectors' snapshots. So archiving is a tombstone: the record
+leaves the world the way a retention eviction does, and its id is appended to
+`~/.orca/hub/archived.jsonl`, which the hub replays on start and checks on
+every snapshot, `agent:new` and patch. A tombstoned session that comes back
+*finished* is refused; one that comes back *live* — someone resumed it — lifts
+its own tombstone and is admitted like any other agent. The transcript, the
+event log and the timeline keep everything they had.
 
 Measured after these landed: an absurd synthetic fleet (three machines, chaos
 reconnects, six times real speed) that used to crash the hub in three minutes
@@ -515,17 +946,34 @@ must not become arbitrary code execution on your laptop.
 | `ORCA_TOKEN` | generated | shared secret; written to `~/.orca/token` |
 | `ORCA_PORT` | `4479` | hub port |
 | `ORCA_FLEET_WINDOW_MS` | `86400000` | how far back a session still counts |
-| `ORCA_CAPCOM` | unset | `1` makes this collector carry CAPCOM (same as `--capcom`) |
+| `ORCA_CAPCOM` | on when the hub is local | `1` forces CAPCOM on this collector (`--capcom`), `0` turns it off (`--no-capcom`) |
 | `ORCA_CAPCOM_DIR` | `~/.orca/capcom` | where the command session lives |
+| `ORCA_CAPCOM_MAX_COMPACTIONS` | `2` | recycle CAPCOM after this many context compactions; `0` disables |
+| `ORCA_CAPCOM_MAX_TURNS` | `300` | recycle CAPCOM after this many turns; `0` disables |
+| `ORCA_CAPCOM_ROTATE_IDLE_MS` | `30000` | how long CAPCOM must be idle before it is recycled |
 | `ORCA_HOME` | `~/.orca` | moves everything: token, hub files, `fleets/`, `capcom/` |
 | `ORCA_HUB_HTTP` | derived from `ORCA_HUB_URL` | the hub's http base, for the MCP url |
-| `ORCA_MODEL` | `claude-opus-5` | the API fallback's model |
-| `ORCA_ORDERS` | `~/.orca/ORDERS.md` | standing orders for the API fallback |
+| `ORCA_JOURNAL_MAX_BYTES` | `8388608` | rotate the fleet journal past this size |
+| `ORCA_JOURNAL_KEEP` | `6` | rotated journal files to keep |
 | `ORCA_STRICT_AUTH` | unset | refuse the localhost-without-token shortcut |
+| `ORCA_DEFAULT_BUDGET_USD` | unset | dollar ceiling for every worker that has no budget of its own; empty = no limit |
+| `ORCA_DEFAULT_BUDGET_MIN` | unset | the same, in minutes of wall clock since launch |
+| `ORCA_BUDGET_ACTION` | `stop` | what 100 % of a budget does to an agent that has stopped progressing: `stop` it, or only `warn` |
+| `ORCA_BUDGET_PROGRESS_MIN` | `3` | minutes without a tool call or an edit before an agent counts as "not progressing" |
+| `ORCA_BUDGET_USD_PER_MTOK` | `6` | flat $/million tokens used to estimate spend while the CLI has not written a cost yet |
 
 CAPCOM's own brief is `~/.orca/capcom/CLAUDE.md`, rewritten from
 `src/collector/briefs.ts` on every start. To give it a policy that survives that,
-edit the brief. `~/.orca/ORDERS.md` does the same job for the API fallback.
+edit the brief, or tell CAPCOM the rule and let it `remember` it.
+
+## Communication and usability review
+
+See [the September 2026 review](docs/USABILITY-REVIEW.md) for the latency findings,
+implemented improvements, and remaining runtime/input limitations. CAPCOM now
+includes a **FLEET WORK** list with direct access to agents and terminals.
+`orca-read --wait --timeout 60` waits for mail through filesystem events (timeout
+in seconds), so a worker can wait without repeated tool calls. This does not
+wake a session that has already stopped executing.
 
 ## Tests
 
@@ -604,3 +1052,7 @@ modules, and design system are its own copies. Move the directory somewhere
 else and it runs.
 
 See `DESIGN.md` for the visual contract.
+
+### New CAPCOM
+
+La ventana de mando incluye **New CAPCOM** con dos modos: **Clean context** (sin pendientes ni historial heredados; espera instrucciones nuevas) y **With continuity** (checkpoint breve del hub). Ambos conservan proveedor/modelo, archivos, historial, reglas persistidas y workers. La barra ORCA ofrece `/capcom-new clean`, `/capcom-new continuity` y `/capcom-new` para abrir la elección. El UUID cambia mediante un traspaso coordinado; `/clear` sigue deseleccionando. Alcance, pruebas, límites y activación: [New CAPCOM](docs/CAPCOM-NEW.md).

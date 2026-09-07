@@ -92,6 +92,8 @@ export type BlockKind =
 export type AgentRole = 'agent' | 'capcom';
 
 export interface Agent {
+  continuation?: import('./continuation.ts').Continuation;
+  modelControl?: import('./model-control.ts').ModelControl;
   id: string;
   machineId: string;
   projectId: string;
@@ -117,6 +119,32 @@ export interface Agent {
    * record written before this field existed should get.
    */
   role?: AgentRole;
+  /**
+   * True when this session exists but does not belong on the fleet.
+   *
+   * Set by the collector for everything living in a directory that is not a
+   * project (see `shared/workspaces.ts`): the CAPCOM sessions that came before
+   * the live one, and the agents somebody launched inside CAPCOM's own
+   * directory or in a session scratchpad. They are reported rather than
+   * dropped — the transcript is still on disk and the operator may want to
+   * look — but `list_fleet`, `list_agents`, the field and every counter leave
+   * them out unless explicitly asked for them.
+   *
+   * Optional, and false for every ordinary agent: an absent field means "on
+   * the fleet", which is what a record written before this existed should get.
+   */
+  hidden?: boolean;
+
+  /** Verified launch provenance, inherited by native children. */
+  origin?: 'orca' | 'external';
+  /**
+   * True when this is a Claude Code `Task` subagent: a transcript under its
+   * parent's `subagents/` directory, not a session of its own. It exists to
+   * do one job for its parent and report back, so the console folds it into
+   * the parent's block instead of giving it a tile and a pipe. An agent
+   * ORCA spawned as a full session is never a subagent, whoever asked for it.
+   */
+  subagent?: boolean;
 
   state: AgentState;
   /** Present only while state === 'blocked'. */
@@ -179,6 +207,21 @@ export interface Agent {
   background: boolean;
   /** Claude Code's own short id for `claude attach <id>`, when background. */
   shortId: string | null;
+  /**
+   * True when the session lives in a tmux pane ORCA created, so the console
+   * can open a TERMINAL on it. A session the human started in their own shell
+   * has no pane: it can be watched, not attached to.
+   */
+  pane?: boolean;
+  /**
+   * The git worktree the collector launched it in, when it runs workers in
+   * worktrees (`ORCA_WORKTREES=1`), and the branch it works on there
+   * (`orca/<name>`). Absent or null for an agent on the project's own tree.
+   * Set by the `spawn` that created it, persisted in lineage.json like
+   * `mission`; `land` and `discard` act on it.
+   */
+  worktree?: string | null;
+  branch?: string | null;
 }
 
 export interface AgentMetrics {
@@ -196,6 +239,13 @@ export interface AgentMetrics {
   toolDurationMs: number;
   apiDurationMs: number;
   turns: number;
+  /**
+   * Tokens in the model's context at its last call: input + cache creation +
+   * cache read. The one number that says how full the window is.
+   */
+  contextTokens?: number;
+  /** Times the CLI compacted this conversation. Each one is memory lost. */
+  compactions?: number;
 }
 
 /** Aggregate over a set of agents. Computed, never stored by a producer. */
@@ -218,6 +268,8 @@ export interface SessionRollup {
 export type EscalationStatus = 'pending' | 'with_ceo' | 'answered' | 'withdrawn' | 'expired';
 
 export interface Escalation {
+  /** Terminal approval: sending a key is not resolution. */
+  permission?: { phase: 'requested' | 'pending' | 'confirmed'; fingerprint: string };
   id: string;
   /** Agent that raised it. */
   agentId: string;
@@ -280,6 +332,54 @@ export interface CeoAction {
   detail?: string;
   at: number;
 }
+
+/* ── Talk: what a session actually said, block by block ───────────── */
+
+/**
+ * One block of a session's conversation, as its CLI wrote it to disk.
+ *
+ * `lastPrompt` / `lastSay` are one trimmed line each, enough for a tile. A
+ * command window needs the conversation itself: the prompt in full, the
+ * thinking, every tool the session reached for, what came back, and the
+ * answer in full — in the order it happened, as it happens. The CLI appends
+ * one JSONL line per content block, so this is the finest grain there is
+ * short of a pty: a reply shows up paragraph by paragraph, not token by
+ * token, and thinking shows up when the block closes.
+ *
+ * Emitted for the CAPCOM session only: it is the one conversation the human
+ * reads in the console. Any other agent's is a TERMINAL away.
+ */
+export type TalkKind =
+  | 'prompt'    // the human (or the hub on their behalf) said this
+  | 'thinking'  // a thinking block; empty text when the CLI redacted it
+  | 'say'       // a text block of the assistant's reply
+  | 'tool'      // a tool call: `tool` is the name, `text` the one-line detail
+  | 'result';   // what a tool returned, trimmed; `error` when the CLI flagged it
+
+export interface TalkItem {
+  /** Stable: the transcript line's uuid plus the block index. */
+  id: string;
+  agentId: string;
+  at: number;
+  kind: TalkKind;
+  /** Full text, bounded by MAX_TALK_TEXT. */
+  text: string;
+  /** For `tool` and `result`: the tool's name. */
+  tool?: string;
+  /** For `tool` and `result`: the `tool_use` id that pairs them. */
+  toolUseId?: string;
+  /** For `result`: the CLI marked it an error. */
+  error?: boolean;
+  /** For assistant blocks: the API message they belong to. */
+  msgId?: string;
+}
+
+/** Past this a block is a file, not a line in a chat. */
+export const MAX_TALK_TEXT = 8_000;
+/** A tool result is a glance, never the whole file it read. */
+export const MAX_TALK_RESULT = 600;
+/** Blocks kept per agent, hub and console alike. */
+export const MAX_TALK = 300;
 
 /* ── Telemetry feed ───────────────────────────────────────────────── */
 
@@ -472,6 +572,8 @@ export interface KeyDescriptor {
 
 /** Complete console state. The UI renders this and nothing else. */
 export interface WorldState {
+  capcomHandoffs?: import('./handoff.ts').CapcomHandoff[];
+  tasks?: Record<string, import('./tasks.ts').CapcomTask>;
   /** Bumped on every mutation; the UI diffs on it. */
   rev: number;
   at: number;
@@ -494,6 +596,15 @@ export interface WorldState {
   };
   feed: FeedItem[];
   fleet: SessionRollup;
+  /** The CAPCOM conversation, block by block, keyed by agent id. See TalkItem. */
+  talk?: Record<string, TalkItem[]>;
+  /**
+   * The reply CAPCOM is typing right now, read off its pane, keyed by agent
+   * id. Present only while a text block is streaming; the finished block
+   * arrives in `talk` and this goes away. Best effort: it is what the TUI
+   * painted, not what the API said.
+   */
+  talkLive?: Record<string, string>;
 }
 
 export function emptyRollup(): SessionRollup {
@@ -522,6 +633,8 @@ export function emptyWorld(): WorldState {
     ceo: { messages: [], thinking: false, awaitingHuman: false },
     feed: [],
     fleet: emptyRollup(),
+    talk: {},
+    talkLive: {},
   };
 }
 

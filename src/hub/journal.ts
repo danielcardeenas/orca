@@ -1,0 +1,899 @@
+/**
+ * Pieza E del squad autonomy: journal. Lado hub.
+ *
+ * El diario de la flota: un registro persistente y consultable de lo que los
+ * agentes han hecho, para que una sesión CAPCOM nueva aprenda de las
+ * anteriores y para que el operador pueda auditar. `remember`/`recall`
+ * guardan reglas del humano; esto guarda RESULTADOS.
+ *
+ * ── Qué se anota ───────────────────────────────────────────────────
+ *
+ *   launch     un agente entró al mundo: quién lo lanzó (humano / CAPCOM /
+ *              agente), proyecto, squad, tarea, brief completo, runtime, modelo
+ *   end        pasó a done o dead: coste, duración, tokens, líneas, último
+ *              mensaje recortado
+ *   escalation un agente preguntó (ask_human o pregunta al mando)
+ *   answer     quién contestó esa escalación (CAPCOM o humano) y qué dijo
+ *   rotation   CAPCOM se recicló: de qué sesión a cuál, y con qué cifras
+ *   landing    un worktree aterrizó en la rama del proyecto (pieza C, si existe)
+ *
+ * ── Dónde ──────────────────────────────────────────────────────────
+ *
+ *   ~/.orca/hub/journal/journal.jsonl              el fichero vivo, append-only
+ *   ~/.orca/hub/journal/journal.<stamp>.jsonl      rotados por tamaño
+ *   ~/.orca/hub/journal/state.json                 cuándo fue el último briefing
+ *
+ * Append-only como todo en ~/.orca/hub: una entrada por hecho, nunca se
+ * reescribe una línea. Cuando el fichero vivo supera `ORCA_JOURNAL_MAX_BYTES`
+ * (8 MiB) se renombra con la fecha y se abre otro; se conservan los últimos
+ * `ORCA_JOURNAL_KEEP` (6) rotados. Las consultas leen todos los ficheros, del
+ * más viejo al más nuevo, y filtran línea a línea: no hay índice en memoria
+ * más allá de "qué agentes ya tienen launch/end", que es lo único que hace
+ * falta para no anotar dos veces lo mismo cuando un collector reenvía su
+ * snapshot tras un reinicio del hub.
+ *
+ * ── De dónde salen los hechos ──────────────────────────────────────
+ *
+ * Del ciclo de vida tipado (lifecycle.ts): agent:new, agent:state,
+ * escalation:new, escalation:answered. Más un barrido cada
+ * `ORCA_JOURNAL_SWEEP_MS` (5 s) sobre la flota entera, porque un snapshot de
+ * collector (arranque del hub, reconexión) mete agentes en el mundo sin
+ * evento alguno, y los da por muertos igual de en silencio: el barrido anota
+ * el launch que falta y el end que nadie vio pasar, marcado `late`. Y de dos
+ * ganchos que server.ts puede llamar si los tiene cableados: `rotated` (el
+ * frame capcom:rotated, con sus cifras) y `spawnRequested` (quién pidió el
+ * spawn).
+ * Sin ellos el diario sigue funcionando con lo que se puede deducir del
+ * agente: una rotación es un CAPCOM nuevo cuando había otro, y el que lanza
+ * es el padre (CAPCOM si el padre es CAPCOM, un agente si no, el humano si no
+ * hay padre).
+ */
+
+import { appendFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import type { Agent } from '../shared/types.ts';
+import { TERMINAL_STATES } from '../shared/types.ts';
+import type { AutonomyDeps } from './autonomy.ts';
+import type { EscalationAnswered, EscalationRaised } from './lifecycle.ts';
+import { normalize } from './memory.ts';
+
+/* ── el registro ──────────────────────────────────────────────────── */
+
+export type JournalKind = 'launch' | 'end' | 'escalation' | 'answer' | 'rotation' | 'landing';
+export const JOURNAL_KINDS: readonly JournalKind[] = ['launch', 'end', 'escalation', 'answer', 'rotation', 'landing'];
+
+export type LaunchedBy = 'human' | 'capcom' | 'agent';
+export type AnsweredBy = 'human' | 'capcom';
+export type FinalState = 'done' | 'dead';
+
+/**
+ * Una línea del diario. Plana a propósito: un registro con cinco formas
+ * distintas anidadas es cinco lectores; uno plano con campos opcionales se
+ * filtra, se imprime y se agrega con el mismo código.
+ */
+export interface JournalEntry {
+  id: string;
+  at: number;
+  kind: JournalKind;
+
+  agentId: string | null;
+  callsign: string | null;
+  machineId: string | null;
+  projectId: string | null;
+  /** El código del proyecto (AX), que es como lo nombra una persona. */
+  project: string | null;
+  squad: string | null;
+  taskId: string | null;
+
+  /* launch */
+  by?: LaunchedBy;
+  parentId?: string | null;
+  lead?: boolean;
+  /** El brief completo, sin recortar: es lo que una sesión nueva quiere releer. */
+  brief?: string | null;
+  title?: string | null;
+  runtime?: string | null;
+  model?: string | null;
+  origin?: 'orca' | 'external' | null;
+  startedAt?: number;
+
+  /* end */
+  state?: FinalState;
+  costUSD?: number;
+  durationMs?: number;
+  tokens?: { input: number; output: number; cacheRead: number; thinking: number };
+  lines?: { added: number; removed: number };
+  toolCalls?: number;
+  turns?: number | null;
+  /** Lo último que dijo, recortado a MAX_SAY. */
+  lastSay?: string | null;
+  /** True cuando el fin se anotó al reaparecer el agente ya terminado (el hub no lo vio pasar). */
+  late?: boolean;
+
+  /* escalation / answer */
+  escalationId?: string | null;
+  question?: string | null;
+  urgency?: string | null;
+  options?: string[];
+  answer?: string | null;
+  answeredBy?: AnsweredBy;
+  rememberAs?: string | null;
+  /** answer: cuánto esperó la pregunta. */
+  waitedMs?: number | null;
+
+  /* rotation */
+  fromId?: string | null;
+  toId?: string | null;
+  compactions?: number | null;
+  contextTokens?: number | null;
+
+  /* landing */
+  branch?: string | null;
+  target?: string | null;
+  commit?: string | null;
+  ok?: boolean;
+  detail?: string | null;
+
+  note?: string | null;
+}
+
+export type JournalInput = Omit<JournalEntry, 'id' | 'at'> & { at?: number };
+
+/** Lo último que dijo un agente se guarda recortado: el diario no es el transcript. */
+export const MAX_SAY = 600;
+export const MAX_QUESTION = 1200;
+export const MAX_BRIEF = 12_000;
+
+export const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_KEEP = 6;
+export const JOURNAL_FILE = 'journal.jsonl';
+const STATE_FILE = 'state.json';
+/**
+ * `journal.<fecha>.<n>.jsonl`: la fecha para que una persona sepa de cuándo es,
+ * el contador para que el orden no dependa de ella (dos rotaciones en el mismo
+ * segundo, un reloj que se atrasa).
+ */
+const ROTATED = /^journal\.(\d{8}-\d{6})\.(\d+)\.jsonl$/;
+function rotatedSeq(name: string): number { return Number(ROTATED.exec(name)?.[2] ?? -1); }
+function sortRotated(names: string[]): string[] {
+  return names.filter((n) => ROTATED.test(n)).sort((a, b) => rotatedSeq(a) - rotatedSeq(b));
+}
+
+function isEntry(v: unknown): v is JournalEntry {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return typeof o['id'] === 'string' && typeof o['at'] === 'number'
+    && typeof o['kind'] === 'string' && (JOURNAL_KINDS as readonly string[]).includes(o['kind']);
+}
+
+function clip(s: string | null | undefined, n: number): string | null {
+  if (typeof s !== 'string') return null;
+  const t = s.replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+}
+
+function stamp(at: number): string {
+  const d = new Date(at);
+  const p = (n: number, w = 2): string => String(n).padStart(w, '0');
+  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
+}
+
+/* ── consultas ────────────────────────────────────────────────────── */
+
+export interface JournalQuery {
+  /** Id o código del proyecto, sin distinguir mayúsculas. */
+  project?: string | null;
+  squad?: string | null;
+  taskId?: string | null;
+  /** Id o callsign. */
+  agent?: string | null;
+  kind?: JournalKind | JournalKind[] | null;
+  /** Epoch ms, inclusive. */
+  since?: number | null;
+  until?: number | null;
+  /** Sólo entradas `end` con ese estado final. */
+  state?: FinalState | null;
+  by?: LaunchedBy | null;
+  /** Texto libre sobre brief, último mensaje, pregunta, respuesta, título y nota. */
+  text?: string | null;
+  /** Por defecto 50; tope 500. */
+  limit?: number | null;
+  /** Por defecto las más nuevas primero. */
+  order?: 'asc' | 'desc' | null;
+}
+
+export const DEFAULT_LIMIT = 50;
+export const MAX_LIMIT = 500;
+
+export interface ProjectStats {
+  project: string | null;
+  projectId: string | null;
+  launches: number;
+  done: number;
+  dead: number;
+  /** done / (done + dead), null sin fines. */
+  doneRate: number | null;
+  totalCostUSD: number;
+  avgCostUSD: number | null;
+  avgDurationMs: number | null;
+  escalations: number;
+}
+
+export interface EscalatedBrief {
+  agentId: string | null;
+  callsign: string | null;
+  project: string | null;
+  squad: string | null;
+  taskId: string | null;
+  brief: string | null;
+  question: string | null;
+  answeredBy: AnsweredBy | null;
+  /** Cómo acabó ese agente, si ya acabó. */
+  state: FinalState | null;
+}
+
+export interface JournalStats {
+  since: number | null;
+  until: number | null;
+  entries: number;
+  launches: number;
+  byLauncher: Record<LaunchedBy, number>;
+  ends: { done: number; dead: number };
+  doneRate: number | null;
+  cost: { totalUSD: number; avgUSD: number | null };
+  duration: { avgMs: number | null };
+  byProject: ProjectStats[];
+  escalations: { asked: number; answeredByCapcom: number; answeredByHuman: number; unanswered: number; avgWaitMs: number | null };
+  /** Briefs que acabaron en escalación: lo que una sesión nueva debería escribir mejor. */
+  escalatedBriefs: EscalatedBrief[];
+  rotations: number;
+  landings: { ok: number; failed: number };
+}
+
+/**
+ * "24h", "3d", "90m", una fecha ISO, o epoch en ms. Null si no se entiende:
+ * el que llama decide si eso es un error o "sin límite".
+ */
+export function parseWhen(v: unknown, now = Date.now()): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const s = String(v).trim();
+  const rel = /^(\d+(?:\.\d+)?)\s*([mhdw])$/i.exec(s);
+  if (rel) {
+    const n = Number(rel[1]);
+    const unit = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 7 * 86_400_000 }[rel[2]!.toLowerCase() as 'm' | 'h' | 'd' | 'w'];
+    return now - n * unit;
+  }
+  if (/^\d{10,13}$/.test(s)) return Number(s);
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : null;
+}
+
+/* ── el almacén ───────────────────────────────────────────────────── */
+
+export interface JournalOptions {
+  dir: string;
+  maxBytes?: number;
+  keep?: number;
+  now?: () => number;
+}
+
+interface JournalState {
+  lastBriefingAt: number | null;
+  /** Rotaciones hechas: numera el siguiente fichero rotado. */
+  rotations: number;
+}
+
+/**
+ * El diario en disco, sin nada del hub: lo que un test abre sobre un
+ * directorio temporal y lo que `createJournal` monta sobre ~/.orca/hub.
+ */
+export class Journal {
+  readonly dir: string;
+  readonly file: string;
+  private readonly maxBytes: number;
+  private readonly keep: number;
+  private readonly now: () => number;
+  private writes: Promise<void> = Promise.resolve();
+  private state: JournalState = { lastBriefingAt: null, rotations: 0 };
+  /** Agentes con launch / end ya anotados, para no repetirlos tras un snapshot. */
+  private launched = new Set<string>();
+  private ended = new Set<string>();
+  private seq = 0;
+
+  constructor(opts: JournalOptions) {
+    this.dir = opts.dir;
+    this.file = join(this.dir, JOURNAL_FILE);
+    this.maxBytes = Math.max(64 * 1024, opts.maxBytes ?? DEFAULT_MAX_BYTES);
+    this.keep = Math.max(0, opts.keep ?? DEFAULT_KEEP);
+    this.now = opts.now ?? (() => Date.now());
+    // Un directorio que no se puede crear no tumba el hub: el diario avisa y
+    // cada escritura volverá a intentarlo (y a avisar) por su cuenta.
+    try { mkdirSync(this.dir, { recursive: true }); }
+    catch (err) { console.warn('[journal] no pude crear', this.dir, err); }
+    this.loadState();
+    for (const e of this.scan()) this.index(e);
+  }
+
+  /* ── ficheros ─────────────────────────────────────────────────── */
+
+  private names(): string[] {
+    try { return readdirSync(this.dir); } catch { return []; }
+  }
+
+  /** Todos los ficheros del diario, del más viejo al más nuevo (el vivo al final). */
+  files(): string[] {
+    const names = this.names();
+    const out = sortRotated(names).map((n) => join(this.dir, n));
+    if (names.includes(JOURNAL_FILE)) out.push(this.file);
+    return out;
+  }
+
+  /** Cada entrada válida de cada fichero, en orden de escritura. */
+  private scan(): JournalEntry[] {
+    const out: JournalEntry[] = [];
+    for (const file of this.files()) {
+      let text: string;
+      try { text = readFileSync(file, 'utf8'); } catch { continue; }
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const v: unknown = JSON.parse(line);
+          if (isEntry(v)) out.push(v);
+        } catch { /* una línea partida por un corte no invalida el resto */ }
+      }
+    }
+    return out;
+  }
+
+  private index(e: JournalEntry): void {
+    if (!e.agentId) return;
+    if (e.kind === 'launch') this.launched.add(e.agentId);
+    if (e.kind === 'end') this.ended.add(e.agentId);
+  }
+
+  private loadState(): void {
+    try {
+      const file = join(this.dir, STATE_FILE);
+      if (!existsSync(file)) return;
+      const v = JSON.parse(readFileSync(file, 'utf8')) as Partial<JournalState>;
+      this.state = {
+        lastBriefingAt: typeof v.lastBriefingAt === 'number' ? v.lastBriefingAt : null,
+        rotations: typeof v.rotations === 'number' ? v.rotations : 0,
+      };
+      // Un state.json perdido no puede reutilizar un número: se sigue del mayor en disco.
+      const onDisk = Math.max(-1, ...sortRotated(this.names()).map(rotatedSeq));
+      if (onDisk + 1 > this.state.rotations) this.state.rotations = onDisk + 1;
+    } catch { /* un state.json roto es un briefing que mira 6 h atrás, nada más */ }
+  }
+
+  private saveState(): void {
+    try {
+      writeFileSync(join(this.dir, STATE_FILE), JSON.stringify(this.state), { mode: 0o600 });
+    } catch (err) { console.warn('[journal] no pude escribir state.json', err); }
+  }
+
+  /* ── escritura ────────────────────────────────────────────────── */
+
+  hasLaunch(agentId: string): boolean { return this.launched.has(agentId); }
+  hasEnd(agentId: string): boolean { return this.ended.has(agentId); }
+  /** El agente volvió a trabajar tras terminar: su próximo fin cuenta otra vez. */
+  reopen(agentId: string): void { this.ended.delete(agentId); }
+
+  append(input: JournalInput): JournalEntry {
+    this.seq += 1;
+    const at = input.at ?? this.now();
+    const entry: JournalEntry = {
+      ...input,
+      id: `jr_${at.toString(36)}${this.seq.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      at,
+      brief: input.brief === undefined ? undefined : clip(input.brief, MAX_BRIEF),
+      lastSay: input.lastSay === undefined ? undefined : clip(input.lastSay, MAX_SAY),
+      question: input.question === undefined ? undefined : clip(input.question, MAX_QUESTION),
+      answer: input.answer === undefined ? undefined : clip(input.answer, MAX_QUESTION),
+    };
+    // Sin `undefined` en disco: JSON los omite, pero la copia en memoria que
+    // devolvemos debe ser la misma que se leerá luego.
+    for (const k of Object.keys(entry) as (keyof JournalEntry)[]) if (entry[k] === undefined) delete entry[k];
+    this.index(entry);
+    this.writes = this.writes.then(async () => {
+      try {
+        await mkdir(this.dir, { recursive: true });
+        await appendFile(this.file, `${JSON.stringify(entry)}\n`, 'utf8');
+        await this.rotateIfBig();
+      } catch (err) {
+        console.warn('[journal] no pude escribir', this.file, err);
+      }
+    });
+    return entry;
+  }
+
+  /**
+   * Rotación por tamaño: el fichero vivo se renombra con la fecha y se abre
+   * otro. Nunca se recorta un fichero (eso perdería entradas); lo que se
+   * borra son rotados enteros, los más viejos, por encima de `keep`.
+   */
+  private async rotateIfBig(): Promise<void> {
+    let size = 0;
+    try { size = (await stat(this.file)).size; } catch { return; }
+    if (size <= this.maxBytes) return;
+    const name = `journal.${stamp(this.now())}.${String(this.state.rotations).padStart(6, '0')}.jsonl`;
+    this.state.rotations += 1;
+    this.saveState();
+    await rename(this.file, join(this.dir, name));
+    const rotated = sortRotated(await readdir(this.dir));
+    for (const old of rotated.slice(0, Math.max(0, rotated.length - this.keep))) {
+      await rm(join(this.dir, old), { force: true });
+    }
+  }
+
+  flush(): Promise<void> { return this.writes; }
+
+  /* ── lectura ──────────────────────────────────────────────────── */
+
+  query(q: JournalQuery = {}): JournalEntry[] {
+    const project = q.project ? q.project.trim().toLowerCase() : null;
+    const squad = q.squad ? q.squad.trim().toLowerCase() : null;
+    const agent = q.agent ? q.agent.trim().toLowerCase() : null;
+    const kinds = q.kind ? new Set(Array.isArray(q.kind) ? q.kind : [q.kind]) : null;
+    const text = q.text ? normalize(q.text) : null;
+    const since = q.since ?? null;
+    const until = q.until ?? null;
+    const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(q.limit ?? DEFAULT_LIMIT)));
+    const desc = (q.order ?? 'desc') !== 'asc';
+
+    const out: JournalEntry[] = [];
+    for (const e of this.scan()) {
+      if (since !== null && e.at < since) continue;
+      if (until !== null && e.at > until) continue;
+      if (kinds && !kinds.has(e.kind)) continue;
+      if (project && (e.projectId ?? '').toLowerCase() !== project && (e.project ?? '').toLowerCase() !== project) continue;
+      if (squad && (e.squad ?? '').toLowerCase() !== squad) continue;
+      if (q.taskId && e.taskId !== q.taskId) continue;
+      if (agent && (e.agentId ?? '').toLowerCase() !== agent && (e.callsign ?? '').toLowerCase() !== agent) continue;
+      if (q.state && (e.kind !== 'end' || e.state !== q.state)) continue;
+      if (q.by && (e.kind !== 'launch' || e.by !== q.by)) continue;
+      if (text && !normalize([e.brief, e.lastSay, e.question, e.answer, e.title, e.note, e.detail]
+        .filter((s): s is string => typeof s === 'string').join(' ')).includes(text)) continue;
+      out.push(e);
+    }
+    out.sort((a, b) => (a.at - b.at) || a.id.localeCompare(b.id));
+    if (desc) out.reverse();
+    return out.slice(0, limit);
+  }
+
+  stats(q: Pick<JournalQuery, 'project' | 'since' | 'until' | 'squad'> = {}): JournalStats {
+    const entries = this.query({ ...q, limit: MAX_LIMIT * 1000, order: 'asc' });
+    const byLauncher: Record<LaunchedBy, number> = { human: 0, capcom: 0, agent: 0 };
+    const ends = { done: 0, dead: 0 };
+    const cost: number[] = [];
+    const dur: number[] = [];
+    const proj = new Map<string, ProjectStats & { costs: number[]; durs: number[] }>();
+    const projOf = (e: JournalEntry) => {
+      const key = e.projectId ?? e.project ?? '?';
+      let p = proj.get(key);
+      if (!p) {
+        p = { project: e.project ?? null, projectId: e.projectId ?? null, launches: 0, done: 0, dead: 0, doneRate: null, totalCostUSD: 0, avgCostUSD: null, avgDurationMs: null, escalations: 0, costs: [], durs: [] };
+        proj.set(key, p);
+      }
+      return p;
+    };
+    const launches = new Map<string, JournalEntry>();
+    const finals = new Map<string, FinalState>();
+    const asked = new Map<string, JournalEntry>();
+    const answered = new Map<string, JournalEntry>();
+    const waits: number[] = [];
+    let rotations = 0;
+    const landings = { ok: 0, failed: 0 };
+
+    for (const e of entries) {
+      switch (e.kind) {
+        case 'launch':
+          if (e.by) byLauncher[e.by] += 1;
+          projOf(e).launches += 1;
+          if (e.agentId) launches.set(e.agentId, e);
+          break;
+        case 'end': {
+          if (e.state === 'done') ends.done += 1; else if (e.state === 'dead') ends.dead += 1;
+          const p = projOf(e);
+          if (e.state === 'done') p.done += 1; else if (e.state === 'dead') p.dead += 1;
+          if (typeof e.costUSD === 'number') { cost.push(e.costUSD); p.costs.push(e.costUSD); p.totalCostUSD += e.costUSD; }
+          if (typeof e.durationMs === 'number') { dur.push(e.durationMs); p.durs.push(e.durationMs); }
+          if (e.agentId && e.state) finals.set(e.agentId, e.state);
+          break;
+        }
+        case 'escalation':
+          projOf(e).escalations += 1;
+          if (e.escalationId) asked.set(e.escalationId, e);
+          else if (e.agentId) asked.set(`agent:${e.agentId}:${e.at}`, e);
+          break;
+        case 'answer':
+          if (e.escalationId) answered.set(e.escalationId, e);
+          if (typeof e.waitedMs === 'number') waits.push(e.waitedMs);
+          break;
+        case 'rotation': rotations += 1; break;
+        case 'landing': if (e.ok === false) landings.failed += 1; else landings.ok += 1; break;
+      }
+    }
+
+    const avg = (xs: number[]): number | null => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+    const round = (n: number | null, d = 4): number | null => (n === null ? null : Number(n.toFixed(d)));
+    const byProject = [...proj.values()]
+      .map(({ costs, durs, ...p }) => ({
+        ...p,
+        doneRate: p.done + p.dead ? round(p.done / (p.done + p.dead)) : null,
+        totalCostUSD: round(p.totalCostUSD) ?? 0,
+        avgCostUSD: round(avg(costs)),
+        avgDurationMs: round(avg(durs), 0),
+      }))
+      .sort((a, b) => b.launches - a.launches);
+
+    let byCapcom = 0, byHuman = 0;
+    for (const a of answered.values()) { if (a.answeredBy === 'capcom') byCapcom += 1; else byHuman += 1; }
+
+    // Un brief que acabó en escalación: el agente que la levantó y con qué se
+    // le lanzó. Ordenado por la pregunta más reciente.
+    const escalatedBriefs: EscalatedBrief[] = [];
+    const seenAgents = new Set<string>();
+    for (const e of [...asked.values()].reverse()) {
+      if (!e.agentId || seenAgents.has(e.agentId)) continue;
+      seenAgents.add(e.agentId);
+      const l = launches.get(e.agentId);
+      const a = e.escalationId ? answered.get(e.escalationId) : undefined;
+      escalatedBriefs.push({
+        agentId: e.agentId, callsign: e.callsign ?? l?.callsign ?? null,
+        project: e.project ?? l?.project ?? null, squad: e.squad ?? l?.squad ?? null, taskId: e.taskId ?? l?.taskId ?? null,
+        brief: clip(l?.brief ?? null, 240), question: clip(e.question ?? null, 200),
+        answeredBy: a?.answeredBy ?? null,
+        state: finals.get(e.agentId) ?? null,
+      });
+      if (escalatedBriefs.length >= 20) break;
+    }
+
+    const total = cost.reduce((a, b) => a + b, 0);
+    return {
+      since: q.since ?? null, until: q.until ?? null,
+      entries: entries.length,
+      launches: launches.size || entries.filter((e) => e.kind === 'launch').length,
+      byLauncher,
+      ends,
+      doneRate: ends.done + ends.dead ? round(ends.done / (ends.done + ends.dead)) : null,
+      cost: { totalUSD: round(total) ?? 0, avgUSD: round(avg(cost)) },
+      duration: { avgMs: round(avg(dur), 0) },
+      byProject,
+      escalations: {
+        asked: asked.size, answeredByCapcom: byCapcom, answeredByHuman: byHuman,
+        unanswered: [...asked.keys()].filter((k) => !answered.has(k)).length,
+        avgWaitMs: round(avg(waits), 0),
+      },
+      escalatedBriefs,
+      rotations,
+      landings,
+    };
+  }
+
+  /* ── briefing ─────────────────────────────────────────────────── */
+
+  get lastBriefingAt(): number | null { return this.state.lastBriefingAt; }
+
+  /** Anota que CAPCOM acaba de recibir un briefing: lo siguiente empieza aquí. */
+  markBriefing(at = this.now()): void {
+    this.state.lastBriefingAt = at;
+    this.saveState();
+  }
+}
+
+/* ── el lado del hub ──────────────────────────────────────────────── */
+
+export interface RotationInput {
+  fromId: string;
+  machineId?: string | null;
+  turns?: number;
+  compactions?: number;
+  contextTokens?: number;
+}
+
+export interface SpawnHint {
+  by: LaunchedBy;
+  projectId: string;
+  mission: string;
+  squad?: string | null;
+}
+
+export interface LandingInput {
+  agentId: string | null;
+  projectId?: string | null;
+  branch?: string | null;
+  target?: string | null;
+  commit?: string | null;
+  ok: boolean;
+  detail?: string | null;
+}
+
+export interface JournalApi {
+  /** Dónde está el diario en disco. */
+  dir: string;
+  query(q?: JournalQuery): JournalEntry[];
+  stats(q?: Pick<JournalQuery, 'project' | 'since' | 'until' | 'squad'>): JournalStats;
+  /**
+   * Lo terminado desde el último briefing (o las últimas 6 h si nunca hubo
+   * uno), en líneas cortas, y marca este instante como el último briefing.
+   */
+  briefingLines(now?: number): string[];
+  /** server.ts: el frame capcom:rotated, con sus cifras. */
+  rotated(input: RotationInput): void;
+  /** server.ts: quién pidió un spawn, para atribuir el launch que viene. */
+  spawnRequested(hint: SpawnHint): void;
+  /** Pieza C: un worktree aterrizó (o no). */
+  landed(input: LandingInput): JournalEntry;
+  /** Cualquier otra pieza: una entrada a mano. */
+  record(input: JournalInput): JournalEntry;
+  /**
+   * Recorre la flota y anota lo que los eventos no trajeron: agentes sin
+   * launch, terminados sin end. Corre solo cada SWEEP_MS; expuesto para que
+   * un test no tenga que esperar. Devuelve cuántas entradas escribió.
+   */
+  sweep(): number;
+  flush(): Promise<void>;
+  stop?(): void;
+}
+
+/** Cuánto vive una pista de spawn sin que aparezca el agente que la explique. */
+const HINT_TTL_MS = 5 * 60_000;
+/** Cuánto se espera al CAPCOM nuevo antes de anotar la rotación sin destino. */
+const ROTATION_HOLD_MS = 180_000;
+const BRIEFING_DEFAULT_MS = 6 * 3_600_000;
+const DEFAULT_SWEEP_MS = 5_000;
+export const BRIEFING_MAX_LINES = 8;
+
+export function ago(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? `${h}h${m % 60 ? `${m % 60}m` : ''}` : `${Math.round(h / 24)}d`;
+}
+
+/** Una entrada `end`, en una línea para CAPCOM o para un terminal. */
+export function endLine(e: JournalEntry, now: number): string {
+  const parts: string[] = [];
+  if (typeof e.costUSD === 'number' && e.costUSD > 0) parts.push(`$${e.costUSD.toFixed(2)}`);
+  if (typeof e.durationMs === 'number') parts.push(ago(e.durationMs));
+  if (e.lines && (e.lines.added || e.lines.removed)) parts.push(`+${e.lines.added}/-${e.lines.removed}`);
+  if (e.taskId) parts.push(e.taskId);
+  if (e.squad) parts.push(`squad ${e.squad}`);
+  return `${e.callsign ?? e.agentId ?? '?'} [${e.project ?? e.projectId ?? '?'}] ${e.state ?? 'ended'} ${ago(now - e.at)} ago`
+    + (parts.length ? ` · ${parts.join(' · ')}` : '')
+    + (e.lastSay ? `: "${clip(e.lastSay, 140)}"` : '');
+}
+
+export function createJournal(deps: AutonomyDeps): JournalApi {
+  const journal = new Journal({
+    dir: join(deps.dir, 'journal'),
+    maxBytes: Number(deps.env['ORCA_JOURNAL_MAX_BYTES']) > 0 ? Number(deps.env['ORCA_JOURNAL_MAX_BYTES']) : undefined,
+    keep: Number.isInteger(Number(deps.env['ORCA_JOURNAL_KEEP'])) && deps.env['ORCA_JOURNAL_KEEP'] !== undefined
+      ? Number(deps.env['ORCA_JOURNAL_KEEP']) : undefined,
+    now: () => deps.now(),
+  });
+
+  const sweepMs = Number(deps.env['ORCA_JOURNAL_SWEEP_MS']) > 0 ? Number(deps.env['ORCA_JOURNAL_SWEEP_MS']) : DEFAULT_SWEEP_MS;
+  const hints: (SpawnHint & { at: number })[] = [];
+  let rotation: { input: RotationInput; at: number; timer: { cancel(): void } } | null = null;
+  let capcomId: string | null = deps.capcom()?.id ?? null;
+  /** Escalaciones abiertas por agente, para casar la respuesta con la pregunta. */
+  const open = new Map<string, JournalEntry>();
+  const openById = new Map<string, JournalEntry>();
+
+  const code = (projectId: string | null): string | null => (projectId ? deps.project(projectId)?.code ?? null : null);
+  const taskOf = (a: Pick<Agent, 'id' | 'squad'>): string | null => {
+    let fallback: string | null = null;
+    for (const t of Object.values(deps.tasks())) {
+      if (t.agentIds.includes(a.id)) { if (t.status === 'active') return t.id; fallback ??= t.id; }
+      else if (a.squad && t.squads?.includes(a.squad) && t.status === 'active') fallback ??= t.id;
+    }
+    return fallback;
+  };
+
+  const base = (a: Agent) => ({
+    agentId: a.id, callsign: a.callsign, machineId: a.machineId,
+    projectId: a.projectId, project: code(a.projectId),
+    squad: a.squad ?? null, taskId: taskOf(a),
+  });
+
+  function launchedBy(a: Agent, at: number): LaunchedBy {
+    // La pista del hub gana: sabe por qué puerta entró la orden.
+    for (let i = hints.length - 1; i >= 0; i -= 1) {
+      const h = hints[i]!;
+      if (at - h.at > HINT_TTL_MS) { hints.splice(i, 1); continue; }
+      if (h.projectId !== a.projectId) continue;
+      if ((a.mission ?? '').trim() === h.mission.trim() || (h.squad && h.squad === a.squad)) {
+        hints.splice(i, 1);
+        return h.by;
+      }
+    }
+    if (a.parentId) return deps.agent(a.parentId)?.role === 'capcom' ? 'capcom' : 'agent';
+    return 'human';
+  }
+
+  function recordLaunch(a: Agent, at: number): void {
+    journal.append({
+      kind: 'launch', at: a.startedAt || at, ...base(a),
+      by: launchedBy(a, at), parentId: a.parentId, lead: a.lead === true,
+      brief: a.mission ?? a.lastPrompt ?? null, title: a.title || null,
+      runtime: a.runtime, model: a.model, origin: a.origin ?? null, startedAt: a.startedAt,
+    });
+  }
+
+  function recordEnd(a: Agent, state: FinalState, at: number, late = false): void {
+    const m = a.metrics;
+    journal.append({
+      kind: 'end', at, ...base(a), state,
+      costUSD: Number((m?.costUSD ?? 0).toFixed(4)),
+      durationMs: Math.max(0, (a.updatedAt || at) - (a.startedAt || at)),
+      tokens: { input: m?.inputTokens ?? 0, output: m?.outputTokens ?? 0, cacheRead: m?.cacheReadTokens ?? 0, thinking: m?.thinkingTokens ?? 0 },
+      lines: { added: m?.linesAdded ?? 0, removed: m?.linesRemoved ?? 0 },
+      toolCalls: m?.toolCalls ?? 0, turns: m?.turns ?? 0,
+      lastSay: a.lastSay, runtime: a.runtime, model: a.model,
+      ...(late ? { late: true } : {}),
+    });
+  }
+
+  /** Un CAPCOM vivo que no era el conocido. Devuelve si escribió una rotación. */
+  function capcomArrived(a: Agent, at: number): boolean {
+    let wrote = false;
+    if (rotation) {
+      rotation.timer.cancel();
+      const { input } = rotation;
+      rotation = null;
+      journal.append({
+        kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
+        projectId: a.projectId, project: code(a.projectId), squad: null, taskId: null,
+        fromId: input.fromId, toId: a.id, turns: input.turns ?? null,
+        compactions: input.compactions ?? null, contextTokens: input.contextTokens ?? null,
+      });
+      wrote = true;
+    } else if (capcomId && capcomId !== a.id) {
+      // Sin gancho del hub: un CAPCOM nuevo cuando había otro ES una rotación.
+      journal.append({
+        kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
+        projectId: a.projectId, project: code(a.projectId), squad: null, taskId: null,
+        fromId: capcomId, toId: a.id, note: 'inferred: a new CAPCOM appeared while another was known',
+      });
+      wrote = true;
+    }
+    capcomId = a.id;
+    return wrote;
+  }
+
+  const offs = [
+    deps.lifecycle.on('agent:new', (a, at) => {
+      if (a.subagent) return;
+      if (a.role === 'capcom') { capcomArrived(a, at); return; }
+      if (!journal.hasLaunch(a.id)) recordLaunch(a, at);
+      // Llegó ya terminado (snapshot tras un reinicio del hub): el fin no se
+      // vio pasar, pero cuenta igual.
+      if (TERMINAL_STATES.has(a.state) && !journal.hasEnd(a.id)) recordEnd(a, a.state as FinalState, a.updatedAt || at, true);
+    }),
+    deps.lifecycle.on('agent:state', (c) => {
+      if (c.agent.subagent || c.agent.role === 'capcom') return;
+      if (!TERMINAL_STATES.has(c.to as Agent['state'])) { journal.reopen(c.agent.id); return; }
+      if (journal.hasEnd(c.agent.id)) return;
+      if (!journal.hasLaunch(c.agent.id)) recordLaunch(c.agent, c.at);
+      recordEnd(c.agent, c.to as FinalState, c.at);
+    }),
+    deps.lifecycle.on('escalation:new', (e: EscalationRaised) => {
+      const a = e.agentId ? deps.agent(e.agentId) : undefined;
+      const entry = journal.append({
+        kind: 'escalation', at: e.at,
+        agentId: e.agentId, callsign: a?.callsign ?? null, machineId: a?.machineId ?? e.machineId ?? null,
+        projectId: e.projectId, project: code(e.projectId),
+        squad: a?.squad ?? null, taskId: a ? taskOf(a) : null,
+        escalationId: e.id, question: e.question, urgency: e.urgency ?? null, options: e.options ?? [],
+        by: e.from === 'ceo' ? 'capcom' : undefined,
+      });
+      if (e.id) openById.set(e.id, entry);
+      if (e.agentId) open.set(e.agentId, entry);
+    }),
+    deps.lifecycle.on('escalation:answered', (e: EscalationAnswered) => {
+      const asked = (e.id ? openById.get(e.id) : undefined) ?? (e.agentId ? open.get(e.agentId) : undefined) ?? null;
+      if (asked?.escalationId) openById.delete(asked.escalationId);
+      if (e.agentId) open.delete(e.agentId);
+      const a = e.agentId ? deps.agent(e.agentId) : undefined;
+      journal.append({
+        kind: 'answer', at: e.at,
+        agentId: e.agentId, callsign: a?.callsign ?? asked?.callsign ?? null, machineId: a?.machineId ?? e.machineId ?? null,
+        projectId: e.projectId ?? asked?.projectId ?? null, project: code(e.projectId ?? asked?.projectId ?? null),
+        squad: a?.squad ?? asked?.squad ?? null, taskId: a ? taskOf(a) : asked?.taskId ?? null,
+        escalationId: e.id ?? asked?.escalationId ?? null, question: e.question ?? asked?.question ?? null,
+        answer: e.answer, answeredBy: e.by === 'human' ? 'human' : 'capcom', rememberAs: e.rememberAs ?? null,
+        waitedMs: asked ? Math.max(0, e.at - asked.at) : null,
+      });
+    }),
+  ];
+
+  function sweep(): number {
+    const now = deps.now();
+    let wrote = 0;
+    for (const a of deps.agents()) {
+      if (a.subagent) continue;
+      if (a.role === 'capcom') {
+        if (!TERMINAL_STATES.has(a.state) && capcomId !== a.id && capcomArrived(a, now)) wrote += 1;
+        continue;
+      }
+      if (!journal.hasLaunch(a.id)) { recordLaunch(a, now); wrote += 1; }
+      if (TERMINAL_STATES.has(a.state) && !journal.hasEnd(a.id)) { recordEnd(a, a.state as FinalState, a.updatedAt || now, true); wrote += 1; }
+    }
+    return wrote;
+  }
+  const ticker = deps.setInterval(() => { try { sweep(); } catch (err) { deps.log(`[journal] sweep failed: ${String(err)}`); } }, sweepMs);
+
+  const api: JournalApi = {
+    dir: journal.dir,
+    query: (q) => journal.query(q),
+    stats: (q) => journal.stats(q),
+    sweep,
+
+    briefingLines(now = deps.now()) {
+      // Exclusivo por abajo: lo que se enseñó en el briefing anterior no vuelve.
+      const since = journal.lastBriefingAt !== null ? journal.lastBriefingAt + 1 : now - BRIEFING_DEFAULT_MS;
+      const ended = journal.query({ kind: ['end', 'landing'], since, until: now, order: 'asc', limit: MAX_LIMIT });
+      const lines = ended.map((e) => (e.kind === 'landing'
+        ? `${e.callsign ?? e.agentId ?? '?'} [${e.project ?? '?'}] ${e.ok === false ? 'FAILED to land' : 'landed'}${e.branch ? ` ${e.branch}` : ''}${e.target ? ` → ${e.target}` : ''} ${ago(now - e.at)} ago${e.detail ? `: ${clip(e.detail, 100)}` : ''}`
+        : endLine(e, now)));
+      journal.markBriefing(now);
+      if (lines.length <= BRIEFING_MAX_LINES) return lines;
+      const shown = lines.slice(-BRIEFING_MAX_LINES);
+      shown.unshift(`… ${lines.length - BRIEFING_MAX_LINES} more — journal since=${new Date(since).toISOString()}`);
+      return shown;
+    },
+
+    rotated(input) {
+      rotation?.timer.cancel();
+      const at = deps.now();
+      const timer = deps.setTimer(() => {
+        if (!rotation) return;
+        const { input: held } = rotation;
+        rotation = null;
+        journal.append({
+          kind: 'rotation', at: deps.now(), agentId: held.fromId, callsign: null, machineId: held.machineId ?? null,
+          projectId: null, project: null, squad: null, taskId: null,
+          fromId: held.fromId, toId: null, turns: held.turns ?? null,
+          compactions: held.compactions ?? null, contextTokens: held.contextTokens ?? null,
+          note: 'the new CAPCOM never showed up',
+        });
+      }, ROTATION_HOLD_MS);
+      rotation = { input, at, timer };
+    },
+
+    spawnRequested(hint) {
+      hints.push({ ...hint, at: deps.now() });
+      while (hints.length > 200) hints.shift();
+    },
+
+    landed(input) {
+      const a = input.agentId ? deps.agent(input.agentId) : undefined;
+      const projectId = input.projectId ?? a?.projectId ?? null;
+      return journal.append({
+        kind: 'landing', agentId: input.agentId, callsign: a?.callsign ?? null, machineId: a?.machineId ?? null,
+        projectId, project: code(projectId), squad: a?.squad ?? null, taskId: a ? taskOf(a) : null,
+        branch: input.branch ?? null, target: input.target ?? null, commit: input.commit ?? null,
+        ok: input.ok, detail: input.detail ?? null,
+      });
+    },
+
+    record: (input) => journal.append(input),
+    flush: () => journal.flush(),
+
+    stop() {
+      for (const off of offs) off();
+      ticker.cancel();
+      rotation?.timer.cancel();
+      rotation = null;
+    },
+  };
+  return api;
+}

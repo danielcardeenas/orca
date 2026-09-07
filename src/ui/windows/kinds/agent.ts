@@ -1,3 +1,6 @@
+import { mountCapcomModel } from '../capcom-model.ts';
+import { mountAgentRecovery } from '../agent-recovery.ts';
+import { agentOrigin, originLabel } from '../../../shared/origin.ts';
 /**
  * An agent's interior.
  *
@@ -10,43 +13,99 @@
  *  - **A4, glyph bursts.** While the agent is `thinking` with no tool call,
  *    NOW carries the handshake glyphs in two irregular bursts instead of a
  *    spinner. A constant rhythm reads as an animation; this reads as a machine.
- *  - **A6, the check.** The window of an agent that reaches `done` while you
- *    are looking at it leaves with the eight-pixel check drawn one pixel at a
- *    time, then collapses. An agent that reaches `dead` gets `is-dead` and a
- *    plain close after a beat — lime means confirmed, and a death is not.
+ * Finished and failed agents remain open so their results can be read.
  */
 
-import type { Agent, AgentState, Escalation } from '../../../shared/types.ts';
+import type { Agent, Escalation } from '../../../shared/types.ts';
 import { store } from '../../store.ts';
+import { drafts, draftKey } from '../../drafts.ts';
 import { authedUrl, hub } from '../../net/client.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
-import { ago, dur, esc, money, runtimeOf, stateVar, stateWord, tokens } from '../../util.ts';
+import { ago, dur, esc, money, runtimeOf, stateVar, stateWord, tokens, nameOf } from '../../util.ts';
 import { glyphBurst, slabBusy, slabFlash } from '../fx.ts';
+import { mountAgentConversation } from '../agent-conversation.ts';
+import { mountTerminal } from './terminal.ts';
 import { toggle, type ToggleHandle } from '../../controls.ts';
 
 export function mountAgent(ctx: WinCtx, c: Console) {
   const id = ctx.win.spec.params?.agentId ?? '';
   const body = ctx.body;
+  body.classList.add('agent-workspace');
   body.innerHTML = `
     <div class="band" data-band></div>
-    <div class="win__scroll scroll" data-scroll></div>
-    <div class="slab-row" style="padding:8px;border-top:1px solid var(--line-soft)">
-      <input class="input" data-say placeholder="say something to this agent" />
-      <button class="slab-btn slab-btn--auto" type="button" data-send data-key="s">SAY</button>
+    <div class="agent-workspace__status mono" data-status></div>
+    <button class="chip" type="button" data-successor hidden>OPEN CONTINUED AGENT</button>
+    <div class="tabs" role="tablist" aria-label="Agent views">
+      <button class="tab is-on" role="tab" aria-selected="true" data-view="conversation">Conversation</button>
+      <button class="tab" role="tab" aria-selected="false" data-view="terminal">Terminal</button>
+      <button class="tab" role="tab" aria-selected="false" data-view="details">Details</button>
+    </div>
+    <div class="agent-workspace__conversation" data-conversation role="tabpanel"></div>
+    <div class="agent-workspace__terminal" data-terminal role="tabpanel" hidden></div>
+    <div class="win__scroll scroll" data-scroll role="tabpanel" hidden></div>
+    <div data-agent-model></div>
+    <div data-agent-recovery></div>
+    <div class="ceo__in" data-composer>
+      <textarea class="input" data-say rows="2" aria-label="Message agent" placeholder="message agent · enter sends, shift+enter newline"></textarea>
+      <button class="slab-btn" type="button" data-send data-key="s">SEND</button>
     </div>
     <div class="row row--split" style="padding:0 8px 8px">
       <div class="row">
         <button class="btn" type="button" data-fly data-key="f">FLY</button>
+        <button class="btn" type="button" data-term data-key="t" title="The pane itself: look at the CLI and type into it">TERM</button>
         <button class="btn" type="button" data-logs data-key="l">LOGS</button>
         <button class="btn" type="button" data-spawn data-key="c">SPAWN CHILD</button>
       </div>
-      <button class="btn" type="button" data-stop data-key="x">STOP</button>
+      <div class="row">
+        <button class="btn" type="button" data-interrupt data-key="i" title="Cut the turn it is in the middle of. The session, its id and its context survive. With text in the box, the correction goes with it">INTERRUPT</button>
+        <button class="btn" type="button" data-stop data-key="x">STOP</button>
+      </div>
     </div>
   `;
+  const conversation = body.querySelector<HTMLElement>('[data-conversation]')!;
+  const terminalHost = body.querySelector<HTMLElement>('[data-terminal]')!;
+  const composer = body.querySelector<HTMLElement>('[data-composer]')!;
+  const models = mountCapcomModel(body.querySelector<HTMLElement>('[data-agent-model]')!, cmd => hub.cmd(cmd), () => setView('terminal'), path => c.openFile({ path, agentId: id }), { scope: id, openAgent: agentId => c.openAgent(agentId) });
+  const recovery = mountAgentRecovery(body.querySelector<HTMLElement>('[data-agent-recovery]')!, cmd => hub.cmd(cmd), agentId => c.openAgent(agentId));
+  const offConversation = mountAgentConversation(conversation, id);
+  let terminal: ReturnType<typeof mountTerminal> | null = null;
+  function setView(next: string) {
+    if (next === 'terminal' && !agent()?.pane) return;
+    conversation.hidden = next !== 'conversation';
+    terminalHost.hidden = next !== 'terminal';
+    scroll.hidden = next !== 'details';
+    composer.hidden = next !== 'conversation';
+    body.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => {
+      button.setAttribute('aria-selected', String(button.dataset.view === next));
+      button.classList.toggle('is-on', button.dataset.view === next);
+      button.tabIndex = button.dataset.view === next ? 0 : -1;
+    });
+    if (next === 'terminal' && !terminal) {
+      terminal = mountTerminal({ ...ctx, body: terminalHost, setTitle() {}, setCallsign() {}, setState() {} }, c);
+    } else if (next !== 'terminal' && terminal) {
+      terminal.dispose(); terminal = null; terminalHost.replaceChildren();
+    }
+  }
+  const tabs = [...body.querySelectorAll<HTMLButtonElement>('[data-view]')];
+  tabs.forEach((button, i) => {
+    button.tabIndex = i === 0 ? 0 : -1;
+    button.addEventListener('click', () => setView(button.dataset.view!));
+    button.addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+      e.preventDefault();
+      const enabled = tabs.filter((tab) => !tab.disabled);
+      const index = enabled.indexOf(button);
+      const n = e.key === 'Home' ? 0 : e.key === 'End' ? enabled.length - 1 : (index + (e.key === 'ArrowRight' ? 1 : -1) + enabled.length) % enabled.length;
+      setView(enabled[n]!.dataset.view!); enabled[n]!.focus();
+    });
+  });
   const scroll = body.querySelector<HTMLElement>('[data-scroll]')!;
   const band = body.querySelector<HTMLElement>('[data-band]')!;
-  const sayIn = body.querySelector<HTMLInputElement>('[data-say]')!;
+  const sayIn = body.querySelector<HTMLTextAreaElement>('[data-say]')!;
+  // The unsent line to this agent survives a reload (drafts.ts).
+  const draft = drafts.bind(sayIn, draftKey('agent', id));
+  draft.restore();
   const stopBtn = body.querySelector<HTMLButtonElement>('[data-stop]')!;
 
   let armed = 0;
@@ -55,20 +114,10 @@ export function mountAgent(ctx: WinCtx, c: Console) {
   let sig = '';
   /** Kills the glyph loop before the section that holds it is rewritten. */
   let stopGlyphs: (() => void) | null = null;
-  /** Set once a terminal state has taken the window; nothing renders after. */
-  let leaving = false;
-  let leaveTimer = 0;
   /** The REMEMBER switch of the current render, when a question is on screen. */
   let remembering: ToggleHandle | null = null;
 
-  function agent(): Agent | undefined { return store.world.agents[id]; }
-
-  /**
-   * The state this window has already reacted to. Seeded at mount so opening
-   * the window of an agent that is *already* done does not close it in your
-   * face — the check is for a finish you witnessed.
-   */
-  let seen: AgentState | null = store.world.agents[id]?.state ?? null;
+  function agent(): Agent | undefined { return store.knownAgent(id); }
 
   function escalationFor(a: Agent): Escalation | undefined {
     if (a.block?.escalationId) return store.world.escalations[a.block.escalationId];
@@ -76,26 +125,18 @@ export function mountAgent(ctx: WinCtx, c: Console) {
   }
 
   function render() {
-    if (leaving) return;
     const a = agent();
-    if (a && a.state !== seen) {
-      const was = seen;
-      seen = a.state;
-      if (was && a.state === 'done') {
-        leaving = true;
-        stopGlyphs?.(); stopGlyphs = null;
-        void c.wm.closeWith(ctx.win, 'check');
-        return;
-      }
-      if (was && a.state === 'dead') {
-        leaving = true;
-        stopGlyphs?.(); stopGlyphs = null;
-        // Red first, so the operator sees which agent it was, then it goes.
-        ctx.setState('dead', stateVar(a));
-        leaveTimer = window.setTimeout(() => ctx.close(), 700);
-        return;
-      }
+    models.update(a, store.linkUp); recovery.update(a, store.linkUp);
+    const successor = Object.values(store.world.agents).find(other => other.continuation?.fromId === id);
+    const successorButton = body.querySelector<HTMLButtonElement>('[data-successor]')!; successorButton.hidden = !successor; successorButton.onclick = () => { if (successor) c.openAgent(successor.id); };
+    const terminalAvailable = !!a?.pane;
+    for (const button of [termBtn, body.querySelector<HTMLButtonElement>('[data-view="terminal"]')!]) {
+      button.disabled = !terminalAvailable;
+      button.title = terminalAvailable ? 'Connect to this agent’s terminal' : 'No terminal available — this session has no hosted pane';
+      button.classList.toggle('is-off', !terminalAvailable);
     }
+    if (!terminalAvailable && !terminalHost.hidden) setView('conversation');
+    // Completion and failure stay open: the result is what the user came to read.
     if (!a) {
       ctx.setTitle('GONE');
       stopGlyphs?.(); stopGlyphs = null;
@@ -104,22 +145,32 @@ export function mountAgent(ctx: WinCtx, c: Console) {
       return;
     }
     const p = store.world.projects[a.projectId];
+    const status = body.querySelector<HTMLElement>('[data-status]')!;
+    status.textContent = `${stateWord(a)} · ${runtimeOf(a)}${a.model ? ` · ${a.model}` : ''} · ${p?.name ?? a.projectId}`;
+    const canSend = store.linkUp && a.state !== 'dead' && a.state !== 'done';
+    sayIn.disabled = !canSend;
+    body.querySelector<HTMLButtonElement>('[data-send]')!.disabled = !canSend;
+    // Interrumpir es sobre un turno en vuelo: sin sesión viva no hay ninguno.
+    body.querySelector<HTMLButtonElement>('[data-interrupt]')!.disabled = !canSend;
+    body.querySelector<HTMLButtonElement>('[data-interrupt]')!.textContent = sayIn.value.trim() ? 'INTERRUPT + SEND' : 'INTERRUPT';
+    sayIn.placeholder = !store.linkUp ? 'Disconnected — reconnect to send' : !canSend ? 'This session has ended' : 'message agent · enter sends, shift+enter newline';
     const m = store.world.machines[a.machineId];
     ctx.setCallsign(a.callsign, p?.code);
-    ctx.setTitle(a.title || a.mission || '');
+    ctx.setTitle(nameOf(a));
     const peer = a.state === 'blocked' && a.block?.kind === 'peer';
     ctx.setState(a.state === 'blocked' && !peer ? 'blocked' : a.state === 'dead' ? 'dead' : null, stateVar(a));
 
     band.classList.toggle('is-off', a.state !== 'working' && a.state !== 'thinking');
+    termBtn.classList.toggle('is-off', !a.pane);
     band.style.setProperty('--band-t', `${Math.max(0.35, 1.6 - Math.min(1, a.metrics.tokensPerSec / 80) * 1.2)}s`);
 
     const esca = a.state === 'blocked' ? escalationFor(a) : undefined;
     const unblocks = 1 + store.dammedBehind(a.id).length;
     const now = Date.now();
     const s = [
-      a.state, a.block?.summary, a.tool, a.toolDetail, a.lastSay, a.lastPrompt, a.mission, a.title,
+      a.origin, a.role, a.state, a.block?.summary, a.tool, a.toolDetail, a.lastSay, a.lastPrompt, a.mission, a.title,
       a.metrics.costUSD.toFixed(2), a.metrics.outputTokens, a.metrics.tokensPerSec.toFixed(0), a.metrics.turns,
-      a.childIds.join(','), esca?.id, esca?.status, logsOpen, logsText.length,
+      a.childIds.join(','), esca?.id, esca?.status, esca?.permission?.phase, logsOpen, logsText.length,
       store.trafficFor(a.id).slice(0, 8).map((x) => x.id + (x.answer ? 'a' : '')).join(','),
       store.artifactsOf(a.id).map((x) => x.id).join(','),
       Math.floor(now / 15000),
@@ -143,11 +194,11 @@ export function mountAgent(ctx: WinCtx, c: Console) {
         </div>`;
       } else if (esca) {
         block = `<div class="block">
-          <div class="block__k"><span>${esc(a.block.kind)} · WAITING ${ago(esca.askedAt, now)}</span><span>UNBLOCKS ${unblocks}</span></div>
+          <div class="block__k"><span>${esca.permission?.phase === 'pending' ? 'RESPONSE PENDING' : esc(a.block.kind) + ' · WAITING'} ${ago(esca.askedAt, now)}</span><span>UNBLOCKS ${unblocks}</span></div>
           <div class="block__q mono">${esc(esca.question)}</div>
           ${esca.context ? `<div class="mono" style="margin-top:6px;color:var(--ink-dim)">${esc(esca.context)}</div>` : ''}
-          ${esca.ceoAttempt ? `<div class="block__tried mono"><b>CEO TRIED · ${Math.round(esca.ceoAttempt.confidence * 100)}%</b>${esc(esca.ceoAttempt.answer)}<br/><span style="color:var(--ink-dimmer)">punted: ${esc(esca.ceoAttempt.reason)}</span></div>` : ''}
-          <div class="block__opts">${esca.options.map((o) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" data-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
+          ${esca.ceoAttempt ? `<div class="block__tried mono"><b>CAPCOM TRIED · ${Math.round(esca.ceoAttempt.confidence * 100)}%</b>${esc(esca.ceoAttempt.answer)}<br/><span style="color:var(--ink-dimmer)">punted: ${esc(esca.ceoAttempt.reason)}</span></div>` : ''}
+          <div class="block__opts">${esca.options.map((o) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" ${esca.permission?.phase === 'pending' ? 'disabled' : ''} data-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
           ${esca.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><input class="input" data-ans placeholder="type an answer" /><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-ans-send>SEND</button></div>`}
           <div data-remember style="margin-top:8px"></div>
         </div>`;
@@ -155,7 +206,9 @@ export function mountAgent(ctx: WinCtx, c: Console) {
         block = `<div class="block">
           <div class="block__k"><span>PERMISSION · WAITING ${ago(a.block.since, now)}</span><span>UNBLOCKS ${unblocks}</span></div>
           <div class="block__q mono">${esc(a.block.summary)}</div>
-          <p class="px px--tiny" style="margin-top:8px;color:var(--ink-dim)">CLAUDE CODE CANNOT TAKE THIS ANSWER FROM OUTSIDE THE PROCESS. ANSWER IN ITS TERMINAL ON ${esc(m?.hostname ?? a.machineId)}${a.shortId ? ` · <span class="mono">claude attach ${esc(a.shortId)}</span>` : ''}.</p>
+          ${a.pane
+            ? `<p class="px px--tiny" style="margin-top:8px;color:var(--ink-dim)">NO VERIFIED REQUEST YET. WAIT FOR AN IDENTIFIED ESCALATION OR REVIEW THE TERMINAL.</p>`
+            : `<p class="px px--tiny" style="margin-top:8px;color:var(--ink-dim)">CLAUDE CODE CANNOT TAKE THIS ANSWER FROM OUTSIDE THE PROCESS. ANSWER IN ITS TERMINAL ON ${esc(m?.hostname ?? a.machineId)}${a.shortId ? ` · <span class="mono">claude attach ${esc(a.shortId)}</span>` : ''}.</p>`}
         </div>`;
       } else {
         block = `<div class="block">
@@ -177,6 +230,7 @@ export function mountAgent(ctx: WinCtx, c: Console) {
     remembering?.dispose(); remembering = null;
     scroll.innerHTML = `
       <div class="sec row row--wrap" style="gap:10px">
+        <span class="origin-badge" data-origin-kind="${agentOrigin(a)}">${originLabel(a)}</span>
         <span class="status ${a.state === 'blocked' && !peer ? 'is-alert' : a.state === 'working' ? 'is-on' : a.state === 'dead' ? 'is-dead' : ''}">${esc(stateWord(a))}</span>
         <span class="px px--tiny">${esc(runtimeOf(a))}${a.model ? ` · ${esc(a.model)}` : ''}</span>
         <span class="px px--tiny">${esc(m?.hostname ?? a.machineId)}</span>
@@ -201,7 +255,7 @@ export function mountAgent(ctx: WinCtx, c: Console) {
       <div class="sec">
         <div class="sec__k px">LINEAGE</div>
         <div class="chips">
-          ${parent ? `<button class="chip" type="button" data-go="${esc(parent.id)}" style="--chip-state:${stateVar(parent)}"><small>PARENT</small>${esc(parent.callsign)}</button>` : `<span class="px px--tiny" style="color:var(--ink-faint)">ROOT · LAUNCHED BY YOU</span>`}
+          ${parent ? `<button class="chip" type="button" data-go="${esc(parent.id)}" style="--chip-state:${stateVar(parent)}"><small>PARENT</small>${esc(parent.callsign)}</button>` : `<span class="px px--tiny" style="color:var(--ink-faint)">ROOT SESSION</span>`}
           ${kids.map((k) => `<button class="chip" type="button" data-go="${esc(k.id)}" style="--chip-state:${stateVar(k)}"><small>CHILD</small>${esc(k.callsign)} <small>${esc(k.state)}</small></button>`).join('')}
         </div>
       </div>
@@ -225,11 +279,11 @@ export function mountAgent(ctx: WinCtx, c: Console) {
     scroll.querySelectorAll<HTMLElement>('[data-art]').forEach((b) => b.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); c.menu({ kind: 'artifact', id: b.dataset.art! }, { x: e.clientX, y: e.clientY }); }));
     if (esca) {
       const host = scroll.querySelector<HTMLElement>('[data-remember]');
-      if (host) {
-        remembering = toggle({ name: 'remember', label: 'REMEMBER · LET THE CEO ANSWER THIS NEXT TIME' });
+      if (host && !esca.permission) {
+        remembering = toggle({ name: 'remember', label: 'REMEMBER · LET CAPCOM ANSWER THIS NEXT TIME' });
         host.appendChild(remembering.el);
       }
-      const remember = () => (remembering?.checked() ? esca.question : null);
+      const remember = () => (!esca.permission && remembering?.checked() ? esca.question : null);
       scroll.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) => b.addEventListener('click', () => { slabFlash(b); c.answer(esca.id, b.dataset.opt!, remember()); }));
       const ans = scroll.querySelector<HTMLInputElement>('[data-ans]');
       const ansBtn = scroll.querySelector<HTMLElement>('[data-ans-send]');
@@ -245,19 +299,64 @@ export function mountAgent(ctx: WinCtx, c: Console) {
    * thin band runs along its bottom edge until the hub says it arrived. The
    * band reports flight, never progress.
    */
+  let sending = false;
   const send = async () => {
     const t = sayIn.value.trim();
-    if (!t) return;
+    if (!t || sending || sayIn.disabled) return;
+    if (!store.linkUp) { c.note('link down · your message has not been sent', 'warn'); return; }
     sayIn.value = '';
+    draft.clear();
     slabFlash(sendBtn);
     const done = slabBusy(sendBtn);
-    try { await c.say([id], t); } finally { done(); }
+    sending = true;
+    try {
+      const result = await c.say([id], t);
+      if (result.failed.length && !sayIn.value) sayIn.value = t;
+    } catch (err) {
+      if (!sayIn.value) sayIn.value = t;
+      c.note(`Message not sent: ${(err as Error).message}`, 'warn');
+    } finally { sending = false; done(); draft.save(); }
   };
   sendBtn.addEventListener('click', () => void send());
-  sayIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void send(); } });
+
+  /*
+   * INTERRUPT is `say`'s twin, not `stop`'s: it cuts the turn in flight and
+   * leaves the session standing. Whatever is in the composer rides along as
+   * the correction, which is the whole point — cancelling to then type the
+   * fix is two actions where the operator meant one, and the two runtimes
+   * need the two halves in opposite orders anyway (shared/interrupt.ts).
+   * Unlike STOP it is not armed: interrupting by accident costs a turn, and
+   * making the operator click twice costs the seconds the correction was for.
+   */
+  const intBtn = body.querySelector<HTMLButtonElement>('[data-interrupt]')!;
+  let interrupting = false;
+  intBtn.addEventListener('click', async () => {
+    if (interrupting) return;
+    if (!store.linkUp) { c.note('link down · nothing was interrupted', 'warn'); return; }
+    const t = sayIn.value.trim() || null;
+    interrupting = true;
+    slabFlash(intBtn);
+    const done = slabBusy(intBtn);
+    try {
+      const out = await c.interrupt(id, t);
+      // El texto sólo se retira del compositor si de verdad salió con el corte.
+      if (t && (out?.message === 'pasted' || out?.message === 'queued')) { sayIn.value = ''; draft.clear(); }
+    } finally { interrupting = false; done(); draft.save(); }
+  });
+  sayIn.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void send(); } });
+  // La etiqueta sigue a lo que hay escrito: el mismo botón corta a secas o
+  // corta y entrega, y el operador tiene que ver cuál de las dos va a pasar.
+  sayIn.addEventListener('input', () => {
+    intBtn.textContent = sayIn.value.trim() ? 'INTERRUPT + SEND' : 'INTERRUPT';
+  });
   body.querySelector('[data-fly]')!.addEventListener('click', () => c.go(id));
   body.querySelector('[data-spawn]')!.addEventListener('click', () => { const a = agent(); if (a) c.openSpawn(a.projectId, a.id); });
+  const termBtn = body.querySelector<HTMLButtonElement>('[data-term]')!;
+  termBtn.addEventListener('click', () => {
+    setView('terminal');
+  });
   body.querySelector('[data-logs]')!.addEventListener('click', async () => {
+    setView('details');
     logsOpen = !logsOpen;
     if (logsOpen) {
       logsText = '';
@@ -292,9 +391,9 @@ export function mountAgent(ctx: WinCtx, c: Console) {
   });
 
   const off = store.on((e) => {
-    if (e.k === 'world' || (e.k === 'agents' && e.ids.includes(id)) || e.k === 'escalations' || e.k === 'traffic' || (e.k as string) === 'artifacts') render();
+    if (e.k === 'link' || e.k === 'world' || (e.k === 'agents' && e.ids.includes(id)) || e.k === 'escalations' || e.k === 'traffic' || (e.k as string) === 'artifacts') render();
   });
   const tick = window.setInterval(render, 5000);
   render();
-  return { dispose() { off(); clearInterval(tick); clearTimeout(leaveTimer); stopGlyphs?.(); remembering?.dispose(); } };
+  return { dispose() { models.dispose(); recovery.dispose(); offConversation(); terminal?.dispose(); body.classList.remove('agent-workspace'); off(); clearInterval(tick); stopGlyphs?.(); remembering?.dispose(); draft.dispose(); } };
 }

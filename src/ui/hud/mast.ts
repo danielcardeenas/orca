@@ -27,6 +27,8 @@ import { drawBits, inlineORCA, sizeOf } from '../gfx/logo.ts';
 import { fullscreenOn, onFullscreen, toggleFullscreen } from './fullscreen.ts';
 import type { Console } from '../console.ts';
 import { esc, hexNoise, money } from '../util.ts';
+import { typing } from '../keys.ts';
+import { mountClock } from './clock.ts';
 
 /** ⌥C on a Mac, Alt+C elsewhere: the mast shows the chord that opens each window. */
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -87,7 +89,7 @@ function rollup() {
   return { byState, costUSD, tokensPerSec, blocked };
 }
 
-export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean): void; setDeck(sort: string | null): void } {
+export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean): void; setDeck(sort: string | null): void; dispose(): void } {
   const el = document.createElement('header');
   el.className = 'mast';
   el.innerHTML = `
@@ -112,6 +114,9 @@ export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean)
     </div>
   `;
   host.appendChild(el);
+  // The clock holds the first row's right corner: after the gauges, before the
+  // tools, in the flow. `clock.ts` says why that spot and not the tools row.
+  const clock = mountClock(el, el.querySelector<HTMLElement>('.mast__tools')!);
   // Tele and bookmarks live inside the mast's flow, so when the mast wraps
   // at a narrow width nothing sits on top of anything.
   const tele = document.createElement('div');
@@ -212,8 +217,7 @@ export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean)
   }
   const onChord = (e: KeyboardEvent) => {
     if (REDUCE.value || e.repeat || e.metaKey || e.ctrlKey) return;
-    const t = e.target as HTMLElement | null;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (typing(e)) return;
     const cap = e.altKey
       ? caps.get(`alt:${e.code}`)
       : document.body.classList.contains('has-window') ? undefined : caps.get(e.code);
@@ -230,9 +234,10 @@ export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean)
   store.on((e) => { if (e.k === 'world' || e.k === 'agents' || e.k === 'escalations' || e.k === 'link' || e.k === 'fleet' as string) render(); });
   render();
   teleTick();
-  void t;
   return {
     setTilt(on) { tiltBtn.classList.toggle('is-on', on); },
+    // Every timer the mast started, stopped: the clock's tick, the tele, the chord echo.
+    dispose() { clock.stop(); window.clearInterval(t); window.removeEventListener('keydown', onChord, true); el.remove(); },
     // Only the label, never the whole button: the `kbd` is what the echo
     // holds a reference to, and a rewritten button would orphan it.
     setDeck(sort) { deckBtn.classList.toggle('is-on', !!sort); deckLabel.textContent = sort ? `DECK · ${sort.toUpperCase()}` : 'DECK'; },

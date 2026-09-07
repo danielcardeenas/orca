@@ -1,0 +1,45 @@
+╭───────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.4)                │
+│                                           │
+│ model:     gpt-6-astra   /model to change │
+│ directory: /tmp/…/codex-mcp/workspace     │
+╰───────────────────────────────────────────╯
+
+  Tip: This is GPT-6, a new generation of intelligence. Astra is state-of-the-art in coding, computer use, science, and professional work. Give it a hard
+  problem, a half-formed idea, or anything you've been meaning to build. See where it takes you.
+
+
+› Call only the playwright MCP tool browser_tabs with action new, url https://example.invalid/native-permission-test, local true. This is a harmless isolated
+  fixture. Wait for its manual permission approval; never change the approval configuration. Report the tool result and stop. If denied, stop without retrying.
+
+
+⚠ Heads up, you have less than 25% of your weekly limit left. Run /status for a breakdown.
+
+• I’ll call browser_tabs with the exact parameters and wait for manual approval. If denied, I’ll stop without retrying.
+
+• Called playwright.browser_tabs({"action":"new","url":"https://example.invalid/native-permission-test","local":true})
+  └ Error: user cancelled MCP tool call
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Tool result: user cancelled MCP tool call (isError: true). Stopped without retrying or changing approval configuration.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 
+ 
+› Ask Codex to do anything
+ 
+  gpt-6-astra default · /tmp/orca-native-permissions-task07/codex-mcp/workspace
+
+
+
+
+
+
+
+
+
+
+
+
+

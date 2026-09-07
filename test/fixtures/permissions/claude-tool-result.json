@@ -1,0 +1,11 @@
+[
+  {
+    "tool_use_id": "toolu_native_permission",
+    "type": "tool_result",
+    "content": "ORCA_NATIVE_PERMISSION_OK",
+    "is_error": false,
+    "cache_control": {
+      "type": "ephemeral"
+    }
+  }
+]

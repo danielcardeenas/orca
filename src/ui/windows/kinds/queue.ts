@@ -45,7 +45,7 @@ export function mountQueue(ctx: WinCtx, c: Console) {
       return `<div class="qrow" data-esc="${esc(e.id)}" data-agent="${esc(e.agentId)}">
         <div class="qrow__h"><span class="qrow__cs">${esc(a?.callsign ?? '??')} <span class="win__pj">${esc(p?.code ?? '')}</span></span><span class="qrow__meta">${ago(e.askedAt, now)}</span></div>
         <div class="qrow__q mono">${esc(e.question)}</div>
-        <div class="qrow__meta">${e.status === 'with_ceo' ? 'CEO LOOKING · ' : ''}${e.urgency.toUpperCase()} · <b>UNBLOCKS ${unblocks}</b>${e.options.length ? ` · ${e.options.length} OPTIONS` : ''}</div>
+        <div class="qrow__meta">${e.status === 'with_ceo' ? 'CAPCOM LOOKING · ' : ''}${e.urgency.toUpperCase()} · <b>UNBLOCKS ${unblocks}</b>${e.options.length ? ` · ${e.options.length} OPTIONS` : ''}</div>
       </div>`;
     }).join('') + perms.map((a) => {
       const p = store.world.projects[a.projectId];

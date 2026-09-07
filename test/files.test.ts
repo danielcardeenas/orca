@@ -1,0 +1,273 @@
+/**
+ * `/api/file`: archivos de proyecto servidos a la consola.
+ *
+ * Un endpoint que lee del disco a petición de un cliente es donde viven los
+ * path traversal, así que la mitad de esto son intentos de salirse de la raíz:
+ * `..`, codificado, symlinks que apuntan fuera, la home del usuario, la raíz
+ * del disco declarada como proyecto. El resto comprueba que lo que sí está
+ * dentro sale con el tipo correcto y con html sin poder ejecutar.
+ */
+
+import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { createAuth } from '../src/hub/auth.ts';
+import { findPaths, fileKind } from '../src/ui/windows/paths.ts';
+import { startHub } from '../src/hub/server.ts';
+import { acceptableRoot, envRoots, scratchpadRoots, fileMime, parseRange, resolveServedPath } from '../src/hub/files.ts';
+import { ok, eq, test, freePort, type TestModule } from './harness.ts';
+
+const BASE = realpathSync(tmpdir());
+const FIXTURE = mkdtempSync(join(BASE, 'orca-files-test-'));
+const ROOT = join(FIXTURE, 'project');
+const OUTSIDE = join(FIXTURE, 'outside');
+const ALIAS = join(FIXTURE, 'alias');
+const TEST_TOKEN = 'orca-files-fixture-token';
+let ready = false;
+const CANARY = 'ESTO-NO-DEBE-SALIR-POR-/api/file';
+
+function fixture(): void {
+  if (ready) return;
+  ready = true;
+  mkdirSync(join(ROOT, 'src'), { recursive: true });
+  mkdirSync(OUTSIDE, { recursive: true });
+  writeFileSync(join(ROOT, 'src', 'a.ts'), 'export const a = 1;\n');
+  writeFileSync(join(ROOT, 'page.html'), '<script>fetch("/api/world")</script>');
+  writeFileSync(join(ROOT, 'shot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64'));
+  writeFileSync(join(ROOT, 'clip.mp4'), Buffer.alloc(1000, 7));
+  writeFileSync(join(ROOT, 'big.bin'), Buffer.alloc(64));
+  writeFileSync(join(OUTSIDE, 'outside.txt'), CANARY);
+  symlinkSync(join(OUTSIDE, 'outside.txt'), join(ROOT, 'leak.txt'));
+  symlinkSync(OUTSIDE, join(ROOT, 'leakdir'));
+  symlinkSync(ROOT, ALIAS);
+  symlinkSync(BASE, join(FIXTURE, 'broad-alias'));
+  writeFileSync(join(ROOT, '.env'), 'NON-SENSITIVE-FIXTURE');
+  symlinkSync(join(ROOT, '.env'), join(ROOT, 'innocent.txt'));
+  writeFileSync(join(ROOT, 'voice.wav'), Buffer.alloc(100, 1));
+  execFileSync('mkfifo', [join(ROOT, 'pipe')]);
+}
+
+async function withHub<T>(fn: (base: string) => Promise<T>): Promise<T> {
+  const port = await freePort();
+  const hub = await startHub({ port, host: '127.0.0.1', quiet: true, fileRoots: [ALIAS], auth: createAuth({ ORCA_TOKEN: TEST_TOKEN, ORCA_STRICT_AUTH: '1' }) });
+  try { return await fn(`http://127.0.0.1:${port}`); } finally { await hub.close(); }
+}
+
+const url = (base: string, path: string) => `${base}/api/file?path=${encodeURIComponent(path)}&token=${TEST_TOKEN}`;
+
+const tests = [
+  /* ── resolveServedPath, en seco ────────────────────────────────── */
+  test('un archivo bajo la raíz se resuelve', () => {
+    fixture();
+    const r = resolveServedPath(join(ROOT, 'src', 'a.ts'), [ROOT]);
+    return ok('ok', r.ok && r.path === join(ROOT, 'src', 'a.ts') && r.mime.startsWith('text/plain'), JSON.stringify(r));
+  }),
+
+  test('.. que se sale de la raíz es 403', () => {
+    const r = resolveServedPath(join(ROOT, 'src', '..', '..', 'outside', 'outside.txt'), [ROOT]);
+    return eq('403', r.ok ? 'ok' : r.status, 403);
+  }),
+
+  test('un symlink a un archivo de fuera es 403', () => {
+    const r = resolveServedPath(join(ROOT, 'leak.txt'), [ROOT]);
+    return eq('403', r.ok ? 'ok' : r.status, 403);
+  }),
+
+  test('un symlink a un directorio de fuera es 403', () => {
+    const r = resolveServedPath(join(ROOT, 'leakdir', 'outside.txt'), [ROOT]);
+    return eq('403', r.ok ? 'ok' : r.status, 403);
+  }),
+
+  test('dentro pero inexistente es 404, no 403', () => {
+    const r = resolveServedPath(join(ROOT, 'nope.ts'), [ROOT]);
+    return eq('404', r.ok ? 'ok' : r.status, 404);
+  }),
+
+  test('un directorio no se sirve', () => {
+    const r = resolveServedPath(join(ROOT, 'src'), [ROOT]);
+    return eq('404', r.ok ? 'ok' : r.status, 404);
+  }),
+
+  test('una ruta relativa es 400', () => {
+    const r = resolveServedPath('src/a.ts', [ROOT]);
+    return eq('400', r.ok ? 'ok' : r.status, 400);
+  }),
+
+  test('vacío o con NUL es 400', () =>
+    eq('400s', [resolveServedPath('', [ROOT]), resolveServedPath(`${ROOT}/a\0.ts`, [ROOT])].map((r) => r.ok ? 'ok' : r.status), [400, 400])),
+
+  test('por encima del techo es 413', () => {
+    const r = resolveServedPath(join(ROOT, 'big.bin'), [ROOT], { maxBytes: 16 });
+    return eq('413', r.ok ? 'ok' : r.status, 413);
+  }),
+
+  test('~/ se expande a la home dada y sigue contenido', () => {
+    const r = resolveServedPath('~/project/src/a.ts', [ROOT], { home: FIXTURE });
+    const out = resolveServedPath('~/secret.txt', [ROOT], { home: OUTSIDE });
+    return ok('home', r.ok && r.path.endsWith('/src/a.ts') && !out.ok && out.status === 403, JSON.stringify([r, out]));
+  }),
+
+  test('sin raíces nada se sirve', () =>
+    eq('403', (() => { const r = resolveServedPath(join(ROOT, 'src', 'a.ts'), []); return r.ok ? 'ok' : r.status; })(), 403)),
+
+  test('la raíz del disco, /Users y la home no valen como raíz', () =>
+    eq('roots', ['/', '/Users', homedir(), 'relative/x', ROOT].map((r) => acceptableRoot(r)), [false, false, false, false, true])),
+
+  test('una raíz de otra máquina no contiene nada de esta', () => {
+    const r = resolveServedPath('/Users/otra/persona/x.ts', ['/Users/otra/persona']);
+    return eq('404', r.ok ? 'ok' : r.status, 404);
+  }),
+
+  test('el tipo por extensión, y texto para lo que parece código', () =>
+    eq('mime', ['a.png', 'b.PDF', 'c.mp3', 'd.md', 'e.ts', 'Makefile', '.gitignore', 'f.bin'].map(fileMime),
+      ['image/png', 'application/pdf', 'audio/mpeg', 'text/markdown; charset=utf-8', 'text/plain; charset=utf-8',
+        'text/plain; charset=utf-8', 'text/plain; charset=utf-8', 'application/octet-stream'])),
+
+  test('rangos: a-b, a-, -n, y los que no caben', () =>
+    eq('ranges', [parseRange('bytes=0-9', 100), parseRange('bytes=90-', 100), parseRange('bytes=-10', 100), parseRange('bytes=200-', 100), parseRange('items=1-2', 100)],
+      [{ start: 0, end: 9 }, { start: 90, end: 99 }, { start: 90, end: 99 }, null, null])),
+
+  test('aliases de raíz: forma declarada y canónica', () =>
+    ok('aliases', [ROOT, ALIAS].every((r) => resolveServedPath(join(r, 'src/a.ts'), [ALIAS]).ok))),
+
+  test('alias macOS inverso de una raíz canónica funciona por realpath', () => {
+    const alias = ROOT.replace(/^\/private\/(tmp|var)(?=\/)/, '/$1');
+    return ok('canonical grant', realpathSync(alias) === ROOT
+      && resolveServedPath(join(alias, 'shot.png'), [ROOT]).ok);
+  }),
+
+  test('scratchpad TMPDIR propio se admite sin ampliar el padre', () => {
+    const parent = join(FIXTURE, 'work-temp');
+    const scratch = join(parent, `claude-${process.getuid?.()}`);
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(join(scratch, 'note.txt'), 'fixture');
+    writeFileSync(join(parent, 'loose.txt'), 'fixture');
+    const roots = scratchpadRoots({ TMPDIR: parent });
+    return ok('narrow', roots.includes(scratch) && resolveServedPath(join(scratch, 'note.txt'), roots).ok
+      && !resolveServedPath(join(parent, 'loose.txt'), roots).ok);
+  }),
+
+  test('aliases reales macOS son linkificables sin cambiar el visor', () => {
+    const paths = ['/tmp/claude-501/a.png', '/private/tmp/claude-501/a.html',
+      '/var/folders/z0/example/T/claude-501/a.mp4', '/private/var/folders/z0/example/T/claude-501/a.wav'];
+    return eq('paths', paths.map((p) => [findPaths(p)[0]?.path, fileKind(p)]),
+      paths.map((p, i) => [p, ['image', 'html', 'video', 'audio'][i]]));
+  }),
+
+  test('contenedores temporales y alias de contenedor no autorizan', () => {
+    const roots = ['/private', '/private/tmp', '/tmp', '/private/temp', '/private/var',
+      '/var/tmp', '/private/var/tmp', tmpdir(), BASE, '/var/folders/z0/example/T'];
+    const broad = resolveServedPath(join(FIXTURE, 'broad-alias', 'anything.txt'), [join(FIXTURE, 'broad-alias')]);
+    return ok('blocked', roots.every((r) => !acceptableRoot(r)) && !broad.ok && broad.status === 403);
+  }),
+
+  test('archivo explícito autoriza sólo ese archivo y sus aliases', () => {
+    const file = join(ALIAS, 'shot.png');
+    const roots = envRoots({ ORCA_FILE_ROOTS: file });
+    return eq('scoped', [resolveServedPath(join(ROOT, 'shot.png'), roots).ok,
+      resolveServedPath(join(ROOT, 'page.html'), roots).ok], [true, false]);
+  }),
+
+  test('configuración privada y symlink con nombre inocuo se excluyen', () => {
+    const names = ['.env', '.env.local', '.ssh/id_ed25519', '.aws/credentials', '.claude/settings.json',
+      '.codex/auth.json', '.config/app/config.json', '.orca/token', 'innocent.txt', 'client.key'];
+    return ok('403', names.every((p) => {
+      const r = resolveServedPath(join(ROOT, p), [ROOT]); return !r.ok && r.status === 403;
+    }));
+  }),
+
+  test('FIFO y raíces de otro usuario se rechazan sin leer', () => {
+    const pipe = resolveServedPath(join(ROOT, 'pipe'), [ROOT]);
+    const other = resolveServedPath(join(ROOT, 'claude-999999', 'a.txt'), [ROOT]);
+    const system = resolveServedPath('/usr/bin/true', ['/usr/bin']);
+    return ok('refused', !pipe.ok && pipe.status === 404 && !other.ok && other.status === 403
+      && (process.getuid?.() === 0 || (!system.ok && system.status === 403)));
+  }),
+
+  test('scratchpad sólo adopta directorios propios y nunca symlinks', () => {
+    const parent = join(FIXTURE, 'temp-parent');
+    mkdirSync(parent);
+    symlinkSync(ROOT, join(parent, `claude-${process.getuid?.()}`));
+    return ok('no alias adoption', !scratchpadRoots({ TMPDIR: parent }).some((r) => r.startsWith(parent)));
+  }),
+
+  /* ── el endpoint de verdad ─────────────────────────────────────── */
+  test('GET /api/file sirve un archivo del proyecto con su tipo', () => withHub(async (base) => {
+    fixture();
+    const r = await fetch(url(base, join(ROOT, 'src', 'a.ts')));
+    const body = await r.text();
+    return ok('200', r.status === 200 && body.includes('export const a') && (r.headers.get('content-type') ?? '').startsWith('text/plain')
+      && r.headers.get('x-content-type-options') === 'nosniff', `http ${r.status} ${r.headers.get('content-type')}`);
+  })),
+
+  test('el html sale con CSP sandbox', () => withHub(async (base) => {
+    const r = await fetch(url(base, join(ROOT, 'page.html')));
+    return ok('sandbox', r.status === 200 && r.headers.get('content-security-policy') === 'sandbox'
+      && (r.headers.get('content-type') ?? '').startsWith('text/html'), `${r.status} csp=${r.headers.get('content-security-policy')}`);
+  })),
+
+  test('una imagen no lleva CSP y sí su tipo', () => withHub(async (base) => {
+    const r = await fetch(url(base, join(ROOT, 'shot.png')));
+    return ok('png', r.status === 200 && r.headers.get('content-type') === 'image/png' && r.headers.get('content-security-policy') === null, `${r.status}`);
+  })),
+
+  test('Range devuelve 206 con content-range', () => withHub(async (base) => {
+    const r = await fetch(url(base, join(ROOT, 'clip.mp4')), { headers: { range: 'bytes=0-99' } });
+    const buf = new Uint8Array(await r.arrayBuffer());
+    return ok('206', r.status === 206 && buf.length === 100 && r.headers.get('content-range') === 'bytes 0-99/1000', `${r.status} ${r.headers.get('content-range')} ${buf.length}`);
+  })),
+
+  test('fuera de la raíz es 403 y el canario no sale', () => withHub(async (base) => {
+    const attempts = [
+      join(OUTSIDE, 'outside.txt'),
+      `${ROOT}/../outside/outside.txt`,
+      `${ROOT}/leak.txt`,
+      `${ROOT}/leakdir/outside.txt`,
+      `${ROOT}/src/%2e%2e/%2e%2e/outside/outside.txt`,
+      '/etc/passwd',
+      '~/.orca/token',
+    ];
+    const results: string[] = [];
+    for (const p of attempts) {
+      const r = await fetch(url(base, p));
+      const body = await r.text();
+      results.push(`${r.status}${body.includes(CANARY) ? ' LEAK' : ''}`);
+    }
+    return ok('all refused', results.every((s) => /^(403|404)$/.test(s)), results.join(', '));
+  })),
+
+  test('lo que no existe es 404', () => withHub(async (base) => {
+    const r = await fetch(url(base, join(ROOT, 'nope.ts')));
+    return eq('404', r.status, 404);
+  })),
+
+  test('sin path es 400', () => withHub(async (base) => {
+    const r = await fetch(`${base}/api/file?token=${TEST_TOKEN}`);
+    return eq('400', r.status, 400);
+  })),
+
+  test('sin token el endpoint exige autenticación', () => withHub(async (base) => {
+    const r = await fetch(`${base}/api/file?path=${encodeURIComponent(join(ROOT, 'shot.png'))}`);
+    return eq('401', r.status, 401);
+  })),
+
+  test('audio, HEAD y rechazos privados/especiales pasan por el endpoint', () => withHub(async (base) => {
+    const audio = await fetch(url(base, join(ROOT, 'voice.wav')), { headers: { range: 'bytes=0-9' } });
+    const head = await fetch(url(base, join(ALIAS, 'shot.png')), { method: 'HEAD' });
+    const statuses = [];
+    for (const name of ['.env', 'innocent.txt', 'pipe']) {
+      const r = await fetch(url(base, join(ROOT, name))); statuses.push(r.status);
+    }
+    return ok('http', audio.status === 206 && audio.headers.get('content-type') === 'audio/wav'
+      && (await audio.arrayBuffer()).byteLength === 10 && head.status === 200 && (await head.text()) === ''
+      && JSON.stringify(statuses) === '[403,403,404]');
+  })),
+
+  test('con token equivocado es 401', () => withHub(async (base) => {
+    const r = await fetch(url(base, join(ROOT, 'src', 'a.ts')).replace(TEST_TOKEN, 'nope'));
+    return eq('401', r.status, 401);
+  })),
+];
+
+export default { suite: 'files', tests } satisfies TestModule;

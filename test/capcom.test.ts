@@ -17,9 +17,9 @@
  * Nothing here launches a CLI or spends anything.
  */
 
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import type { Agent, Escalation } from '../src/shared/types.ts';
 import { PATHS, newId } from '../src/shared/protocol.ts';
@@ -37,8 +37,8 @@ import { mcpDispatch, mcpTools, MCP_SERVER_NAME } from '../src/hub/mcp.ts';
 import { CEO_TOOLS } from '../src/agents/tools.ts';
 import { capcomBrief } from '../src/collector/briefs.ts';
 import {
-  CapcomSession, CAPCOM_FIRST_PROMPT, CAPCOM_GRACE_MS, capcomSettingsJson,
-  hubHttpUrl, mcpConfigJson,
+  CapcomSession, CAPCOM_FIRST_PROMPT, CAPCOM_GRACE_MS, capcomRoots, capcomSettingsJson,
+  hubHttpUrl, mcpConfigJson, preTrust, wantsCapcom,
 } from '../src/collector/capcom.ts';
 import { squadsOf } from '../src/shared/squads.ts';
 import { startFakeFleet } from './fake-collector.ts';
@@ -140,6 +140,28 @@ async function rpc(
 /* ── the MCP server ───────────────────────────────────────────────── */
 
 const tests = [
+  test('CAPCOM is on by default on the hub machine, and off on a remote one', () => {
+    const cases: [Record<string, string | undefined>, string[], boolean][] = [
+      [{}, [], true],
+      [{ ORCA_HUB_URL: 'ws://127.0.0.1:4479' }, [], true],
+      [{ ORCA_HUB_URL: 'ws://localhost:4479/ws/collector' }, [], true],
+      [{ ORCA_HUB_URL: 'ws://[::1]:4479' }, [], true],
+      [{ ORCA_HUB_URL: 'wss://orca.example.net' }, [], false],
+      [{ ORCA_HUB_URL: 'ws://10.0.0.7:4479' }, [], false],
+      [{ ORCA_HUB_URL: 'wss://orca.example.net' }, ['--capcom'], true],
+      [{ ORCA_HUB_URL: 'wss://orca.example.net', ORCA_CAPCOM: '1' }, [], true],
+      [{}, ['--no-capcom'], false],
+      [{ ORCA_CAPCOM: '0' }, [], false],
+      [{ ORCA_CAPCOM: '0' }, ['--capcom'], false],
+    ];
+    const wrong = cases.filter(([env, argv, want]) => wantsCapcom(env, argv) !== want);
+    return ok(
+      'CAPCOM is on by default on the hub machine, and off on a remote one',
+      wrong.length === 0,
+      wrong.length ? JSON.stringify(wrong[0]) : `${cases.length} cases agree`,
+    );
+  }),
+
   test('the MCP tool list is the fleet command, not a copy of it', () => {
     const names = mcpTools().map((t) => t.name).sort();
     const expected = CEO_TOOLS.map((t) => t.name).sort();
@@ -359,6 +381,39 @@ const tests = [
     return eq('capcomOf ignores a dead command session', found?.id, 'c2');
   }),
 
+  test('capcomOf breaks a startedAt tie by who moved last (a resumed transcript keeps the old start)', () => {
+    const found = capcomOf([
+      agent({ id: 'old', role: 'capcom', state: 'idle', startedAt: 5, updatedAt: 10 }),
+      agent({ id: 'new', role: 'capcom', state: 'idle', startedAt: 5, updatedAt: 20 }),
+    ]);
+    return eq('capcomOf breaks a startedAt tie by who moved last', found?.id, 'new');
+  }),
+
+  test('adopting a new CAPCOM demotes the one it replaces', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-capcom-'));
+    const roles: string[] = [];
+    try {
+      const session = new CapcomSession({
+        bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 't', dir,
+        lineage: {
+          noteSpawn: (id, _p, _m, _s, _l, role) => { roles.push(`${id}:${role}`); },
+          demote: (id) => { roles.push(`${id}:demoted`); },
+          bind: () => { /* quiet */ },
+        },
+        alive: () => true,
+        note: () => { /* quiet */ },
+      });
+      session.adopt('aaaa1111');
+      session.adopt('aaaa1111');   // same one again: nothing changes
+      session.adopt('bbbb2222');
+      return eq(
+        'adopting a new CAPCOM demotes the one it replaces',
+        roles.join(' '),
+        'aaaa1111:capcom aaaa1111:demoted bbbb2222:capcom',
+      );
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
   test('an escalation reaches CAPCOM as one line carrying its id', () => {
     const line = escalationSay(escalation(), 'K9');
     return ok(
@@ -372,6 +427,8 @@ const tests = [
   test('with a CAPCOM alive, what the human types becomes a say command to it', async () => {
     return await withHub(async (hub) => {
       const commands: { agentId: string; text: string }[] = [];
+      let commandId = '';
+      const receipts: { cmdId: string; ok: boolean }[] = [];
       // A CAPCOM session in the world, and a fake collector socket to receive
       // the command the hub routes to it.
       hub.world.applyCollector(
@@ -390,22 +447,26 @@ const tests = [
         },
       }));
       ws.on('message', (raw) => {
-        const f = JSON.parse(raw.toString()) as { t: string; cmd?: Command };
-        if (f.t === 'cmd' && f.cmd?.k === 'say') commands.push({ agentId: f.cmd.agentId, text: f.cmd.text });
+        const f = JSON.parse(raw.toString()) as { t: string; id: string; cmd?: Command };
+        if (f.t === 'cmd' && f.cmd?.k === 'say') { commandId = f.id; commands.push({ agentId: f.cmd.agentId, text: f.cmd.text }); }
       });
 
       const console1 = new WebSocket(`ws://127.0.0.1:${hub.port}${PATHS.console}?token=${TOKEN}`);
       await new Promise<void>((res, rej) => { console1.once('open', () => res()); console1.once('error', rej); });
-      console1.send(JSON.stringify({ t: 'ceo:say', text: 'status of the fleet please' }));
+      console1.on('message', (raw) => { const f = JSON.parse(raw.toString()); if (f.t === 'ack') receipts.push(f); });
+      console1.send(JSON.stringify({ t: 'ceo:say', id: 'receipt_test', text: 'status of the fleet please' }));
 
       const arrived = await until(() => commands.length > 0, 4000);
+      const premature = receipts.length;
+      ws.send(JSON.stringify({ t: 'ack', cmdId: commandId, ok: true }));
+      const acknowledged = await until(() => receipts.length > 0, 2000);
       const said = commands[0];
       // And the human's line is still in the transcript the console reads.
       const history = hub.world.state.ceo.messages.some((m) => m.role === 'human' && m.text.includes('status of the fleet'));
       ws.close(); console1.close();
       return ok(
         'what the human types becomes a say command to CAPCOM',
-        arrived && said?.agentId === 'cap1' && said?.text === 'status of the fleet please' && history,
+        arrived && said?.agentId === 'cap1' && said?.text === 'status of the fleet please' && history && premature === 0 && acknowledged && receipts[0]?.cmdId === 'receipt_test' && receipts[0]?.ok === true,
         `${commands.length} say(s) → ${said?.agentId ?? 'nobody'}`,
       );
     });
@@ -420,28 +481,23 @@ const tests = [
       c.send(JSON.stringify({ t: 'ceo:say', text: 'anybody home' }));
       const arrived = await until(() => seen.length > 0, 4000);
       c.close();
-      return ok('with no CAPCOM the API command still gets it', arrived && seen[0] === 'anybody home', seen[0]);
-    }, { onCeoSay: (text) => { seen.push(text); } });
+      return ok('with no CAPCOM the message is observable as unrouted', arrived && seen[0] === 'anybody home', seen[0]);
+    }, { onUnrouted: (text) => { seen.push(text); } });
   }),
 
-  test('--api-command keeps the API CEO in charge even with CAPCOM alive', async () => {
-    const seen: string[] = [];
-    return await withHub(async (hub) => {
-      hub.world.applyCollector(
-        { t: 'agent:new', machineId: 'm1', agent: agent({ id: 'cap1', role: 'capcom' }) }, 'm1',
-      );
+  test('an unavailable command returns a negative receipt instead of silent success', async () => {
+    return withHub(async (hub) => {
       const { WebSocket } = await import('ws');
       const c = new WebSocket(`ws://127.0.0.1:${hub.port}${PATHS.console}?token=${TOKEN}`);
-      await new Promise<void>((res, rej) => { c.once('open', () => res()); c.once('error', rej); });
-      c.send(JSON.stringify({ t: 'ceo:say', text: 'forced to the api' }));
-      const arrived = await until(() => seen.length > 0, 4000);
-      c.close();
-      return ok(
-        '--api-command keeps the API CEO in charge',
-        arrived && hub.capcom() === null,
-        `onCeoSay fired: ${arrived}, hub.capcom(): ${hub.capcom()?.id ?? 'null'}`,
-      );
-    }, { apiCommand: true, onCeoSay: (text) => { seen.push(text); } });
+      const receipts: { cmdId: string; ok: boolean; detail: string }[] = [];
+      c.on('message', (raw) => { const f = JSON.parse(raw.toString()); if (f.t === 'ack') receipts.push(f); });
+      try {
+        await new Promise<void>((resolve, reject) => { c.once('open', resolve); c.once('error', reject); });
+        c.send(JSON.stringify({ t: 'ceo:say', id: 'no_command', text: 'Please report status' }));
+        const arrived = await until(() => receipts.length > 0, 2000);
+        return ok('no command is a visible delivery failure', arrived && receipts[0]?.cmdId === 'no_command' && receipts[0]?.ok === false && receipts[0]?.detail.includes('saved'));
+      } finally { c.close(); }
+    });
   }),
 
   /* ── the 90-second deadline ─────────────────────────────────────── */
@@ -463,6 +519,33 @@ const tests = [
       'an escalation is handed to CAPCOM and marked as being triaged',
       took && esc.status === 'with_ceo' && said.length === 1 && said[0]!.includes('[ESCALATION esc_1]'),
       said[0]?.slice(0, 70),
+    );
+  }),
+
+  test('a question that arrived while CAPCOM was away is offered on the next sweep, once', () => {
+    const clock = fakeClock();
+    const said: string[] = [];
+    let cap: Agent | null = null;
+    const fresh = escalation({ id: 'esc_late' });
+    const givenUp = escalation({ id: 'esc_old', ceoAttempt: { answer: '', confidence: 0, reason: 'capcom did not answer in time' } });
+    const state = new Map<string, Escalation>([[fresh.id, fresh], [givenUp.id, givenUp]]);
+    const router = new CapcomRouter({
+      capcom: () => cap,
+      say: (_id, text) => { said.push(text); },
+      escalation: (id) => state.get(id),
+      markWithCeo: (id) => { state.set(id, { ...state.get(id)!, status: 'with_ceo' }); },
+      giveUp: () => { /* not this test */ },
+      setTimer: clock.setTimer,
+    });
+    const before = router.sweep(state.values());          // nobody home
+    cap = agent({ id: 'cap1', role: 'capcom' });
+    const first = router.sweep(state.values());
+    const again = router.sweep(state.values());           // already held: no repeat
+    return ok(
+      'a question that arrived while CAPCOM was away is offered on the next sweep, once',
+      before === 0 && first === 1 && again === 0
+      && said.length === 1 && said[0]!.includes('[ESCALATION esc_late]'),
+      `offered ${before}/${first}/${again} · said: ${said.map((s) => s.slice(0, 22)).join(' | ')}`,
     );
   }),
 
@@ -589,23 +672,53 @@ const tests = [
       hubHttpUrl('wss://orca.example.com/ws/collector'), 'https://orca.example.com');
   }),
 
-  test('the settings approve the orca server and deny the tools that write code', () => {
-    const s = JSON.parse(capcomSettingsJson()) as {
+  test('the settings approve the orca server, run in auto mode, deny nothing, and open the project roots', () => {
+    /*
+     * The roots matter: they are the working directories CAPCOM reads without
+     * the "first read outside the working directories" dialog. Measured: an
+     * allow rule does not do that job; only working directories do.
+     */
+    const s = JSON.parse(capcomSettingsJson(['/repos/a', '/repos/b'])) as {
       enableAllProjectMcpServers?: boolean;
-      permissions?: { allow?: string[]; deny?: string[] };
+      permissions?: { allow?: string[]; deny?: string[]; defaultMode?: string; additionalDirectories?: string[] };
     };
+    const bare = JSON.parse(capcomSettingsJson()) as { permissions?: { additionalDirectories?: string[] } };
     return ok(
-      'the settings approve the orca server and deny the code tools',
+      'the settings approve the orca server, run in auto mode, deny nothing, and open the project roots',
       s.enableAllProjectMcpServers === true
       && (s.permissions?.allow ?? []).includes('mcp__orca')
-      && (s.permissions?.deny ?? []).includes('Bash')
-      && (s.permissions?.deny ?? []).includes('Edit'),
+      && s.permissions?.defaultMode === 'auto'
+      && (s.permissions?.deny ?? []).length === 0
+      && JSON.stringify(s.permissions?.additionalDirectories) === JSON.stringify(['/repos/a', '/repos/b'])
+      && JSON.stringify(bare.permissions?.additionalDirectories) === '[]',
       JSON.stringify(s.permissions),
     );
   }),
 
+  test('the roots are existing directories only, never CAPCOM\'s own, deduplicated and sorted', () => {
+    const own = tempDir();
+    const repo = tempDir();
+    try {
+      const file = join(repo, 'not-a-dir.txt');
+      writeFileSync(file, 'x');
+      const roots = capcomRoots(
+        [repo, `${repo}/`, own, join(own, 'missing'), file, '', join(repo, '..', basename(repo))],
+        own,
+      );
+      return ok(
+        'the roots are existing directories only, never CAPCOM\'s own, deduplicated and sorted',
+        roots.length === 1 && roots[0] === repo,
+        JSON.stringify(roots),
+      );
+    } finally {
+      rmSync(own, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }),
+
   test('starting CAPCOM writes its brief, its MCP config, and marks it as the command', async () => {
     const dir = tempDir();
+    const repo = tempDir();
     try {
       const noted: string[] = [];
       const spawns: { shortId: string; role: string }[] = [];
@@ -617,16 +730,27 @@ const tests = [
         dir,
         lineage: {
           noteSpawn: (shortId, _p, _m, _s, _l, role) => { spawns.push({ shortId, role: role ?? 'agent' }); },
+          demote: () => { /* quiet */ },
+          bind: () => { /* quiet */ },
         },
         alive: () => false,
         note: (_level, text) => { noted.push(text); },
         launch: async (_bin, a) => { args.push(...a); return { ok: true, stdout: 'started 1a2b3c4d\n', detail: '' }; },
+        // A real repo, a folder that is gone, and CAPCOM's own cwd: only the first belongs.
+        roots: () => [repo, join(dir, 'gone'), dir],
       });
       const out = await session.ensure();
 
       const brief = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
       const mcp = readFileSync(join(dir, '.mcp.json'), 'utf8');
-      const settings = existsSync(join(dir, '.claude', 'settings.json'));
+      const settingsPath = join(dir, '.claude', 'settings.json');
+      const written = JSON.parse(readFileSync(settingsPath, 'utf8')) as {
+        permissions?: { additionalDirectories?: string[] };
+      };
+      const settings = existsSync(settingsPath)
+        && JSON.stringify(written.permissions?.additionalDirectories) === JSON.stringify([repo]);
+      // The settings file is how those roots reach the session: it has to be in the argv.
+      const settingsInArgv = args.includes('--settings') && args.includes(settingsPath);
 
       /*
        * The argv is load-bearing and gets checked properly.
@@ -637,7 +761,7 @@ const tests = [
        * would boot with no instruction at all — a session that starts fine and
        * does nothing, which is the failure nobody notices.
        */
-      const VARIADIC = new Set(['--allowedTools', '--disallowedTools', '--mcp-config', '--tools']);
+      const VARIADIC = new Set(['--allowedTools', '--disallowedTools', '--mcp-config', '--tools', '--add-dir']);
       const promptLast = args[args.length - 1] === CAPCOM_FIRST_PROMPT;
       const variadicsTerminated = args.every((a, i) => {
         if (!VARIADIC.has(a)) return true;
@@ -652,9 +776,110 @@ const tests = [
         'starting CAPCOM writes its files and marks it as the command',
         out.ok && out.shortId === '1a2b3c4d'
         && spawns[0]?.role === 'capcom'
-        && brief.includes('CAPCOM') && mcp.includes('tok-abc') && settings
+        && brief.includes('CAPCOM') && mcp.includes('tok-abc') && settings && settingsInArgv
         && promptLast && variadicsTerminated && preApproved,
-        `${out.shortId} · prompt last: ${promptLast}, variadics terminated: ${variadicsTerminated}`,
+        `${out.shortId} · prompt last: ${promptLast}, variadics terminated: ${variadicsTerminated}`
+        + ` · roots: ${JSON.stringify(written.permissions?.additionalDirectories)}`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }),
+
+  test('with tmux, CAPCOM starts hosted: one interactive session in a pane, id chosen up front', async () => {
+    const dir = tempDir();
+    try {
+      const spawned: { shortId: string; role: string }[] = [];
+      const bound: string[] = [];
+      const panes: { name: string; cwd: string; argv: string[]; env: Record<string, string> }[] = [];
+      let bgLaunches = 0;
+      const session = new CapcomSession({
+        bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 'tok', dir,
+        lineage: {
+          noteSpawn: (id, _p, _m, _s, _l, role) => { spawned.push({ shortId: id, role: role ?? 'agent' }); },
+          demote: () => { /* quiet */ },
+          bind: (id, sess) => { bound.push(`${id}=${sess}`); },
+        },
+        alive: () => false,
+        note: () => { /* quiet */ },
+        trust: false,
+        tmux: {
+          available: () => true,
+          spawn: async (p) => { panes.push({ name: p.name, cwd: p.cwd, argv: p.argv, env: p.env }); return { ok: true, stdout: '', detail: '' }; },
+        },
+        launch: async () => { bgLaunches += 1; return { ok: true, stdout: 'never\n', detail: '' }; },
+      });
+      const out = await session.ensure();
+      const pane = panes[0];
+      const id = out.shortId ?? '';
+      const uuid = /^[0-9a-f-]{36}$/.test(id);
+      const argv = pane?.argv ?? [];
+      const sessionIdFlag = argv[1] === '--session-id' && argv[2] === id;
+      const promptLast = argv[argv.length - 1] === CAPCOM_FIRST_PROMPT;
+      const tools = argv.includes('--mcp-config') && argv.includes('--strict-mcp-config') && argv.includes('mcp__orca');
+      return ok(
+        'with tmux, CAPCOM starts hosted',
+        out.ok && uuid && bgLaunches === 0
+        && pane?.name === `orca-${id}` && pane.cwd === dir && pane.env['ORCA_PANE'] === pane.name
+        && sessionIdFlag && promptLast && tools
+        && spawned[0]?.shortId === id && spawned[0].role === 'capcom' && bound[0] === `${id}=${id}`
+        && session.owns(id),
+        `${pane?.name ?? 'no pane'} · bg launches: ${bgLaunches} · argv: ${argv.slice(0, 3).join(' ')} …`,
+      );
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('preTrust records folder trust the way the CLI does, once, and leaves a broken file alone', () => {
+    const dir = tempDir();
+    try {
+      const file = join(dir, '.claude.json');
+      const capcomDir = join(dir, 'capcom');
+      writeFileSync(file, JSON.stringify({ numStartups: 3, projects: { '/elsewhere': { hasTrustDialogAccepted: true } } }, null, 2));
+      const first = preTrust(capcomDir, file);
+      const again = preTrust(capcomDir, file);
+      const after = JSON.parse(readFileSync(file, 'utf8')) as { numStartups: number; projects: Record<string, { hasTrustDialogAccepted?: boolean }> };
+      writeFileSync(file, '{ not json');
+      const broken = preTrust(capcomDir, file);
+      const missing = preTrust(capcomDir, join(dir, 'nope.json'));
+      return ok(
+        'preTrust records folder trust once and leaves a broken file alone',
+        first === 'written' && again === 'already'
+        && after.projects[capcomDir]?.hasTrustDialogAccepted === true
+        && after.projects['/elsewhere']?.hasTrustDialogAccepted === true && after.numStartups === 3
+        && broken === 'skipped' && missing === 'skipped'
+        && readFileSync(file, 'utf8') === '{ not json',
+        `${first}, ${again}, broken: ${broken}, missing: ${missing}`,
+      );
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('a remembered --bg CAPCOM is stopped and relaunched hosted once tmux is there', async () => {
+    const dir = tempDir();
+    try {
+      const ran: string[][] = [];
+      const panes: string[] = [];
+      const demoted: string[] = [];
+      writeFileSync(join(dir, 'session.json'), JSON.stringify({ shortId: 'e1065027', at: 1 }));
+      const session = new CapcomSession({
+        bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 'tok', dir,
+        lineage: { noteSpawn: () => { /* quiet */ }, demote: (id) => { demoted.push(id); }, bind: () => { /* quiet */ } },
+        alive: (id) => id === 'e1065027',
+        note: () => { /* quiet */ },
+        trust: false,
+        tmux: {
+          available: () => true,
+          spawn: async (p) => { panes.push(p.name); return { ok: true, stdout: '', detail: '' }; },
+        },
+        launch: async (_bin, args) => { ran.push(args); return { ok: true, stdout: 'stopped e1065027\n', detail: '' }; },
+      });
+      const out = await session.ensure();
+      return ok(
+        'a remembered --bg CAPCOM is stopped and relaunched hosted',
+        out.ok && ran.length === 1 && ran[0]?.join(' ') === 'stop e1065027'
+        && demoted[0] === 'e1065027' && panes.length === 1 && panes[0] === `orca-${out.shortId}`
+        && !session.owns('e1065027'),
+        `ran: ${ran.map((a) => a.join(' ')).join(' | ')} · pane: ${panes[0] ?? 'none'}`,
       );
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }),
@@ -665,7 +890,7 @@ const tests = [
       const spawned: { shortId: string; role: string }[] = [];
       const session = new CapcomSession({
         bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 't', dir,
-        lineage: { noteSpawn: (id, _p, _m, _s, _l, role) => { spawned.push({ shortId: id, role: role ?? 'agent' }); } },
+        lineage: { demote: () => { /* quiet */ }, bind: () => { /* quiet */ }, noteSpawn: (id, _p, _m, _s, _l, role) => { spawned.push({ shortId: id, role: role ?? 'agent' }); } },
         alive: () => false,
         note: () => { /* quiet */ },
         launch: async () => ({ ok: true, stdout: 'aaaa1111\n', detail: '' }),
@@ -705,7 +930,7 @@ const tests = [
       let launches = 0;
       const make = (alive: (id: string) => boolean) => new CapcomSession({
         bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 't', dir,
-        lineage: { noteSpawn: () => { /* noted */ } },
+        lineage: { demote: () => { /* quiet */ }, bind: () => { /* quiet */ }, noteSpawn: () => { /* noted */ } },
         alive,
         note: () => { /* quiet */ },
         launch: async () => { launches += 1; return { ok: true, stdout: 'id deadbeef\n', detail: '' }; },
@@ -729,7 +954,7 @@ const tests = [
       let launches = 0;
       const session = new CapcomSession({
         bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 't', dir,
-        lineage: { noteSpawn: () => { /* noted */ } },
+        lineage: { demote: () => { /* quiet */ }, bind: () => { /* quiet */ }, noteSpawn: () => { /* noted */ } },
         // The worst case: liveness never confirms it.
         alive: () => false,
         note: () => { /* quiet */ },
@@ -760,7 +985,7 @@ const tests = [
       const noted: string[] = [];
       const session = new CapcomSession({
         bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 't', dir,
-        lineage: { noteSpawn: () => { /* never reached */ } },
+        lineage: { demote: () => { /* quiet */ }, bind: () => { /* quiet */ }, noteSpawn: () => { /* never reached */ } },
         alive: () => false,
         note: (_l, text) => { noted.push(text); },
         now: () => now,

@@ -56,6 +56,7 @@
  */
 
 import gsap from 'gsap';
+import { ZIP_SVG } from '../../gfx/algn.ts';
 import { REDUCE } from '../../motion.ts';
 import { store } from '../../store.ts';
 import { getSound } from '../../hud/sound.ts';
@@ -126,12 +127,7 @@ async function nextSquadName(presetName: string): Promise<string> {
 
 /* ── The window ─────────────────────────────────────────────────────── */
 
-/** The comp's zipper: three lime bars that read as a plug seating. */
-const ZIP_SVG = `<svg viewBox="0 0 200 16" preserveAspectRatio="none">`
-  + `<rect x="52" y="0" width="36" height="7" fill="#c0f94a"/>`
-  + `<rect x="112" y="0" width="36" height="7" fill="#c0f94a"/>`
-  + `<rect x="70" y="9" width="60" height="7" fill="#c0f94a"/>`
-  + `</svg>`;
+/** The comp's zipper, shared with the boot and the HUD's task panel. */
 
 const wait = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
 
@@ -419,7 +415,7 @@ export function mountLaunch(ctx: WinCtx, c: Console) {
         squad,
         lead,
         background: true,
-        permissionMode: 'acceptEdits',
+        permissionMode: 'auto',
       })) as SpawnAck | null;
 
     async function one(i: number, parentId: string | null) {

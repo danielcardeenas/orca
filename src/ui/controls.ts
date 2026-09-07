@@ -47,6 +47,7 @@ import { EASE, REDUCE, T, dur } from './motion.ts';
 /* ── pick ───────────────────────────────────────────────────────────── */
 
 export interface PickOption {
+  group?: string;
   value: string;
   /** Tiny5, uppercased by CSS. What the operator picks by. */
   label: string;
@@ -171,7 +172,11 @@ export function pick(opts: PickOpts): PickHandle {
 
   function paintList() {
     list.textContent = '';
+    let lastGroup: string | undefined;
     rows = shown.map((o, i) => {
+      if (o.group && o.group !== lastGroup) {
+        const group = document.createElement('div'); group.className = 'pick__group px'; group.setAttribute('role', 'presentation'); group.textContent = o.group; list.appendChild(group); lastGroup = o.group;
+      }
       const row = document.createElement('div');
       row.className = 'pick__item';
       row.setAttribute('role', 'option');

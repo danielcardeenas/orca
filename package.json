@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "ORCA \u2014 Orchestration & Reconnaissance Console for Agents. A containment console for watching and commanding fleets of coding agents.",
+  "description": "ORCA — Orchestration & Reconnaissance Console for Agents. A containment console for watching and commanding fleets of coding agents.",
   "bin": {
     "orca": "bin/orca.mjs",
     "orca-capcom": "bin/orca-capcom.mjs",
@@ -12,7 +12,8 @@
     "orca-tell": "bin/orca-tell.mjs",
     "orca-read": "bin/orca-read.mjs",
     "orca-show": "bin/orca-show.mjs",
-    "orca-spawn": "bin/orca-spawn.mjs"
+    "orca-spawn": "bin/orca-spawn.mjs",
+    "orca-recover": "bin/orca-recover.mjs"
   },
   "scripts": {
     "dev": "concurrently -n orca,collector,ui -c magenta,cyan,green \"npm:dev:orca\" \"npm:dev:collector\" \"npm:dev:ui\"",
@@ -27,16 +28,23 @@
     "dev:orca": "tsx watch src/orca.ts",
     "start": "tsx src/orca.ts",
     "visual": "tsx test/visual.ts",
-    "stress": "tsx test/field-stress.ts"
+    "stress": "tsx test/field-stress.ts",
+    "postinstall": "node -e \"try{require('fs').readdirSync('node_modules/node-pty/prebuilds').forEach(d=>{try{require('fs').chmodSync('node_modules/node-pty/prebuilds/'+d+'/spawn-helper',0o755)}catch{}})}catch{}\""
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.123.0",
     "@types/three": "^0.185.4",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
     "gsap": "^3.14.2",
+    "highlight.js": "^11.12.0",
+    "markdown-it": "^15.0.1",
+    "node-pty": "^1.1.0",
     "three": "^0.185.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
     "concurrently": "^9.1.0",

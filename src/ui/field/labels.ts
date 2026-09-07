@@ -1,3 +1,4 @@
+import { originLabel } from '../../shared/origin.ts';
 /**
  * Labels: real text, for tiles large enough to read.
  *
@@ -19,19 +20,25 @@
  * 2. **The shader owns three regions of the tile, and the text keeps out of
  *    all three.** The state stripe takes the left 4.5 %, so the bands start
  *    at `left: 7%`. The bite cuts x 70–100 %, y 30–70 % out of the right
- *    edge, so only the middle band is narrow. The travelling speed band runs
- *    the bottom ~10 %, so the bottom band stops at `bottom: 11%`. And the
- *    sigil — the agent's 5×5 mark — owns x 80–95.5 % of the top ~22 %, so no
- *    band ever reaches past 78 % up there.
+ *    edge, so the middle band is narrow — until tier 4 (320 px), where the
+ *    shader has slid the bite out of the tile and the band takes the full
+ *    width. The travelling speed band runs the bottom ~10 %, so the column
+ *    stops at `bottom: 11%`. And the sigil — the agent's 5×5 mark — owns
+ *    x 80–95.5 % of the top ~22 %, so the top band never reaches past 78 %.
  *
  *      ┌───────────────────────────────────────┐
- *      │▌ top  0–30 %   x 7–78 %   K9 AX ·CX │▒│  ← sigil, x 80–95.5 %
- *      │▌ mid 31–68 %   x 7–66 %        ▐█████│  ← bite, x 70–100 %
- *      │▌                               ▐█████│
- *      │▌ bot 69–89 %   x 7–96 %  NOW ────────│
+ *      │▌ top  auto     x 7–78 %   K9 AX ·CX │▒│  ← sigil, x 80–95.5 %
+ *      │▌ mid  flex 1   x 7–66 %        ▐█████│  ← bite, x 70–100 %, < 320 px
+ *      │▌               (x 7–96 % from 320 px)│
+ *      │▌ bot  auto     x 7–96 %  NOW ────────│
  *      │▌                $ TOK/S UP TURNS [P] │
  *      │▌ (shader's speed band, 0–10 %)       │
  *      └───────────────────────────────────────┘
+ *
+ *    The three bands are a flex column, not three boxes at fixed heights.
+ *    The bottom band is sized by what it holds, so NOW and the numbers are
+ *    never cut by a percentage that was right at one zoom and wrong at the
+ *    next; the middle takes what is left and clamps its lines.
  *
  * 3. **NOW lives at the bottom.** It is the line that changes most and the
  *    one the bite used to cut to eleven characters. Downstairs it gets the
@@ -46,7 +53,7 @@
  */
 
 import type { Agent } from '../../shared/types.ts';
-import { esc, money, runtimeCode, tokens } from '../util.ts';
+import { esc, money, nameOf, plain, runtimeCode, tokens } from '../util.ts';
 
 export interface LabelItem {
   agent: Agent;
@@ -113,8 +120,12 @@ function unitOf(w: number): number {
  * A missing glyph is not decoration: it is a hole that reads as data.
  */
 const TOFU = /[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200D\uFE0E\uFE0F]/gu;
+/**
+ * Markdown goes with them (`plain`): `**No he podido escribir**` on a tile is
+ * two asterisks the operator has to read past before the word.
+ */
 function clean(s: string | null | undefined): string {
-  const t = String(s ?? '');
+  const t = plain(s);
   if (!t) return '';
   TOFU.lastIndex = 0;
   if (!TOFU.test(t)) return t;
@@ -176,14 +187,16 @@ function echoesProject(a: Agent, title: string): boolean {
 }
 
 /**
- * What the middle band says. `head` is the big line — the title, or the
- * mission when the title only echoed the project; `sub` is the mission under
- * it, and exists only once the tile is wide enough to carry both.
+ * What the middle band says. `head` is the big line — the agent's name
+ * (`nameOf`: the title, or the mission when the title is the brief or a bare
+ * id), or the mission when the title only echoed the project; `sub` is the
+ * mission under it, and exists only once the tile is wide enough to carry
+ * both and the mission is not already the head.
  */
 interface MidText { head: string; sub: string }
 function midText(a: Agent, tier: number): MidText {
   if (tier < 2) return { head: '', sub: '' };
-  const raw = clean(a.title);
+  const raw = clean(nameOf(a));
   const mission = clean(a.mission);
   const title = raw && echoesProject(a, raw) ? '' : raw;
   const head = title || mission || raw;
@@ -266,8 +279,12 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
         .filter(Boolean).join(' · ');
       if (meta) top += `<div class="lbl__meta"${s(5)}>${esc(meta)}</div>`;
     }
-    top += `<div class="lbl__row"${s(1)}><span class="lbl__cs">${esc(a.callsign)}</span>`
-      + `<span class="lbl__pj">${esc(projectCode(a))}</span>`
+    // CAPCOM belongs to no project and is named by what it is: CAPCOM, then
+    // its callsign and COMMAND where a worker shows its project and origin.
+    const cap = a.role === 'capcom';
+    const where = cap ? `${esc(a.callsign)} · COMMAND` : `${esc(projectCode(a))} · ${originLabel(a)}`;
+    top += `<div class="lbl__row"${s(1)}><span class="lbl__cs">${cap ? 'CAPCOM' : esc(a.callsign)}</span>`
+      + `<span class="lbl__pj">${where}</span>`
       + (tier >= 2 && tier < 5 && rt !== 'CL' ? `<span class="lbl__rt"${s(2)}>${rt}</span>` : '')
       + `</div>`;
 
@@ -288,10 +305,10 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
         + `</div>`;
     }
 
-    return `<div class="lbl__top">${top}</div>`
+    return `<div class="lbl__col"><div class="lbl__top">${top}</div>`
       + (mid ? `<div class="lbl__mid">${mid}</div>` : '')
       + (bot ? `<div class="lbl__bot">${bot}</div>` : '')
-      + `<i class="lbl__c"></i><i class="lbl__c"></i>`;
+      + `</div><i class="lbl__c"></i><i class="lbl__c"></i>`;
   }
 
   return {
@@ -314,7 +331,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
         // transform and the box run every frame; this does not. The project's
         // name and code are in it too — they decide whether the title is an
         // echo, and they can land after the label already exists.
-        const sig = `${tier}|${unit}|${amber ? 'A' : ''}|${a.state}|${a.block?.kind ?? ''}|${a.title}|${a.mission}|${a.tool}|${a.toolDetail}|${a.lastSay}|${a.callsign}|${projectCode(a)}|${names.get(a.projectId) ?? ''}`
+        const sig = `${a.origin}|${a.role}|${tier}|${unit}|${amber ? 'A' : ''}|${a.state}|${a.block?.kind ?? ''}|${a.title}|${a.mission}|${a.tool}|${a.toolDetail}|${a.lastSay}|${a.callsign}|${projectCode(a)}|${names.get(a.projectId) ?? ''}`
           + (tier >= 4 ? `|${a.metrics.costUSD.toFixed(2)}|${Math.round(a.metrics.tokensPerSec)}|${Math.round(a.uptimeMs / 1000)}|${a.metrics.turns}` : '')
           + (tier >= 5 ? `|${a.model}|${a.machineId}` : '');
         if (sig !== rec.sig) {
@@ -328,11 +345,13 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
           rec.el.innerHTML = content(a, tier, from, mid);
           rec.base = 'lbl'
             + ` t-${tier}`
+            + (a.role === 'capcom' ? ' is-capcom' : '')
             + (mid.sub ? ' has-mission' : '')
             + (amber ? ' is-blocked' : '')
             + (a.state === 'dead' ? ' is-dead' : '')
             + (a.state === 'done' ? ' is-done' : '')
-            + (a.state === 'idle' ? ' is-dim' : '')
+            // The command at rest is not dim: it is waiting for you.
+            + (a.state === 'idle' && a.role !== 'capcom' ? ' is-dim' : '')
             + (climbed ? ' is-rung' : '');
           rec.el.className = rec.base + (selected ? ' is-sel' : '');
           rec.sel = selected;

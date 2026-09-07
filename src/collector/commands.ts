@@ -18,13 +18,18 @@
  */
 
 import { spawn } from 'node:child_process';
-import { runtimeNote, runtimeReady } from './runtime.ts';
+import { randomUUID } from 'node:crypto';
+import { runtimeBin, runtimeNote, runtimeReady } from './runtime.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 
 import type { Command, SpawnAck } from '../shared/protocol.ts';
 import { SPAWN_ACK_TIMEOUT_MS } from '../shared/protocol.ts';
 import { squadName } from '../shared/squads.ts';
+import {
+  INTERRUPT_EVIDENCE_MS, QUEUED_MARK, describeOutcome, interruptPlan,
+  type InterruptOutcome,
+} from '../shared/interrupt.ts';
 import type { AgentMessage } from '../shared/types.ts';
 import { squadBrief, withBrief } from './briefs.ts';
 import type { ArtifactIndex } from './artifacts.ts';
@@ -33,7 +38,16 @@ import type { KeyVault } from './keys.ts';
 import type { LineageIndex } from './lineage.ts';
 import type { MessageWatcher } from './messages.ts';
 import type { ProjectRegistry } from './projects.ts';
-import { errText, home, isInside, launchable, log, oneLine } from './util.ts';
+import { paneName, type TmuxHost } from './tmux.ts';
+import { errText, home, isInside, launchable, log, oneLine, orcaDir, sleep } from './util.ts';
+import {
+  NAME_RE as WORKTREE_NAME_RE, createWorktree, discard as discardWorktree, land as landWorktree,
+  worktreesEnabled, type WorktreeInfo,
+} from './worktrees.ts';
+import { runAutonomy } from './autonomy.ts';
+import { WorkerHandoffs } from './worker-handoff.ts';
+import { ModelController } from './model-control.ts';
+import { ProviderHandoffs, providerModels } from './provider-handoff.ts';
 
 const SCOPE = 'commands';
 
@@ -46,6 +60,16 @@ const PERMISSION_MODES = new Set([
 const ID_RE = /^[A-Za-z0-9_-]{4,64}$/;
 
 export interface AgentHandle {
+  origin?: 'orca' | 'external';
+  cwd?: string;
+  parentId?: string | null;
+  squad?: string | null;
+  lead?: boolean;
+  subagent?: boolean;
+  transcriptPath?: string;
+  model?: string | null;
+  state?: import('../shared/types.ts').AgentState;
+  blockKind?: import('../shared/types.ts').BlockKind;
   id: string;
   projectId: string;
   sessionId: string;
@@ -54,20 +78,35 @@ export interface AgentHandle {
   alive: boolean;
   /** La etiqueta que la consola enseña, p.ej. "K9". */
   callsign: string;
+  /** El pane de tmux que la hospeda (`orca-<sessionId>`), o null si no vive en uno. */
+  pane: string | null;
+  /** Qué CLI es: 'claude', 'codex'… Decide cómo se reanuda y qué se puede hacer sin pane. */
+  runtime: string;
+  /** El worktree en el que se lanzó, si el collector corre con ORCA_WORKTREES=1. */
+  worktree?: WorktreeInfo | null;
+  /** Su brief, para el mensaje del commit al aterrizar. */
+  mission?: string | null;
 }
 
 /** Qué sesión buscar tras un spawn. Ver `CommandDeps.awaitSpawn`. */
 export interface SpawnLookup {
   /** El short id que imprimió el CLI, cuando lo imprimió. */
   shortId: string | null;
+  /** El id que ORCA eligió por adelantado (`--session-id`): la búsqueda es exacta. */
+  sessionId?: string | null;
+  /** Sin id previo (Codex): la sesión raíz más nueva de ESTE runtime en el proyecto. */
+  runtime?: string;
   projectId: string;
   /** epoch ms justo antes de lanzar: descarta sesiones que ya existían. */
   since: number;
 }
 
 export interface CommandDeps {
+  transfer?: { context(): string; hold(id: string, on: boolean, plan?: import('../shared/provider-handoff.ts').ProviderHandoffPlan): void; activate(plan: import('../shared/provider-handoff.ts').ProviderHandoffPlan, sessionId: string): Promise<void> };
   projects: ProjectRegistry;
   keys: KeyVault;
+  /** Donde viven los agentes hospedados. Sin tmux, todo cae a `--bg`. */
+  tmux: TmuxHost;
   lineage: LineageIndex;
   escalations: EscalationWatcher;
   messages: MessageWatcher;
@@ -94,12 +133,35 @@ export interface CommandDeps {
    * de ensuciar `say` con condicionales.
    */
   capcom?: CapcomChannel;
+  /**
+   * Escalaciones de permisos que este collector levantó leyendo pantallas
+   * (index.ts). `get` identifies the agent; `answer` validates the current dialog and
+   * keeps the escalation pending until observable resolution.
+   */
+  permissions?: {
+    get(escalationId: string): { agentId: string } | null;
+    answer(escalationId: string, answer: string): Promise<CommandResult>;
+  };
+  /**
+   * Cuándo vio ORCA por última vez, en el transcript de ese agente, la marca
+   * de turno interrumpido que escribe su propio CLI. 0 = nunca.
+   *
+   * Es lo que convierte "mandé la tecla" en "el turno se cortó". Opcional
+   * porque un collector de prueba no tiene derivers: sin esto, `interrupt`
+   * responde `pending` en vez de afirmar algo que no puede comprobar.
+   */
+  interruptedAt?(agentId: string): number;
 }
 
 /** Lo que `commands.ts` necesita saber de CAPCOM. Lo implementa capcom.ts. */
 export interface CapcomChannel {
   /** ¿Es este short id la sesión CAPCOM? */
   owns(shortId: string | null): boolean;
+  /**
+   * Dónde vive. Se usa como cwd sin pasar por el proyecto: el collector lo
+   * lanzó ahí, así que no hay nada que adivinar a partir de un slug.
+   */
+  dir(): string | null;
   /** Las opciones que toda invocación suya necesita: MCP, permisos, nombre. */
   launchArgs(): string[];
   /** El resume creó una sesión nueva: el rol se muda a ella. */
@@ -113,11 +175,25 @@ export interface CommandResult {
 }
 
 export class CommandRunner {
+  readonly workers: WorkerHandoffs;
+  readonly handoffs: ProviderHandoffs;
+  readonly models: ModelController;
+  private inputBusy = new Map<string, number>();
   private readonly deps: CommandDeps;
   private readonly bin: string | null;
 
   constructor(deps: CommandDeps) {
     this.deps = deps;
+    this.models = new ModelController({ tmux: deps.tmux, agent: deps.agent,
+      owns: a => (!!a.pane || a.origin === 'orca') && !a.subagent, dir: id => id && this.capcomFor(deps.agent(id)) ? deps.capcom!.dir() : path.join(orcaDir(), 'worker-recovery', 'models'), busy: id => this.inputBusy.has(id) || this.handoffs?.locked(id) || this.workers?.handoffs.locked(id) });
+    this.handoffs = new ProviderHandoffs({ agent: deps.agent, owns: a => !!this.capcomFor(a),
+      model: a => this.models.state(a)?.active ?? a.model ?? null,
+      dir: () => { const dir = deps.capcom?.dir(); if (!dir) throw new Error('CAPCOM is unavailable'); return dir; },
+      busy: id => this.inputBusy.has(id) || this.models.locked(id) || ['queued', 'applying'].includes(this.models.state(deps.agent(id)!)?.phase ?? ''),
+      context: () => deps.transfer?.context() ?? '', hold: (id, on, plan) => deps.transfer?.hold(id, on, plan),
+      activate: async (plan, sessionId) => { if (!deps.transfer) throw new Error('Provider handoff activation unavailable'); await deps.transfer.activate(plan, sessionId); },
+    });
+    this.workers = new WorkerHandoffs(deps, this.models, id => this.inputBusy.has(id));
     this.bin = resolveClaudeBin();
     if (!this.bin) {
       log('warn', SCOPE, 'no encontré el binario `claude` en PATH: spawn/stop/logs no funcionarán');
@@ -127,11 +203,31 @@ export class CommandRunner {
   }
 
   async execute(cmd: Command): Promise<CommandResult> {
+    const service = 'agentId' in cmd && !this.capcomFor(this.deps.agent(cmd.agentId)!) ? this.workers.handoffs : this.handoffs;
+    const inputId = 'agentId' in cmd && !cmd.k.startsWith('handoff:') && cmd.k !== 'model:list' && cmd.k !== 'model:set' && cmd.k !== 'capcom:new' ? cmd.agentId : null;
+    if ('agentId' in cmd && cmd.k !== 'capcom:new' && !cmd.k.startsWith('handoff:') && (this.handoffs.locked(cmd.agentId) || this.workers.handoffs.locked(cmd.agentId))) return { ok: false, detail: 'CAPCOM handoff preparation is in progress. Your current session is preserved.' };
+    if (inputId && this.models.locked(inputId)) return { ok: false, detail: 'CAPCOM model selection is in progress; retry after it finishes.' };
+    if (inputId) this.inputBusy.set(inputId, (this.inputBusy.get(inputId) ?? 0) + 1);
     try {
       switch (cmd.k) {
+        case 'recovery:settings': case 'recovery:status': case 'recovery:decide': throw new Error('Recovery decisions must run through the hub');
+        case 'capcom:new': return { ok: true, data: this.handoffs.fresh(cmd.agentId, cmd.mode, cmd.checkpoint) };
+        case 'handoff:models': return { ok: true, data: providerModels() };
+        case 'handoff:prepare': return { ok: true, data: service.review(cmd.agentId, cmd.runtime, cmd.model, typeof cmd.checkpoint === 'string' ? cmd.checkpoint : '') };
+        case 'handoff:commit': return { ok: true, data: service.commit(cmd.agentId, cmd.planId) };
+        case 'handoff:status': return { ok: true, data: (this.handoffs.has(cmd.planId) ? this.handoffs : this.workers.handoffs).status(cmd.planId) };
+        case 'handoff:history': {
+          if (!Number.isInteger(cmd.offset) || cmd.offset < 0 || !Number.isFinite(cmd.before)) throw new Error('Invalid history page');
+          return { ok: true, data: service.history(cmd.agentId, cmd.offset, cmd.before) };
+        }
+        case 'model:list': return { ok: true, data: await this.models.list(cmd.agentId) };
+        case 'model:set': return { ok: true, data: this.models.request(cmd.agentId, cmd.model) };
         case 'spawn': return await this.spawn(cmd);
+        case 'land': return await this.land(cmd);
+        case 'discard': return await this.discard(cmd);
         case 'say': return await this.say(cmd);
-        case 'permit': return this.permit(cmd);
+        case 'interrupt': return await this.interrupt(cmd);
+        case 'permit': return await this.permit(cmd);
         case 'stop': return await this.simple(cmd.agentId, ['stop'], 'stop');
         case 'resume': return await this.resume(cmd);
         case 'remove': return await this.simple(cmd.agentId, ['rm'], 'remove');
@@ -143,6 +239,7 @@ export class CommandRunner {
         case 'artifact:read': return await this.artifactRead(cmd);
         case 'resync': this.deps.onResync(); return { ok: true, detail: 'resync encolado' };
         case 'logs': return await this.logs(cmd);
+        case 'autonomy': return await runAutonomy(cmd, this.deps);
         default: {
           // Exhaustividad: si protocol.ts crece, esto deja de compilar.
           const never: never = cmd;
@@ -152,6 +249,11 @@ export class CommandRunner {
     } catch (err) {
       log('error', SCOPE, `${cmd.k} lanzó: ${errText(err)}`);
       return { ok: false, detail: errText(err) };
+    } finally {
+      if (inputId) {
+        const remaining = (this.inputBusy.get(inputId) ?? 1) - 1;
+        if (remaining) this.inputBusy.set(inputId, remaining); else this.inputBusy.delete(inputId);
+      }
     }
   }
 
@@ -161,14 +263,19 @@ export class CommandRunner {
     // Un runtime que este collector no sabe conducir se rechaza con el porqué,
     // en vez de lanzar `claude` y fingir que era Codex.
     if (!runtimeReady(cmd.runtime)) return { ok: false, detail: runtimeNote(cmd.runtime) };
-    if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
+    if ((cmd.runtime ?? 'claude') === 'claude' && !this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
     const project = this.deps.projects.get(cmd.projectId);
     if (!project) return { ok: false, detail: `proyecto desconocido: ${cmd.projectId}` };
 
-    const cwd = path.resolve(project.path);
+    let cwd = path.resolve(project.path);
     const allowed = launchable(cwd);
     if (!allowed.ok) return { ok: false, detail: allowed.why };
     if (!isDir(cwd)) return { ok: false, detail: `la ruta del proyecto no existe: ${cwd}` };
+    const controlRoot = path.resolve(process.env['ORCA_CAPCOM_DIR'] ?? path.join(orcaDir(), 'capcom'));
+    const realControlRoot = fs.existsSync(controlRoot) ? fs.realpathSync(controlRoot) : controlRoot;
+    if (isInside(realControlRoot, fs.realpathSync(cwd))) {
+      return { ok: false, detail: 'CAPCOM is a control workspace: workers launched here read its CLAUDE.md and wake up believing they are the commander. Choose a work project outside the CAPCOM directory; do not retry by spawning more workers here.' };
+    }
     if (typeof cmd.prompt !== 'string' || cmd.prompt.trim().length === 0) {
       return { ok: false, detail: 'prompt vacío' };
     }
@@ -203,22 +310,45 @@ export class CommandRunner {
     if (brief) prompt = withBrief(prompt, brief);
 
     // argv como ARRAY. El prompt es un elemento, nunca texto de shell.
-    const args: string[] = [];
-    if (cmd.background) args.push('--bg');
+    const opts: string[] = [];
     if (cmd.model) {
       if (!/^[A-Za-z0-9._-]{1,64}$/.test(cmd.model)) {
         return { ok: false, detail: `modelo inválido: ${cmd.model}` };
       }
-      args.push('--model', cmd.model);
+      opts.push('--model', cmd.model);
     }
     if (cmd.permissionMode) {
       if (!PERMISSION_MODES.has(cmd.permissionMode)) {
         return { ok: false, detail: `permissionMode inválido: ${cmd.permissionMode}` };
       }
-      args.push('--permission-mode', cmd.permissionMode);
+      opts.push('--permission-mode', cmd.permissionMode);
     }
     const name = oneLine(cmd.mission, 60);
-    if (name) args.push('--name', name);
+    if (name) opts.push('--name', name);
+
+    /*
+     * Hospedado o suelto.
+     *
+     * Con tmux en la máquina, un agente que debe sobrevivir a la consola va a
+     * un pane: sesión interactiva normal, id elegido aquí, y una TERMINAL que
+     * el operador puede abrir. `--bg` queda para las máquinas sin tmux y para
+     * quien lo pida (`pane: false`); CAPCOM nunca pasa por aquí.
+     */
+    const runtime = cmd.runtime ?? 'claude';
+    if (cmd.background && cmd.pane !== false && this.deps.tmux.available()) {
+      return runtime === 'claude'
+        ? this.spawnPane(cmd, project.name, cwd, prompt, opts, squad, lead)
+        : this.spawnCodexPane(cmd, project.name, cwd, prompt, squad, lead);
+    }
+    if (runtime !== 'claude') {
+      return { ok: false, detail: `${runtime} sólo se lanza hospedado en tmux (background on, tmux instalado)` };
+    }
+
+    if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
+
+    const args: string[] = [];
+    if (cmd.background) args.push('--bg');
+    args.push(...opts);
 
     /*
      * El prompt va POSICIONAL con --bg y con -p sin él. No es cosmético: el CLI
@@ -236,15 +366,22 @@ export class CommandRunner {
       ORCA_PARENT_ID: cmd.parentId ?? '',
     };
 
+    // Sin id previo (`--bg` lo elige el CLI), el worktree se nombra por un
+    // nonce; el registro lo ata al short id en cuanto el CLI lo imprime.
+    const projectRoot = cwd;
+    const wt = await this.worktreeFor(cmd, projectRoot, randomUUID().replace(/-/g, '').slice(0, 8));
+    if (!wt.ok) return { ok: false, detail: wt.detail };
+    if (wt.worktree) cwd = wt.worktree.path;
+
     const since = Date.now();
     const res = await run(this.bin, args, { cwd, env, timeoutMs: 60_000, detach: true });
-    if (!res.ok) return { ok: false, detail: res.detail };
+    if (!res.ok) { await this.dropFreshWorktree(projectRoot, wt); return { ok: false, detail: res.detail }; }
 
     const shortId = extractShortId(res.stdout);
     if (shortId) {
       // Anotamos el linaje ANTES de contárselo al hub: si el collector muere en
       // el siguiente instante, el padre ya quedó persistido en disco.
-      this.deps.lineage.noteSpawn(shortId, cmd.parentId, cmd.mission, squad, lead);
+      this.deps.lineage.noteSpawn(shortId, cmd.parentId, cmd.mission, squad, lead, 'agent', wt.worktree);
     }
 
     /*
@@ -266,6 +403,8 @@ export class CommandRunner {
       callsign: found?.callsign ?? null,
       shortId: found?.shortId ?? shortId,
       stdout: oneLine(res.stdout, 400),
+      worktree: wt.worktree?.path ?? null,
+      branch: wt.worktree?.branch ?? null,
     };
     log('info', SCOPE, `spawn en ${project.name} → ${data.agentId ?? shortId ?? '(sin id)'}`
       + (squad ? ` [${squad}${lead ? ' lead' : ''}]` : ''));
@@ -278,10 +417,145 @@ export class CommandRunner {
     };
   }
 
+  /**
+   * Un agente en su pane.
+   *
+   * El id de sesión lo elige ORCA (`--session-id`), así que el pane se llama
+   * `orca-<id>` antes de que exista y el ack no tiene que adivinar nada: la
+   * sesión aparece bajo ese id o no aparece. El env va con `-e` por variable
+   * —no hereda el del servidor de tmux, que es el de quien lo arrancó— y el
+   * prompt es el último argumento, después de cualquier opción.
+   */
+  private async spawnPane(
+    cmd: Extract<Command, { k: 'spawn' }>, projectName: string, cwd: string,
+    prompt: string, opts: string[], squad: string | null, lead: boolean,
+  ): Promise<CommandResult> {
+    const sessionId = randomUUID();
+    const name = paneName(sessionId);
+    if (!name || !this.bin) return { ok: false, detail: 'no pude nombrar el pane' };
+    // El id lo elige ORCA, así que el worktree puede llevar su nombre desde antes de existir.
+    const projectRoot = cwd;
+    const wt = await this.worktreeFor(cmd, projectRoot, sessionId.slice(0, 8));
+    if (!wt.ok) return { ok: false, detail: wt.detail };
+    if (wt.worktree) cwd = wt.worktree.path;
+
+    const env: Record<string, string> = {};
+    for (const k of ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'TERM_PROGRAM']) {
+      const v = process.env[k];
+      if (v) env[k] = v;
+    }
+    Object.assign(env, this.deps.keys.materialize(cmd.projectId, cmd.parentId ?? 'orca'));
+    env['ORCA_SPAWNED'] = '1';
+    env['ORCA_PARENT_ID'] = cmd.parentId ?? '';
+    env['ORCA_PANE'] = name;
+
+    const since = Date.now();
+    // Se anota ANTES de lanzar: el pane puede aparecer antes de que vuelva tmux.
+    this.deps.lineage.noteSpawn(sessionId, cmd.parentId, cmd.mission, squad, lead, 'agent', wt.worktree);
+    this.deps.lineage.bind(sessionId, sessionId);
+    const res = await this.deps.tmux.spawn({
+      name, cwd, env, argv: [this.bin, '--session-id', sessionId, ...opts, prompt],
+    });
+    if (!res.ok) { await this.dropFreshWorktree(projectRoot, wt); return { ok: false, detail: res.detail }; }
+
+    const found = await this.deps.awaitSpawn(
+      // Hosted Claude already has a stable identity. A successful tmux launch
+      // is enough to acknowledge it; transcript discovery updates the UI later.
+      // Waiting up to 8s here serialized that delay across every squad member.
+      { shortId: null, sessionId, projectId: cmd.projectId, since }, 0,
+    );
+    const data: SpawnAck = {
+      agentId: found?.id ?? sessionId,
+      callsign: found?.callsign ?? null,
+      shortId: null,
+      stdout: `pane ${name}`,
+      worktree: wt.worktree?.path ?? null,
+      branch: wt.worktree?.branch ?? null,
+    };
+    log('info', SCOPE, `spawn en ${projectName} → pane ${name}`
+      + (squad ? ` [${squad}${lead ? ' lead' : ''}]` : ''));
+    return {
+      ok: true,
+      detail: found
+        ? `sesión ${found.callsign} (${found.id}) en ${name}`
+        : `lanzado en ${name}; la sesión aún no escribió su transcript, llegará por agent:new`,
+      data,
+    };
+  }
+
+  /**
+   * Codex en su pane.
+   *
+   * Codex no acepta un id de sesión por adelantado, así que el pane nace con
+   * un nombre provisional y se renombra a `orca-<sessionId>` en cuanto el
+   * rollout aparece en ~/.codex/sessions: a partir de ahí liveness, terminal,
+   * say y stop lo encuentran como a cualquier otro. Si el rollout tarda más
+   * que el ack, el renombrado sigue intentándolo en segundo plano.
+   */
+  private async spawnCodexPane(
+    cmd: Extract<Command, { k: 'spawn' }>, projectName: string, cwd: string,
+    prompt: string, squad: string | null, lead: boolean,
+  ): Promise<CommandResult> {
+    const bin = runtimeBin('codex');
+    if (!bin) return { ok: false, detail: runtimeNote('codex') };
+    const nonce = randomUUID().replace(/-/g, '').slice(0, 12);
+    const temp = paneName(`cx-${nonce}`);
+    if (!temp) return { ok: false, detail: 'no pude nombrar el pane' };
+    // Codex no acepta id previo: el worktree lleva el nonce del pane provisional.
+    const projectRoot = cwd;
+    const wt = await this.worktreeFor(cmd, projectRoot, `cx-${nonce.slice(0, 8)}`);
+    if (!wt.ok) return { ok: false, detail: wt.detail };
+    if (wt.worktree) cwd = wt.worktree.path;
+    const argv = codexArgv(bin, cwd, { model: cmd.model, permissionMode: cmd.permissionMode, prompt });
+    if (!argv.ok) return { ok: false, detail: argv.detail };
+
+    const env = paneEnv(this.deps.keys.materialize(cmd.projectId, cmd.parentId ?? 'orca'));
+    env['ORCA_PARENT_ID'] = cmd.parentId ?? '';
+    env['ORCA_PANE'] = temp;
+
+    const since = Date.now();
+    const res = await this.deps.tmux.spawn({ name: temp, cwd, env, argv: argv.argv });
+    if (!res.ok) { await this.dropFreshWorktree(projectRoot, wt); return { ok: false, detail: res.detail }; }
+
+    const want: SpawnLookup = { shortId: null, runtime: 'codex', projectId: cmd.projectId, since };
+    const adopt = (found: AgentHandle): void => {
+      const name = paneName(found.sessionId);
+      if (!name) return;
+      this.deps.lineage.noteSpawn(found.sessionId, cmd.parentId, cmd.mission, squad, lead, 'agent', wt.worktree);
+      this.deps.lineage.bind(found.sessionId, found.sessionId);
+      void this.deps.tmux.rename(temp, name).then((r) => {
+        if (!r.ok) log('warn', SCOPE, `no pude renombrar ${temp} → ${name}: ${r.detail}`);
+      });
+    };
+    const found = await this.deps.awaitSpawn(want, SPAWN_ACK_TIMEOUT_MS);
+    if (found) adopt(found);
+    else {
+      // Sigue esperando al rollout sin retener el ack: el proceso YA arrancó.
+      void this.deps.awaitSpawn(want, 120_000).then((late) => { if (late) adopt(late); });
+    }
+    const data: SpawnAck = {
+      agentId: found?.id ?? null,
+      callsign: found?.callsign ?? null,
+      shortId: null,
+      stdout: `pane ${found ? paneName(found.sessionId) ?? temp : temp}`,
+      worktree: wt.worktree?.path ?? null,
+      branch: wt.worktree?.branch ?? null,
+    };
+    log('info', SCOPE, `spawn codex en ${projectName} → ${found ? paneName(found.sessionId) : temp}`
+      + (squad ? ` [${squad}${lead ? ' lead' : ''}]` : ''));
+    return {
+      ok: true,
+      detail: found
+        ? `sesión ${found.callsign} (${found.id}) en ${paneName(found.sessionId)}`
+        : `lanzado en ${temp}; el rollout de Codex aún no apareció, llegará por agent:new`,
+      data,
+    };
+  }
+
   /* ── decir / reanudar ─────────────────────────────────────────── */
 
   private async say(cmd: Extract<Command, { k: 'say' }>): Promise<CommandResult> {
-    if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
+    if (this.models.locked(cmd.agentId)) return { ok: false, detail: 'CAPCOM model selector is open; retry after the change finishes.' };
     const a = this.deps.agent(cmd.agentId);
     if (!a) return { ok: false, detail: `agente desconocido: ${cmd.agentId}` };
     if (!ID_RE.test(a.sessionId)) return { ok: false, detail: 'sessionId inválido' };
@@ -289,9 +563,21 @@ export class CommandRunner {
     const cwd = await this.cwdOf(a);
     if (!cwd.ok) return cwd.res;
 
+    if (!a.pane && a.runtime !== 'claude') {
+      return { ok: false, detail: `${a.callsign} corre ${a.runtime} fuera de ORCA: sin pane no hay dónde escribirle` };
+    }
+    // Hospedado: el texto se pega en su prompt, como si lo escribiera el humano.
+    // La sesión sigue siendo la misma; nada se bifurca.
+    if (a.pane) {
+      if (!(await this.deps.tmux.has(a.pane))) return { ok: false, detail: `su pane ${a.pane} ya no existe; /resume lo relanza` };
+      const r = await this.deps.tmux.paste(a.pane, cmd.text);
+      return r.ok ? { ok: true, detail: `pegado en ${a.pane}` } : { ok: false, detail: r.detail };
+    }
+
     // No hay `claude say`. Continuar la sesión en background con un prompt nuevo
     // ES el canal de entrada de texto que el CLI ofrece hoy.
     // Prompt posicional: con --bg, -p es un error del CLI (ver spawn()).
+    if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
     const cap = this.capcomFor(a);
     const res = await run(this.bin, ['--bg', ...(cap?.launchArgs() ?? []), '--resume', a.sessionId, cmd.text], {
       cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000, detach: true,
@@ -302,10 +588,170 @@ export class CommandRunner {
       : { ok: false, detail: res.detail };
   }
 
+  /* ── interrumpir ──────────────────────────────────────────────── */
+
+  /**
+   * Cortar el turno en vuelo y, si viene texto, decir qué hacer en su lugar.
+   *
+   * Todo lo delicado está en `shared/interrupt.ts`, que es donde se explica
+   * por qué el orden de las dos mitades es distinto en cada CLI. Aquí sólo se
+   * ejecuta ese plan y se cuenta la verdad de lo que pasó:
+   *
+   *  - la tecla salió (`sent`) no es que el turno se cortara;
+   *  - el turno se cortó (`confirmed`) sólo si el propio CLI lo escribió en su
+   *    transcript, que es lo único que no depende de lo que ORCA crea;
+   *  - y nada de esto dice que el agente haya LEÍDO el mensaje. Eso no lo dice
+   *    ningún transcript, así que no se afirma en ninguna parte.
+   *
+   * Lo que NO se hace, en ningún camino: matar el pane, mandar Ctrl-C,
+   * relanzar la sesión o borrarla. Si no se puede interrumpir, se dice.
+   */
+  private async interrupt(cmd: Extract<Command, { k: 'interrupt' }>): Promise<CommandResult> {
+    const a = this.deps.agent(cmd.agentId);
+    if (!a) return { ok: false, detail: `agente desconocido: ${cmd.agentId}` };
+    const text = typeof cmd.text === 'string' && cmd.text.trim() ? cmd.text.trim() : null;
+    const runtime = a.runtime || 'claude';
+    const fail = (o: InterruptOutcome): CommandResult => ({ ok: false, detail: o.detail, data: o });
+
+    const plan = interruptPlan(runtime, a.pane !== null, text !== null);
+    if (!plan.ok) {
+      return fail({
+        ok: false, runtime, interrupt: 'unsupported',
+        message: text ? 'unsent' : 'none', evidence: 'none',
+        order: [], detail: plan.reason,
+      });
+    }
+    const pane = a.pane!;
+    if (!(await this.deps.tmux.has(pane))) {
+      return fail({
+        ok: false, runtime, interrupt: 'unsupported',
+        message: text ? 'unsent' : 'none', evidence: 'none',
+        order: [],
+        detail: `su pane ${pane} ya no existe: no hay turno que interrumpir. /resume lo relanza.`,
+      });
+    }
+
+    // Desde ANTES de tocar nada: una marca de interrupción anterior no puede
+    // pasar por el acuse de ésta.
+    const since = Date.now();
+    const order: string[] = [];
+    let message: InterruptOutcome['message'] = text ? 'unsent' : 'none';
+
+    const escape = async (): Promise<string | null> => {
+      const r = await this.deps.tmux.keys(pane, ['Escape']);
+      order.push('escape');
+      return r.ok ? null : r.detail;
+    };
+    const paste = async (): Promise<string | null> => {
+      const r = await this.deps.tmux.paste(pane, text!);
+      order.push('message');
+      return r.ok ? null : r.detail;
+    };
+
+    let failed: string | null;
+    if (plan.delivery === 'escape-then-message') {
+      // Claude Code: cortar primero. El texto pegado antes se quedaría en el
+      // compositor de un turno que sigue vivo, y no cancelaría nada.
+      failed = await escape();
+      if (failed) {
+        return fail({
+          ok: false, runtime, interrupt: 'failed', message: text ? 'unsent' : 'none',
+          evidence: 'none', order, detail: `no pude mandar Escape a ${pane}: ${failed}`,
+        });
+      }
+      if (text) {
+        await sleep(plan.settleMs);
+        const bad = await paste();
+        if (bad) {
+          return fail({
+            ok: false, runtime, interrupt: 'sent', message: 'unsent', evidence: 'pending',
+            order, detail: `interrumpido, pero el mensaje no salió: ${bad}`,
+          });
+        }
+        // Dónde aterrizó no lo dice el paste: lo dice la pantalla. Claude Code
+        // recoloca el prompt que acababa de interrumpir, y un texto que llegue
+        // en ese momento se le queda en la cola — con lo que el agente lo verá
+        // cuando termine, que es justo lo que se quería evitar. Medido.
+        message = (await this.pasteLanded(pane)) ? 'pasted' : 'queued';
+      }
+    } else {
+      // Codex: el texto se encola —lo dice su propia TUI— y es el Escape el
+      // que lo entrega cortando el turno. Sin cola, el Escape sale igual pero
+      // no hay acuse que esperar (plan.confirms === false).
+      if (text) {
+        const bad = await paste();
+        if (bad) {
+          return fail({
+            ok: false, runtime, interrupt: 'failed', message: 'unsent', evidence: 'none',
+            order, detail: `no pude encolar el mensaje en ${pane}: ${bad}`,
+          });
+        }
+        message = 'queued';
+        await sleep(plan.settleMs);
+      }
+      failed = await escape();
+      if (failed) {
+        return fail({
+          ok: false, runtime, interrupt: 'failed',
+          message, evidence: 'none',
+          detail: `el mensaje quedó en la cola de ${pane} pero el Escape no salió: ${failed}`
+            + ' — el CLI lo entregará al terminar el turno, sin interrumpir.',
+          order,
+        });
+      }
+    }
+
+    const evidence = plan.confirms
+      ? (await this.awaitInterruptMark(a.id, since) ? 'confirmed' : 'pending')
+      : 'pending';
+    const outcome: InterruptOutcome = {
+      ok: true, runtime, interrupt: 'sent', message, evidence, order, detail: '',
+    };
+    outcome.detail = describeOutcome(outcome)
+      + (plan.confirms || evidence === 'confirmed' ? '' : ` ${runtime}: a bare cancel key is not`
+        + ' acknowledged by this CLI, so the turn may still be running.');
+    return { ok: true, detail: outcome.detail, data: outcome };
+  }
+
+  /**
+   * ¿El texto entró en el prompt, o en la cola del CLI?
+   *
+   * Se lee la pantalla porque no hay otra forma: tmux confirma que el buffer
+   * salió, no dónde acabó. Si no se puede capturar, se da por bueno el caso
+   * normal en vez de inventar una cola que quizá no existe — y el campo
+   * `evidence` sigue diciendo lo que se sabe del corte, que es lo que decide.
+   */
+  private async pasteLanded(pane: string): Promise<boolean> {
+    const r = await this.deps.tmux.capture(pane, 12);
+    if (!r.ok) return true;
+    return !QUEUED_MARK.test(r.stdout);
+  }
+
+  /**
+   * Espera a que el transcript del agente traiga la marca de interrupción.
+   *
+   * Es la única evidencia que no se inventa ORCA: la escribe el CLI —
+   * `[Request interrupted by user]` en Claude, `turn_aborted` en Codex— y
+   * llega por el mismo camino que todo lo demás, el vigilante de transcripts.
+   * Sin `interruptedAt` en las deps (un collector de prueba, por ejemplo) no
+   * se espera nada y la respuesta dice `pending`, que es lo que se sabe.
+   */
+  private async awaitInterruptMark(agentId: string, since: number): Promise<boolean> {
+    const at = this.deps.interruptedAt;
+    if (!at) return false;
+    const until = Date.now() + INTERRUPT_EVIDENCE_MS;
+    for (;;) {
+      if (at(agentId) > since) return true;
+      if (Date.now() >= until) return false;
+      await sleep(200);
+    }
+  }
+
   /** El canal de CAPCOM si este agente lo es, null para todos los demás. */
-  private capcomFor(a: AgentHandle): CapcomChannel | null {
+  private capcomFor(a: AgentHandle | null): CapcomChannel | null {
     const cap = this.deps.capcom;
-    return cap && cap.owns(a.shortId) ? cap : null;
+    // Hospedado se conoce por session id; `--bg` por el short id del CLI.
+    return cap && a && (cap.owns(a.shortId) || cap.owns(a.sessionId)) ? cap : null;
   }
 
   /**
@@ -328,6 +774,34 @@ export class CommandRunner {
     if (!ID_RE.test(a.sessionId)) return { ok: false, detail: 'sessionId inválido' };
     const cwd = await this.cwdOf(a);
     if (!cwd.ok) return cwd.res;
+    const paneOf = a.pane ?? (this.deps.tmux.available() ? paneName(a.sessionId) : null);
+    if (paneOf) {
+      // Interactivo, `--resume` conserva el id: la sesión vuelve al mismo pane
+      // con la misma identidad, que es justo lo que `--bg --resume` no hace.
+      if (await this.deps.tmux.has(paneOf)) return { ok: true, detail: `${paneOf} ya está corriendo` };
+      const env: Record<string, string> = {};
+      for (const k of ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR']) {
+        const v = process.env[k];
+        if (v) env[k] = v;
+      }
+      Object.assign(env, this.deps.keys.materialize(a.projectId, a.id));
+      env['ORCA_SPAWNED'] = '1';
+      env['ORCA_PANE'] = paneOf;
+      let argv: string[];
+      if (a.runtime === 'codex') {
+        const bin = runtimeBin('codex');
+        if (!bin) return { ok: false, detail: runtimeNote('codex') };
+        argv = [bin, '-C', cwd.path, 'resume', a.sessionId];
+        const model = this.models.state(a)?.active; if (model) argv.push('-m', model);
+      } else if (a.runtime === 'claude') {
+        argv = [this.bin, '--resume', a.sessionId];
+        const model = this.models.state(a)?.active; if (model) argv.push('--model', model);
+      } else {
+        return { ok: false, detail: `no sé reanudar ${a.runtime}` };
+      }
+      const r = await this.deps.tmux.spawn({ name: paneOf, cwd: cwd.path, env, argv });
+      return r.ok ? { ok: true, detail: `reanudado en ${paneOf}` } : { ok: false, detail: r.detail };
+    }
     const cap = this.capcomFor(a);
     const res = await run(this.bin, ['--bg', ...(cap?.launchArgs() ?? []), '--resume', a.sessionId], {
       cwd: cwd.path, env: this.envFor(a), timeoutMs: 60_000, detach: true,
@@ -344,6 +818,13 @@ export class CommandRunner {
     if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
     const a = this.deps.agent(agentId);
     if (!a) return { ok: false, detail: `agente desconocido: ${agentId}` };
+    if (a.pane) {
+      if (what !== 'remove') return this.stopPane(a.pane);
+      const r = await this.killPane(a.pane);
+      if (r.ok) await this.cleanupWorktree(a);
+      return r;
+    }
+    if (a.runtime !== 'claude') return { ok: false, detail: `${a.callsign} corre ${a.runtime} fuera de ORCA: sin pane no se puede parar` };
     const id = a.shortId ?? a.sessionId;
     if (!ID_RE.test(id)) return { ok: false, detail: 'id inválido' };
     if (!a.background && a.shortId === null) {
@@ -353,15 +834,135 @@ export class CommandRunner {
     const res = await run(this.bin, [...verb, id], {
       cwd: cwd.ok ? cwd.path : home(), env: process.env, timeoutMs: 30_000,
     });
+    if (res.ok && what === 'remove') await this.cleanupWorktree(a);
     return res.ok
       ? { ok: true, detail: oneLine(res.stdout, 200) }
       : { ok: false, detail: res.detail };
+  }
+
+  /* ── worktrees ────────────────────────────────────────────────── */
+
+  /**
+   * El worktree de un spawn, o ninguno.
+   *
+   * Sólo con ORCA_WORKTREES=1 en este collector: sin la variable la flota
+   * sigue corriendo sobre el working tree del proyecto exactamente como hoy.
+   * `cmd.worktree` con nombre es un worktree compartido (el de un escuadrón);
+   * `false` deja a este spawn fuera aunque la variable esté puesta.
+   */
+  private async worktreeFor(
+    cmd: Extract<Command, { k: 'spawn' }>, projectRoot: string, ownName: string,
+  ): Promise<{ ok: true; worktree: WorktreeInfo | null; fresh: boolean } | { ok: false; detail: string }> {
+    if (!worktreesEnabled() || cmd.worktree === false) return { ok: true, worktree: null, fresh: false };
+    const name = typeof cmd.worktree === 'string' && cmd.worktree ? cmd.worktree : ownName;
+    if (!WORKTREE_NAME_RE.test(name)) return { ok: false, detail: `nombre de worktree inválido: ${oneLine(name, 40)}` };
+    const r = await createWorktree(projectRoot, name);
+    if (!r.ok) return { ok: false, detail: `worktree: ${r.detail}` };
+    return { ok: true, worktree: r.worktree, fresh: !r.reused };
+  }
+
+  /** El proceso no arrancó: un worktree recién creado para él no tiene dueño y se tira. */
+  private async dropFreshWorktree(projectRoot: string, wt: { worktree: WorktreeInfo | null; fresh: boolean }): Promise<void> {
+    if (!wt.worktree || !wt.fresh) return;
+    const r = await discardWorktree(projectRoot, wt.worktree, { force: true });
+    if (!r.ok) log('warn', SCOPE, `no pude tirar el worktree huérfano ${wt.worktree.path}: ${r.detail}`);
+  }
+
+  /**
+   * Aterrizar lo que hizo un worker. El ack es `ok` en cuanto el comando corrió;
+   * si aterrizó o no lo dice `data` (un LandResult), porque un conflicto es
+   * una respuesta que CAPCOM tiene que leer, no un fallo del collector.
+   */
+  private async land(cmd: Extract<Command, { k: 'land' }>): Promise<CommandResult> {
+    const a = this.deps.agent(cmd.agentId);
+    if (!a) return { ok: false, detail: `agente desconocido: ${cmd.agentId}` };
+    if (!a.worktree) return { ok: false, detail: `${a.callsign} no corre en un worktree propio: no hay rama que aterrizar` };
+    const project = this.deps.projects.get(a.projectId);
+    if (!project) return { ok: false, detail: 'proyecto desconocido' };
+    const root = path.resolve(project.path);
+    const allowed = launchable(root);
+    if (!allowed.ok) return { ok: false, detail: allowed.why };
+    const message = typeof cmd.message === 'string' && cmd.message.trim() ? cmd.message : null;
+    const out = await landWorktree(root, a.worktree, {
+      callsign: a.callsign, mission: a.mission ?? null, message, runTests: cmd.runTests !== false,
+    });
+    const detail = out.ok
+      ? `${a.callsign}: ${a.worktree.branch} → ${out.projectBranch} @ ${out.commit.slice(0, 8)} (${out.files.length} archivos)`
+      : `${a.callsign}: no aterrizado (${out.reason}): ${out.detail}`;
+    log(out.ok ? 'info' : 'warn', SCOPE, `land ${detail}`);
+    return { ok: true, detail, data: out };
+  }
+
+  private async discard(cmd: Extract<Command, { k: 'discard' }>): Promise<CommandResult> {
+    const a = this.deps.agent(cmd.agentId);
+    if (!a) return { ok: false, detail: `agente desconocido: ${cmd.agentId}` };
+    if (!a.worktree) return { ok: false, detail: `${a.callsign} no corre en un worktree propio: nada que tirar` };
+    const project = this.deps.projects.get(a.projectId);
+    if (!project) return { ok: false, detail: 'proyecto desconocido' };
+    const root = path.resolve(project.path);
+    const allowed = launchable(root);
+    if (!allowed.ok) return { ok: false, detail: allowed.why };
+    const out = await discardWorktree(root, a.worktree, { force: cmd.force === true });
+    if (out.ok) this.deps.lineage.clearWorktree(a.worktree.path);
+    return { ok: true, detail: `${a.callsign}: ${out.detail}`, data: out };
+  }
+
+  /**
+   * Un worker que se va (rm, archivado) se lleva su worktree SI no hay nada
+   * que perder: aterrizado o sin cambios. Con trabajo sin aterrizar se queda,
+   * y quien quiera tirarlo lo dice con `discard` y `force`. Nunca falla el
+   * comando que lo llamó: es limpieza, no la operación.
+   */
+  private async cleanupWorktree(a: AgentHandle): Promise<void> {
+    if (!a.worktree) return;
+    const project = this.deps.projects.get(a.projectId);
+    if (!project) return;
+    try {
+      const out = await discardWorktree(path.resolve(project.path), a.worktree, { force: false });
+      if (out.ok) this.deps.lineage.clearWorktree(a.worktree.path);
+      else log('info', SCOPE, `worktree de ${a.callsign} se queda: ${out.detail}`);
+    } catch (err) {
+      log('warn', SCOPE, `limpiando el worktree de ${a.callsign}: ${errText(err)}`);
+    }
+  }
+
+  /**
+   * Parar a un agente hospedado: dos Ctrl-C, que es como se sale del CLI a
+   * mano, y si el pane sigue ahí pasados unos segundos, se mata. El transcript
+   * queda; `resume` lo trae de vuelta al mismo pane con el mismo id.
+   */
+  private async stopPane(pane: string): Promise<CommandResult> {
+    const tmux = this.deps.tmux;
+    if (!(await tmux.has(pane))) return { ok: true, detail: `${pane} ya no existía` };
+    const first = await tmux.keys(pane, ['C-c']);
+    if (!first.ok) return { ok: false, detail: first.detail };
+    await sleep(300);
+    await tmux.keys(pane, ['C-c']);
+    const t = setTimeout(() => {
+      void tmux.has(pane).then((alive) => { if (alive) void tmux.kill(pane); });
+    }, 6_000);
+    t.unref?.();
+    return { ok: true, detail: `interrumpido ${pane}; si no sale solo, se cierra en 6s` };
+  }
+
+  private async killPane(pane: string): Promise<CommandResult> {
+    const r = await this.deps.tmux.kill(pane);
+    return r.ok ? { ok: true, detail: `cerrado ${pane}` } : { ok: false, detail: r.detail };
   }
 
   private async logs(cmd: Extract<Command, { k: 'logs' }>): Promise<CommandResult> {
     if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
     const a = this.deps.agent(cmd.agentId);
     if (!a) return { ok: false, detail: `agente desconocido: ${cmd.agentId}` };
+    const wanted = Math.max(1, Math.min(2000, Math.floor(cmd.lines) || 200));
+    if (a.pane) {
+      // La pantalla del pane, sin escapes: tmux ya la tiene compuesta.
+      const r = await this.deps.tmux.capture(a.pane, wanted);
+      if (!r.ok) return { ok: false, detail: r.detail };
+      const lines = r.stdout.replace(/\s+$/, '').split('\n').slice(-wanted);
+      return { ok: true, data: { lines } };
+    }
+    if (a.runtime !== 'claude') return { ok: false, detail: `${a.callsign} corre ${a.runtime} fuera de ORCA: sin pane no hay pantalla que leer` };
     const id = a.shortId;
     if (!id || !ID_RE.test(id)) {
       return { ok: false, detail: 'sin short id: `claude logs` sólo lee sesiones background' };
@@ -371,7 +972,6 @@ export class CommandRunner {
       cwd: cwd.ok ? cwd.path : home(), env: process.env, timeoutMs: 30_000,
     });
     if (!res.ok) return { ok: false, detail: res.detail };
-    const wanted = Math.max(1, Math.min(2000, Math.floor(cmd.lines) || 200));
     // Sin limpiar, treinta lineas utiles llegan como cien kilobytes de escapes
     // de terminal y fotogramas de spinner.
     const lines = stripAnsi(res.stdout).split('\n').slice(-wanted);
@@ -380,17 +980,9 @@ export class CommandRunner {
 
   /* ── permisos ─────────────────────────────────────────────────── */
 
-  private permit(cmd: Extract<Command, { k: 'permit' }>): CommandResult {
-    const a = this.deps.agent(cmd.agentId);
-    if (!a) return { ok: false, detail: `agente desconocido: ${cmd.agentId}` };
-    // Claude Code 2.1.260 no expone ninguna forma de contestar un prompt de
-    // permisos desde fuera del proceso: no hay subcomando ni archivo de control.
-    // Ver docs/CONTRACT-REQUESTS.md. Fallar explícito es mejor que fingir.
-    return {
-      ok: false,
-      detail: 'el CLI no expone respuesta remota a prompts de permisos; '
-        + 'usa `claude attach` o relanza con --permission-mode',
-    };
+  /** Unbound permission commands cannot identify the request the operator reviewed. */
+  private async permit(cmd: Extract<Command, { k: 'permit' }>): Promise<CommandResult> {
+    return { ok: false, detail: 'Use answer_agent with the current permission escalation_id; unbound permit is disabled' };
   }
 
   /* ── escalaciones ─────────────────────────────────────────────── */
@@ -398,6 +990,12 @@ export class CommandRunner {
   private async answer(cmd: Extract<Command, { k: 'answer' }>): Promise<CommandResult> {
     if (typeof cmd.answer !== 'string' || !cmd.answer.length) {
       return { ok: false, detail: 'respuesta vacía' };
+    }
+    // Una escalación de permisos no es un archivo en .orca/ask: es un diálogo
+    // en una pantalla. La levantó el collector y la contesta el collector.
+    const perm = this.deps.permissions?.get(cmd.escalationId);
+    if (perm) {
+      return this.deps.permissions!.answer(cmd.escalationId, cmd.answer);
     }
     const ok = await this.deps.escalations.answer(cmd.escalationId, cmd.answer, cmd.rememberAs);
     return ok
@@ -502,6 +1100,14 @@ export class CommandRunner {
   private async cwdOf(
     a: AgentHandle,
   ): Promise<{ ok: true; path: string } | { ok: false; res: CommandResult }> {
+    // CAPCOM: su directorio se conoce de primera mano. Resolverlo desde el
+    // slug es justo lo que falló —`~/.orca/capcom` codifica el punto como
+    // guión— y dejó al mando sin poder recibir ni una línea.
+    const capDir = this.capcomFor(a)?.dir() ?? null;
+    if (capDir) {
+      if (!isDir(capDir)) return { ok: false, res: { ok: false, detail: `el directorio de CAPCOM no existe: ${capDir}` } };
+      return { ok: true, path: capDir };
+    }
     const project = this.deps.projects.get(a.projectId);
     if (!project) return { ok: false, res: { ok: false, detail: 'proyecto desconocido' } };
     const cwd = path.resolve(project.path);
@@ -512,6 +1118,58 @@ export class CommandRunner {
     }
     return { ok: true, path: cwd };
   }
+}
+
+/* ── argv por runtime ─────────────────────────────────────────────── */
+
+/** Lo que un pane hereda del collector, más las keys del proyecto. */
+export function paneEnv(keys: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const k of ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'TERM_PROGRAM']) {
+    const v = process.env[k];
+    if (v) env[k] = v;
+  }
+  Object.assign(env, keys);
+  env['ORCA_SPAWNED'] = '1';
+  return env;
+}
+
+/**
+ * `codex` interactivo, con la postura de permisos de ORCA traducida a la suya.
+ *
+ *   auto / acceptEdits → pregunta cuando el modelo lo decide, escribe en el workspace (su default)
+ *   plan               → sólo lectura
+ *   manual             → pide aprobación para todo lo que no sea de confianza
+ *   dontAsk            → nunca pregunta (los fallos vuelven al modelo)
+ *   bypassPermissions  → sin sandbox ni aprobaciones; sólo para entornos ya aislados
+ *
+ * El prompt va POSICIONAL y al final, después de toda opción: `-C`, `-m` y las
+ * de política no son variádicas, pero el orden fijo evita tener que saberlo.
+ */
+export function codexArgv(
+  bin: string, cwd: string,
+  o: { model?: string | undefined; permissionMode?: string | undefined; prompt: string },
+): { ok: true; argv: string[] } | { ok: false; detail: string } {
+  const argv = [bin, '-C', cwd];
+  if (o.model) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(o.model)) return { ok: false, detail: `modelo inválido: ${o.model}` };
+    argv.push('-m', o.model);
+  }
+  switch (o.permissionMode) {
+    case undefined: case 'auto': case 'acceptEdits': argv.push('-a', 'on-request', '-s', 'workspace-write'); break;
+    case 'plan': argv.push('-s', 'read-only'); break;
+    case 'manual': argv.push('-a', 'untrusted', '-s', 'workspace-write'); break;
+    case 'dontAsk': argv.push('-a', 'never', '-s', 'workspace-write'); break;
+    case 'bypassPermissions': argv.push('--dangerously-bypass-approvals-and-sandbox'); break;
+    default: return { ok: false, detail: `permissionMode inválido: ${o.permissionMode}` };
+  }
+  if (o.prompt.startsWith('-')) {
+    // Un prompt que empieza por guion sería una opción para clap; un espacio delante lo salva sin cambiar su sentido.
+    argv.push(` ${o.prompt}`);
+  } else {
+    argv.push(o.prompt);
+  }
+  return { ok: true, argv };
 }
 
 /* ── ejecución sin shell ──────────────────────────────────────────── */

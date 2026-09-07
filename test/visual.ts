@@ -56,6 +56,10 @@ export interface OrcaHook {
   view(): { minX: number; minY: number; maxX: number; maxY: number };
   select(ids: string[]): void;
   note(t: string): void;
+  /** Put a task in the console's store without giving the hub one. See hud-tasks.shots.ts. */
+  task(t: import('../src/shared/tasks.ts').CapcomTask): void;
+  /** Live, non-CAPCOM agents on the field: the ones a click can actually fly to. */
+  agentIds(): string[];
 }
 
 declare global {

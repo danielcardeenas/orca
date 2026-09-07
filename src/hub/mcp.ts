@@ -103,18 +103,15 @@ export interface McpTool {
 /**
  * `CEO_TOOLS`, in MCP's shape.
  *
- * Derived and never copied: the day someone adds a tool for the API CEO, CAPCOM
- * gets it in the same commit. Two lists is how one command ends up able to do
- * something the other cannot, and nobody notices until it matters.
- *
- * Only the envelope changes — `input_schema` → `inputSchema`, and Anthropic's
- * `strict` flag drops off because it is not a JSON-Schema keyword.
+ * Derived and never copied: the list in tools.ts is the only definition of what
+ * CAPCOM can do. Only the envelope changes — `input_schema` → `inputSchema`,
+ * and the `strict` flag drops off because it is not a JSON-Schema keyword.
  */
 export function mcpTools(): McpTool[] {
   return CEO_TOOLS.map((t) => ({
     name: t.name,
-    description: typeof t.description === 'string' ? t.description : '',
-    inputSchema: t.input_schema as unknown as Record<string, unknown>,
+    description: t.description,
+    inputSchema: t.input_schema,
   }));
 }
 
@@ -182,7 +179,8 @@ export async function mcpDispatch(
         instructions:
           'ORCA fleet command. These tools reach every agent on every machine this hub can see.'
           + ' Survey with list_fleet before you act. Before ask_human, always recall —'
-          + ' the human should never answer the same question twice.',
+          + ' the human should never answer the same question twice.'
+          + ' `show` moves the operator\'s camera on the console; callsigns you write are clickable there.',
       });
     }
 

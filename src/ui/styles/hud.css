@@ -61,7 +61,10 @@
 .gauge.is-blocked.has-n { border-color: rgba(245,165,36,0.45); box-shadow: 0 0 14px rgba(245,165,36,0.18); }
 .gauge.is-dead.has-n .gauge__n { color: var(--red); }
 
-.mast__tools { margin-left: auto; display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+/* `flex: 1 1 auto` is for the clock: on a row wide enough to hold everything the
+   tools take the slack, so the clock stays beside the gauges instead of floating.
+   They still shrink, so on a narrow screen they wrap instead of overflowing. */
+.mast__tools { margin-left: auto; flex: 1 1 auto; display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
 .tool {
   background: rgba(11,10,13,0.55); border: 1px solid var(--line-soft); color: var(--ink-dim);
   font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
@@ -87,6 +90,19 @@ body.has-window .mast .tool kbd { opacity: 1; }
 /* With a window active the window owns the keyboard, so the mast's own caps
    step back. `main.ts` puts the class on from `WmEvents.onFocus`. */
 body.has-window .tool kbd { opacity: 0.3; }
+
+/* The clock: a readout in the gauge row's right corner, the gauge's box
+   without the gauge's hand. Tabular digits so the seconds never move the column. */
+.mast__clock {
+  margin-left: auto; display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 5px 10px; border: 1px solid var(--line-soft); background: rgba(11,10,13,0.55);
+  pointer-events: none; white-space: nowrap;
+}
+.mast__clock__n {
+  font-family: 'Tiny5', monospace; font-size: 15px; letter-spacing: 0.06em; line-height: 1;
+  color: var(--ink-mid); font-variant-numeric: tabular-nums;
+}
+.mast__clock__k { font-size: 9px; letter-spacing: 0.16em; color: var(--ink-dimmer); }
 
 /* Tele: scrambled hex, top right, like the comp. Real numbers underneath. */
 .tele {
@@ -134,7 +150,8 @@ body.tray-mode .hints kbd { border-color: var(--lime); color: var(--lime); }
 }
 .cmd__target.is-agent { border-color: var(--lime); color: var(--lime); }
 .cmd__target.is-project, .cmd__target.is-group, .cmd__target.is-squad { border-color: var(--st-thinking); color: var(--st-thinking); }
-.cmd__target.is-ceo { border-color: var(--line-soft); color: var(--ink-dim); }
+/* Talking to the command: the chip wears its colour, the one place cyan appears in the HUD. */
+.cmd__target.is-ceo { border-color: var(--cyan); color: var(--cyan); }
 .cmd__target.is-bad { border-color: var(--red); color: var(--red); }
 /* One frame of ink in front of the new colour. Never on `is-bad`: red is the
    one thing in the console that does not move, which is what makes it read. */
@@ -432,3 +449,85 @@ body.tray-mode .tray .tile { width: 72px; }
 .ctx__item.is-took, .ctx__item.is-took.is-sel { background: var(--lime); border-left-color: var(--lime); }
 .ctx__item.is-took b, .ctx__item.is-took span, .ctx__item.is-took kbd { color: #111; }
 .ctx__item--red.is-took, .ctx__item--red.is-took.is-sel { background: var(--red); border-left-color: var(--red); }
+
+/* ── Update sentinel (hud/update.ts) ──────────────────────────────────
+   Bottom right of the dock, clear of the command line and the tray. Amber:
+   it waits on a human, like everything else that colour. It never blinks;
+   the dot is the one live thing, and the click is the reload. */
+.update {
+  position: absolute; right: 62px; bottom: 22px;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px; font-size: 9px; letter-spacing: 0.16em; white-space: nowrap;
+  border: 1px solid var(--amber); background: rgba(11,10,13,0.88); color: var(--amber);
+  cursor: none;
+}
+.update:hover { background: var(--amber); color: #111; }
+.update__dot { width: 6px; height: 6px; background: currentColor; flex: none; }
+
+/* ── Tasks: what CAPCOM is on, under the mast's right corner ───────
+ *
+ * The boot's ALGN slab at instrument size (`gfx/algn.ts`, `hud/tasks.ts`).
+ * `--hud-top` is the mast's bottom — the clock is part of the mast — so the
+ * panel starts where the mast ends, covers nothing and moves nothing. Fixed
+ * width; the list scrolls inside past its height. */
+
+.tasks {
+  position: absolute; top: calc(var(--hud-top, 58px) + 4px); right: 62px;
+  width: 360px; max-height: calc(100vh - var(--hud-top, 58px) - 160px);
+  display: flex; flex-direction: column;
+  padding: 8px 8px 6px; border-radius: 8px;
+  box-shadow: 0 0 24px rgba(192,249,74,0.22);
+}
+.tasks__head { margin-bottom: 4px; user-select: none; }
+.tasks__head .algn__badge { min-width: 44px; padding: 4px 6px; }
+.tasks__t { margin: 0 auto 0 0; font-size: 12px; letter-spacing: 0.16em; display: inline-flex; align-items: center; gap: 8px; }
+.tasks__n {
+  background: #111; color: var(--lime); font-size: 11px; letter-spacing: 0.08em;
+  padding: 2px 6px; border-radius: var(--r-chip); min-width: 1.4em; text-align: center;
+}
+.tasks:not(.has-open) .tasks__n { color: #d2d2d6; }
+.tasks__fold { color: #111; opacity: 0.6; }
+.tasks__head:hover .tasks__fold { opacity: 1; }
+.tasks.is-folded .tasks__list { display: none; }
+.tasks.is-folded .tasks__head { margin-bottom: 0; }
+.tasks__list { overflow: auto; min-height: 0; overscroll-behavior: contain; }
+
+.tasks__row { grid-template-columns: minmax(0, 1fr) 38px auto; gap: 5px 8px; padding: 6px 10px; margin: 4px 0; }
+.tasks__row:hover { background: #1c1c1c; }
+.tasks__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase; }
+.tasks__row .algn-bar { height: 12px; }
+.tasks__meta { white-space: nowrap; font-size: 9px; letter-spacing: 0.1em; text-align: right; }
+.tasks__crew { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; text-align: left; }
+.tasks__crew[hidden] { display: none; }
+.tasks__crewn { color: var(--ink-dim); margin-right: 2px; }
+.tasks__cs {
+  background: transparent; border: 1px solid rgba(192,249,74,0.45); color: var(--lime);
+  font-family: 'Tiny5', monospace; font-size: 9px; letter-spacing: 0.12em;
+  padding: 1px 5px; line-height: 1; border-radius: 2px;
+}
+.tasks__cs:hover { background: var(--lime); color: #111; border-color: var(--lime); }
+
+/* Phases. Waiting is amber, the console's colour for "a human"; a finished
+   task dims; a failed one is the breach red the launch rows already wear.
+   The zipper is the state: seated for work and for done, empty for queued. */
+.tasks__row.is-waiting .px, .tasks__row.is-waiting .tasks__cs { color: var(--amber); }
+.tasks__row.is-waiting .tasks__cs { border-color: rgba(245,165,36,0.5); }
+.tasks__row.is-waiting .algn-zip rect { fill: var(--amber); }
+.tasks__row.is-done { opacity: 0.55; }
+.tasks__row.is-done:hover { opacity: 0.85; }
+.tasks__row.is-completed .px { color: var(--ink-mid); }
+.tasks__row.is-completed .algn-zip rect { fill: var(--ink-mid); }
+.tasks__row.is-failed { background: var(--red-deep); }
+.tasks__row.is-failed .px { color: var(--red); }
+.tasks__row.is-failed .algn-zip { visibility: hidden; }
+/* The conversation the CAPCOM window is on: a frame of bone inside the ink. */
+.tasks__row.is-current { box-shadow: inset 0 0 0 1px var(--ink-bright); }
+
+.tasks__empty { margin: 4px 2px 6px; color: #111; opacity: 0.7; }
+.tasks__more {
+  display: block; width: 100%; margin: 2px 0 0; padding: 5px;
+  background: transparent; border: 1px dashed rgba(17,17,17,0.45); color: #111; border-radius: var(--r-chip);
+}
+.tasks__more:hover { background: #111; color: var(--lime); }
+
+@media (max-width: 900px) { .tasks { display: none; } }

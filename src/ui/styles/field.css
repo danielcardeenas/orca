@@ -60,16 +60,27 @@
   line-height: 1.05;
 }
 
+/* The interior is one column: top, middle, bottom. The bottom is as tall as
+   what it holds and the middle takes the rest, so NOW and the numbers are
+   never clipped by a band whose height was a guess. Absolutely placed
+   against the tile (7 % in from the stripe, 11 % up from the speed band):
+   percentages here are the tile's, where a percentage *padding* on `.lbl`
+   would have been the layer's. */
+.lbl__col {
+  position: absolute; left: 7%; right: 4%; top: 0; bottom: 11%;
+  display: flex; flex-direction: column; min-width: 0;
+}
 .lbl__top, .lbl__mid, .lbl__bot {
-  position: absolute; box-sizing: border-box; overflow: hidden;
+  box-sizing: border-box; overflow: hidden; min-width: 0;
   display: flex; flex-direction: column; gap: calc(1.5px * var(--u));
 }
-/* 7 → 78 %: the sigil starts at 80 % and nothing may reach it. */
-.lbl__top { left: 7%; top: 0; width: 71%; height: 30%; padding: var(--pad-y) 0 0 0; }
-/* 7 → 66 %: clear of the bite at 70 %. */
-.lbl__mid { left: 7%; top: 31%; height: 33%; width: 59%; justify-content: center; }
-/* 7 → 96 %, stopping at 11 % so the shader's speed band runs under it. */
-.lbl__bot { left: 7%; bottom: 11%; width: 89%; height: 25%; justify-content: flex-end; }
+/* Up to 78 % of the tile: the sigil starts at 80 % and nothing may reach it. */
+.lbl__top { flex: 0 0 auto; width: 80%; padding: var(--pad-y) 0 0 0; }
+/* Up to 66 % of the tile: clear of the bite at 70 %, while there is a bite. */
+.lbl__mid { flex: 1 1 0; min-height: 0; width: 66%; justify-content: center; padding: calc(2px * var(--u)) 0; }
+/* From tier 4 the shader has slid the bite out of the tile: the whole width. */
+.lbl.t-4 .lbl__mid, .lbl.t-5 .lbl__mid { width: 100%; }
+.lbl__bot { flex: 0 0 auto; width: 100%; justify-content: flex-end; }
 
 .lbl__row { display: flex; align-items: baseline; gap: calc(4px * var(--u)); white-space: nowrap; }
 .lbl__cs {
@@ -166,6 +177,24 @@
 .lbl.is-dim { opacity: 0.55; }
 
 /*
+ * CAPCOM (§1.3): the one tile in cyan. The callsign carries the colour and a
+ * beacon in front of it — a square that breathes on a slow cycle, the way the
+ * shader's outline does under it — and COMMAND stands where a project code
+ * would. Nothing else on the field is allowed this colour.
+ */
+.lbl.is-capcom .lbl__cs { color: var(--cyan); text-shadow: 0 0 calc(6px * var(--u)) var(--cyan-glow); }
+.lbl.is-capcom .lbl__cs::before {
+  content: ''; display: inline-block; vertical-align: baseline;
+  width: calc(5px * var(--u)); height: calc(5px * var(--u)); margin-right: calc(4px * var(--u));
+  background: var(--cyan); box-shadow: 0 0 calc(4px * var(--u)) var(--cyan-glow);
+  animation: capcom-beacon 2.6s ease-in-out infinite;
+}
+.lbl.is-capcom .lbl__pj { color: var(--cyan); opacity: 0.75; }
+.lbl.is-capcom .lbl__title, .lbl.is-capcom .lbl__now b { color: var(--ink-bright); }
+.lbl.is-capcom.is-sel::before, .lbl.is-capcom.is-sel::after, .lbl.is-capcom.is-sel .lbl__c { --tick: var(--cyan); }
+@keyframes capcom-beacon { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/*
  * Selection (§6.4): four 6 px lime ticks at the label's corners. They appear
  * by cut and leave by cut — a selection that fades is a selection you doubt.
  * Two of them are pseudo-elements, two are the `<i>` the label always carries;
@@ -227,6 +256,12 @@
 /* The label is the region's handle (drag moves the project); a moved one wears a lime tick. */
 .rgn.is-moved { box-shadow: -2px 0 0 0 var(--lime); }
 .rgn.is-machine { border-color: var(--line); }
+/* CAPCOM's rótulo: the word over the one cyan tile, at the zooms where the
+   tile itself is too small to carry it. Same chip as a region's, in its colour. */
+.rgn--capcom { border-color: var(--cyan); background: rgba(11,10,13,0.75); }
+.rgn--capcom .rgn__code { color: var(--cyan); text-shadow: 0 0 6px var(--cyan-glow); }
+.rgn--capcom .rgn__name { color: var(--cyan); opacity: 0.7; }
+.rgn--capcom:hover { border-color: var(--cyan); box-shadow: 0 0 8px var(--cyan-glow); }
 
 /* The squad rótulo, its outline legend and roster live in squad.css. */
 
@@ -291,4 +326,6 @@
   .field__layer .lbl { transition: none; }
   /* The rung lands whole: the information is the elements, not their order. */
   .lbl.is-rung [data-rung] { animation: none; }
+  /* The beacon stays lit: colour alone says command. */
+  .lbl.is-capcom .lbl__cs::before { animation: none; }
 }

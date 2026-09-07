@@ -24,7 +24,11 @@
  */
 
 import type { Agent, Escalation } from '../shared/types.ts';
-import { TERMINAL_STATES } from '../shared/types.ts';
+import { capcomOf, ESCALATION_PREFIX } from '../shared/capcom.ts';
+
+// Lives in shared/ so the console picks the same session the hub routes to,
+// and recognises the escalation prefix the hub writes.
+export { capcomOf, ESCALATION_PREFIX };
 
 /**
  * How long CAPCOM gets to answer an agent's question before the human sees it.
@@ -38,30 +42,16 @@ export const CAPCOM_ANSWER_MS = 90_000;
 /** Written onto the escalation so the operator knows why it reached them. */
 export const CAPCOM_TIMEOUT_REASON = 'capcom did not answer in time';
 
-/** The prefix CAPCOM's brief tells it to look for. Change one, change both. */
-export const ESCALATION_PREFIX = 'ESCALATION';
-
 /**
- * The live CAPCOM session, if this fleet has one.
+ * How long the hub waits for a recycled CAPCOM to come back before it gives
+ * up on the mail it held for it.
  *
- * "Live" means not terminal: a `done` or `dead` CAPCOM is a session whose
- * process is gone, and delivering to it would be dropping the message in
- * silence. Two candidates is a bug upstream (a collector that launched a second
- * one), not a reason to return nothing: the newest wins, because it is the one
- * whose process is actually up.
+ * A rotation is a pane killed and a pane spawned: the new transcript shows
+ * within seconds, a slow machine within a minute. Three minutes is that with
+ * room, and short enough that a rotation that never came back turns into the
+ * plain "no CAPCOM" behaviour while the operator is still looking.
  */
-export function capcomOf(agents: Iterable<Agent> | Record<string, Agent>): Agent | null {
-  const list: Agent[] = Symbol.iterator in Object(agents)
-    ? [...(agents as Iterable<Agent>)]
-    : Object.values(agents as Record<string, Agent>);
-  let best: Agent | null = null;
-  for (const a of list) {
-    if (a.role !== 'capcom') continue;
-    if (TERMINAL_STATES.has(a.state)) continue;
-    if (!best || a.startedAt > best.startedAt) best = a;
-  }
-  return best;
-}
+export const CAPCOM_ROTATION_HOLD_MS = 180_000;
 
 /**
  * An agent's question, as one line CAPCOM can act on.
@@ -85,6 +75,14 @@ export function escalationSay(esc: Escalation, callsign?: string | null): string
 
 export interface CapcomTimer { cancel(): void }
 
+/** A line for CAPCOM, held while a rotation is in progress. */
+interface QueuedSay {
+  text: string;
+  deliver: CapcomDeps['say'];
+  /** What to do if the new session never shows. */
+  dropped?: ((reason: string) => void) | undefined;
+}
+
 export interface CapcomDeps {
   /** The live CAPCOM session, or null when this fleet has none. */
   capcom(): Agent | null;
@@ -103,57 +101,155 @@ export interface CapcomDeps {
 }
 
 export interface CapcomOptions {
-  /** `--api-command` turns this off: the API CEO commands even if CAPCOM is up. */
-  enabled?: boolean;
   answerMs?: number;
 }
 
 export class CapcomRouter {
   private deps: CapcomDeps;
-  private enabled: boolean;
   private answerMs: number;
   /** escalation id → the deadline timer, while CAPCOM holds it. */
   private held = new Map<string, CapcomTimer>();
   /** Said once, the first time a fleet actually gets a CAPCOM. */
   private announced = false;
+  /**
+   * A rotation in progress: the session going away, and the deadline for the
+   * new one to show. While set, `fromId` is never a delivery target and what
+   * would have gone to CAPCOM waits in `mail`.
+   */
+  private rotation: { fromId: string; timer: CapcomTimer } | null = null;
+  private mail: QueuedSay[] = [];
+  private transfer: { previousCutoff: number | null } | null = null;
+  private cleanCutoff: number | null = null;
+  holdingFor(id: string): boolean { return !!this.rotation && !this.live() && (this.rotation.fromId === id || this.deps.capcom()?.id === id); }
+  contextCutoff(): number | null { return this.cleanCutoff; }
+  setContext(mode?: 'continuity' | 'clean', cutoffAt?: number): void {
+    this.cleanCutoff = mode === 'clean' ? cutoffAt ?? Date.now() : null;
+  }
+  beginTransfer(fromId: string, mode?: 'continuity' | 'clean', cutoffAt?: number): void {
+    if (this.transfer) return;
+    this.transfer = { previousCutoff: this.cleanCutoff };
+    this.setContext(mode, cutoffAt);
+    this.rotating(fromId, 15 * 60_000);
+  }
 
   constructor(deps: CapcomDeps, opts: CapcomOptions = {}) {
     this.deps = deps;
-    this.enabled = opts.enabled ?? true;
     this.answerMs = opts.answerMs ?? CAPCOM_ANSWER_MS;
   }
 
-  /** The session commanding this fleet, or null. */
+  /**
+   * The session commanding this fleet, or null.
+   *
+   * Never the one a rotation is retiring: the collector announces the rotation
+   * before it stops that session, and for a few seconds the world still lists
+   * it as alive. Delivering to it then is pasting into a pane about to die.
+   */
   live(): Agent | null {
-    return this.enabled ? this.deps.capcom() : null;
+    const cap = this.deps.capcom();
+    if (this.transfer) return null;
+    if (cap && this.rotation && cap.id === this.rotation.fromId) return null;
+    return cap;
   }
 
   /**
    * The human said something.
    *
-   * Returns true when CAPCOM took it. False means there is no CAPCOM session
-   * and the caller should fall back to whatever command it has — the API CEO,
-   * the scripted one, or nothing.
+   * `'delivered'` when CAPCOM took it; `'queued'` when CAPCOM is being
+   * recycled and the line waits for the new session (`dropped` is called if
+   * that session never shows); `false` when there is no CAPCOM at all — the
+   * caller records the message and says so, because nothing else commands.
    */
-  humanSays(text: string): boolean {
+  humanSays(
+    text: string, deliver: CapcomDeps['say'] = this.deps.say, dropped?: (reason: string) => void,
+  ): 'delivered' | 'queued' | false {
     const cap = this.live();
-    if (!cap) return false;
-    this.announce(cap);
-    this.deps.say(cap.id, text);
-    return true;
+    if (cap) {
+      this.announce(cap);
+      deliver(cap.id, text);
+      return 'delivered';
+    }
+    if (this.rotation) {
+      this.mail.push({ text, deliver, dropped });
+      return 'queued';
+    }
+    return false;
+  }
+
+  /* ── rotation ─────────────────────────────────────────────────── */
+
+  /**
+   * The collector is recycling CAPCOM: `fromId` is going away on purpose.
+   *
+   * From here until the new session shows — or `holdMs` runs out — the
+   * retiring session is not a target, and everything addressed to CAPCOM is
+   * held. Without this the window between the old pane dying and the new
+   * transcript appearing reads as "no CAPCOM connected": the operator's
+   * message is refused, a task prompt goes nowhere, and a rotation that was
+   * meant to be invisible costs them a retype.
+   */
+  rotating(fromId: string, holdMs = CAPCOM_ROTATION_HOLD_MS): void {
+    this.rotation?.timer.cancel();
+    const timer = this.deps.setTimer(() => {
+      if (!this.rotation) return;
+      if (this.transfer) { this.deps.note?.('CAPCOM transfer is taking longer than expected; messages remain held. Inspect handoff status.'); return; }
+      const lost = this.mail.splice(0);
+      this.rotation = null;
+      const reason = `CAPCOM did not come back ${Math.round(holdMs / 1000)}s after rotating`;
+      this.deps.note?.(`${reason}${lost.length ? ` — ${lost.length} message(s) not delivered` : ''}`);
+      for (const m of lost) m.dropped?.(reason);
+    }, holdMs);
+    this.rotation = { fromId, timer };
+  }
+
+  /** True while a rotation is in progress and mail is being held. */
+  inRotation(): boolean { return this.rotation !== null; }
+  /** A preparation failed or completed: release held mail to the current coordinator. */
+  releaseTransfer(toId?: string): void {
+    if (this.transfer && !toId) this.cleanCutoff = this.transfer.previousCutoff;
+    this.transfer = null;
+    const current = this.deps.capcom();
+    // The collector may announce activation before its transcript is visible.
+    // Keep mail held until the new identity can actually receive it.
+    if (toId && current?.id !== toId) return;
+    this.rotation?.timer.cancel(); this.rotation = null;
+    const cap = this.live();
+    const mail = this.mail.splice(0);
+    for (const m of mail) { if (cap) m.deliver(cap.id, m.text); else m.dropped?.('CAPCOM unavailable after handoff'); }
+  }
+
+  /** Lines waiting for the new CAPCOM. */
+  queued(): number { return this.mail.length; }
+
+  /**
+   * A new CAPCOM is live: end the rotation and hand it what was held.
+   *
+   * Called whenever the fleet changes and on every sweep; cheap when nothing
+   * is pending. Returns how many lines went out.
+   */
+  flush(): number {
+    if (!this.rotation) return 0;
+    const cap = this.live();
+    if (!cap) return 0;
+    this.rotation.timer.cancel();
+    this.rotation = null;
+    const out = this.mail.splice(0);
+    if (out.length) this.deps.note?.(`CAPCOM de vuelta (${cap.callsign}): ${out.length} mensaje(s) en espera entregados`);
+    for (const m of out) m.deliver(cap.id, m.text);
+    return out.length;
   }
 
   /**
    * An agent asked something. Offer it to CAPCOM first.
    *
-   * Returns true when CAPCOM has it; the caller must NOT also hand it to the
-   * API CEO, or the same question gets triaged twice by two different minds.
+   * Returns true when CAPCOM has it. False leaves the question in the human's
+   * queue, where it was going to end up anyway.
    */
   offer(escalationId: string): boolean {
     const cap = this.live();
     if (!cap) return false;
     const esc = this.deps.escalation(escalationId);
-    if (!esc || esc.status !== 'pending') return false;
+    if (!esc || esc.status !== 'pending' || (esc.permission && esc.permission.phase !== 'requested')) return false;
+    if (this.cleanCutoff !== null && esc.askedAt <= this.cleanCutoff) return false;
     // Its own question would loop straight back into it.
     if (esc.agentId === cap.id) return false;
     if (this.held.has(escalationId)) return true;
@@ -195,10 +291,36 @@ export class CapcomRouter {
   /** Every escalation CAPCOM is holding right now. For diagnostics. */
   holding(): string[] { return [...this.held.keys()]; }
 
+  /**
+   * Offer CAPCOM whatever is pending and was never offered.
+   *
+   * `offer` runs once, the moment a question arrives. If CAPCOM was not in the
+   * world at that moment — the collector that carries it was reconnecting, or
+   * the question came in the same snapshot that announced CAPCOM — the
+   * question fell through to nobody and stayed pending, unread, forever.
+   * Measured on a hub restart: three permission prompts sat there for an hour.
+   *
+   * Only questions with no `ceoAttempt`: one CAPCOM already gave up on (the 90
+   * second deadline writes the attempt) belongs to the human now, and offering
+   * it again every sweep would bounce it between the two for the rest of time.
+   */
+  sweep(pending: Iterable<Escalation>): number {
+    if (!this.live()) return 0;
+    let offered = 0;
+    for (const esc of pending) {
+      if (esc.status !== 'pending' || esc.ceoAttempt || this.held.has(esc.id)) continue;
+      if (this.offer(esc.id)) offered += 1;
+    }
+    return offered;
+  }
+
   /** Stop waiting on everything. Called when the hub closes. */
   stop(): void {
     for (const t of this.held.values()) t.cancel();
     this.held.clear();
+    this.rotation?.timer.cancel();
+    this.rotation = null;
+    this.mail = [];
   }
 
   private announce(cap: Agent): void {

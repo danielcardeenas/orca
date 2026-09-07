@@ -1,3 +1,4 @@
+import { parseContinuation } from '../shared/continuation.ts';
 /**
  * ORCA hub — el store autoritativo.
  *
@@ -25,9 +26,16 @@ import type {
   Agent, AgentMessage, AgentMetrics, AgentRole, AgentState, Artifact, ArtifactKind, CeoMessage,
   Collision, Escalation, FeedItem, KeyDescriptor, Machine, MessageKind, MessageScope,
   Project, SessionRollup, WorldState,
+  TalkItem,
 } from '../shared/types.ts';
-import { AGENT_STATES, LIVE_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
+import { AGENT_STATES, LIVE_STATES, MAX_TALK, MAX_TALK_TEXT, TERMINAL_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
 import { squadName } from '../shared/squads.ts';
+import { parseModelControl } from '../shared/model-control.ts';
+import {
+  MAX_ARCHIVED, archiveBy, archiveCandidates, tombstone,
+  type ArchiveFilter, type ArchiveOutcome, type ArchivedAgent,
+} from '../shared/archive.ts';
+import { mergeTalk } from '../shared/talk.ts';
 import type { CollectorFrame, PatchOp } from '../shared/protocol.ts';
 import { BEAT_TIMEOUT_MS } from '../shared/protocol.ts';
 
@@ -162,6 +170,13 @@ export interface WorldHooks {
    * crecería para siempre en un disco que nadie mira.
    */
   onArtifactGone?: (id: string) => void;
+  /**
+   * Agentes archivados a mano (consola, CAPCOM, CLI). El hub guarda la lápida
+   * en disco: sin ella, el siguiente snapshot del collector los devolvería.
+   */
+  onArchived?: (entries: ArchivedAgent[]) => void;
+  /** Una sesión archivada volvió a la vida; su lápida deja de valer. */
+  onUnarchived?: (id: string, at: number) => void;
   now?: () => number;
 }
 
@@ -298,6 +313,8 @@ function metrics(raw: unknown): AgentMetrics {
     toolDurationMs: n(o['toolDurationMs']),
     apiDurationMs: n(o['apiDurationMs']),
     turns: n(o['turns']),
+    ...(has(o, 'contextTokens') ? { contextTokens: n(o['contextTokens']) } : {}),
+    ...(has(o, 'compactions') ? { compactions: n(o['compactions']) } : {}),
   };
 }
 
@@ -329,6 +346,9 @@ export function sanitizeAgentPatch(raw: unknown): Partial<Agent> {
   if (has(o, 'projectId') && validId(o['projectId'])) p.projectId = o['projectId'];
   if (has(o, 'title')) p.title = s(o['title']);
   if (has(o, 'callsign')) p.callsign = s(o['callsign'], 12);
+  if (o['origin'] === 'orca' || o['origin'] === 'external') p.origin = o['origin'];
+  if (has(o, 'subagent')) p.subagent = b(o['subagent']);
+  if (has(o, 'hidden')) p.hidden = b(o['hidden']);
   if (has(o, 'role')) p.role = agentRole(o['role']);
   if (has(o, 'state')) p.state = agentState(o['state'], 'booting');
   if (has(o, 'block')) p.block = block(o['block']);
@@ -339,6 +359,8 @@ export function sanitizeAgentPatch(raw: unknown): Partial<Agent> {
   if (has(o, 'squad')) p.squad = squadName(o['squad']);
   if (has(o, 'lead')) p.lead = b(o['lead']);
   if (has(o, 'model')) p.model = sOrNull(o['model'], 80);
+  if (has(o, 'continuation')) p.continuation = parseContinuation(o['continuation']);
+  if (has(o, 'modelControl')) p.modelControl = parseModelControl(o['modelControl']);
   if (has(o, 'tool')) p.tool = sOrNull(o['tool'], 64);
   if (has(o, 'toolDetail')) p.toolDetail = sOrNull(o['toolDetail']);
   if (has(o, 'lastPrompt')) p.lastPrompt = sOrNull(o['lastPrompt'], MAX_TEXT);
@@ -349,6 +371,9 @@ export function sanitizeAgentPatch(raw: unknown): Partial<Agent> {
   if (has(o, 'metrics')) p.metrics = metrics(o['metrics']);
   if (has(o, 'background')) p.background = b(o['background']);
   if (has(o, 'shortId')) p.shortId = sOrNull(o['shortId'], 64);
+  if (has(o, 'pane')) p.pane = b(o['pane']);
+  if (has(o, 'worktree')) p.worktree = sOrNull(o['worktree'], 1024);
+  if (has(o, 'branch')) p.branch = sOrNull(o['branch'], 256);
   return p;
 }
 
@@ -371,6 +396,9 @@ export function sanitizeAgent(raw: unknown, machineId: string): Agent | null {
      * el comando de la flota.
      */
     role: agentRole(o['role']),
+    ...(o['origin'] === 'orca' || o['origin'] === 'external' ? { origin: o['origin'] } : {}),
+    ...(has(o, 'subagent') ? { subagent: b(o['subagent']) } : {}),
+    ...(has(o, 'hidden') ? { hidden: b(o['hidden']) } : {}),
     state: agentState(o['state']),
     block: block(o['block']),
     parentId: validId(o['parentId']) ? o['parentId'] : null,
@@ -386,6 +414,8 @@ export function sanitizeAgent(raw: unknown, machineId: string): Agent | null {
     squad: squadName(o['squad']),
     lead: squadName(o['squad']) !== null && b(o['lead']),
     model: sOrNull(o['model'], 80),
+    continuation: parseContinuation(o['continuation']),
+    modelControl: parseModelControl(o['modelControl']),
     tool: sOrNull(o['tool'], 64),
     toolDetail: sOrNull(o['toolDetail']),
     lastPrompt: sOrNull(o['lastPrompt'], MAX_TEXT),
@@ -396,6 +426,9 @@ export function sanitizeAgent(raw: unknown, machineId: string): Agent | null {
     metrics: metrics(o['metrics']),
     background: b(o['background']),
     shortId: sOrNull(o['shortId'], 64),
+    pane: b(o['pane']),
+    worktree: sOrNull(o['worktree'], 1024),
+    branch: sOrNull(o['branch'], 256),
   };
 }
 
@@ -514,6 +547,30 @@ export function sanitizeFeedItem(raw: unknown, machineId: string): FeedItem | nu
   return item;
 }
 
+const TALK_KINDS = new Set<TalkItem['kind']>(['prompt', 'thinking', 'say', 'tool', 'result']);
+
+export function sanitizeTalkItem(raw: unknown, agentId: string): TalkItem | null {
+  const o = obj(raw);
+  if (!o || !validId(o['id'])) return null;
+  const kind = o['kind'];
+  if (typeof kind !== 'string' || !TALK_KINDS.has(kind as TalkItem['kind'])) return null;
+  const item: TalkItem = {
+    id: o['id'],
+    agentId,
+    at: n(o['at'], Date.now()),
+    kind: kind as TalkItem['kind'],
+    text: s(o['text'], MAX_TALK_TEXT),
+  };
+  const tool = sOrNull(o['tool'], 80);
+  if (tool) item.tool = tool;
+  const tuid = sOrNull(o['toolUseId'], 120);
+  if (tuid) item.toolUseId = tuid;
+  if (o['error'] === true) item.error = true;
+  const msgId = sOrNull(o['msgId'], 120);
+  if (msgId) item.msgId = msgId;
+  return item;
+}
+
 export function sanitizeEscalation(raw: unknown, machineId: string): Escalation | null {
   const o = obj(raw);
   if (!o || !validId(o['id'])) return null;
@@ -532,6 +589,7 @@ export function sanitizeEscalation(raw: unknown, machineId: string): Escalation 
     context: sOrNull(o['context'], MAX_TEXT),
     options: strArray(o['options'], 12),
     optionsOnly: b(o['optionsOnly']),
+    ...(obj(o['permission']) && ['requested', 'pending', 'confirmed'].includes(String(obj(o['permission'])!['phase'])) ? { permission: { phase: obj(o['permission'])!['phase'] as 'requested' | 'pending' | 'confirmed', fingerprint: s(obj(o['permission'])!['fingerprint'], 64) } } : {}),
     urgency: urg === 'low' || urg === 'blocking' ? urg : 'normal',
     status,
     ceoAttempt: attempt ? {
@@ -720,6 +778,12 @@ export class World {
   private buckets = new Map<string, Bucket>();
   /** Índice agente → bucket, para mover un agente cuando cambia de proyecto. */
   private agentBucket = new Map<string, string>();
+  /**
+   * Lápidas: agentes que alguien archivó y que el collector seguirá mandando
+   * mientras su transcript exista. Un id de aquí no vuelve a entrar al mundo
+   * salvo que llegue en un estado vivo — una sesión reanudada es un agente.
+   */
+  private archived = new Map<string, ArchivedAgent>();
 
   constructor(hooks: WorldHooks = {}) {
     this.hooks = hooks;
@@ -801,7 +865,10 @@ export class World {
       const roll = emptyRollup();
       for (const id of bkt.ids) {
         const a = this.state.agents[id];
-        if (!a) continue;
+        // Lo que no está en la flota tampoco cuenta en ella: las sesiones que
+        // quedaron en el directorio de CAPCOM o en un scratchpad sumarían
+        // decenas de agentes en el contador del HUD sin ser trabajo de nadie.
+        if (!a || a.hidden === true) continue;
         roll.total += 1;
         roll.byState[a.state] += 1;
         roll.costUSD += a.metrics.costUSD;
@@ -876,6 +943,8 @@ export class World {
       case 'project': return this.patchProject(machineId, frame.id, frame.patch);
       case 'project:new': return this.addProject(machineId, frame.project);
       case 'feed': return this.pushFeed(machineId, frame.items);
+      case 'talk': return this.pushTalk(machineId, frame.agentId, frame.items);
+      case 'talk:live': return this.setTalkLive(machineId, frame.agentId, frame.text);
       case 'escalation': return this.upsertEscalation(machineId, frame.escalation);
       case 'escalation:withdraw': return this.withdrawEscalation(machineId, frame.id, frame.reason);
       // El ruteo no vive aquí: el mundo guarda el mensaje y emite el evento;
@@ -1230,6 +1299,102 @@ export class World {
     }
   }
 
+  /* ── archivo ─────────────────────────────────────────────────────── */
+
+  /** Lápidas leídas del disco al arrancar. Van antes del primer snapshot. */
+  hydrateArchived(entries: ArchivedAgent[]): void {
+    for (const e of entries) this.archived.set(e.id, e);
+    this.capArchived();
+  }
+
+  isArchived(id: string): boolean { return this.archived.has(id); }
+
+  /** Las lápidas vigentes, la más reciente al final. */
+  archivedAgents(): ArchivedAgent[] {
+    return [...this.archived.values()].sort((a, b) => a.archivedAt - b.archivedAt);
+  }
+
+  /**
+   * Archivar lo terminado que cumpla el filtro.
+   *
+   * El registro sale del mundo como en un desalojo por retención —hijos
+   * desenganchados del padre, correo retirado, op `agent:null` a la consola— y
+   * además queda la lápida, que es lo que distingue "archivado" de "desalojado":
+   * al desalojado el siguiente snapshot lo trae de vuelta; al archivado no.
+   *
+   * `dryRun` responde exactamente lo mismo sin tocar nada: la misma función
+   * decide en los dos casos, así que lo que se anunció es lo que se archiva.
+   */
+  archiveAgents(filter: ArchiveFilter = {}, opts: { dryRun?: boolean; by?: string } = {}): ArchiveOutcome {
+    const now = this.now();
+    const plan = archiveCandidates(this.state.agents, filter, now);
+    const by = archiveBy(opts.by, 'hub');
+    const archived = plan.archive.map((a) => tombstone(a, by, now));
+    const outcome: ArchiveOutcome = {
+      dryRun: opts.dryRun === true, archived, kept: plan.kept, squadsRetired: plan.squadsRetired,
+    };
+    if (outcome.dryRun || archived.length === 0) return outcome;
+
+    const projects = new Set<string>();
+    for (const t of archived) {
+      this.archived.set(t.id, t);
+      if (this.state.talk) delete this.state.talk[t.id];
+      if (this.state.talkLive) delete this.state.talkLive[t.id];
+      this.dropAgent(t.id);
+      projects.add(t.projectId);
+      this.event({
+        at: now, kind: 'agent:archived', machineId: t.machineId, agentId: t.id, projectId: t.projectId,
+        text: `${t.callsign} (${t.state}) archivado por ${by}`,
+        data: { squad: t.squad, finishedAt: t.finishedAt, by },
+      });
+    }
+    for (const pid of projects) this.syncProjectSessions(pid);
+    if (plan.squadsRetired.length) {
+      this.event({
+        at: now, kind: 'squad:retired', text: plan.squadsRetired.join(', '),
+        data: { squads: plan.squadsRetired, by },
+      });
+    }
+    this.capArchived();
+    this.hooks.onArchived?.(archived);
+    this.settle();
+    this.flushOut();
+    return outcome;
+  }
+
+  /**
+   * ¿Este agente que llega está archivado? Terminado: se rechaza y no entra.
+   * Vivo: alguien reanudó la sesión, la lápida se levanta y el agente entra
+   * como cualquier otro. Devuelve true cuando hay que ignorarlo.
+   */
+  private refuseArchived(a: Agent, machineId: string): boolean {
+    if (!this.archived.has(a.id)) return false;
+    if (TERMINAL_STATES.has(a.state)) return true;
+    this.unarchive(a.id, machineId, 'resumed', false);
+    return false;
+  }
+
+  private unarchive(id: string, machineId: string, why: string, resync: boolean): void {
+    const tomb = this.archived.get(id);
+    if (!tomb) return;
+    this.archived.delete(id);
+    const at = this.now();
+    this.hooks.onUnarchived?.(id, at);
+    this.event({
+      at, kind: 'agent:unarchived', machineId, agentId: id, projectId: tomb.projectId,
+      text: why, data: { resync, callsign: tomb.callsign },
+    });
+  }
+
+  /** Las lápidas más viejas se caen primero; el archivo en disco las conserva. */
+  private capArchived(): void {
+    if (this.archived.size <= MAX_ARCHIVED) return;
+    const excess = [...this.archived.values()]
+      .sort((a, b) => a.archivedAt - b.archivedAt)
+      .slice(0, this.archived.size - MAX_ARCHIVED);
+    for (const t of excess) this.archived.delete(t.id);
+  }
+
   /* ── snapshot completo de una máquina ───────────────────────────── */
 
   private applySnapshot(
@@ -1251,6 +1416,7 @@ export class World {
     for (const raw of Array.isArray(frame.agents) ? frame.agents : []) {
       const a = sanitizeAgent(raw, machineId);
       if (!a) continue;
+      if (this.refuseArchived(a, machineId)) continue;
       a.machineId = machineId;
       seenAgents.add(a.id);
       this.state.agents[a.id] = a;
@@ -1291,6 +1457,7 @@ export class World {
   private addAgent(machineId: string, raw: unknown): void {
     const a = sanitizeAgent(raw, machineId);
     if (!a) throw new Error('agent:new inválido');
+    if (this.refuseArchived(a, machineId)) return;
     a.machineId = machineId;
     this.state.agents[a.id] = a;
     this.indexAgent(a);
@@ -1319,6 +1486,14 @@ export class World {
     if (!validId(id)) throw new Error('agent id inválido');
     const a = this.state.agents[id];
     if (!a) {
+      if (this.archived.has(id)) {
+        // Un archivado que cambia: si vuelve a un estado vivo es que alguien
+        // reanudó la sesión. Un patch no trae el registro entero, así que se
+        // levanta la lápida y se pide el snapshot que sí lo trae.
+        const patch = sanitizeAgentPatch(rawPatch);
+        if (patch.state && !TERMINAL_STATES.has(patch.state)) this.unarchive(id, machineId, 'resumed', true);
+        return;
+      }
       // Llegó un patch de un agente que no conocemos. En vez de inventarlo,
       // pedimos implícitamente un resync marcando el hecho en el log.
       this.event({ at: this.now(), kind: 'agent:orphan-patch', machineId, agentId: id });
@@ -1358,6 +1533,8 @@ export class World {
     // La sesión ya no existe en disco: su correo tampoco lleva a ninguna parte.
     this.dropTrafficFor(id);
     delete this.state.agents[id];
+    if (this.state.talk) delete this.state.talk[id];
+    if (this.state.talkLive) delete this.state.talkLive[id];
     this.unindexAgent(id);
     if (a.parentId) {
       const parent = this.state.agents[a.parentId];
@@ -1427,6 +1604,50 @@ export class World {
     }
   }
 
+  /* ── charla ─────────────────────────────────────────────────────── */
+
+  /**
+   * Bloques de la conversación de un agente (hoy sólo CAPCOM). Se apilan por
+   * agente, deduplicados por id —un collector que reconecta relee la cola del
+   * transcript y vuelve a mandar lo mismo— y acotados a MAX_TALK. No se
+   * persisten: el transcript en disco ya es la copia de verdad, y el collector
+   * la reproduce al arrancar.
+   */
+  pushTalk(machineId: string, agentId: unknown, rawItems: unknown): void {
+    if (!validId(agentId) || !Array.isArray(rawItems) || rawItems.length === 0) return;
+    const a = this.state.agents[agentId];
+    if (!a) return;                     // charla de un id que no conocemos: la próxima llegará con el agente
+    if (a.machineId !== machineId) throw new Error('máquina ajena');
+    const talk = (this.state.talk ??= {});
+    const list = talk[agentId] ?? [];
+    const seen = new Set(list.map((t) => t.id));
+    const items: TalkItem[] = [];
+    for (const raw of rawItems.slice(0, MAX_TALK)) {
+      const item = sanitizeTalkItem(raw, agentId);
+      if (!item || seen.has(item.id)) continue;
+      seen.add(item.id);
+      items.push(item);
+    }
+    if (items.length === 0) return;
+    // Orden por tiempo, misma regla que la consola (shared/talk.ts): una
+    // reposición tras reiniciar el hub trae bloques de ayer después de los de hoy.
+    talk[agentId] = mergeTalk(list, items);
+    this.emit({ o: 'talk', id: agentId, v: items });
+  }
+
+  /** Lo que CAPCOM está escribiendo ahora; null cuando paró. No se persiste. */
+  setTalkLive(machineId: string, agentId: unknown, raw: unknown): void {
+    if (!validId(agentId)) return;
+    const a = this.state.agents[agentId];
+    if (!a) return;
+    if (a.machineId !== machineId) throw new Error('máquina ajena');
+    const text = typeof raw === 'string' ? redact(raw.length > MAX_TALK_TEXT ? raw.slice(0, MAX_TALK_TEXT) : raw) : null;
+    const live = (this.state.talkLive ??= {});
+    if ((live[agentId] ?? null) === text) return;
+    if (text === null) delete live[agentId]; else live[agentId] = text;
+    this.emit({ o: 'talk:live', id: agentId, v: text });
+  }
+
   /* ── escalaciones ───────────────────────────────────────────────── */
 
   private upsertEscalation(machineId: string, raw: unknown): void {
@@ -1435,7 +1656,16 @@ export class World {
     e.machineId = machineId;
     const prev = this.state.escalations[e.id];
     // Una escalación ya respondida no vuelve a 'pending' por un frame tardío.
-    if (prev && prev.status === 'answered' && e.status !== 'answered') return;
+    if (prev && (prev.status === 'answered' || (prev.permission && ['withdrawn', 'expired'].includes(prev.status))) && e.status !== prev.status) return;
+    if (prev?.permission?.phase === 'pending' && e.permission?.phase === 'requested') e.permission.phase = 'pending';
+    if (e.permission && !prev) {
+      for (const older of Object.values(this.state.escalations)) {
+        if (older.id !== e.id && older.machineId === machineId && older.agentId === e.agentId && older.permission && ['pending', 'with_ceo'].includes(older.status)) {
+          older.status = 'withdrawn';
+          this.emit({ o: 'escalation', id: older.id, v: older });
+        }
+      }
+    }
     this.state.escalations[e.id] = e;
     this.emit({ o: 'escalation', id: e.id, v: e });
     if (!prev) {
@@ -1455,6 +1685,14 @@ export class World {
     e.status = 'withdrawn';
     this.emit({ o: 'escalation', id, v: e });
     this.event({ at: this.now(), kind: 'escalation:withdraw', machineId, text: s(reason, MAX_LINE) });
+  }
+
+  requestPermissionAnswer(id: string): void {
+    const e = this.state.escalations[id];
+    if (!e?.permission) return;
+    e.permission.phase = 'pending';
+    this.emit({ o: 'escalation', id, v: e });
+    this.flushOut();
   }
 
   /** Respuesta humana (o del CEO). Devuelve la escalación resuelta. */
@@ -1763,6 +2001,11 @@ export class World {
     this.state.ceo.messages = tail;
   }
 
+  setCapcomHandoffs(events: import('../shared/handoff.ts').CapcomHandoff[]): void {
+    this.state.capcomHandoffs = events;
+    this.emit({ o: 'capcom:handoffs', v: events });
+  }
+
   setCeoThinking(v: boolean): void {
     if (this.state.ceo.thinking === v) return;
     this.state.ceo.thinking = v;
@@ -1809,6 +2052,7 @@ export class World {
       },
       projects: Object.keys(this.state.projects).length,
       agents: { total: this.state.fleet.total, byState: this.state.fleet.byState },
+      archived: this.archived.size,
       blocked: this.state.fleet.blocked,
       costUSD: Number(this.state.fleet.costUSD.toFixed(4)),
       tokensPerSec: Number(this.state.fleet.tokensPerSec.toFixed(1)),

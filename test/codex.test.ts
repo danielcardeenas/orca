@@ -1,0 +1,193 @@
+/**
+ * Codex como segundo runtime.
+ *
+ * Las líneas de aquí son las que escribe codex-cli 0.153.4 en su rollout,
+ * recortadas. Lo que se prueba es que se convierten en el mismo `Agent` que
+ * una sesión de Claude: estado, prompt, lo último que dijo, la tool abierta,
+ * los tokens. Y que el watcher encuentra los rollouts en su layout de fechas,
+ * y que el argv de lanzamiento traduce la postura de permisos de ORCA.
+ */
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { CodexDeriver } from '../src/collector/codex.ts';
+import { codexArgv } from '../src/collector/commands.ts';
+import { TranscriptWatcher, codexRef, type LineBatch } from '../src/collector/watch.ts';
+import { ok, eq, test, sleep, type TestModule } from './harness.ts';
+
+const SID = '01a07208-9b2e-7392-b78c-023d6329cf4c';
+const CWD = '/Users/dan/projects/dijosi';
+
+function ref() {
+  return { path: `/tmp/rollout-2026-09-05T14-46-01-${SID}.jsonl`, slug: '', sessionId: SID, agentId: null, metaPath: null, workflowId: null, key: SID };
+}
+function batch(lines: Record<string, unknown>[], bootstrap = false): LineBatch {
+  return { ref: ref(), lines, bootstrap, mtimeMs: Date.now(), at: Date.now() };
+}
+const ts = (offsetMs: number) => new Date(Date.now() - 5000 + offsetMs).toISOString();
+
+const META = { timestamp: ts(0), type: 'session_meta', payload: { session_id: SID, id: SID, timestamp: ts(0), cwd: CWD, originator: 'codex-tui', cli_version: '0.153.4', model_provider: 'openai' } };
+const STARTED = { timestamp: ts(10), type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } };
+const AGENTS_MD = { timestamp: ts(11), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions for /x\n\n<INSTRUCTIONS>…' }] } };
+const PROMPT = { timestamp: ts(12), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'Evalúa el agente de invitados y propón un plan.' }] } } };
+const SAY = { timestamp: ts(20), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Voy a revisar cómo funciona el agente.' }], phase: 'commentary' } };
+const CALL = { timestamp: ts(30), type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'call_1', name: 'exec', input: 'rg --files -g AGENTS.md' } };
+const OUT = { timestamp: ts(40), type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call_1', output: [{ type: 'input_text', text: 'ok' }] } };
+const TOKENS = { timestamp: ts(41), type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 19172, cached_input_tokens: 11904, output_tokens: 145, reasoning_output_tokens: 7 } } } };
+const MODEL = { timestamp: ts(42), type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: 'gpt-6-astra', approval_policy: 'on-request' } } };
+const DONE = { timestamp: ts(50), type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1', last_agent_message: 'Sí, vale la pena evolucionarlo.' } };
+
+function alive(d: CodexDeriver, pane = true) {
+  d.setLiveness({ alive: true, background: false, shortId: null, pid: 1, name: null, startedAt: null, cliState: null, pane });
+}
+
+const tests = [
+  test('codex: conversation preserves prompts, reasoning, tools and results without mirrored messages', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    const mirror = { ...SAY, type: 'event_msg', payload: { type: 'item_completed', item: { type: 'AgentMessage', content: SAY.payload.content } } };
+    const reasoning = { timestamp: ts(25), type: 'response_item', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Checking the project' }], encrypted_content: 'must-never-appear' } };
+    d.ingest(batch([META, STARTED, AGENTS_MD, PROMPT, SAY, mirror, reasoning, CALL, OUT]));
+    const talk = d.drainTalk();
+    const replay = new CodexDeriver(ref(), 'm1', 'p1');
+    replay.ingest(batch([META, STARTED, AGENTS_MD, PROMPT, SAY, mirror, reasoning, CALL, OUT], true));
+    return ok('chronological, paired, stable, drained',
+      talk.map((t) => t.kind).join(',') === 'prompt,say,thinking,tool,result'
+      && talk[2]!.text === 'Checking the project'
+      && talk[3]!.toolUseId === talk[4]!.toolUseId && talk[4]!.text === 'ok'
+      && replay.drainTalk().map((t) => t.id).join(',') === talk.map((t) => t.id).join(',')
+      && d.drainTalk().length === 0);
+  }),
+  test('codex: identical prompts in separate turns remain separate exchanges', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    d.ingest(batch([STARTED, PROMPT, { ...STARTED, timestamp: ts(100) }, { ...PROMPT, timestamp: ts(110) }]));
+    return eq('two prompts', d.drainTalk().map((t) => t.kind), ['prompt', 'prompt']);
+  }),
+  test('codex: el rollout se convierte en un agente con runtime codex, cwd y prompt', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    d.ingest(batch([META, STARTED, AGENTS_MD, PROMPT, SAY]));
+    const a = d.snapshot();
+    return ok('codex: el rollout se convierte en un agente con runtime codex, cwd y prompt',
+      a.runtime === 'codex' && d.cwd === CWD && a.lastPrompt === 'Evalúa el agente de invitados y propón un plan.'
+      && a.title === 'Evalúa el agente de invitados y propón un plan.' && a.lastSay === 'Voy a revisar cómo funciona el agente.',
+      `runtime=${a.runtime} cwd=${d.cwd} prompt="${a.lastPrompt}" title="${a.title}"`);
+  }),
+
+  test('codex: AGENTS.md no es el prompt del humano', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    d.ingest(batch([META, STARTED, AGENTS_MD]));
+    return eq('codex: AGENTS.md no es el prompt del humano', d.snapshot().lastPrompt, null);
+  }),
+
+  test('codex: turno abierto sin tool es thinking, con tool es working, cerrado es idle', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    d.ingest(batch([META, STARTED, PROMPT, SAY]));
+    const thinking = d.state();
+    d.ingest(batch([CALL]));
+    const working = d.state();
+    const tool = d.snapshot().tool;
+    d.ingest(batch([OUT]));
+    const afterOut = d.state();
+    d.ingest(batch([DONE]));
+    const idle = d.state();
+    return ok('codex: turno abierto sin tool es thinking, con tool es working, cerrado es idle',
+      thinking === 'thinking' && working === 'working' && tool === 'exec' && afterOut === 'thinking' && idle === 'idle',
+      `${thinking} → ${working}(${tool}) → ${afterOut} → ${idle}`);
+  }),
+
+  test('codex: task_complete deja lo último que dijo y el modelo viene de thread_settings', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    d.ingest(batch([META, STARTED, PROMPT, MODEL, DONE]));
+    const a = d.snapshot();
+    return ok('codex: task_complete deja lo último que dijo y el modelo viene de thread_settings',
+      a.lastSay === 'Sí, vale la pena evolucionarlo.' && a.model === 'gpt-6-astra' && a.metrics.turns === 1,
+      `say="${a.lastSay}" model=${a.model} turns=${a.metrics.turns}`);
+  }),
+
+  test('codex: los tokens vienen de token_count y el costo es cero (suscripción)', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    d.ingest(batch([META, STARTED, PROMPT, SAY, CALL, OUT, TOKENS, DONE]));
+    const m = d.snapshot().metrics;
+    return ok('codex: los tokens vienen de token_count y el costo es cero (suscripción)',
+      m.inputTokens === 19172 && m.cacheReadTokens === 11904 && m.outputTokens === 145 && m.thinkingTokens === 7 && m.costUSD === 0 && m.toolCalls === 1,
+      JSON.stringify({ in: m.inputTokens, cached: m.cacheReadTokens, out: m.outputTokens, think: m.thinkingTokens, cost: m.costUSD, tools: m.toolCalls }));
+  }),
+
+  test('codex: una tool abierta 90s bajo una política que puede preguntar es un bloqueo de permiso', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    const old = { ...CALL, timestamp: new Date(Date.now() - 120_000).toISOString() };
+    d.ingest(batch([META, STARTED, PROMPT, SAY, MODEL, old]));
+    const blocked = d.state();
+    const b = d.blockOf();
+    const d2 = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d2);
+    const never = { ...MODEL, payload: { type: 'thread_settings_applied', thread_settings: { model: 'gpt-6-astra', approval_policy: 'never' } } };
+    d2.ingest(batch([META, STARTED, PROMPT, SAY, never, old]));
+    return ok('codex: una tool abierta 90s bajo una política que puede preguntar es un bloqueo de permiso',
+      blocked === 'blocked' && b?.kind === 'permission' && d2.state() === 'working',
+      `on-request → ${blocked} (${b?.kind}); never → ${d2.state()}`);
+  }),
+
+  test('codex: sin proceso y con el archivo quieto un minuto, la sesión está done', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1', Date.now() - 120_000);
+    const b = batch([META, STARTED, PROMPT, SAY, DONE]);
+    b.mtimeMs = Date.now() - 120_000;
+    const oldLines = b.lines.map((l) => ({ ...l, timestamp: new Date(Date.now() - 120_000).toISOString() }));
+    d.ingest({ ...b, lines: oldLines });
+    return eq('codex: sin proceso y con el archivo quieto un minuto, la sesión está done', d.state(), 'done');
+  }),
+
+  test('codex: el nombre del rollout da la sesión; otros archivos se ignoran', () => {
+    const r = codexRef('/x/2026/09/05', `rollout-2026-09-05T22-46-01-${SID}.jsonl`);
+    const bad = codexRef('/x/2026/09/05', 'notes.txt');
+    return ok('codex: el nombre del rollout da la sesión; otros archivos se ignoran',
+      r?.sessionId === SID && r.key === SID && r.slug === '' && bad === null, `${r?.key}`);
+  }),
+
+  test('codex: el watcher descubre rollouts en YYYY/MM/DD y su primer lote trae el session_meta', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'orca-codex-'));
+    try {
+      const day = join(root, '2026', '09', '05');
+      mkdirSync(day, { recursive: true });
+      writeFileSync(join(day, `rollout-2026-09-05T22-46-01-${SID}.jsonl`), [META, STARTED, PROMPT].map((l) => JSON.stringify(l)).join('\n') + '\n');
+      writeFileSync(join(day, 'unrelated.jsonl'), '{}\n');
+      const w = new TranscriptWatcher({ layout: 'codex', root, pollMs: 200, rescanMs: 500 });
+      const got: LineBatch[] = [];
+      w.onLines((b) => got.push(b));
+      await w.start();
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && !got.length) await sleep(30);
+      w.stop();
+      const b = got[0];
+      return ok('codex: el watcher descubre rollouts en YYYY/MM/DD y su primer lote trae el session_meta',
+        !!b && b.ref.key === SID && b.lines.some((l) => l['type'] === 'session_meta') && got.every((x) => x.ref.key === SID),
+        b ? `${b.lines.length} líneas, key ${b.ref.key}` : 'sin lotes');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }),
+
+  test('codex: el argv traduce la postura de permisos y deja el prompt al final', () => {
+    const auto = codexArgv('/bin/codex', '/p', { prompt: 'hola' });
+    const plan = codexArgv('/bin/codex', '/p', { prompt: 'hola', permissionMode: 'plan', model: 'gpt-6-astra' });
+    const dash = codexArgv('/bin/codex', '/p', { prompt: '-rf everything' });
+    const bad = codexArgv('/bin/codex', '/p', { prompt: 'x', permissionMode: 'yolo' });
+    const semi = codexArgv('/bin/codex', '/p', { prompt: ';' });
+    return ok('codex: el argv traduce la postura de permisos y deja el prompt al final',
+      auto.ok && auto.argv.join(' ') === '/bin/codex -C /p -a on-request -s workspace-write hola'
+      && plan.ok && plan.argv.join(' ') === '/bin/codex -C /p -m gpt-6-astra -s read-only hola'
+      && dash.ok && dash.argv[dash.argv.length - 1] === ' -rf everything'
+      && !bad.ok && semi.ok && semi.argv[semi.argv.length - 1] === ';',
+      auto.ok ? auto.argv.join(' ') : auto.detail);
+  }),
+];
+
+const suite: TestModule = { suite: 'collector · codex', tests };
+export default suite;

@@ -13,7 +13,9 @@
  *   3. señales de bloqueo externas: escalaciones ORCA y ~/.claude/jobs/<id>/state.json
  */
 
-import type { Agent, AgentMetrics, AgentRole, AgentState, BlockKind } from '../shared/types.ts';
+import type { Agent, AgentMetrics, AgentRole, AgentState, BlockKind, TalkItem } from '../shared/types.ts';
+import { CLAUDE_INTERRUPT_MARK } from '../shared/interrupt.ts';
+import { MAX_TALK, MAX_TALK_RESULT, MAX_TALK_TEXT } from '../shared/types.ts';
 import { ARTIFACT_TOOLS, kindOf } from './artifacts.ts';
 import type { LineBatch, TranscriptRef } from './watch.ts';
 import { isRecord, num, oneLine, stableCallsign, str, tsMs } from './util.ts';
@@ -26,14 +28,33 @@ export const PERMISSION_SUSPECT_MS = 90_000;
 export const REAP_AFTER_MS = 60_000;
 /** Ventana de la media móvil de tokens/s. */
 export const TPS_WINDOW_MS = 30_000;
+/** Un prompt sin respuesta cuenta como "pensando" hasta esto; después, idle. */
+export const PROMPT_THINKING_MS = 10 * 60_000;
 
-/** Modos en los que Claude Code no pregunta antes de correr una tool. */
-const PERMISSIVE_MODES = new Set(['auto', 'acceptEdits', 'bypassPermissions', 'plan']);
+/** Modos en los que Claude Code NUNCA abre un prompt de permisos. */
+const PERMISSIVE_MODES = new Set(['auto', 'bypassPermissions', 'dontAsk']);
 
 /** Tools que en modo manual sí abren un prompt de permisos. */
 const GATED_TOOLS = new Set([
   'Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'Task', 'MultiEdit',
 ]);
+
+/**
+ * Lo que `acceptEdits` (y `plan`) aprueban solos: ediciones de archivos. Un
+ * `Bash` en acceptEdits SÍ pregunta. Tratar acceptEdits como "no pregunta
+ * nunca" fue lo que dejó a un agente hospedado en `working` con un "Do you
+ * want to proceed?" en pantalla y a nadie avisado — medido en ping-pong-papas.
+ */
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
+
+/** Las tools que en este modo pueden quedarse esperando a un humano. */
+export function gatedIn(mode: string | null): ReadonlySet<string> {
+  if (mode && PERMISSIVE_MODES.has(mode)) return new Set();
+  if (mode === 'acceptEdits' || mode === 'plan') {
+    return new Set([...GATED_TOOLS].filter((t) => !EDIT_TOOLS.has(t)));
+  }
+  return GATED_TOOLS;
+}
 
 /**
  * Tools cuya única semántica es "le estoy preguntando al humano". Un tool_use
@@ -54,6 +75,8 @@ export interface Liveness {
   startedAt: number | null;
   /** `state`/`status` que reporta el propio CLI. */
   cliState: string | null;
+  /** La sesión vive en un pane de tmux de ORCA: se puede abrir una TERMINAL. */
+  pane: boolean;
 }
 
 export interface BlockSignal {
@@ -68,6 +91,7 @@ export interface BlockSignal {
 }
 
 export interface Lineage {
+  origin?: 'orca' | 'external';
   parentId: string | null;
   depth: number;
   childIds: string[];
@@ -76,6 +100,9 @@ export interface Lineage {
   squad: string | null;
   /** Si lo lidera. Sin `squad` no significa nada. */
   lead: boolean;
+  /** El worktree donde lo lanzó el spawn y su rama, si corre en uno. Ver worktrees.ts. */
+  worktree?: string | null;
+  branch?: string | null;
   /**
    * 'capcom' cuando esta sesión es el mando de la flota, 'agent' para todo lo
    * demás. Viaja por el mismo camino que `mission`: lo dijo quien la lanzó y se
@@ -108,7 +135,20 @@ export interface ProducedFile { path: string; at: number; }
  */
 const MAX_PRODUCED = 64;
 
+/**
+ * What the collector needs from a session, whichever CLI wrote it. Claude's
+ * `SessionDeriver` is the reference implementation; `CodexDeriver` (codex.ts)
+ * is the second. index.ts only ever talks to this.
+ */
+export type Deriver = Pick<SessionDeriver,
+  | 'id' | 'ref' | 'machineId' | 'projectId' | 'callsign' | 'cwd' | 'firstSeenAt' | 'rev'
+  | 'setLiveness' | 'setBlock' | 'setLineage' | 'setProject' | 'setCallsign'
+  | 'ingest' | 'drainProduced' | 'drainTalk' | 'state' | 'blockOf' | 'metrics' | 'snapshot' | 'debug'
+  | 'gatedPending' | 'interruptedMarkAt'>
+  & { readonly runtime: string };
+
 export class SessionDeriver {
+  readonly runtime = 'claude';
   readonly id: string;
   readonly ref: TranscriptRef;
   readonly machineId: string;
@@ -127,14 +167,39 @@ export class SessionDeriver {
   private sawAssistant = false;
   private lastStopReason: string | null = null;
   private lastAssistantAt = 0;
+  /** Cuándo llegó el último prompt humano (no meta, no tool_result). */
+  private lastPromptAt = 0;
   private lastLineAt = 0;
+  /**
+   * The last line that was the conversation — a prompt, a reply, a tool
+   * result. An idle session keeps appending housekeeping (bridge-session,
+   * atis-latch, system) every half hour, so the file's mtime says "touched",
+   * not "used". This is what `updatedAt` reports, and what the console uses
+   * to tell a working session from a tab left open.
+   */
+  private lastActivityAt = 0;
   private lastMtimeMs = 0;
   private endedCleanly = false;
   private interrupted = false;
+  /**
+   * Cuándo escribió el CLI que el humano cortó el turno. 0 = nunca.
+   *
+   * `[Request interrupted by user]` es una línea `user` que el propio Claude
+   * Code añade al pulsar Esc; no la escribe nadie más y no es texto del
+   * humano. Es el ÚNICO acuse de que una interrupción llegó, así que se guarda
+   * con su hora: quien la pidió compara contra el momento en que la mandó.
+   */
+  private interruptedAt = 0;
 
   private pending = new Map<string, PendingTool>();
   private lastTool: PendingTool | null = null;
   private produced: ProducedFile[] = [];
+  /**
+   * La conversación, bloque a bloque, esperando a que index.ts la drene.
+   * Acotada: un deriver que nadie drena (todo agente que no es CAPCOM) se
+   * queda con los últimos MAX_TALK y no crece más.
+   */
+  private talk: TalkItem[] = [];
 
   /**
    * Cuándo vio ORCA este transcript por primera vez. Público porque el ack de
@@ -149,15 +214,26 @@ export class SessionDeriver {
   private since = zeroCounters();
   private toolCalls = 0;
   private turns = 0;
+  /**
+   * Compactaciones vistas en el transcript. El CLI escribe un `system` con
+   * `subtype: 'compact_boundary'` y, detrás, un `user` con `isCompactSummary`;
+   * se cuentan las fronteras, y los resúmenes sólo si no hubo frontera (un CLI
+   * más viejo). Es la señal con la que se recicla a CAPCOM (rotation.ts).
+   */
+  private compactBoundaries = 0;
+  private compactSummaries = 0;
+  /** input + cache_creation + cache_read del último assistant: cuánto contexto lleva. */
+  private contextTokens = 0;
   private samples: TokenSample[] = [];
   private tpsSmooth = 0;
   private tpsAt = 0;
 
   private liveness: Liveness = {
     alive: false, background: false, shortId: null, pid: null,
-    name: null, startedAt: null, cliState: null,
+    name: null, startedAt: null, cliState: null, pane: false,
   };
   private block: BlockSignal | null = null;
+  private apiFailure: Agent['block'] = null;
   private lineage: Lineage = {
     parentId: null, depth: 0, childIds: [], mission: null, squad: null, lead: false,
     role: 'agent',
@@ -248,9 +324,11 @@ export class SessionDeriver {
         this.mode = str(l['mode']);
         break;
       case 'assistant':
+        if (at > this.lastActivityAt) this.lastActivityAt = at;
         this.assistant(l, at);
         break;
       case 'user':
+        if (at > this.lastActivityAt) this.lastActivityAt = at;
         this.user(l, at);
         break;
       case 'system':
@@ -295,6 +373,19 @@ export class SessionDeriver {
     if (!msg) return;
     this.sawAssistant = true;
     this.lastAssistantAt = at || Date.now();
+    if (l['isApiErrorMessage'] === true) {
+      const content = Array.isArray(msg['content']) ? msg['content'] : [];
+      const text = content.filter(isRecord).map((b) => str(b['text']) ?? '').filter(Boolean).join('\n');
+      this.apiFailure = { kind: 'error', since: this.lastAssistantAt,
+        summary: oneLine(`${str(l['error']) ?? 'api_error'}: ${text || 'CLI API request failed'}`, 500) };
+      this.pending.clear();
+      this.lastSay = oneLine(text, 200);
+      this.say(str(l['uuid']), 0, { at: this.lastAssistantAt, kind: 'say', text });
+      // Synthetic errors have zero usage and model <synthetic>. Preserve the
+      // real model/context counters; neither proves successful model progress.
+      return;
+    }
+    this.apiFailure = null;
     const model = str(msg['model']);
     if (model) this.model = model;
 
@@ -308,18 +399,30 @@ export class SessionDeriver {
       this.since.inputTokens += num(usage['input_tokens']);
       this.since.outputTokens += out;
       this.since.cacheReadTokens += num(usage['cache_read_input_tokens']);
+      this.contextTokens = num(usage['input_tokens']) + num(usage['cache_creation_input_tokens'])
+        + num(usage['cache_read_input_tokens']);
       const details = isRecord(usage['output_tokens_details']) ? usage['output_tokens_details'] : null;
       this.since.thinkingTokens += details ? num(details['thinking_tokens']) : 0;
       if (out > 0) this.samples.push({ at: this.lastAssistantAt, tokens: out });
     }
 
     const content = Array.isArray(msg['content']) ? msg['content'] : [];
-    for (const raw of content) {
-      if (!isRecord(raw)) continue;
+    const lineId = str(l['uuid']);
+    const msgId = str(msg['id']) ?? undefined;
+    content.forEach((raw, i) => {
+      if (!isRecord(raw)) return;
       const bt = raw['type'];
       if (bt === 'text') {
         const t = str(raw['text']);
-        if (t) this.lastSay = oneLine(t, 200);
+        if (t) {
+          this.lastSay = oneLine(t, 200);
+          this.say(lineId, i, { at: this.lastAssistantAt, kind: 'say', text: t, msgId });
+        }
+      } else if (bt === 'thinking') {
+        // Un thinking redactado llega como texto vacío: se anota igual, para
+        // que la consola sepa que hubo un paso de pensar aunque no qué.
+        const t = str(raw['thinking']) ?? '';
+        this.say(lineId, i, { at: this.lastAssistantAt, kind: 'thinking', text: t, msgId });
       } else if (bt === 'tool_use') {
         const id = str(raw['id']);
         const name = str(raw['name']) ?? 'tool';
@@ -333,38 +436,87 @@ export class SessionDeriver {
         this.lastTool = p;
         this.toolCalls++;
         this.noteProduced(name, raw['input'], p.at);
+        this.say(lineId, i, { at: p.at, kind: 'tool', text: p.detail, tool: name, toolUseId: p.id, msgId });
       }
-    }
+    });
     // Un turno que cierra no puede dejar tools colgando.
     if (this.lastStopReason === 'end_turn') this.pending.clear();
     this.trimSamples();
   }
 
-  private user(l: Record<string, unknown>, _at: number): void {
+  private user(l: Record<string, unknown>, at: number): void {
     if (str(l['interruptedMessageId'])) this.interrupted = true;
+    if (interruptMark(l['message'])) {
+      this.interrupted = true;
+      if (at > this.interruptedAt) this.interruptedAt = at;
+    }
     const msg = isRecord(l['message']) ? l['message'] : null;
     if (!msg) return;
     const content = msg['content'];
+    const lineId = str(l['uuid']);
+    const meta = l['isMeta'] === true;
+    if (l['isCompactSummary'] === true) this.compactSummaries++;
     if (typeof content === 'string') {
       // Prompt humano en texto plano: cuenta como turno.
-      if (l['isMeta'] !== true) this.turns++;
+      if (!meta) {
+        this.turns++;
+        if (isHumanText(content)) {
+          this.lastPromptAt = Math.max(this.lastPromptAt, at);
+          this.say(lineId, 0, { at, kind: 'prompt', text: content });
+        }
+      }
       return;
     }
     if (!Array.isArray(content)) return;
     let sawToolResult = false;
-    for (const raw of content) {
-      if (!isRecord(raw)) continue;
+    content.forEach((raw, i) => {
+      if (!isRecord(raw)) return;
       if (raw['type'] === 'tool_result') {
         sawToolResult = true;
         const tuid = str(raw['tool_use_id']);
+        const tool = tuid ? this.pending.get(tuid) : undefined;
         if (tuid) this.pending.delete(tuid);
+        this.say(lineId, i, {
+          at, kind: 'result', text: resultText(raw['content']),
+          ...(tool ? { tool: tool.name } : {}), ...(tuid ? { toolUseId: tuid } : {}),
+          ...(raw['is_error'] === true ? { error: true } : {}),
+        });
+      } else if (raw['type'] === 'text' && !meta) {
+        // Un prompt con adjuntos llega como bloques; el texto es lo dicho.
+        const t = str(raw['text']);
+        if (t && isHumanText(t)) {
+          this.lastPromptAt = Math.max(this.lastPromptAt, at);
+          this.say(lineId, i, { at, kind: 'prompt', text: t });
+        }
       }
-    }
-    if (!sawToolResult && l['isMeta'] !== true) this.turns++;
+    });
+    if (!sawToolResult && !meta) this.turns++;
+  }
+
+  /** Anota un bloque de conversación. El id es estable por línea y posición. */
+  private say(lineId: string | null, i: number, item: Omit<TalkItem, 'id' | 'agentId'>): void {
+    const text = item.text.length > MAX_TALK_TEXT ? `${item.text.slice(0, MAX_TALK_TEXT)}…` : item.text;
+    this.talk.push({
+      id: `${lineId ?? `${item.kind}:${item.at}`}:${i}`,
+      agentId: this.id,
+      ...item,
+      text,
+      at: item.at || Date.now(),
+    });
+    if (this.talk.length > MAX_TALK) this.talk.splice(0, this.talk.length - MAX_TALK);
+  }
+
+  /** Vacía la conversación pendiente. index.ts la drena sólo para CAPCOM. */
+  drainTalk(): TalkItem[] {
+    if (this.talk.length === 0) return [];
+    const out = this.talk;
+    this.talk = [];
+    return out;
   }
 
   private system(l: Record<string, unknown>): void {
     const sub = str(l['subtype']);
+    if (sub === 'compact_boundary') this.compactBoundaries++;
     if (sub === 'turn_duration') {
       // Claude Code cierra cada turno con esto: nada colgando.
       this.pending.clear();
@@ -431,6 +583,7 @@ export class SessionDeriver {
   }
 
   state(now = Date.now()): AgentState {
+    if (this.apiFailure) return 'blocked';
     if (this.block) return 'blocked';
     if (this.askingTool()) return 'blocked';
 
@@ -451,6 +604,11 @@ export class SessionDeriver {
     if (stuck) return 'blocked';
 
     if (this.pending.size > 0) return 'working';
+    // Un prompt más nuevo que la última respuesta: el modelo está en ello,
+    // aunque el último stop_reason diga end_turn. Sin esto la consola decía
+    // IDLE durante los segundos entre enviar y el primer bloque de respuesta.
+    // Acotado: un prompt que lleva minutos sin respuesta no es "pensando".
+    if (this.lastPromptAt > this.lastAssistantAt && now - this.lastPromptAt < PROMPT_THINKING_MS) return 'thinking';
     if (this.lastStopReason === 'end_turn') return 'idle';
     if (this.lastStopReason === 'tool_use') return 'working';
     // stop_reason null o desconocido con assistant reciente: sigue hablando.
@@ -468,15 +626,31 @@ export class SessionDeriver {
   /** El tool colgado que hace sospechar de un prompt de permisos, si lo hay. */
   private stuckTool(now: number): PendingTool | null {
     if (this.pending.size === 0) return null;
-    if (this.permissionMode && PERMISSIVE_MODES.has(this.permissionMode)) return null;
+    const gated = gatedIn(this.permissionMode);
     for (const p of this.pending.values()) {
       if (now - p.at < PERMISSION_SUSPECT_MS) continue;
-      if (GATED_TOOLS.has(p.name)) return p;
+      if (gated.has(p.name)) return p;
     }
     return null;
   }
 
+  /**
+   * La tool pendiente que PODRÍA estar detrás de un prompt de permisos, sin
+   * esperar los 90 s de sospecha. Para una sesión en pane no hace falta
+   * sospechar: se mira la pantalla, y esto dice cuándo merece la pena mirar.
+   */
+  gatedPending(now = Date.now(), minAgeMs = 1_500): { name: string; detail: string; at: number } | null {
+    const gated = gatedIn(this.permissionMode);
+    let oldest: PendingTool | null = null;
+    for (const p of this.pending.values()) {
+      if (!gated.has(p.name) || now - p.at < minAgeMs) continue;
+      if (!oldest || p.at < oldest.at) oldest = p;
+    }
+    return oldest ? { name: oldest.name, detail: oldest.detail, at: oldest.at } : null;
+  }
+
   blockOf(now = Date.now()): Agent['block'] {
+    if (this.apiFailure) return this.apiFailure;
     if (this.block) {
       const b: Agent['block'] = {
         kind: this.block.kind, summary: this.block.summary, since: this.block.since,
@@ -520,8 +694,13 @@ export class SessionDeriver {
       toolDurationMs: num(b.toolDurationMs),
       apiDurationMs: num(b.apiDurationMs),
       turns: this.turns,
+      contextTokens: this.contextTokens,
+      compactions: Math.max(this.compactBoundaries, this.compactSummaries),
     };
   }
+
+  /** Cuándo se vio el último acuse de interrupción en el transcript. 0 = ninguno. */
+  interruptedMarkAt(): number { return this.interruptedAt; }
 
   snapshot(now = Date.now()): Agent {
     const state = this.state(now);
@@ -535,6 +714,9 @@ export class SessionDeriver {
       callsign: this.callsign,
       runtime: 'claude',
       role: this.lineage.role,
+      origin: this.lineage.origin,
+      // Un transcript bajo subagents/ es una tool `Task` del padre, no una sesión.
+      subagent: this.ref.agentId !== null,
       state,
       block: this.blockOf(now),
       parentId: this.lineage.parentId,
@@ -543,17 +725,20 @@ export class SessionDeriver {
       mission: this.lineage.mission,
       squad: this.lineage.squad,
       lead: this.lineage.lead,
+      worktree: this.lineage.worktree ?? null,
+      branch: this.lineage.branch ?? null,
       model: this.model,
       tool: working ? (this.currentTool()?.name ?? null) : null,
       toolDetail: working ? (this.currentTool()?.detail ?? null) : null,
       lastPrompt: this.lastPrompt,
       lastSay: this.lastSay,
       startedAt,
-      updatedAt: Math.max(this.lastLineAt, this.lastMtimeMs) || now,
+      updatedAt: this.lastActivityAt || Math.max(this.lastLineAt, this.lastMtimeMs) || now,
       uptimeMs: Math.max(0, now - startedAt),
       metrics: this.metrics(now),
       background: this.liveness.background,
       shortId: this.liveness.shortId,
+      pane: this.liveness.pane,
     };
   }
 
@@ -581,6 +766,44 @@ export class SessionDeriver {
 }
 
 /* ── ayudas ───────────────────────────────────────────────────────── */
+
+/**
+ * Lo que el CLI inyecta como si fuera el humano — la salida de un slash
+ * command, un system-reminder, un `<command-name>` — no es conversación.
+ */
+const INJECTED = /^\s*<(?:system-reminder|local-command|command-name|command-message|bash-input|bash-stdout|bash-stderr)/;
+
+/**
+ * ¿Es este `message` el acuse de una interrupción?
+ *
+ * El contenido llega como texto plano o como bloques; la marca es la misma en
+ * los dos casos y viene sola, así que basta mirar el primer texto.
+ */
+function interruptMark(message: unknown): boolean {
+  if (!isRecord(message)) return false;
+  const c = message['content'];
+  if (typeof c === 'string') return CLAUDE_INTERRUPT_MARK.test(c);
+  if (!Array.isArray(c)) return false;
+  return c.some((b) => isRecord(b) && b['type'] === 'text' && CLAUDE_INTERRUPT_MARK.test(str(b['text']) ?? ''));
+}
+function isHumanText(t: string): boolean {
+  return t.trim().length > 0 && !INJECTED.test(t);
+}
+
+/**
+ * Un tool_result es texto plano o una lista de bloques; para la conversación
+ * basta un vistazo, nunca el archivo entero que se leyó.
+ */
+function resultText(c: unknown): string {
+  let t = '';
+  if (typeof c === 'string') t = c;
+  else if (Array.isArray(c)) {
+    t = c.map((b) => (isRecord(b) && b['type'] === 'text' ? str(b['text']) ?? '' : isRecord(b) && b['type'] === 'image' ? '[image]' : ''))
+      .filter(Boolean).join('\n');
+  }
+  t = t.trim();
+  return t.length > MAX_TALK_RESULT ? `${t.slice(0, MAX_TALK_RESULT)}…` : t;
+}
 
 function zeroCounters() {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, thinkingTokens: 0 };

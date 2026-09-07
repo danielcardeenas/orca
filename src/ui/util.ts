@@ -61,6 +61,63 @@ export function runtimeCode(a: Agent): string {
   return RUNTIME_CODE[r] ?? r.slice(0, 2).toUpperCase();
 }
 
+/**
+ * Markdown, out. An agent's last word arrives as it typed it — `**bold**`,
+ * a `## heading`, a `- ` list, a [link](url), `code` — and in a tile every one
+ * of those marks is a glyph that means nothing. Only the marks go: the words
+ * stay in order. Whitespace collapses to one space.
+ */
+export function plain(s: string | null | undefined): string {
+  let t = String(s ?? '');
+  if (!t) return '';
+  t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');                 // [text](url) → text
+  t = t.replace(/(^|\s)(#{1,6}|>+)\s+/g, '$1');                       // headings, quotes
+  t = t.replace(/^([-*]|\d+[.)])\s+/, '');                            // a list marker opening the line
+  t = t.replace(/([.:;!?])\s+[-*]\s+(?=\S)/g, '$1 ');                 // …and one opening a sentence
+  t = t.replace(/`{1,3}([^`]+)`{1,3}/g, '$1');                         // code spans
+  // Emphasis only at word boundaries: `**bold**` goes, `snake_case` stays.
+  t = t.replace(/(^|[\s("'])(\*\*|__|~~|\*|_)(?=\S)(.+?\S)\2(?=$|[\s)"'.,;:!?])/g, '$1$3');
+  t = t.replace(/(^|\s)[*_~]{2,}(?=\s|$)/g, '$1');                     // orphan marks
+  t = t.replace(/\s*\|\s*/g, ' · ');                                  // table bars
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Does this title read as an instruction rather than a name? The collector
+ * falls back to the first prompt when a session has no `ai-title`, so half a
+ * spawned squad is titled `Eres el agente A en una prueba corta de saludo…`.
+ * A sentence that long, or one that opens by telling the agent who it is, is
+ * the brief — not what to call it.
+ */
+export function promptish(title: string): boolean {
+  const t = title.trim();
+  if (t.length >= 56) return true;
+  return /^(eres|sos|eres el|you are|you're|act as|actúa como|tu (misión|tarea|trabajo) es|your (mission|task|job) is)\b/i.test(t);
+}
+
+/** A session id standing in for a title: eight hex or decimal digits and nothing else. */
+export function bareId(title: string): boolean {
+  return /^[0-9a-f]{6,12}$/i.test(title.trim());
+}
+
+/**
+ * What to call an agent, in one line.
+ *
+ * The title when it is a name. When it is the brief, or a bare session id,
+ * and the mission is a shorter thing to say, the mission — `Escribir
+ * saludo/saludo.log` over `Eres el agente A en una prueba corta…`. With
+ * nothing better, the title anyway: a redundant fact beats a hole.
+ */
+export function nameOf(a: Pick<Agent, 'title' | 'mission'>): string {
+  const title = plain(a.title);
+  const mission = plain(a.mission);
+  if (!title) return mission;
+  if (!mission || mission === title) return title;
+  if (bareId(title)) return mission;
+  if (promptish(title) && mission.length < title.length) return mission;
+  return title;
+}
+
 export function money(n: number): string {
   return n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
 }

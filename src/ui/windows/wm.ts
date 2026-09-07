@@ -116,6 +116,7 @@
 
 import gsap from 'gsap';
 import { esc, hexNoise } from '../util.ts';
+import { typing } from '../keys.ts';
 import { dur, EASE, REDUCE, T } from '../motion.ts';
 import { getSound } from '../hud/sound.ts';
 import {
@@ -124,7 +125,7 @@ import {
 
 export type WinKind =
   | 'agent' | 'interrupt' | 'queue' | 'ceo' | 'feed' | 'fleet' | 'spawn' | 'artifact' | 'breach' | 'help' | 'settings'
-  | 'gallery' | 'launch' | 'timeline' | 'sfx' | 'music';
+  | 'gallery' | 'launch' | 'timeline' | 'sfx' | 'music' | 'terminal' | 'file' | 'hygiene';
 
 export interface WinSpec {
   kind: WinKind;
@@ -710,9 +711,8 @@ export class WindowManager {
    */
   handleKey(e: KeyboardEvent): boolean {
     if (e.defaultPrevented) return false;
-    const t = e.target as HTMLElement | null;
     // Enter is already "send" inside a field. Never send the same line twice.
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return false;
+    if (typing(e)) return false;
     const tok = keyToken(e);
     if (!tok) return false;
 
@@ -801,7 +801,6 @@ export class WindowManager {
   /** Called every frame: anchored windows follow their tiles. */
   reproject() {
     let paths = '';
-    const vw = window.innerWidth, vh = window.innerHeight;
     for (const win of this.wins.values()) {
       if (win.minimized || MOBILE()) continue;
       if (!win.spec.anchor) continue;
@@ -809,13 +808,15 @@ export class WindowManager {
       if (!r) { this.showOff(win, null); continue; }
       win.x = r.x + r.w + win.ax;
       win.y = r.y + win.ay;
+      // A visible tile can still project its window beyond the viewport.
+      // Clamp the housing, not the anchor offsets: panning back restores the
+      // intended placement. Size only changes when the viewport cannot fit it.
+      this.clampToView(win);
       // A window whose tile left the screen used to fade to 15% and take its
       // report with it. It stays legible instead: same size, clamped to the
       // edge nearest the tile, with an indicator that says which way to look.
       if (!r.visible || outsideViewport(r)) {
         win.el.style.opacity = '';
-        win.x = Math.max(8, Math.min(vw - win.w - 8, win.x));
-        win.y = Math.max(44, Math.min(vh - win.h - DOCK_H, win.y));
         this.apply(win);
         this.showOff(win, edgeToward(r, win));
         continue;
@@ -927,7 +928,7 @@ export class WindowManager {
   private clampToView(win: Win) {
     const vw = window.innerWidth, vh = window.innerHeight;
     win.w = Math.min(win.w, vw - 16);
-    win.h = Math.min(win.h, vh - 90);
+    win.h = Math.min(win.h, vh - 44 - DOCK_H);
     win.x = Math.max(8, Math.min(vw - win.w - 8, win.x));
     win.y = Math.max(44, Math.min(vh - win.h - DOCK_H, win.y));
   }
@@ -1257,10 +1258,10 @@ function dockHome(kind: WinKind, w: number, h: number, vw: number, vh: number): 
 
 function defaultSize(kind: WinKind): { w: number; h: number } {
   switch (kind) {
-    case 'agent': return { w: 420, h: 520 };
+    case 'agent': return { w: 640, h: 720 };
     case 'interrupt': return { w: 360, h: 260 };
     case 'queue': return { w: 340, h: 420 };
-    case 'ceo': return { w: 420, h: 520 };
+    case 'ceo': return { w: 500, h: 680 };
     case 'feed': return { w: 520, h: 260 };
     case 'fleet': return { w: 380, h: 440 };
     case 'spawn': return { w: 380, h: 400 };
@@ -1273,13 +1274,18 @@ function defaultSize(kind: WinKind): { w: number; h: number } {
     case 'timeline': return { w: 620, h: 400 };
     case 'sfx': return { w: 480, h: 640 };
     case 'music': return { w: 420, h: 560 };
+    case 'terminal': return { w: 760, h: 480 };
+    case 'file': return { w: 680, h: 540 };
+    // Tall and narrow: it is a column of rows read top to bottom, one machine
+    // after another, and every row is a label and a number.
+    case 'hygiene': return { w: 460, h: 620 };
   }
 }
 
 function chrome(spec: WinSpec): string {
   const cs = spec.callsign ? `<span class="win__cs">${esc(spec.callsign)}</span>` : `<span class="win__kind">${esc(spec.kind)}</span>`;
   const pj = spec.project ? `<span class="win__pj">${esc(spec.project)}</span>` : '';
-  const pinnable = spec.kind === 'agent' || spec.kind === 'interrupt' || spec.kind === 'artifact';
+  const pinnable = spec.kind === 'agent' || spec.kind === 'interrupt' || spec.kind === 'artifact' || spec.kind === 'terminal';
   return `
     <i class="win__xh win__xh--tl"></i>
     <header class="win__head">

@@ -10,5 +10,10 @@ test/shots/
 # esta máquina, no código del proyecto.
 .orca/
 
-# Artefactos de trabajo de diseño (caché de impeccable), no código.
-.impeccable/
+# Volcados del navegador que deja el MCP de Playwright al depurar la consola.
+# Son artefactos de una sesión concreta, grandes y sin valor fuera de ella.
+.playwright-mcp/
+
+# Sobras de las corridas de autoverificación de agentes (scripts y salidas
+# que el propio agente genera para comprobarse). No son código del proyecto.
+orca-selftest/

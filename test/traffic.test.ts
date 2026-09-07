@@ -325,19 +325,20 @@ const tests = [
         `K9 quedó ${k9?.state}, respondido por ${msg?.answeredBy}, reply bajó a m1`);
     })),
 
-  test('un relay del CEO llega al collector del destinatario', () =>
+  test('un relay de CAPCOM llega al collector del destinatario', () =>
     withFleet([], async ({ hub, a, b }) => {
-      // El CEO no es un agente y no tiene collector: si esto llega, es porque
-      // el hub lo metió en el tráfico y lo enrutó como cualquier otro mensaje.
+      // El mando no es un compañero de flota y no tiene collector: si esto
+      // llega, es porque el hub lo metió en el tráfico y lo enrutó como
+      // cualquier otro mensaje, firmado como CAPCOM.
       const out = hub.relayMessage({
         kind: 'warning', scope: 'agent', toAgentId: 't1',
         subject: 'no toques el esquema, K9 lo está migrando',
       });
       await until(() => b.delivered().includes('t1'), 5_000);
       const stored = hub.world.state.messages[out.message.id];
-      return ok('un relay del CEO llega a su destinatario',
+      return ok('un relay de CAPCOM llega a su destinatario',
         out.delivered.includes('t1') && a.delivered().length === 0
-        && stored?.fromCallsign === 'CEO' && stored.kind === 'warning',
+        && stored?.fromCallsign === 'CAPCOM' && stored.kind === 'warning',
         `entregado a [${out.delivered.join(', ')}] como ${stored?.fromCallsign}`);
     })),
 

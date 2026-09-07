@@ -258,7 +258,7 @@ async function heldOpen<T>(fn: () => Promise<T>): Promise<T> {
 function handle(over: Partial<AgentHandle> = {}): AgentHandle {
   return {
     id: 'sess-lead', projectId: 'p1', sessionId: 'sess-lead', shortId: 'a1b2c3d4',
-    background: true, alive: true, callsign: 'K9', ...over,
+    background: true, alive: true, callsign: 'K9', pane: null, runtime: 'claude', ...over,
   };
 }
 
@@ -268,6 +268,8 @@ function spawnDeps(dir: string, over: Partial<CommandDeps> = {}): CommandDeps {
   return {
     projects: { get: (id: string) => (id === 'p1' ? project : null) },
     keys: { materialize: () => ({}) },
+    // Sin tmux: estas pruebas ejercen el camino `--bg`; el pane tiene las suyas.
+    tmux: { available: () => false },
     lineage: new LineageIndex(join(dir, 'lineage.json')),
     escalations: {},
     messages: {},
@@ -297,6 +299,50 @@ const spawnAckHasAgentId = test('el ack de spawn trae agentId, callsign y shortI
       res.ok && data.agentId === 'sess-child' && data.callsign === 'T4'
       && data.shortId === 'a1b2c3d4',
       `agentId=${data?.agentId} callsign=${data?.callsign} shortId=${data?.shortId}`);
+  } finally {
+    if (prev === undefined) delete process.env['ORCA_CLAUDE_BIN'];
+    else process.env['ORCA_CLAUDE_BIN'] = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const controlWorkspaceRefused = test('workers cannot inherit the CAPCOM control workspace', async () => {
+  const dir = temp();
+  const oldBin = process.env['ORCA_CLAUDE_BIN'];
+  const oldControl = process.env['ORCA_CAPCOM_DIR'];
+  try {
+    process.env['ORCA_CLAUDE_BIN'] = fakeClaude(dir).bin;
+    process.env['ORCA_CAPCOM_DIR'] = dir;
+    let launched = false;
+    const runner = new CommandRunner(spawnDeps(dir, {
+      awaitSpawn: async () => { launched = true; return null; },
+    }));
+    const res = await runner.execute({ k: 'spawn', projectId: 'p1', prompt: 'Say hello to the other worker.', parentId: null, mission: 'hello', background: true });
+    return ok('CAPCOM folder is rejected before process launch', !res.ok && !launched && (res.detail ?? '').includes('control workspace'));
+  } finally {
+    if (oldBin === undefined) delete process.env['ORCA_CLAUDE_BIN']; else process.env['ORCA_CLAUDE_BIN'] = oldBin;
+    if (oldControl === undefined) delete process.env['ORCA_CAPCOM_DIR']; else process.env['ORCA_CAPCOM_DIR'] = oldControl;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const hostedAckDoesNotWait = test('hosted spawn acknowledges its stable id before a transcript exists', async () => {
+  const dir = temp();
+  const prev = process.env['ORCA_CLAUDE_BIN'];
+  try {
+    process.env['ORCA_CLAUDE_BIN'] = fakeClaude(dir).bin;
+    let pane = '';
+    let wait = -1;
+    const runner = new CommandRunner(spawnDeps(dir, {
+      tmux: {
+        available: () => true,
+        spawn: async (p: { name: string }) => { pane = p.name; return { ok: true, stdout: '', detail: '' }; },
+      } as unknown as CommandDeps['tmux'],
+      awaitSpawn: async (_want, ms) => { wait = ms; return null; },
+    }));
+    const res = await runner.execute({ k: 'spawn', projectId: 'p1', prompt: 'Audit the payments module.', parentId: null, mission: 'audit', background: true });
+    const data = res.data as SpawnAck;
+    return ok('stable identity without transcript wait', res.ok && wait === 0 && pane === `orca-${data.agentId}` && data.callsign === null);
   } finally {
     if (prev === undefined) delete process.env['ORCA_CLAUDE_BIN'];
     else process.env['ORCA_CLAUDE_BIN'] = prev;
@@ -542,6 +588,8 @@ const tests = [
   briefsSayTheRightThing,
   briefRidesTheEnd,
   spawnAckHasAgentId,
+  hostedAckDoesNotWait,
+  controlWorkspaceRefused,
   spawnAckSurvivesNoSession,
   spawnPastesTheBrief,
   badSquadIsRefused,

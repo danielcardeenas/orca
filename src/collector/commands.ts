@@ -167,6 +167,8 @@ export interface CapcomChannel {
   launchArgs(): string[];
   /** El resume creó una sesión nueva: el rol se muda a ella. */
   adopt(shortId: string): void;
+  /** Tras un `/clear`: mueve el rol y el registro que lo readopta. */
+  adoptCleared(toId: string, mode: 'clean' | 'continuity', cutoffAt: number): void;
 }
 
 export interface CommandResult {
@@ -217,7 +219,7 @@ export class CommandRunner {
       setModel: (id, model) => this.applyModel(id, model),
       discover: (projectId, runtime, since, ms) => deps.awaitSpawn({ shortId: null, runtime, projectId, since }, ms),
       hold: (id, on, cutoffAt, mode) => deps.transfer?.hold(id, on, on ? { contextMode: mode, at: cutoffAt } as never : undefined),
-      adopt: (_from, to) => { deps.capcom?.adopt(to); },
+      adopt: (_from, to, mode, cutoffAt) => { deps.capcom?.adoptCleared(to, mode, cutoffAt); },
       note: text => log('info', SCOPE, text),
     });
     this.bin = resolveClaudeBin();

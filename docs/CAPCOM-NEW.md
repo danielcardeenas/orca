@@ -61,6 +61,14 @@ camino preparado: ahí sí se arranca otro binario y verificar antes de retirar
 vale lo que cuesta. `ORCA_CAPCOM_PREPARED_RESET=1` devuelve el camino largo
 también para el mismo runtime, sin la elección de modelo.
 
+Adoptar el hilo nuevo no es sólo mover el rol en memoria: `ensure` lee primero
+`codex-recovery.json` —una recuperación preparada pesa más que un recuerdo— y su
+`sessionId` gana sobre `session.json`. Sin apuntarlo ahí, el vigilante devolvía
+el rol al hilo ya vaciado en su siguiente vuelta, y el hub decía «0 UNDER
+COMMAND» con el proceso corriendo delante. Se actualiza `sessionId`,
+`contextMode`, `cutoffAt` y `previousSessionId`; runtime, modelo y `cwd` no
+cambian, porque es el mismo proceso.
+
 El modelo se cambia **antes** de vaciar, con el selector nativo: el relevo debe
 nacer con el que se pidió, y mientras el contexto viejo sigue en pie un modelo
 sin cuota falla sin haber tocado nada.

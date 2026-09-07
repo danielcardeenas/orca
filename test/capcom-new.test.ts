@@ -119,6 +119,37 @@ export default { suite: 'Fresh CAPCOM', tests: [
       return ok('Codex isolated readiness, atomic UUID publication and clean resume policy', true);
     } finally { r.dispose(); }
   }),
+  test('after a native /clear the role sticks: the record the watchdog reads points at the new session', async () => {
+    const r = rig();
+    try {
+      // Lo que había en disco cuando esto falló de verdad: una recuperación
+      // preparada que nombra el hilo viejo. `ensure` la lee ANTES que
+      // `session.json`, así que sin actualizarla el vigilante devolvía el rol
+      // al hilo ya vaciado y el hub decía «no hay CAPCOM» con el proceso vivo.
+      const file = path.join(r.dir, 'codex-recovery.json');
+      fs.writeFileSync(file, JSON.stringify({ runtime: 'codex', sessionId: OLD, model: 'gpt-6-astra',
+        cwd: path.join(r.dir, 'runtime'), contextMode: 'clean' }));
+      const cap = new CapcomSession({ dir: r.dir, bin: '/fake/claude', codexBin: '/fake/codex', hubUrl: 'ws://127.0.0.1:1', token: '', trust: false,
+        alive: id => id === NEW, wait: async () => {}, note() {}, lineage: { noteSpawn() {}, bind() {}, demote() {} },
+        tmux: { available: () => true, spawn: async () => { throw new Error('a native clear must not launch anything'); },
+          capture: async () => ({ ok: true, stdout: '', detail: '' }), kill: async () => ({ ok: true, stdout: '', detail: '' }) },
+      });
+      cap.adopt(OLD);
+      cap.adoptCleared(NEW, 'clean', 1234);
+      assert.equal(cap.current(), NEW);
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.equal(saved.sessionId, NEW);
+      assert.equal(saved.previousSessionId, OLD);
+      assert.equal(saved.contextMode, 'clean'); assert.equal(saved.cutoffAt, 1234);
+      // Lo demás es el mismo proceso: runtime, modelo y directorio no cambian.
+      assert.equal(saved.runtime, 'codex'); assert.equal(saved.model, 'gpt-6-astra');
+      assert.equal(saved.cwd, path.join(r.dir, 'runtime'));
+      assert.equal(cap.recovery()?.sessionId, NEW, 'and that is what ensure() reads first');
+      const back = await cap.ensure();
+      assert.equal(back.shortId, NEW, 'the watchdog keeps the new session instead of reviving the cleared one');
+      return ok('the record that outranks session.json follows the /clear', true);
+    } finally { r.dispose(); }
+  }),
   test('the archived transcript is not a second copy, and a superseded archive keeps its evidence without its bulk', () => {
     const r = rig();
     try {

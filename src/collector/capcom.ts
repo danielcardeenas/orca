@@ -874,6 +874,38 @@ export class CapcomSession {
    * mando: el hub buscaría un `role:'capcom'` vivo, encontraría la sesión vieja
    * ya terminada, y el collector relanzaría un CAPCOM desde cero.
    */
+  /**
+   * El `/clear` del CLI dejó un hilo nuevo: apuntarlo donde manda de verdad.
+   *
+   * `adopt` mueve el rol en memoria y en `session.json`, y con eso bastaría si
+   * `session.json` fuera la última palabra. No lo es: `ensure` lee primero
+   * `codex-recovery.json`, porque una recuperación preparada es una decisión
+   * más fuerte que un recuerdo, y su `sessionId` gana. Sin actualizarlo, el
+   * vigilante devolvía el rol al hilo vaciado en su siguiente vuelta — un
+   * CAPCOM vivo al que el hub ya no encontraba, que es como se vio: «0 UNDER
+   * COMMAND» con el proceso corriendo delante.
+   *
+   * El resto del registro se conserva tal cual: el runtime, el modelo y el
+   * `cwd` son los mismos —es el mismo proceso—, y `previousSessionId` encadena
+   * el linaje igual que lo haría un traspaso.
+   */
+  adoptCleared(toId: string, mode: 'clean' | 'continuity', cutoffAt: number): void {
+    const file = path.join(this.dir, 'codex-recovery.json');
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      const next = { ...raw, sessionId: toId, contextMode: mode, cutoffAt,
+        previousSessionId: raw['sessionId'], activatedAt: new Date(this.now()).toISOString(), reason: 'manual' };
+      fs.writeFileSync(file + '.tmp', JSON.stringify(next, null, 2), { mode: 0o600 });
+      fs.renameSync(file + '.tmp', file);
+    } catch (err) {
+      // Sin registro previo no hay nada que corregir: `session.json` manda.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        log('warn', SCOPE, `no pude apuntar el CAPCOM nuevo en codex-recovery.json: ${errText(err)}`);
+      }
+    }
+    this.adopt(toId);
+  }
+
   adopt(shortId: string): void {
     this.adoptedAt = this.now();
     if (this.shortId === shortId) return;

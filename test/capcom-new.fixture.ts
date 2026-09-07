@@ -22,6 +22,12 @@ hub.cmd = async cmd => {
   // de New CAPCOM lo pide sola al abrirse.
   if (cmd.k === 'model:list') return { sessionId: 'cap', runtime: 'codex', active: 'gpt-6-astra', requested: null,
     phase: 'ready', detail: '', events: [], choices: [{ id: 'gpt-6-astra', label: 'gpt-6-astra' }, { id: 'gpt-5.6-luna', label: 'gpt-5.6-luna' }] };
+  // Y el de los proveedores, del que salen los modelos del OTRO runtime.
+  if (cmd.k === 'handoff:models') return [
+    { runtime: 'codex', id: 'gpt-6-astra', label: 'gpt-6-astra', installed: true },
+    { runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: true },
+    { runtime: 'claude', id: 'opus', label: 'Opus', installed: false },
+  ];
   throw new Error(`Unexpected fixture command: ${cmd.k}`);
 };
 export function fail() { if (plan) plan = { ...plan, phase: 'failed', detail: 'Destination unavailable. Original CAPCOM retained; retry when ready.' }; }

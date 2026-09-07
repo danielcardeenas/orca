@@ -829,7 +829,12 @@ export class CommandRunner {
     const model = cmd.model?.trim() || current;
     if (!model) throw new Error('Current CAPCOM model is unknown. No new session was started.');
     const runtime = providerModels().find(m => m.id === model)?.runtime ?? a.runtime;
-    if (runtime !== a.runtime) return this.handoffs.review(cmd.agentId, runtime, model, cmd.checkpoint ?? '');
+    // Cruzar de proveedor arranca otro binario: se prepara, se verifica y sólo
+    // entonces se retira al anterior. El modo elegido viaja igual — «limpio»
+    // sigue siendo limpio —, así que va por `fresh` y no por la revisión
+    // manual, que llevaría la conversación entera y dejaría el botón sin hacer
+    // lo que dice.
+    if (runtime !== a.runtime) return this.handoffs.fresh(cmd.agentId, cmd.mode, cmd.checkpoint, { runtime, model });
     if (preparedReset()) {
       if (model !== current) throw new Error('Choosing a model needs the native reset; unset ORCA_CAPCOM_PREPARED_RESET or change the model first.');
       return this.handoffs.fresh(cmd.agentId, cmd.mode, cmd.checkpoint);

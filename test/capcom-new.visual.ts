@@ -35,7 +35,20 @@ try {
   assert.ok(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.some((c: {k: string}) => c.k === 'model:list')),
     'the choice asks the CLI for its catalog instead of offering nothing');
   await page.locator('[data-fresh-model] button').click();
+  // Los dos caminos en la misma lista, cada uno diciendo lo que es.
+  await page.getByRole('option', { name: /Sonnet/ }).waitFor();
+  assert.match(await page.getByRole('option', { name: /gpt-5\.6-luna/ }).innerText(), /clears in place/);
+  assert.match(await page.getByRole('option', { name: /Sonnet/ }).innerText(), /prepares and verifies/);
+  assert.match(await page.getByRole('option', { name: /Opus/ }).innerText(), /CLI not installed/);
+  // Cruzar de proveedor dice lo que cuesta ANTES de pulsar nada.
+  await page.getByRole('option', { name: /Sonnet/ }).click();
+  await page.getByRole('button', { name: 'Clean context · prepare', exact: true }).waitFor();
+  assert.match(await page.locator('[data-fresh-note]').innerText(), /prepared and verified before the current CAPCOM is retired/);
+  // Y volver al proveedor actual devuelve el botón a lo que de verdad hace.
+  await page.locator('[data-fresh-model] button').click();
   await page.getByRole('option', { name: /gpt-5\.6-luna/ }).click();
+  await page.getByRole('button', { name: 'Clean context', exact: true }).waitFor();
+  assert.equal(await page.locator('[data-fresh-note]').isVisible(), false);
   await page.getByRole('button', { name: 'Clean context', exact: true }).click();
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').at(-1)?.model), 'gpt-5.6-luna');
   assert.equal(await page.getByRole('button', { name: 'New CAPCOM', exact: true }).isDisabled(), true);

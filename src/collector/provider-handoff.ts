@@ -210,13 +210,14 @@ export class ProviderHandoffs {
       } catch { /* the note is a courtesy, not the point */ }
     }
   }
-  fresh(id: string, mode: 'continuity' | 'clean', checkpoint = ''): ProviderHandoffPlan {
+  fresh(id: string, mode: 'continuity' | 'clean', checkpoint = '', target?: { runtime: string; model: string }): ProviderHandoffPlan {
     if (!['continuity', 'clean'].includes(mode)) throw new Error('Choose clean or continuity explicitly.');
     if (this.running === id && this.freshPlan && this.freshPlan.contextMode === mode) return this.status(this.freshPlan.id);
     const a = this.target(id);
-    const model = this.deps.model?.(a) ?? a.model;
-    if (!model || !['claude', 'codex'].includes(a.runtime)) throw new Error('Current CAPCOM runtime/model is unknown. No new session was started.');
-    const p = this.review(id, a.runtime, model, mode === 'clean' ? '' : checkpoint, mode);
+    const model = target?.model ?? this.deps.model?.(a) ?? a.model;
+    const runtime = target?.runtime ?? a.runtime;
+    if (!model || !['claude', 'codex'].includes(runtime)) throw new Error('Current CAPCOM runtime/model is unknown. No new session was started.');
+    const p = this.review(id, runtime, model, mode === 'clean' ? '' : checkpoint, mode);
     this.freshPlan = p;
     return this.commit(id, p.id);
   }
@@ -224,8 +225,22 @@ export class ProviderHandoffs {
     const a = this.target(id);
     if (this.running || this.deps.busy(id) || !this.idle(a)) throw new Error('Finish the current turn or model change before preparing a handoff.');
     if (!contextMode && runtime === a.runtime) throw new Error('Use the same-session model selector for this provider.');
-    if (contextMode && (runtime !== a.runtime || model !== (this.deps.model?.(a) ?? a.model))) throw new Error('Fresh CAPCOM must retain its runtime and model.');
-    if (!contextMode && !(this.deps.models?.() ?? providerModels()).some(m => m.runtime === runtime && m.id === model && m.installed)) throw new Error('Choose an installed provider and a listed model.');
+    /*
+     * El modo y el destino son ejes distintos.
+     *
+     * Un contexto nuevo exigía conservar runtime y modelo, y eso ataba dos
+     * cosas que no tienen por qué ir juntas: qué hereda el relevo y qué proceso
+     * lo lleva. «Limpio» significa lo mismo con Codex que cruzando a Claude —
+     * sesión nueva, sin conversación ni checkpoint—; lo único que cambia es que
+     * ahí hay que preparar y verificar un binario en vez de vaciar en el sitio.
+     *
+     * Lo que sí se exige es que el destino exista: cualquier salto que no sea
+     * quedarse exactamente donde se está pasa por el catálogo.
+     */
+    if (!(runtime === a.runtime && model === (this.deps.model?.(a) ?? a.model))
+      && !(this.deps.models?.() ?? providerModels()).some(m => m.runtime === runtime && m.id === model && m.installed)) {
+      throw new Error('Choose an installed provider and a listed model.');
+    }
     const transferId = randomUUID(); const archive = path.join(this.deps.dir(), 'handoffs', transferId);
     fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
     const cwd = contextMode ? path.join(archive, 'runtime') : undefined;

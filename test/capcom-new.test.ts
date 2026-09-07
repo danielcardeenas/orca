@@ -7,7 +7,7 @@ import path from 'node:path';
 import { ProviderHandoffs } from '../src/collector/provider-handoff.ts';
 import { CapcomSession } from '../src/collector/capcom.ts';
 import { CapcomRouter } from '../src/hub/capcom.ts';
-import { cleanCapcomBrief } from '../src/collector/briefs.ts';
+import { capcomBrief, cleanCapcomBrief } from '../src/collector/briefs.ts';
 import { freshCapcomCheckpoint } from '../src/hub/capcom-checkpoint.ts';
 import type { ProviderHandoffPlan, ProviderModel } from '../src/shared/provider-handoff.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
@@ -161,6 +161,44 @@ export default { suite: 'Fresh CAPCOM', tests: [
         assert.deepEqual(r2.activated, []);
       } finally { r2.dispose(); }
       return ok('a source that moved still stops the handoff, both before and during', true);
+    } finally { r.dispose(); }
+  }),
+  ...(['clean', 'continuity'] as const).map(mode => test(`crossing provider keeps the mode: ${mode} is ${mode} with another runtime too`, async () => {
+    const r = rig();
+    try {
+      r.deps.models = () => [{ runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: true }];
+      // El modo y el destino son ejes distintos: antes, pedir un contexto nuevo
+      // con otro proveedor caía en `Fresh CAPCOM must retain its runtime and
+      // model`, y el único camino cruzado que quedaba llevaba la conversación
+      // entera — lo contrario de lo que dice el botón que se pulsó.
+      const p = r.service.fresh(OLD, mode, 'PENDING_HUB_SENTINEL', { runtime: 'claude', model: 'sonnet' });
+      assert.equal(p.contextMode, mode);
+      assert.equal(p.runtime, 'claude'); assert.equal(p.model, 'sonnet');
+      assert.equal(p.fromRuntime, 'codex'); assert.equal(p.fromModel, 'gpt-6-astra');
+      await r.settle();
+      assert.equal(r.service.status(p.id).phase, 'complete');
+      assert.deepEqual(r.activated, [NEW]);
+      // Y lo que se le manda al destino sigue siendo lo que el modo promete.
+      const sent = r.prompts[0]!;
+      assert.ok(!sent.includes('HISTORICAL_CONVERSATION_SENTINEL'), 'no conversation crosses in either mode');
+      assert.equal(sent.includes('PENDING_HUB_SENTINEL'), mode === 'continuity');
+      if (mode === 'clean') assert.ok(!sent.includes(OLD));
+      // El brief del destino es el del modo, en los dos ficheros de runtime.
+      assert.equal(fs.readFileSync(path.join(p.cwd!, 'CLAUDE.md'), 'utf8'), mode === 'clean' ? cleanCapcomBrief() : capcomBrief());
+      return ok(`${mode} across providers: same promise, prepared instead of cleared in place`, true);
+    } finally { r.dispose(); }
+  })),
+  test('a fresh CAPCOM still refuses a model no installed provider offers', () => {
+    const r = rig();
+    try {
+      r.deps.models = () => [{ runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: false }];
+      assert.throws(() => r.service.fresh(OLD, 'clean', '', { runtime: 'claude', model: 'sonnet' }), /installed provider and a listed model/);
+      assert.throws(() => r.service.fresh(OLD, 'clean', '', { runtime: 'claude', model: 'invented' }), /installed provider and a listed model/);
+      // Quedarse donde se está no pasa por el catálogo: no hay salto que validar.
+      const same = r.service.fresh(OLD, 'clean', '', { runtime: 'codex', model: 'gpt-6-astra' });
+      assert.equal(same.runtime, 'codex');
+      assert.deepEqual(r.activated.length, 0, 'nothing activated yet; the point is that it was accepted');
+      return ok('a destination that does not exist is refused; staying put needs no catalog', true);
     } finally { r.dispose(); }
   }),
   test('after a native /clear the role sticks: the record the watchdog reads points at the new session', async () => {

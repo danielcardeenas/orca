@@ -33,6 +33,21 @@ Desde 2026-09-07, New CAPCOM elige según lo que de verdad cambie:
 | Contexto y modelo, mismo runtime | selector nativo del modelo, y después `/clear` |
 | Runtime | sesión preparada aparte, verificada antes de retirar la anterior |
 
+El modo y el destino son ejes distintos: **«limpio» significa lo mismo cruzando
+de proveedor** —sesión nueva, sin conversación ni checkpoint, sólo el brief—, y
+lo único que cambia es el mecanismo. Antes no era así: pedir un contexto nuevo
+con otro proveedor caía en `Fresh CAPCOM must retain its runtime and model`, y el
+único camino cruzado que quedaba llevaba la conversación entera, o sea lo
+contrario de lo que decía el botón pulsado.
+
+La consola ofrece los dos caminos en la misma lista y dice cuál es cuál —
+`clears in place` frente a `prepares and verifies · slower`—, un CLI no instalado
+aparece deshabilitado, y al elegir un modelo de otro proveedor los botones pasan
+a `Clean context · prepare` con una línea que explica que se arranca un segundo
+CLI, que tarda hasta dos minutos y que puede fallar por cuota o autenticación
+conservando la sesión actual. Es la misma acción con dos perfiles de riesgo muy
+distintos, y esconderlo detrás del mismo botón sería engañoso.
+
 `/clear` no era una idea nueva sino una comprobación pendiente: en Codex 0.153.4
 se anuncia como «clear the terminal and start a new chat» y, al ejecutarlo, deja
 por escrito «To continue this session, run codex resume … \<uuid\>» y abre un

@@ -16,7 +16,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   const freshChoice = document.createElement('section');
   freshChoice.className = 'capcom__transfer'; freshChoice.hidden = true;
   freshChoice.setAttribute('aria-label', 'New CAPCOM');
-  freshChoice.innerHTML = '<p class="mono">New session. Keeps files, history, hub rules and workers.</p><p class="mono">Clean context: waits for new instructions, with no summary, history, automatic briefing or recall. Continuity: restores pending work with a brief checkpoint. New messages received during the change are delivered to the new CAPCOM.</p><div class="row"><span class="mono" data-fresh-model-label>Model</span><div data-fresh-model></div></div><div class="row"><button type="button" class="chip" data-fresh-clean>Clean context</button><button type="button" class="chip" data-fresh-continuity>With continuity</button><button type="button" class="chip" data-fresh-cancel>Cancel</button></div>';
+  freshChoice.innerHTML = '<p class="mono">New session. Keeps files, history, hub rules and workers.</p><p class="mono">Clean context: waits for new instructions, with no summary, history, automatic briefing or recall. Continuity: restores pending work with a brief checkpoint. New messages received during the change are delivered to the new CAPCOM.</p><div class="row"><span class="mono" data-fresh-model-label>Model</span><div data-fresh-model></div></div><p class="mono" data-fresh-note hidden></p><div class="row"><button type="button" class="chip" data-fresh-clean>Clean context</button><button type="button" class="chip" data-fresh-continuity>With continuity</button><button type="button" class="chip" data-fresh-cancel>Cancel</button></div>';
   host.appendChild(freshChoice);
   const active = host.querySelector<HTMLElement>('[data-active]')!;
   const detail = host.querySelector<HTMLElement>('[data-detail]')!;
@@ -117,26 +117,65 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
    * falla sin haber tocado nada.
    */
   let freshModel = '';
+  /** Los modelos de TODOS los proveedores, para poder ofrecer el otro camino. */
+  let freshCatalog: ProviderModel[] = [];
   const freshModelHost = freshChoice.querySelector<HTMLElement>('[data-fresh-model]')!;
+  const freshNote = freshChoice.querySelector<HTMLElement>('[data-fresh-note]')!;
+  const freshClean = freshChoice.querySelector<HTMLButtonElement>('[data-fresh-clean]')!;
+  const freshCont = freshChoice.querySelector<HTMLButtonElement>('[data-fresh-continuity]')!;
   let freshPicker: PickHandle | undefined;
+  /** ¿El modelo elegido cruza de proveedor? Decide el mecanismo y lo que se dice. */
+  function freshCrosses(): boolean {
+    return !!freshModel && !!agent && (freshCatalog.find(m => m.id === freshModel)?.runtime ?? agent.runtime) !== agent.runtime;
+  }
   function paintFreshModel() {
     const choices = state?.choices ?? [];
     const active = state?.active ?? agent?.model ?? '';
-    const sig = JSON.stringify([choices.map(c => c.id), active, freshModel]);
+    const others = agent ? freshCatalog.filter(m => m.runtime !== agent!.runtime) : [];
+    // Antes del corte: lo que prometen los botones depende del modelo elegido,
+    // no de si hay que redibujar la lista — y elegir deja el picker abierto un
+    // instante, que era justo cuando el corte se comía la actualización.
+    paintFreshButtons();
+    const sig = JSON.stringify([choices.map(c => c.id), others.map(o => [o.id, o.installed]), active, freshModel]);
     if (sig === freshModelSig || freshPicker?.isOpen()) return;
     freshModelSig = sig;
     freshPicker?.dispose();
-    if (!choices.length) {
+    /*
+     * Los dos caminos en la misma lista, y dicho cuál es cuál.
+     *
+     * Quedarse en el proveedor actual se vacía en el sitio: segundos, y no hay
+     * proceso nuevo que pueda fallar. Cruzar arranca otro binario, tarda hasta
+     * dos minutos y puede quedarse en la cuota o la autenticación. Es la misma
+     * acción con dos perfiles muy distintos, y esconder eso detrás del mismo
+     * botón es lo que hace desconfiar de una consola.
+     */
+    const cross = (m: ProviderModel) => ({ value: m.id, label: m.label,
+      group: m.runtime === 'claude' ? 'CLAUDE CODE' : 'CODEX',
+      hint: m.installed ? 'prepares and verifies · slower' : 'CLI not installed', disabled: !m.installed });
+    if (!choices.length && !others.length) {
       // Nunca una lista inventada: o la dio el CLI, o se dice por qué no.
       freshModelHost.textContent = freshLoading ? 'Loading models…'
         : freshModelError ? `${active || 'current model'} · ${freshModelError}`
         : active ? `${active} · asking the CLI for the rest…` : '';
+      paintFreshButtons();
       return;
     }
-    freshPicker = pick({ name: 'capcom-fresh-model', value: freshModel || active, search: choices.length > 6,
-      options: choices.map(c => ({ value: c.id, label: c.label, hint: c.id === active ? 'current' : '' })),
+    freshPicker = pick({ name: 'capcom-fresh-model', value: freshModel || active, search: choices.length + others.length > 6,
+      options: [...choices.map(c => ({ value: c.id, label: c.label, group: (agent?.runtime ?? '').toUpperCase(),
+        hint: c.id === active ? 'current · clears in place' : 'clears in place' })), ...others.map(cross)],
       onChange: id => { freshModel = id === active ? '' : id; freshModelSig = ''; paintFreshModel(); } });
     freshModelHost.replaceChildren(freshPicker.el);
+    paintFreshButtons();
+  }
+  /** Lo que los botones prometen depende de por dónde va a ir. */
+  function paintFreshButtons() {
+    const crosses = freshCrosses();
+    freshClean.textContent = crosses ? 'Clean context · prepare' : 'Clean context';
+    freshCont.textContent = crosses ? 'With continuity · prepare' : 'With continuity';
+    const note = crosses
+      ? 'Switching provider starts a second CLI: it is prepared and verified before the current CAPCOM is retired, which takes up to two minutes and can fail on quota or authentication. The current session is kept if it does.'
+      : '';
+    freshNote.textContent = note; freshNote.hidden = !note;
   }
   let freshModelSig = '';
   let freshLoading = false;
@@ -149,18 +188,31 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     // hay lista que ofrecer. Preguntarlo aquí es lo que hace que la elección
     // exista: dejarlo para el botón de al lado la escondía a quien no supiera
     // que había que pulsarlo primero.
-    if (!(state?.choices ?? []).length) void loadFreshModels();
+    if (!(state?.choices ?? []).length || !freshCatalog.length) void loadFreshModels();
   });
 
-  /** Sólo el catálogo nativo: aquí no se cambia de proveedor. */
+  /**
+   * Los dos catálogos: el de esta sesión y el de los proveedores instalados.
+   *
+   * Por separado, y tolerando que uno falle: sin el nativo aún se puede cruzar
+   * de proveedor, y sin el de proveedores aún se puede cambiar de modelo aquí
+   * dentro. Rendir la elección entera porque una de las dos preguntas no tuvo
+   * respuesta dejaría al operador sin la mitad que sí funciona.
+   */
   async function loadFreshModels() {
     const id = agent?.id;
     if (!id || busy || freshLoading) return;
-    freshLoading = true; freshModelSig = ''; paintFreshModel();
+    freshLoading = true; freshModelError = ''; freshModelSig = ''; paintFreshModel();
     try {
-      const native = parseModelControl(await command({ k: 'model:list', agentId: id }));
+      const [native, providers] = await Promise.allSettled([
+        command({ k: 'model:list', agentId: id }), command({ k: 'handoff:models', agentId: id }),
+      ]);
       if (disposed || agent?.id !== id) return;
-      if (native) state = native;
+      const parsed = native.status === 'fulfilled' ? parseModelControl(native.value) : undefined;
+      if (parsed) state = parsed;
+      if (providers.status === 'fulfilled' && Array.isArray(providers.value)) freshCatalog = providers.value as ProviderModel[];
+      const failed = [native.status === 'rejected' ? 'this session' : '', providers.status === 'rejected' ? 'other providers' : ''].filter(Boolean);
+      if (failed.length) freshModelError = `Could not list ${failed.join(' or ')}.`;
     } catch (e) {
       if (agent?.id === id) freshModelError = e instanceof Error ? e.message : String(e);
     } finally { freshLoading = false; freshModelSig = ''; if (!disposed) paintFreshModel(); }

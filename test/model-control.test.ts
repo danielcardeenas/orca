@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { peekIdentity } from '../src/collector/capcom-identity.ts';
 import { ModelController, modelMenu, modelPromptReady, modelConfirmed } from '../src/collector/model-control.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
 import { test, ok } from './harness.ts';
@@ -70,8 +71,11 @@ export default { suite: 'CAPCOM model control', tests: [
       const state = r.controller.state(r.a)!;
       assert.equal(state.phase, 'ready'); assert.equal(state.active, 'new'); assert.equal(state.sessionId, 'session-1234');
       assert.equal(state.events.length, 1);
-      const recovery = JSON.parse(fs.readFileSync(path.join(r.dir, 'codex-recovery.json'), 'utf8'));
-      assert.equal(recovery.model, 'new'); assert.equal(recovery.handoffModel, 'old');
+      // Un agente cuyo id no es una sesión de mando: se mira sin exigir que
+      // el archivo sea una identidad de CAPCOM.
+      const recovery = peekIdentity(r.dir);
+      assert.equal(recovery, null, 'a non-CAPCOM session leaves the command identity alone');
+      assert.match(fs.readFileSync(path.join(r.dir, 'codex-recovery.json'), 'utf8'), /"model": ?"old"|"model":"old"/);
       const restarted = new ModelController(r.deps);
       assert.deepEqual(restarted.state(r.a), state);
       assert.equal(fs.readFileSync(path.join(r.dir, 'model-changes.jsonl'), 'utf8').trim().split('\n').length, 1);

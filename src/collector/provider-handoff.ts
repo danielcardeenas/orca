@@ -7,6 +7,7 @@ import { runtimeBin } from './runtime.ts';
 import { home } from './util.ts';
 import type { AgentHandle } from './commands.ts';
 import type { ProviderHandoffPlan, ProviderModel, HistoryPage } from '../shared/provider-handoff.ts';
+import { IDENTITY_FILE, LEGACY_FILES, readIdentity } from './capcom-identity.ts';
 
 const hash = (s: string | Buffer) => createHash('sha256').update(s).digest('hex');
 const uuid = (s: unknown): s is string => typeof s === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(s);
@@ -93,7 +94,8 @@ export class ProviderHandoffs {
   private completed(id: string): string | undefined {
     const known = this.deps.completed?.(id);
     if (known) return known;
-    try { const r = JSON.parse(fs.readFileSync(path.join(this.deps.dir(), 'codex-recovery.json'), 'utf8')); return r.handoffId === id && uuid(r.sessionId) ? r.sessionId : undefined; } catch { return undefined; }
+    // La identidad dice qué traspaso la creó: si es éste, ya se activó.
+    try { const r = readIdentity(this.deps.dir()); return r?.handoffId === id && uuid(r.sessionId) ? r.sessionId : undefined; } catch { return undefined; }
   }
   locked(id: string) { return this.running === id; }
   private target(id: string) {
@@ -142,8 +144,8 @@ export class ProviderHandoffs {
     if (p.phase === 'preparing' && !this.running) {
       p.phase = 'failed'; p.detail = 'Preparation was interrupted. The backup is intact. Check the active agent before preparing a new handoff.';
       try {
-        const recovery = JSON.parse(fs.readFileSync(path.join(this.deps.dir(), 'codex-recovery.json'), 'utf8'));
-        if (recovery.handoffId === id) { p.phase = 'complete'; p.toId = recovery.sessionId; p.detail = 'Handoff activated; history preserved.'; }
+        const active = readIdentity(this.deps.dir());
+        if (active?.handoffId === id) { p.phase = 'complete'; p.toId = active.sessionId; p.detail = 'Handoff activated; history preserved.'; }
       } catch {}
       const completed = this.completed(id);
       if (completed) { p.phase = 'complete'; p.toId = completed; p.detail = 'Handoff activated; history preserved.'; }
@@ -154,11 +156,9 @@ export class ProviderHandoffs {
   }
   private priorHistory(a: AgentHandle): string {
     if (this.deps.priorHistory) return this.deps.priorHistory(a);
-    const file = path.join(this.deps.dir(), 'codex-recovery.json');
-    if (!fs.existsSync(file)) return '';
-    // A recovery record outlives its archive when .orca is pruned. Absent earlier history is
+    // An identity outlives its archive when .orca is pruned. Absent earlier history is
     // the same as none: the transcript is the source and conversation.md is rebuilt from it.
-    try { const recovery = JSON.parse(fs.readFileSync(file, 'utf8')); return recovery.historyPath ? fs.readFileSync(recovery.historyPath, 'utf8') : ''; } catch { return ''; }
+    try { const active = readIdentity(this.deps.dir()); return active?.historyPath ? fs.readFileSync(active.historyPath, 'utf8') : ''; } catch { return ''; }
   }
   history(id: string, offset: number, before: number): HistoryPage {
     const a = this.deps.agent(id);
@@ -192,8 +192,8 @@ export class ProviderHandoffs {
     const root = path.join(this.deps.dir(), 'handoffs');
     const spare = new Set([path.basename(keep)]);
     try {
-      const r = JSON.parse(fs.readFileSync(path.join(this.deps.dir(), 'codex-recovery.json'), 'utf8'));
-      for (const ref of [r.handoffId, r.archive && path.basename(r.archive)]) if (typeof ref === 'string' && ref) spare.add(ref);
+      const r = readIdentity(this.deps.dir());
+      for (const ref of [r?.handoffId, r?.archive && path.basename(r.archive)]) if (typeof ref === 'string' && ref) spare.add(ref);
     } catch { /* no active recovery to protect */ }
     let entries: string[] = [];
     try { entries = fs.readdirSync(root); } catch { return; }
@@ -253,7 +253,7 @@ export class ProviderHandoffs {
     const raw = fs.readFileSync(a.transcriptPath!);
     linkOrCopy(a.transcriptPath!, path.join(archive, 'source.jsonl'));
     // Keep control state and earlier archive references before any target process runs.
-    for (const name of ['codex-recovery.json', 'session.json', 'CLAUDE.md', 'AGENTS.md', 'model-changes.jsonl']) {
+    for (const name of [IDENTITY_FILE, ...LEGACY_FILES, 'CLAUDE.md', 'AGENTS.md', 'model-changes.jsonl']) {
       const file = path.join(this.deps.dir(), name);
       if (fs.existsSync(file)) fs.copyFileSync(file, path.join(archive, name));
     }

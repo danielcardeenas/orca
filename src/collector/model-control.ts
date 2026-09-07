@@ -6,6 +6,7 @@ import type { AgentHandle } from './commands.ts';
 import type { TmuxHost } from './tmux.ts';
 import type { ModelChoice, ModelControl } from '../shared/model-control.ts';
 import { parseModelControl } from '../shared/model-control.ts';
+import { peekIdentity, writeIdentity } from './capcom-identity.ts';
 
 type Row = ModelChoice & { selected: boolean; index: number };
 export function modelMenu(screen: string, runtime: string): Row[] {
@@ -195,17 +196,21 @@ export class ModelController {
       const event = { id: randomUUID(), at: Date.now(), from: s.active, to: choice.id,
         text: `Model changed: ${s.active ?? 'unknown'} → ${choice.id} · Same conversation. Applies to subsequent turns.` };
       fs.appendFileSync(path.join(this.deps.dir(s.sessionId)!, 'model-changes.jsonl'), JSON.stringify({ ...event, sessionId: s.sessionId, runtime: a.runtime }) + '\n', { mode: 0o600 });
-      // Recovery must resume this same thread with the newly confirmed model.
-      const recoveryFile = path.join(this.deps.dir(s.sessionId)!, 'codex-recovery.json');
-      if (fs.existsSync(recoveryFile)) {
-        const recovery = JSON.parse(fs.readFileSync(recoveryFile, 'utf8'));
-        if (recovery.sessionId === s.sessionId) {
-          recovery.handoffModel ??= recovery.model;
-          recovery.model = choice.id;
-          fs.writeFileSync(`${recoveryFile}.tmp`, JSON.stringify(recovery, null, 2) + '\n', { mode: 0o600 });
-          fs.renameSync(`${recoveryFile}.tmp`, recoveryFile);
+      /*
+       * Un relanzamiento tiene que resumir ESTE hilo con el modelo confirmado.
+       *
+       * Que un cambio de modelo tenga que acordarse de actualizar la identidad
+       * es parte de lo que la partía en dos: ahora hay un solo archivo que
+       * corregir, y `handoffModel` conserva con cuál nació la sesión, que es lo
+       * que el acta del traspaso publica.
+       */
+      try {
+        const dir = this.deps.dir(s.sessionId);
+        const active = dir ? peekIdentity(dir) : null;
+        if (dir && active?.sessionId === s.sessionId) {
+          writeIdentity(dir, { ...active, handoffModel: active.handoffModel ?? active.model, model: choice.id });
         }
-      }
+      } catch { /* la identidad se corrige sola al adoptar; un cambio de modelo no falla por esto */ }
       s.active = choice.id; s.requested = null; s.phase = 'ready'; s.detail = event.text;
       s.events = [...s.events, event].slice(-50); this.save(s);
     } catch (e) {

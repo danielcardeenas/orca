@@ -156,6 +156,36 @@ Los mensajes nuevos de TALK, tareas y entregas directas al CAPCOM se retienen. E
 
 La activación mantiene un único CAPCOM con autoridad. Durante la verificación puede haber dos procesos CLI vivos: el original y el destino preparado, sin turno activo ni rol de CAPCOM todavía. No se debe escribir directamente en el tmux de destino ni usar comandos del CLI para cambiar de sesión al margen de ORCA.
 
+## Quién manda, en un solo archivo
+
+Desde 2026-09-07, `<capcom-dir>/capcom.json`. Antes ese hecho vivía repartido:
+`session.json` guardaba la sesión adoptada y `codex-recovery.json` la sesión con
+su runtime, su modelo y su cwd — y **ganaba** sobre el primero, sin que ninguna
+regla escrita dijera cuál actualizar. Un `/clear` actualizó el que no mandaba y
+el vigilante devolvió el mando al hilo ya vaciado: «0 UNDER COMMAND» con el
+proceso corriendo delante. Cinco escritores tocaban ese hecho —adopción,
+traspaso, reset, cambio de modelo, arranque— y bastaba con que uno se dejara el
+archivo con autoridad.
+
+Ahora es un archivo, una escritura atómica, y `recovery()` y la sesión adoptada
+son dos vistas de la misma lectura, así que no pueden discrepar. El nombre del
+pane se deriva; el rol en `lineage.json` y el `role:'capcom'` del hub son
+publicaciones de ese hecho, no copias con voto.
+
+La migración es automática al leer: si no hay `capcom.json` pero sí los
+anteriores, se combinan dando prioridad a la recuperación —que es la que la
+tenía— y se escribe una vez. No borra nada: los archivos viejos siguen siendo la
+evidencia de un traspaso, y un collector anterior que vuelva a arrancar encuentra
+lo suyo. La cuenta atrás de eso es que **volver a una versión anterior después de
+un cambio de sesión requiere reparar a mano**: los archivos viejos ya no se
+actualizan.
+
+Se rechaza en vez de adivinar una identidad sin sesión, con un runtime
+desconocido, o que declare un modelo preparado junto a un id que no es una sesión
+hospedada — reanudar eso lanzaría un CLI sobre una conversación que no existe. Un
+modelo sin declarar sí se acepta como `default`, que es lo que un `--bg` fue
+siempre, y `recovery()` lo lee como «nada que reanudar».
+
 ## Los avisos, plegados
 
 Un traspaso deja su acta —«SESSION CHANGED», con enlaces a la conversación
@@ -192,6 +222,7 @@ Los cambios de autoridad locales son persistentes; no constituyen una transacci�
 npm run typecheck
 npm test
 npm test -- capcom
+npm test -- capcom-identity
 npm test -- capcom-reset
 npm test -- wake
 npm test -- provider-handoff

@@ -146,7 +146,7 @@ export interface ResetServiceDeps extends ResetDeps {
   /** Retener el correo mientras dura, como en un traspaso. */
   hold(id: string, on: boolean, cutoffAt: number, mode: 'clean' | 'continuity'): void;
   /** El rol se muda al id nuevo, y con él el registro que lo readopta. */
-  adopt(from: string, to: string, mode: 'clean' | 'continuity', cutoffAt: number): void;
+  adopt(from: string, to: string, mode: 'clean' | 'continuity', cutoffAt: number, model: string): void;
   note(text: string): void;
 }
 
@@ -187,7 +187,9 @@ export class CapcomResets {
       const fresh = this.deps.agent(id) ?? a;
       const nonce = `${cutoffAt.toString(36)}`;
       const out = await resetContext(fresh, mode, resetPrompt(mode, nonce, checkpoint), this.deps);
-      this.deps.adopt(out.fromId, out.toId, mode, out.cutoffAt);
+      // El modelo va con el relevo: si se cambió antes de vaciar, la identidad
+      // tiene que decir con cuál se relanza, no con el que había al empezar.
+      this.deps.adopt(out.fromId, out.toId, mode, out.cutoffAt, model);
       this.deps.note(`CAPCOM context cleared (${mode}); now ${out.toId} on ${model}.`);
       this.last = out;
       return out;

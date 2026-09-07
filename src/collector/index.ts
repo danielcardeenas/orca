@@ -320,8 +320,8 @@ class Collector {
         owns: (shortId) => this.capcom?.owns(shortId) ?? false,
         dir: () => this.capcom?.dir ?? null,
         launchArgs: () => this.capcom?.launchArgs() ?? [],
-        adoptCleared: (toId, mode, cutoffAt) => {
-          this.capcom?.adoptCleared(toId, mode, cutoffAt);
+        adoptCleared: (toId, mode, cutoffAt, model) => {
+          this.capcom?.adoptCleared(toId, mode, cutoffAt, model);
           // El hilo nuevo puede no estar todavía en el mapa de liveness: sin
           // esta vuelta el snapshot saldría sin CAPCOM y el hub lo diría.
           void this.pollLiveness().then(() => this.codexWatcher?.refresh()).then(() => {

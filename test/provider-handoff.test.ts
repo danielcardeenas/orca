@@ -69,7 +69,8 @@ export default { suite: 'Provider handoff', tests: [
     const r = rig(); try {
       const prior = path.join(r.dir, 'prior.md');
       fs.writeFileSync(prior, Array.from({ length: 30 }, (_, i) => `## 2026-09-05T01:00:00Z · user · old\n\nMessage ${i}\n\n`).join(''));
-      fs.writeFileSync(path.join(r.dir, 'codex-recovery.json'), JSON.stringify({ historyPath: prior }));
+      // Como lo escribe una activación: la sesión que manda, y dónde quedó su historial.
+      fs.writeFileSync(path.join(r.dir, 'codex-recovery.json'), JSON.stringify({ sessionId: sourceId, runtime: 'codex', model: 'gpt-6-astra', historyPath: prior }));
       let offset: number | null = 0; let text = ''; let pages = 0;
       while (offset !== null) { const p = r.service.history(r.a.id, offset, Date.now()); text = p.text + text; offset = p.next; pages++; }
       assert.equal(pages, 3); assert.match(text, /Message 0/); assert.match(text, /Message 29/); assert.match(text, /hygiene task/);

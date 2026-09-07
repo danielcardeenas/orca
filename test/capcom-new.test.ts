@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ProviderHandoffs } from '../src/collector/provider-handoff.ts';
 import { CapcomSession } from '../src/collector/capcom.ts';
+import { readIdentity } from '../src/collector/capcom-identity.ts';
 import { CapcomRouter } from '../src/hub/capcom.ts';
 import { capcomBrief, cleanCapcomBrief } from '../src/collector/briefs.ts';
 import { freshCapcomCheckpoint } from '../src/hub/capcom-checkpoint.ts';
@@ -208,8 +209,9 @@ export default { suite: 'Fresh CAPCOM', tests: [
       // preparada que nombra el hilo viejo. `ensure` la lee ANTES que
       // `session.json`, así que sin actualizarla el vigilante devolvía el rol
       // al hilo ya vaciado y el hub decía «no hay CAPCOM» con el proceso vivo.
-      const file = path.join(r.dir, 'codex-recovery.json');
-      fs.writeFileSync(file, JSON.stringify({ runtime: 'codex', sessionId: OLD, model: 'gpt-6-astra',
+      // Escrito en el formato ANTERIOR a propósito: así este caso comprueba
+      // también que una instalación que venía de ahí migra sin perder el mando.
+      fs.writeFileSync(path.join(r.dir, 'codex-recovery.json'), JSON.stringify({ runtime: 'codex', sessionId: OLD, model: 'gpt-6-astra',
         cwd: path.join(r.dir, 'runtime'), contextMode: 'clean' }));
       const cap = new CapcomSession({ dir: r.dir, bin: '/fake/claude', codexBin: '/fake/codex', hubUrl: 'ws://127.0.0.1:1', token: '', trust: false,
         alive: id => id === NEW, wait: async () => {}, note() {}, lineage: { noteSpawn() {}, bind() {}, demote() {} },
@@ -219,7 +221,7 @@ export default { suite: 'Fresh CAPCOM', tests: [
       cap.adopt(OLD);
       cap.adoptCleared(NEW, 'clean', 1234);
       assert.equal(cap.current(), NEW);
-      const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const saved = readIdentity(r.dir)!;
       assert.equal(saved.sessionId, NEW);
       assert.equal(saved.previousSessionId, OLD);
       assert.equal(saved.contextMode, 'clean'); assert.equal(saved.cutoffAt, 1234);

@@ -39,6 +39,7 @@ import { runtimeBin } from './runtime.ts';
 import type { ProviderHandoffPlan } from '../shared/provider-handoff.ts';
 import { resumedPromptReady } from './model-control.ts';
 import { parseHandoff, type CapcomHandoff } from '../shared/handoff.ts';
+import { clearIdentity, readIdentity, succeed, writeIdentity, type CapcomIdentity } from './capcom-identity.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -479,19 +480,25 @@ export class CapcomSession {
         if (last.ok) try { fs.writeFileSync(path.join(plan.archive, 'resume-screen.txt'), last.stdout, { mode: 0o600 }); } catch { /* la evidencia es mejor esfuerzo */ }
         throw new Error('Destination requires terminal setup or did not become ready. Original CAPCOM retained; its last screen is resume-screen.txt in the backup.');
       }
-      const file = path.join(this.dir, 'codex-recovery.json');
-      const config = { cwd, contextMode: plan.contextMode, cutoffAt: plan.at, runtime: plan.runtime, sessionId, model: plan.model, handoffModel: plan.model, handoffId: plan.id,
-        previousSessionId: old, previousRuntime: plan.fromRuntime, previousModel: plan.fromModel,
-        activatedAt: new Date().toISOString(), reason: 'manual', archive: plan.archive, historyPath: plan.historyPath, checkpointPath: plan.checkpointPath };
-      fs.writeFileSync(file + '.tmp', JSON.stringify(config, null, 2), { mode: 0o600 });
+      /*
+       * El destino verificado, todavía sin publicar.
+       *
+       * Se arma aquí y se escribe DESPUÉS de parar al anterior: mientras haya
+       * dos procesos vivos, quien manda sigue siendo el que ya mandaba, y una
+       * identidad publicada antes de tiempo haría que un collector que muriese
+       * en medio readoptase una sesión que aún no tiene el mando.
+       */
+      const next: CapcomIdentity = { sessionId, runtime: plan.runtime, model: plan.model, cwd,
+        ...(plan.contextMode ? { contextMode: plan.contextMode } : {}), cutoffAt: plan.at,
+        handoffModel: plan.model, handoffId: plan.id, reason: 'manual',
+        previousSessionId: old, previousRuntime: plan.fromRuntime, ...(plan.fromModel !== null ? { previousModel: plan.fromModel } : {}),
+        activatedAt: new Date(this.now()).toISOString(),
+        archive: plan.archive, historyPath: plan.historyPath, checkpointPath: plan.checkpointPath };
       const stopped = await tmux.kill(paneName(old)!);
-      if (!stopped.ok) {
-        fs.unlinkSync(file + '.tmp');
-        throw new Error('Original CAPCOM could not be stopped; handoff cancelled.');
-      }
+      if (!stopped.ok) throw new Error('Original CAPCOM could not be stopped; handoff cancelled.');
       // The prepared pane has no activation turn yet. Publish its durable UUID
       // only after the old pane is stopped, then announce it to the hub.
-      fs.renameSync(file + '.tmp', file);
+      writeIdentity(this.dir, next);
       cutover = true;
       this.adopt(sessionId); this.deps.lineage.bind(sessionId, sessionId);
       this.deps.note('info', `CAPCOM handoff activated: ${plan.fromRuntime} → ${plan.runtime}/${plan.model}. Backup: ${plan.archive}`);
@@ -500,26 +507,35 @@ export class CapcomSession {
 
   handoff(machineId: string): CapcomHandoff | null {
     try {
-      const r = JSON.parse(fs.readFileSync(path.join(this.dir, 'codex-recovery.json'), 'utf8'));
-      // Legacy recoveries must be annotated before publishing their event.
-      if (!r.reason) return null;
+      const r = this.identity();
+      // Una identidad sin motivo no es el acta de nada: es la sesión de siempre.
+      if (!r?.reason) return null;
       return parseHandoff({ machineId, fromId: r.previousSessionId, toId: r.sessionId,
-        at: Date.parse(r.activatedAt), fromRuntime: r.previousRuntime ?? 'claude', toRuntime: r.runtime ?? 'codex',
-        fromModel: r.previousModel ?? null, toModel: r.handoffModel ?? r.model, reason: r.reason ?? 'unknown',
+        at: Date.parse(r.activatedAt ?? ''), fromRuntime: r.previousRuntime ?? 'claude', toRuntime: r.runtime,
+        fromModel: r.previousModel ?? null, toModel: r.handoffModel ?? r.model, reason: r.reason,
         contextMode: r.contextMode, cutoffAt: r.cutoffAt, historyPath: r.historyPath ?? null, checkpointPath: r.checkpointPath ?? null });
     } catch { return null; }
   }
 
-  /** Explicit, prepared cross-runtime recovery. Never interprets a Claude id as a Codex id. */
+  /**
+   * Con qué se relanza el CAPCOM que hay. Una vista de la identidad.
+   *
+   * Era una lectura aparte de `codex-recovery.json` que además MANDABA sobre la
+   * sesión adoptada; ahora las dos preguntas leen el mismo archivo, así que no
+   * pueden discrepar. Nunca interpreta un id de Claude como uno de Codex: el
+   * runtime es explícito o la identidad se rechaza al leerla.
+   *
+   * Devuelve `null` para una identidad migrada de un `session.json` a secas,
+   * cuyo modelo es `default`: no había traspaso que reanudar, y anunciar uno
+   * mandaría a `launchPreparedRecovery` a resumir con un modelo inventado.
+   */
   recovery(): { sessionId: string; model: string; runtime?: 'claude' | 'codex'; cwd?: string; contextMode?: 'continuity' | 'clean' } | null {
-    const file = path.join(this.dir, 'codex-recovery.json');
-    if (!fs.existsSync(file)) return null;
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if ((raw.runtime !== undefined && !['claude', 'codex'].includes(raw.runtime)) || !isHostedId(raw.sessionId) || typeof raw.model !== 'string'
-      || !/^[A-Za-z0-9._-]{1,64}$/.test(raw.model)) {
-      throw new Error('invalid codex-recovery.json; refusing fallback to Claude');
-    }
-    return { sessionId: raw.sessionId, model: raw.model, cwd: raw.cwd, contextMode: raw.contextMode, ...(raw.runtime ? { runtime: raw.runtime } : {}) };
+    const id = this.identity();
+    // Un `--bg` no se reanuda por aquí, y una identidad sin modelo declarado no
+    // dice con qué: las dos son «no hay traspaso que reanudar», no un fallo.
+    if (!id || id.model === 'default' || !isHostedId(id.sessionId)) return null;
+    return { sessionId: id.sessionId, model: id.model, runtime: id.runtime,
+      ...(id.cwd ? { cwd: id.cwd } : {}), ...(id.contextMode ? { contextMode: id.contextMode } : {}) };
   }
 
   /* ── configuration on disk ──────────────────────────────────────── */
@@ -543,23 +559,44 @@ export class CapcomSession {
     fs.writeFileSync(path.join(dir, '.claude', 'settings.json'), capcomSettingsJson(roots), { mode: 0o600 });
   }
 
-  /** Where the short id is remembered, so a collector restart re-adopts it. */
-  private statePath(): string { return path.join(this.dir, 'session.json'); }
+  /* ── la identidad, en un solo archivo (capcom-identity.ts) ──────── */
 
-  private loadState(): string | null {
-    try {
-      const raw = JSON.parse(fs.readFileSync(this.statePath(), 'utf8')) as { shortId?: unknown };
-      return typeof raw.shortId === 'string' && raw.shortId ? raw.shortId : null;
-    } catch { return null; }
+  /**
+   * Quién manda, según el disco. Un archivo ilegible se dice y no se adivina.
+   *
+   * `recovery` y `loadState` eran dos lecturas de dos archivos con reglas de
+   * prioridad implícitas; ahora las dos preguntan aquí y devuelven vistas del
+   * mismo hecho, que es lo que impide que una se actualice sin la otra.
+   */
+  private identity(): CapcomIdentity | null {
+    try { return readIdentity(this.dir); }
+    catch (err) { log('warn', SCOPE, `identidad de CAPCOM ilegible: ${errText(err)}`); throw err; }
   }
 
-  private saveState(shortId: string | null): void {
+  private loadState(): string | null {
+    try { return this.identity()?.sessionId ?? null; } catch { return null; }
+  }
+
+  /**
+   * Apuntar quién manda, conservando con qué se relanza.
+   *
+   * `null` borra el hecho. Un id nuevo sucede al anterior heredando runtime,
+   * modelo y directorio salvo que el llamante diga otra cosa: casi siempre es
+   * el mismo proceso o el mismo sitio, y obligar a repetirlo en cada sitio que
+   * adopta es exactamente cómo se acaba con dos registros que no coinciden.
+   */
+  private saveState(shortId: string | null, next: Partial<CapcomIdentity> = {}): void {
     try {
-      fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.statePath(), JSON.stringify({ shortId, at: this.now() }, null, 2),
-        { mode: 0o600 });
+      if (!shortId) { clearIdentity(this.dir); return; }
+      let previous: CapcomIdentity | null = null;
+      try { previous = readIdentity(this.dir); } catch { previous = null; }
+      if (previous?.sessionId === shortId && !Object.keys(next).length) return;
+      const runtime = next.runtime ?? previous?.runtime ?? (this.deps.codexBin && !this.deps.bin ? 'codex' : 'claude');
+      const model = next.model ?? previous?.model ?? 'default';
+      writeIdentity(this.dir, succeed(previous?.sessionId === shortId ? null : previous,
+        { ...next, sessionId: shortId, runtime, model }, this.now()));
     } catch (err) {
-      log('warn', SCOPE, `no pude guardar session.json: ${errText(err)}`);
+      log('warn', SCOPE, `no pude guardar la identidad de CAPCOM: ${errText(err)}`);
     }
   }
 
@@ -889,33 +926,21 @@ export class CapcomSession {
    * `cwd` son los mismos —es el mismo proceso—, y `previousSessionId` encadena
    * el linaje igual que lo haría un traspaso.
    */
-  adoptCleared(toId: string, mode: 'clean' | 'continuity', cutoffAt: number): void {
-    const file = path.join(this.dir, 'codex-recovery.json');
-    try {
-      const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
-      const next = { ...raw, sessionId: toId, contextMode: mode, cutoffAt,
-        previousSessionId: raw['sessionId'], activatedAt: new Date(this.now()).toISOString(), reason: 'manual' };
-      fs.writeFileSync(file + '.tmp', JSON.stringify(next, null, 2), { mode: 0o600 });
-      fs.renameSync(file + '.tmp', file);
-    } catch (err) {
-      // Sin registro previo no hay nada que corregir: `session.json` manda.
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        log('warn', SCOPE, `no pude apuntar el CAPCOM nuevo en codex-recovery.json: ${errText(err)}`);
-      }
-    }
-    this.adopt(toId);
+  adoptCleared(toId: string, mode: 'clean' | 'continuity', cutoffAt: number, model?: string): void {
+    this.adopt(toId, { contextMode: mode, cutoffAt, reason: 'manual', ...(model ? { model } : {}) });
   }
 
-  adopt(shortId: string): void {
+  adopt(shortId: string, next: Partial<CapcomIdentity> = {}): void {
     this.adoptedAt = this.now();
-    if (this.shortId === shortId) return;
+    if (this.shortId === shortId && !Object.keys(next).length) return;
+    const moved = this.shortId !== null && this.shortId !== shortId;
     const previous = this.shortId;
     this.shortId = shortId;
     // Sólo una sesión lleva el rol. La anterior sigue listada un rato después
     // del resume, y con el rol puesto el hub podría seguir hablándole a ella.
-    if (previous) this.deps.lineage.demote(previous);
+    if (moved && previous) this.deps.lineage.demote(previous);
     this.deps.lineage.noteSpawn(shortId, null, CAPCOM_MISSION, null, false, 'capcom');
-    this.saveState(shortId);
+    this.saveState(shortId, next);
   }
 
   /**

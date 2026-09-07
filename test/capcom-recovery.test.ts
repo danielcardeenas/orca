@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readIdentity } from '../src/collector/capcom-identity.ts';
 import { CapcomSession } from '../src/collector/capcom.ts';
 import { SessionDeriver } from '../src/collector/derive.ts';
 import { test, ok } from './harness.ts';
@@ -49,7 +50,8 @@ export default { suite: 'CAPCOM recovery', tests: [
       });
       assert.equal((await cap.ensure()).shortId, ID);
       assert.equal(adopted, ID);
-      assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'session.json'), 'utf8')).shortId, ID);
+      // La identidad adoptada, en el único archivo que la guarda.
+      assert.equal(readIdentity(dir)?.sessionId, ID);
       assert.equal((await cap.rotate({ turns: 50, compactions: 4, contextTokens: 100000 })).ok, false);
       assert.equal(cap.current(), ID);
       return ok('Codex retained and never rotated into Claude', true);
@@ -63,7 +65,8 @@ export default { suite: 'CAPCOM recovery', tests: [
         alive: () => true, note: () => {},
         lineage: { noteSpawn: () => { throw Error('must not adopt'); }, bind: () => {}, demote: () => {} },
       });
-      await assert.rejects(cap.ensure(), /invalid codex-recovery/);
+      // El mensaje nombra el archivo del que salió, sea el actual o el migrado.
+      await assert.rejects(cap.ensure(), /not a hosted session id but a model is declared/);
       cap.check();
       assert.equal(cap.current(), null);
       return ok('invalid recovery does not fall back', true);

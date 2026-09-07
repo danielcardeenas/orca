@@ -4,7 +4,8 @@ import { store } from '../src/ui/store.ts';
 import { mountCommand } from '../src/ui/hud/command.ts';
 import type { Console } from '../src/ui/console.ts';
 import type { ProviderHandoffPlan } from '../src/shared/provider-handoff.ts';
-export const calls: { k: string; mode?: string }[] = [];
+import type { Agent } from '../src/shared/types.ts';
+export const calls: { k: string; mode?: string; model?: string | null }[] = [];
 export const notes: string[] = [];
 let plan: ProviderHandoffPlan | undefined;
 const commandHost = document.createElement('div'); document.body.appendChild(commandHost);
@@ -23,4 +24,7 @@ export function fail() { if (plan) plan = { ...plan, phase: 'failed', detail: 'D
 export function complete() { if (plan) plan = { ...plan, phase: 'complete', toId: 'new-capcom', detail: 'Clean CAPCOM is active and waiting for new instructions.' }; }
 export function link(up: boolean) { store.linkUp = up; store.applyPatch(store.world.rev + 1, []); }
 
-store.applyPatch(store.world.rev + 1, [{ o: 'agent', id: 'cap', v: { ...store.world.agents.cap!, pane: true, state: 'idle' } }]);
+// Con catálogo cargado, la elección de New CAPCOM ofrece con qué modelo nacer.
+store.applyPatch(store.world.rev + 1, [{ o: 'agent', id: 'cap', v: { ...store.world.agents.cap!, pane: true, state: 'idle',
+  modelControl: { sessionId: 'cap', runtime: 'codex', active: 'gpt-6-astra', requested: null, phase: 'ready', detail: '', events: [],
+    choices: [{ id: 'gpt-6-astra', label: 'gpt-6-astra' }, { id: 'gpt-5.6-luna', label: 'gpt-5.6-luna' }] } } as unknown as Agent }]);

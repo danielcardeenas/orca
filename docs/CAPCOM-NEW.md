@@ -23,6 +23,48 @@ Sin argumento abre la elección; `clean` y `continuity` solicitan directamente e
 
 El protocolo interno es `{ k: 'capcom:new', agentId, mode: 'clean' | 'continuity' }`. El hub genera el checkpoint de continuidad; no confía en un checkpoint proporcionado por la consola. El estado utiliza `handoff:status` y un `planId`, también tras recargar la ventana.
 
+## Tres caminos, y cuál se toma
+
+Desde 2026-09-07, New CAPCOM elige según lo que de verdad cambie:
+
+| Lo que cambia | Cómo |
+| --- | --- |
+| Sólo el contexto | `/clear` del propio CLI |
+| Contexto y modelo, mismo runtime | selector nativo del modelo, y después `/clear` |
+| Runtime | sesión preparada aparte, verificada antes de retirar la anterior |
+
+`/clear` no era una idea nueva sino una comprobación pendiente: en Codex 0.153.4
+se anuncia como «clear the terminal and start a new chat» y, al ejecutarlo, deja
+por escrito «To continue this session, run codex resume … \<uuid\>» y abre un
+hilo con uuid y archivo propios. Verificado con dos mensajes en un Codex real: el
+rollout anterior conserva el primero y no recibe el segundo. La sesión preparada
+por `codex exec` conseguía exactamente eso mismo dando un rodeo.
+
+Lo que ese rodeo compraba, y aquí no hace falta, era conocer el identificador por
+adelantado. Con `/clear` el id lo elige el CLI y no se lo dice a nadie, así que se
+descubre: se espera el transcript nuevo del mismo directorio, creado después del
+corte, y cuando aparece se renombra el pane a `orca-<uuid>`. Es el mismo camino
+que ya recorría un worker de Codex, que tampoco puede tomar su id por adelantado.
+
+Un hilo sin turnos no se escribe en disco, así que el relevo se abre con un
+mensaje: en continuidad el checkpoint del hub, y en limpio una línea que sólo
+pide un recibo y prohíbe explícitamente herramientas, `briefing`, `recall` e
+historia. Ese intercambio es todo lo que hereda un contexto «limpio» — igual que
+antes heredaba el recibo de la preparación.
+
+`/clear` no se puede ensayar: cuando vuelve, el contexto anterior ya no está. No
+hay «conservar el original» porque no hay dos sesiones entre las que elegir, sólo
+un proceso que ya se vació. Lo que sí se conserva es todo lo demás — el proceso
+sigue vivo, el transcript anterior sigue en el directorio del CLI con su uuid, y
+el registro del hub no se toca —, y por eso el cambio de runtime mantiene el
+camino preparado: ahí sí se arranca otro binario y verificar antes de retirar
+vale lo que cuesta. `ORCA_CAPCOM_PREPARED_RESET=1` devuelve el camino largo
+también para el mismo runtime, sin la elección de modelo.
+
+El modelo se cambia **antes** de vaciar, con el selector nativo: el relevo debe
+nacer con el que se pidió, y mientras el contexto viejo sigue en pie un modelo
+sin cuota falla sin haber tocado nada.
+
 ## Qué conserva y qué cambia
 
 Se conserva el **runtime y modelo efectivo**, incluido Codex. No hay fallback a Claude ni a otro modelo. La acción requiere CAPCOM hospedado, vivo, con transcript y modelo conocidos, y sin turno ni cambio de modelo en curso. También admite un bloqueo de error/cuota; la preparación puede fallar por la cuota del mismo modelo y conserva el original.
@@ -117,6 +159,7 @@ Los cambios de autoridad locales son persistentes; no constituyen una transacci�
 npm run typecheck
 npm test
 npm test -- capcom
+npm test -- capcom-reset
 npm test -- wake
 npm test -- provider-handoff
 npm test -- worker-recovery

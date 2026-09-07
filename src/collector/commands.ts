@@ -48,6 +48,7 @@ import { runAutonomy } from './autonomy.ts';
 import { WorkerHandoffs } from './worker-handoff.ts';
 import { ModelController } from './model-control.ts';
 import { ProviderHandoffs, providerModels } from './provider-handoff.ts';
+import { CapcomResets } from './capcom-reset.ts';
 
 const SCOPE = 'commands';
 
@@ -174,10 +175,24 @@ export interface CommandResult {
   data?: unknown;
 }
 
+/**
+ * `ORCA_CAPCOM_PREPARED_RESET=1` vuelve al camino largo.
+ *
+ * Un New CAPCOM que no cambia de runtime se hace ahora con el `/clear` del
+ * propio CLI (capcom-reset.ts). El camino que prepara una sesión aparte sigue
+ * entero —lo necesita cualquier cambio de proveedor— y esta variable lo
+ * devuelve también para el mismo runtime, por si el nativo se atasca en una
+ * versión del CLI que aún no se ha visto.
+ */
+export function preparedReset(env: Record<string, string | undefined> = process.env): boolean {
+  return env['ORCA_CAPCOM_PREPARED_RESET'] === '1';
+}
+
 export class CommandRunner {
   readonly workers: WorkerHandoffs;
   readonly handoffs: ProviderHandoffs;
   readonly models: ModelController;
+  readonly reset: CapcomResets;
   private inputBusy = new Map<string, number>();
   private readonly deps: CommandDeps;
   private readonly bin: string | null;
@@ -194,6 +209,17 @@ export class CommandRunner {
       activate: async (plan, sessionId) => { if (!deps.transfer) throw new Error('Provider handoff activation unavailable'); await deps.transfer.activate(plan, sessionId); },
     });
     this.workers = new WorkerHandoffs(deps, this.models, id => this.inputBusy.has(id));
+    this.reset = new CapcomResets({
+      tmux: deps.tmux, agent: deps.agent, owns: a => !!this.capcomFor(a),
+      busy: id => this.inputBusy.has(id) || this.models.locked(id) || this.handoffs.locked(id)
+        || ['queued', 'applying'].includes(this.models.state(deps.agent(id)!)?.phase ?? ''),
+      model: a => this.models.state(a)?.active ?? a.model ?? null,
+      setModel: (id, model) => this.applyModel(id, model),
+      discover: (projectId, runtime, since, ms) => deps.awaitSpawn({ shortId: null, runtime, projectId, since }, ms),
+      hold: (id, on, cutoffAt, mode) => deps.transfer?.hold(id, on, on ? { contextMode: mode, at: cutoffAt } as never : undefined),
+      adopt: (_from, to) => { deps.capcom?.adopt(to); },
+      note: text => log('info', SCOPE, text),
+    });
     this.bin = resolveClaudeBin();
     if (!this.bin) {
       log('warn', SCOPE, 'no encontré el binario `claude` en PATH: spawn/stop/logs no funcionarán');
@@ -211,7 +237,7 @@ export class CommandRunner {
     try {
       switch (cmd.k) {
         case 'recovery:settings': case 'recovery:status': case 'recovery:decide': throw new Error('Recovery decisions must run through the hub');
-        case 'capcom:new': return { ok: true, data: this.handoffs.fresh(cmd.agentId, cmd.mode, cmd.checkpoint) };
+        case 'capcom:new': return { ok: true, data: await this.freshCapcom(cmd) };
         case 'handoff:models': return { ok: true, data: providerModels() };
         case 'handoff:prepare': return { ok: true, data: service.review(cmd.agentId, cmd.runtime, cmd.model, typeof cmd.checkpoint === 'string' ? cmd.checkpoint : '') };
         case 'handoff:commit': return { ok: true, data: service.commit(cmd.agentId, cmd.planId) };
@@ -752,6 +778,61 @@ export class CommandRunner {
     const cap = this.deps.capcom;
     // Hospedado se conoce por session id; `--bg` por el short id del CLI.
     return cap && a && (cap.owns(a.shortId) || cap.owns(a.sessionId)) ? cap : null;
+  }
+
+  /**
+   * Cambiar el modelo y esperar a que el CLI lo confirme.
+   *
+   * `ModelController` encola y aplica en su propio tick, que es lo correcto
+   * para una petición del operador —espera a que el turno acabe— pero aquí
+   * hace falta saber que terminó antes de vaciar el contexto. `list` primero,
+   * porque `request` sólo acepta un modelo que este CLI haya ofrecido.
+   */
+  private async applyModel(id: string, model: string): Promise<void> {
+    await this.models.list(id);
+    this.models.request(id, model);
+    for (let i = 0; i < 240; i++) {
+      const a = this.deps.agent(id);
+      if (!a) throw new Error('CAPCOM disappeared while changing its model.');
+      this.models.tick(a);
+      const s = this.models.state(a);
+      if (s?.phase === 'failed') throw new Error(`Model change failed: ${s.detail}`);
+      if (s?.phase === 'ready' && s.active === model) return;
+      await new Promise(r => setTimeout(r, 250));
+    }
+    throw new Error('The CLI did not confirm the model change. Context was not cleared.');
+  }
+
+  /**
+   * New CAPCOM: contexto nuevo, y el modelo que se pida.
+   *
+   * Tres caminos, y el que se toma depende de lo que de verdad cambia:
+   *
+   *  - **Otro runtime.** Hay que arrancar otro binario, así que se prepara la
+   *    sesión de destino, se verifica y sólo entonces se retira la anterior
+   *    (`ProviderHandoffs`). Es el caso que justifica todo ese aparato.
+   *  - **Otro modelo, mismo runtime.** El selector nativo del CLI lo cambia en
+   *    el sitio (`ModelController`), y después se vacía el contexto. Cambiar
+   *    primero es deliberado: el modelo pertenece a la sesión, y el relevo debe
+   *    nacer ya con el que se pidió, no heredarlo y cambiarlo a continuación.
+   *  - **Mismo runtime y modelo.** Sólo hace falta vaciar el contexto.
+   *
+   * Los dos últimos terminan en `/clear`, que es lo que el propio CLI trae para
+   * esto. `ORCA_CAPCOM_PREPARED_RESET=1` los devuelve al camino largo.
+   */
+  private async freshCapcom(cmd: { agentId: string; mode: 'continuity' | 'clean'; checkpoint?: string; model?: string }): Promise<unknown> {
+    const a = this.deps.agent(cmd.agentId);
+    if (!a || !this.capcomFor(a)) throw new Error('An active CAPCOM session is required.');
+    const current = this.models.state(a)?.active ?? a.model ?? null;
+    const model = cmd.model?.trim() || current;
+    if (!model) throw new Error('Current CAPCOM model is unknown. No new session was started.');
+    const runtime = providerModels().find(m => m.id === model)?.runtime ?? a.runtime;
+    if (runtime !== a.runtime) return this.handoffs.review(cmd.agentId, runtime, model, cmd.checkpoint ?? '');
+    if (preparedReset()) {
+      if (model !== current) throw new Error('Choosing a model needs the native reset; unset ORCA_CAPCOM_PREPARED_RESET or change the model first.');
+      return this.handoffs.fresh(cmd.agentId, cmd.mode, cmd.checkpoint);
+    }
+    return this.reset.run(cmd.agentId, cmd.mode, model, cmd.checkpoint ?? '');
   }
 
   /**

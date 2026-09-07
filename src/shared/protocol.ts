@@ -121,7 +121,8 @@ export type Command =
   | { k: 'recovery:settings'; automatic?: boolean }
   | { k: 'recovery:status'; agentId: string }
   | { k: 'recovery:decide'; agentId: string; decision: import('./recovery.ts').RecoveryRequest }
-  | { k: 'capcom:new'; agentId: string; mode: 'continuity' | 'clean'; checkpoint?: string }
+  /** `model` opcional: sin él, el relevo nace con el modelo que ya corría. */
+  | { k: 'capcom:new'; agentId: string; mode: 'continuity' | 'clean'; checkpoint?: string; model?: string }
   | { k: 'handoff:models'; agentId: string }
   | { k: 'handoff:prepare'; agentId: string; runtime: string; model: string; checkpoint?: string }
   | { k: 'handoff:commit'; agentId: string; planId: string }

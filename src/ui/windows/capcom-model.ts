@@ -16,7 +16,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   const freshChoice = document.createElement('section');
   freshChoice.className = 'capcom__transfer'; freshChoice.hidden = true;
   freshChoice.setAttribute('aria-label', 'New CAPCOM');
-  freshChoice.innerHTML = '<p class="mono">New session, same provider and model. Keeps files, history, hub rules and workers.</p><p class="mono">Clean context: waits for new instructions, with no summary, history, automatic briefing or recall. Continuity: restores pending work with a brief checkpoint. New messages received during the change are delivered to the new CAPCOM.</p><div class="row"><button type="button" class="chip" data-fresh-clean>Clean context</button><button type="button" class="chip" data-fresh-continuity>With continuity</button><button type="button" class="chip" data-fresh-cancel>Cancel</button></div>';
+  freshChoice.innerHTML = '<p class="mono">New session. Keeps files, history, hub rules and workers.</p><p class="mono">Clean context: waits for new instructions, with no summary, history, automatic briefing or recall. Continuity: restores pending work with a brief checkpoint. New messages received during the change are delivered to the new CAPCOM.</p><div class="row"><span class="mono" data-fresh-model-label>Model</span><div data-fresh-model></div></div><div class="row"><button type="button" class="chip" data-fresh-clean>Clean context</button><button type="button" class="chip" data-fresh-continuity>With continuity</button><button type="button" class="chip" data-fresh-cancel>Cancel</button></div>';
   host.appendChild(freshChoice);
   const active = host.querySelector<HTMLElement>('[data-active]')!;
   const detail = host.querySelector<HTMLElement>('[data-detail]')!;
@@ -98,16 +98,49 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   async function newCapcom(mode: 'clean' | 'continuity') {
     if (!agent || fresh.disabled || options) return;
     const id = agent.id;
+    const model = freshModel;
     busy = true; error = ''; freshChoice.hidden = true; paint();
     try {
-      plan = await command({ k: 'capcom:new', agentId: id, mode }) as ProviderHandoffPlan;
+      plan = await command({ k: 'capcom:new', agentId: id, mode, ...(model ? { model } : {}) }) as ProviderHandoffPlan;
       localStorage.setItem(storageKey, JSON.stringify({ id: plan.id, agentId: id }));
       window.clearTimeout(poll);
       poll = window.setTimeout(() => { void check(); }, 1500);
     } catch (e) { error = e instanceof Error ? e.message : String(e); }
     finally { busy = false; if (!disposed) paint(); }
   }
-  fresh.addEventListener('click', () => { freshChoice.hidden = !freshChoice.hidden; });
+  /**
+   * Con qué modelo nace el relevo. Vacío = el que ya corre.
+   *
+   * Elegirlo aquí evita el paso que antes hacían dos operaciones seguidas —
+   * cambiar el modelo y luego vaciar—: el collector lo aplica con el selector
+   * nativo mientras el contexto viejo sigue en pie, así que un modelo sin cuota
+   * falla sin haber tocado nada.
+   */
+  let freshModel = '';
+  const freshModelHost = freshChoice.querySelector<HTMLElement>('[data-fresh-model]')!;
+  let freshPicker: PickHandle | undefined;
+  function paintFreshModel() {
+    const choices = state?.choices ?? [];
+    const active = state?.active ?? agent?.model ?? '';
+    const sig = JSON.stringify([choices.map(c => c.id), active, freshModel]);
+    if (sig === freshModelSig || freshPicker?.isOpen()) return;
+    freshModelSig = sig;
+    freshPicker?.dispose();
+    if (!choices.length) {
+      // Sin catálogo cargado no se inventa una lista: CHANGE MODEL la trae.
+      freshModelHost.textContent = active ? `${active} · CHANGE MODEL lists the others` : '';
+      return;
+    }
+    freshPicker = pick({ name: 'capcom-fresh-model', value: freshModel || active, search: choices.length > 6,
+      options: choices.map(c => ({ value: c.id, label: c.label, hint: c.id === active ? 'current' : '' })),
+      onChange: id => { freshModel = id === active ? '' : id; freshModelSig = ''; paintFreshModel(); } });
+    freshModelHost.replaceChildren(freshPicker.el);
+  }
+  let freshModelSig = '';
+  fresh.addEventListener('click', () => {
+    freshChoice.hidden = !freshChoice.hidden;
+    if (!freshChoice.hidden) { freshModel = ''; freshModelSig = ''; paintFreshModel(); }
+  });
   freshChoice.querySelector('[data-fresh-clean]')!.addEventListener('click', () => { void newCapcom('clean'); });
   freshChoice.querySelector('[data-fresh-continuity]')!.addEventListener('click', () => { void newCapcom('continuity'); });
   freshChoice.querySelector('[data-fresh-cancel]')!.addEventListener('click', () => { freshChoice.hidden = true; });
@@ -228,6 +261,6 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
       if (!busy && next?.modelControl) state = next.modelControl;
       paint();
     },
-    dispose() { window.removeEventListener('orca:capcom-new', requestedFresh); disposed = true; window.clearTimeout(poll); picker?.dispose(); },
+    dispose() { window.removeEventListener('orca:capcom-new', requestedFresh); disposed = true; window.clearTimeout(poll); picker?.dispose(); freshPicker?.dispose(); },
   };
 }

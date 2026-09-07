@@ -24,7 +24,11 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.ok(await page.getByRole('button', { name: 'Clean context', exact: true }).isVisible());
   }
+  // Con qué modelo nace: elegirlo aquí ahorra el cambio en una operación aparte.
+  await page.locator('[data-fresh-model] button').click();
+  await page.getByRole('option', { name: /gpt-5\.6-luna/ }).click();
   await page.getByRole('button', { name: 'Clean context', exact: true }).click();
+  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').at(-1)?.model), 'gpt-5.6-luna');
   assert.equal(await page.getByRole('button', { name: 'New CAPCOM', exact: true }).isDisabled(), true);
   assert.match(await page.locator('[data-transfer-text]').innerText(), /codex\/gpt-6-astra → codex\/gpt-6-astra/);
   assert.equal(await page.locator('textarea[data-in]').inputValue(), 'Preserve this operator draft');
@@ -53,5 +57,5 @@ try {
   await input.fill('/capcom-new clean'); await input.press('Enter');
   await page.getByText('CAPCOM · CLEAN CONTEXT', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
-  console.log('Fresh UI passed: visible modes, scope, same model, draft, progress, failure/retry, folded receipt, clean/continuity slash commands, desktop/mobile.');
+  console.log('Fresh UI passed: visible modes, scope, chosen model, draft, progress, failure/retry, folded receipt, clean/continuity slash commands, desktop/mobile.');
 } finally { await browser.close(); await server.close(); }

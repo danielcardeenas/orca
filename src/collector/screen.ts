@@ -40,7 +40,11 @@ export function promptOn(screen: string, _tail = 30): ScreenPrompt | null {
   if (options.length < 2 || new Set(options.map(o => o.key)).size !== options.length) return null;
   if (runtime === 'codex' && !footer) return null;
   if (runtime === 'codex' && /following command/.test(lines[i]!) && !lines.slice(i + 1).some(l => /^\s*\$\s+\S/.test(l))) return null;
-  if (runtime === 'codex' && /MCP server/.test(lines[i]!) && !lines.slice(i + 1).some(l => /^\s*action\s*:/.test(l))) return null;
+  // No field is required of an MCP dialog. Demanding one (`action:` was the
+  // first fixture's) rejects every tool that names its arguments otherwise —
+  // browser_navigate has `url`, browser_click has `ref`, browser_snapshot has
+  // none — and rejecting means going blind, not failing safe. The header, the
+  // exact option labels and the footer are what identify the menu.
   const once = options.filter(o => /^(?:Yes|Yes, proceed(?: \(y\))?|Allow)$/.test(o.label));
   const deny = options.filter(o => /^(?:No(?:,.*| \(.*\))?|Cancel)$/.test(o.label));
   if (once.length !== 1 || deny.length !== 1) return null;
@@ -75,6 +79,27 @@ function lastIndex(lines: string[], predicate: (line: string) => boolean): numbe
 
 function hash(text: string): string { return createHash('sha256').update(text).digest('hex'); }
 
+/**
+ * Una huella de la pantalla, para saber si ALGO se está pintando.
+ *
+ * No mira lo que dice: sólo si cambia. Es la única señal de "esperando a
+ * alguien" que no depende del texto de un diálogo, y por tanto la única que
+ * sobrevive a que Codex o Claude reescriban su TUI mañana.
+ *
+ * Funciona porque las dos CLIs animan mientras trabajan — spinner, segundos
+ * transcurridos, tokens — así que un turno abierto pinta algo cada segundo.
+ * Una pantalla idéntica durante segundos con el turno abierto significa que
+ * nadie está pintando: o pregunta algo, o se colgó. Las dos cosas quieren a
+ * un humano.
+ *
+ * Se normalizan los blancos del final de cada línea porque tmux rellena el
+ * ancho del pane y ese relleno cambia con un resize sin que cambie nada.
+ */
+export function screenSignature(screen: string): string {
+  const body = screen.replace(/\r/g, '').split('\n').map((l) => l.replace(/\s+$/, '')).join('\n').replace(/\n+$/, '');
+  return hash(body);
+}
+
 /** Keep tool names and operation shape; values may be credentials, even without labels. */
 export function safePermissionContext(text: string): string {
   return text.split('\n').map(line => {
@@ -85,7 +110,10 @@ export function safePermissionContext(text: string): string {
     if (/^Allow the [A-Za-z0-9_.-]+ MCP server to run tool "[A-Za-z0-9_.-]+"\?$/.test(l)) return l;
     const command = /^\$\s*([A-Za-z0-9_./-]+)/.exec(l);
     if (command) return `Command: ${command[1]!.split('/').pop()} [arguments omitted; inspect terminal]`;
-    const field = /^(action|url|local)\s*:\s*(.*)$/.exec(l);
+    // Any `name: value` line of an MCP dialog. The name survives (it is the
+    // shape of the request); the value never does, unless it is an `action`
+    // out of a known, harmless set.
+    const field = /^([A-Za-z_][A-Za-z0-9_-]{0,40})\s*:\s*(.*)$/.exec(l);
     if (field) return `${field[1]}: ${field[1] === 'action' && /^(list|new|close|select|navigate)$/.test(field[2]!) ? field[2] : '[value omitted]'}`;
     return '[request details omitted; inspect terminal]';
   }).filter(Boolean).join('\n').slice(0, 1200);

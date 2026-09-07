@@ -1137,30 +1137,71 @@ export function paneEnv(keys: Record<string, string>): Record<string, string> {
 /**
  * `codex` interactivo, con la postura de permisos de ORCA traducida a la suya.
  *
- *   auto / acceptEdits → pregunta cuando el modelo lo decide, escribe en el workspace (su default)
+ *   auto               → ni aprobaciones ni sandbox (ver abajo)
+ *   acceptEdits        → pregunta cuando el modelo lo decide, escribe en el workspace
  *   plan               → sólo lectura
- *   manual             → pide aprobación para todo lo que no sea de confianza
- *   dontAsk            → nunca pregunta (los fallos vuelven al modelo)
- *   bypassPermissions  → sin sandbox ni aprobaciones; sólo para entornos ya aislados
+ *   manual             → como acceptEdits: `untrusted` ya no existe (ver abajo)
+ *   dontAsk            → nunca pregunta, pero conserva el sandbox
+ *   bypassPermissions  → lo mismo que `auto`, pedido explícitamente
+ *
+ * ── Por qué `auto` es distinto en Codex y en Claude ────────────────
+ *
+ * Medido el 2026-09-07 con codex-cli 0.153.4: el sandbox de Codex corta la red
+ * (`codex sandbox -- curl https://example.com` devuelve 000). Un worker con un
+ * MCP de navegador dentro de ese sandbox no navega, y `-a never` no lo salva:
+ * en vez de preguntar devuelve el fallo al modelo, que reintenta. Entre parar
+ * la flota ante diálogos que nadie contesta y lanzar sin sandbox, ORCA elige lo
+ * segundo para Codex y lo dice aquí. `ORCA_CODEX_APPROVALS=1` devuelve la
+ * postura anterior (`-a on-request -s workspace-write`) sin tocar código.
+ *
+ * Claude no cambia: su `auto` resuelve solo y no deja prompts colgados.
+ *
+ * ── `manual` ───────────────────────────────────────────────────────
+ *
+ * Era `-a untrusted`. En 0.153.4 `-a` sólo acepta `on-request` y `never`, así
+ * que ese argv lo rechaza el CLI antes de arrancar — un spawn que fallaba en el
+ * lanzamiento, no en la política. La postura más cercana que queda es la de
+ * `acceptEdits`; la granularidad perdida vive ahora en los permission profiles
+ * de Codex, que ORCA todavía no usa.
  *
  * El prompt va POSICIONAL y al final, después de toda opción: `-C`, `-m` y las
  * de política no son variádicas, pero el orden fijo evita tener que saberlo.
  */
+/**
+ * El título del pane, como canal de estado.
+ *
+ * `activity` es el elemento que pinta «spinner mientras trabaja, mensaje de
+ * acción requerida mientras está bloqueado», y es lo que `titleSignal` lee para
+ * saber que un worker espera respuesta sin tener que entender su diálogo. Se
+ * fuerza en el argv porque el default vive en el `config.toml` del operador y
+ * ORCA no puede quedarse sin la señal porque alguien reordenara su título.
+ *
+ * `project` va detrás para que el título siga sirviéndole a un humano que mire
+ * la lista de panes. Un elemento que una versión futura no reconozca lo ignora
+ * Codex con un aviso, sin fallar el arranque: comprobado en 0.153.4.
+ */
+export const CODEX_TITLE_CONFIG = 'tui.terminal_title=["activity","project"]';
+
 export function codexArgv(
   bin: string, cwd: string,
   o: { model?: string | undefined; permissionMode?: string | undefined; prompt: string },
+  env: NodeJS.ProcessEnv = process.env,
 ): { ok: true; argv: string[] } | { ok: false; detail: string } {
-  const argv = [bin, '-C', cwd];
+  const argv = [bin, '-C', cwd, '-c', CODEX_TITLE_CONFIG];
   if (o.model) {
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(o.model)) return { ok: false, detail: `modelo inválido: ${o.model}` };
     argv.push('-m', o.model);
   }
+  const unsandboxed = '--dangerously-bypass-approvals-and-sandbox';
   switch (o.permissionMode) {
-    case undefined: case 'auto': case 'acceptEdits': argv.push('-a', 'on-request', '-s', 'workspace-write'); break;
+    case undefined: case 'auto':
+      if (env['ORCA_CODEX_APPROVALS'] === '1') argv.push('-a', 'on-request', '-s', 'workspace-write');
+      else argv.push(unsandboxed);
+      break;
+    case 'acceptEdits': case 'manual': argv.push('-a', 'on-request', '-s', 'workspace-write'); break;
     case 'plan': argv.push('-s', 'read-only'); break;
-    case 'manual': argv.push('-a', 'untrusted', '-s', 'workspace-write'); break;
     case 'dontAsk': argv.push('-a', 'never', '-s', 'workspace-write'); break;
-    case 'bypassPermissions': argv.push('--dangerously-bypass-approvals-and-sandbox'); break;
+    case 'bypassPermissions': argv.push(unsandboxed); break;
     default: return { ok: false, detail: `permissionMode inválido: ${o.permissionMode}` };
   }
   if (o.prompt.startsWith('-')) {

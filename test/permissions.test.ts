@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { World } from '../src/hub/world.ts';
 import { runTool, type CeoContext } from '../src/agents/tools.ts';
 import type { Escalation } from '../src/shared/types.ts';
-import { promptOn, permissionClosed } from '../src/collector/screen.ts';
+import { promptOn, permissionClosed, screenSignature } from '../src/collector/screen.ts';
 import { answerPermission, type PermissionRequest } from '../src/collector/permissions.ts';
 import { TmuxHost } from '../src/collector/tmux.ts';
 import { test, ok, sleep, type TestModule } from './harness.ts';
@@ -60,6 +60,50 @@ const tests = [
     assert.notEqual(promptOn(CLAUDE)!.fingerprint, promptOn(CLAUDE.replace('fixture-a', 'fixture-b'))!.fingerprint);
     assert.equal(promptOn(MCP)!.fingerprint, promptOn(MCP.replace('› 3.', '  3.').replace('  1.', '› 1.'))!.fingerprint);
     return ok('three formats, secrets omitted, selection-independent fingerprint', true);
+  }),
+  /*
+   * Playwright en ráfaga es lo que destapó esto: el diálogo MCP sólo se
+   * reconocía si entre sus argumentos había una línea `action:`, que es lo que
+   * traía la única herramienta con la que se midió (`browser_tabs`).
+   * `browser_navigate` nombra `url`, `browser_click` nombra `ref`, y
+   * `browser_snapshot` no lleva argumentos: los tres se descartaban en
+   * silencio y el agente se quedaba esperando marcado como `working`.
+   *
+   * Redacción real de 0.153.4 (ver fixtures); los valores son sintéticos.
+   */
+  test('MCP dialogs identify themselves without an `action` field, or with no fields at all', () => {
+    const dialog = (tool: string, fields: string) => `  Allow the playwright MCP server to run tool "${tool}"?\n${fields}\n  › 1. Allow   Run the tool and continue.\n    2. Cancel  Cancel this tool call\n  enter to submit | esc to cancel`;
+    const nav = dialog('browser_navigate', '\n  url: https://example.invalid/?token=secret-canary\n');
+    const click = dialog('browser_click', '\n  element: Sign in button\n  ref: e42\n');
+    const snap = dialog('browser_snapshot', '');
+    for (const [name, screen] of [['navigate', nav], ['click', click], ['snapshot', snap]] as const) {
+      const p = promptOn(screen);
+      assert.equal(p?.kind, 'permission', name);
+      assert.equal(p.onceKey, '1', name);
+      assert.equal(p.runtime, 'codex', name);
+      assert(p.summary.includes(name === 'snapshot' ? 'browser_snapshot' : 'MCP server'), name);
+    }
+    // Los nombres de campo describen la petición; los valores nunca salen.
+    const summary = promptOn(nav)!.summary;
+    assert(!summary.includes('secret-canary'));
+    assert(summary.includes('url:'));
+    assert(!promptOn(click)!.summary.includes('e42'));
+    // Y se sigue fallando cerrado con lo que no es un menú.
+    assert.equal(promptOn(nav.replace('2. Cancel  Cancel this tool call', '2. Whatever')), null);
+    assert.equal(promptOn(nav.replace('  enter to submit | esc to cancel', '')), null);
+    return ok('MCP dialogs with any field set, or none, are recognized', true);
+  }),
+  /*
+   * La huella no lee la pantalla, sólo dice si cambió: es la señal de "parado
+   * esperando a alguien" que sobrevive a que una CLI reescriba su TUI.
+   */
+  test('screen signature ignores tmux padding and catches any real change', () => {
+    const padded = MCP.split('\n').map((l) => `${l}    `).join('\n');
+    assert.equal(screenSignature(MCP), screenSignature(padded));
+    assert.equal(screenSignature(MCP), screenSignature(`${MCP}\n\n`));
+    assert.notEqual(screenSignature(MCP), screenSignature(MCP.replace('4.Cancel', '4.Cancelar')));
+    assert.notEqual(screenSignature(SHELL), screenSignature(SHELL.replace('fixture-a', 'fixture-b')));
+    return ok('padding-insensitive, change-sensitive', true);
   }),
   test('reject truncated, unknown, historical and ordinary screens', () => {
     for (const s of [SHELL.replace('enter to submit | esc to cancel', ''), SHELL.replace('$ printf fixture-a', ''), MCP.replace('  4.Cancel', ''), MCP.replace('1.Allow', '1.Do it forever'), '› ordinary prompt', `${MCP}\n› What next?`, `${CLAUDE}\n⏺ Done\n❯`]) assert.equal(promptOn(s), null, s);

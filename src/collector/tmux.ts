@@ -317,17 +317,26 @@ export class TmuxHost {
     return this.run(['capture-pane', '-p', '-J', '-t', `=${name}:`, '-S', `-${n}`], 10_000);
   }
 
-  /** Visible screen only; never include scrollback when recognizing a live dialog. */
-  async permissionView(name: string): Promise<{ identity: string; screen: string; claimedFingerprint?: string } | null> {
+  /**
+   * Visible screen only; never include scrollback when recognizing a live dialog.
+   *
+   * El título del pane viaja con la identidad porque sale de la misma llamada y
+   * es lo que el CLI dice de sí mismo (ver `titleSignal`). Va tras un tabulador
+   * y NO forma parte de `identity`: el título cambia cada segundo —spinner,
+   * marcador que parpadea— y una identidad que cambia no identifica nada.
+   */
+  async permissionView(name: string): Promise<{ identity: string; screen: string; title: string; claimedFingerprint?: string } | null> {
     if (!NAME_RE.test(name)) return null;
-    const id = await this.run(['display-message', '-p', '-t', `=${name}:`, '#{session_name}|#{pane_id}|#{pane_pid}|#{pane_dead}'], 5_000);
-    if (!id.ok || !id.stdout.trim().startsWith(`${name}|`) || !id.stdout.trim().endsWith('|0')) return null;
-    const identity = id.stdout.trim();
+    const id = await this.run(['display-message', '-p', '-t', `=${name}:`, '#{session_name}|#{pane_id}|#{pane_pid}|#{pane_dead}\t#{pane_title}'], 5_000);
+    const [head = '', rawTitle = ''] = id.stdout.split('\t');
+    const identity = head.trim();
+    if (!id.ok || !identity.startsWith(`${name}|`) || !identity.endsWith('|0')) return null;
+    const title = rawTitle.trim();
     const pane = identity.split('|')[1]!;
     if (!/^%\d+$/.test(pane)) return null;
     const shot = await this.run(['capture-pane', '-p', '-J', '-t', pane, '-S', '0'], 5_000);
     const claim = await this.run(['show-options', '-p', '-v', '-t', pane, '@orca_permission_claim'], 5_000);
-    return shot.ok ? { identity, screen: shot.stdout, claimedFingerprint: claim.ok ? claim.stdout.trim() : '' } : null;
+    return shot.ok ? { identity, screen: shot.stdout, title, claimedFingerprint: claim.ok ? claim.stdout.trim() : '' } : null;
   }
 
   /** Target the observed pane ID, never whichever window became active. No Enter. */

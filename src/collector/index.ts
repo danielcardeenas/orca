@@ -36,7 +36,7 @@ import { WebSocket } from 'ws';
 import type { CollectorFrame, Command, CommandFrame, TermFrame } from '../shared/protocol.ts';
 import { BEAT_INTERVAL_MS, HYGIENE_INTERVAL_MS, PATHS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
 import type {
-  Agent, AgentMessage, Artifact, Escalation, FeedItem, FeedLevel, Machine, Project,
+  Agent, AgentMessage, AgentState, Artifact, Escalation, FeedItem, FeedLevel, Machine, Project,
   SessionRollup, TalkItem,
 } from '../shared/types.ts';
 import { MAX_TALK, TERMINAL_STATES, emptyRollup } from '../shared/types.ts';
@@ -53,7 +53,7 @@ import type { CollisionAgent } from './collisions.ts';
 import { CollisionIndex } from './collisions.ts';
 import { EscalationWatcher } from './escalate.ts';
 import { HygieneSampler } from './hygiene.ts';
-import { liveText, promptOn, permissionClosed } from './screen.ts';
+import { liveText, promptOn, permissionClosed, screenSignature } from './screen.ts';
 import { answerPermission, type PermissionRequest } from './permissions.ts';
 import { KeyVault } from './keys.ts';
 import { MessageWatcher } from './messages.ts';
@@ -116,6 +116,15 @@ const LIVE_DEBOUNCE_MS = 100;
 const LIVE_MIN_GAP_MS = 80;
 const LIVE_MS = 400;
 const LIVE_WATCH_RETRY_MS = 5_000;
+/**
+ * Cuánto puede estar una pantalla sin pintar NADA, con el turno abierto, antes
+ * de que se dé por parada esperando a alguien. `ORCA_STALL_MS` lo mueve.
+ *
+ * Cinco muestras del poll de liveness. Las dos CLIs animan mientras trabajan
+ * —spinner, segundos, tokens—, así que veinte segundos de pantalla idéntica no
+ * son un modelo pensando: son un diálogo abierto, o un cuelgue.
+ */
+const STALL_MS = Math.max(4_000, Number(process.env['ORCA_STALL_MS'] ?? 20_000) || 20_000);
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const FEED_MAX = 200;
@@ -202,6 +211,13 @@ class Collector {
    * por ello. Un `--bg` no tiene pantalla y sigue con la sospecha por tiempo.
    */
   private screenPrompts = new Map<string, { escalation: Escalation; block: BlockSignal; request: PermissionRequest }>();
+  /** Última huella de cada pantalla y desde cuándo no cambia. Ver STALL_MS. */
+  private screenStill = new Map<string, { sig: string; since: number }>();
+  /**
+   * Agentes esperando algo que ORCA no sabe leer: el CLI lo declara en su
+   * título, o su pantalla lleva parada. Sólo un bloqueo, nunca una respuesta.
+   */
+  private waiting = new Map<string, BlockSignal>();
   private feed: FeedItem[] = [];
   private pendingFeed: FeedItem[] = [];
   /** La charla ya enviada por agente CAPCOM, para reponerla tras una reconexión. */
@@ -474,6 +490,8 @@ class Collector {
     if (!d) return;
     this.derivers.delete(ref.key);
     this.hiddenAgents.delete(ref.key);
+    this.screenStill.delete(ref.key);
+    this.waiting.delete(ref.key);
     this.callsigns.release(d.projectId, ref.key);
     this.collisions.forget(ref.key);
     // Su `ask` abierto ya no bloquea a nadie: no hay nadie a quien bloquear.
@@ -625,14 +643,21 @@ class Collector {
       const pane = l?.pane ? paneName(d.ref.sessionId) : null;
       const open = this.screenPrompts.get(d.id);
       // Sin pane no hay pantalla; si ya no está vivo, lo que hubiera se retira.
-      if (!pane || !l?.alive || seen.has(pane)) { if (open) this.withdrawPrompt(d.id, 'la sesión terminó'); continue; }
+      if (!pane || !l?.alive || seen.has(pane)) {
+        if (open) this.withdrawPrompt(d.id, 'la sesión terminó');
+        this.screenStill.delete(d.id);
+        this.waiting.delete(d.id);
+        continue;
+      }
       seen.add(pane);
       const pending = d.gatedPending(now, 0);
 
       const shot = await this.tmux.permissionView(pane);
       if (!shot) continue; // unreadable is not confirmation
+      const still = this.stillFor(d.id, shot.screen, now);
       const prompt = promptOn(shot.screen);
       if (!prompt) {
+        this.markWaiting(d, still, shot.title, now);
         if (open?.request.claimed && shot.identity === open.request.identity && permissionClosed(shot.screen)) {
           open.escalation.permission!.phase = 'confirmed';
           open.escalation.status = 'answered';
@@ -643,6 +668,8 @@ class Collector {
         if (open) this.withdrawPrompt(d.id, 'Dialog no longer observable; no approval or tool success inferred');
         continue;
       }
+      // Reconocido el diálogo, el parón no aporta: la escalación dice más.
+      this.waiting.delete(d.id);
       if (open && open.request.identity === shot.identity && open.request.fingerprint === prompt.fingerprint) continue;
       if (open) this.withdrawPrompt(d.id, 'Permission dialog changed; previous outcome unconfirmed');
       if (prompt.kind === 'trust') continue; // trust has no once scope
@@ -666,6 +693,49 @@ class Collector {
       this.send({ t: 'escalation', machineId: this.machineId, escalation: e });
       this.note('alert', question, d.id);
     }
+  }
+
+  /**
+   * Cuánto lleva esta pantalla sin cambiar, en ms. Cero si acaba de cambiar.
+   *
+   * Se guarda una huella por agente y se compara con la anterior. Nada de esto
+   * mira lo que la pantalla dice, y ése es el punto: es la única señal de
+   * "parado" que no se rompe cuando una CLI reescribe su TUI.
+   */
+  private stillFor(agentId: string, screen: string, now: number): number {
+    const sig = screenSignature(screen);
+    const prev = this.screenStill.get(agentId);
+    if (!prev || prev.sig !== sig) {
+      this.screenStill.set(agentId, { sig, since: now });
+      // Algo se pintó: lo que estuviera parado, ya no lo está.
+      this.waiting.delete(agentId);
+      return 0;
+    }
+    return now - prev.since;
+  }
+
+  /**
+   * Sin diálogo reconocido, las dos señales que quedan, en orden de confianza:
+   * lo que el CLI declara en su título, y el parón de la pantalla.
+   */
+  private markWaiting(d: Deriver, stillMs: number, title: string, now: number): void {
+    const declared = titleSignal(title, now);
+    const open = this.waiting.get(d.id);
+    if (declared) {
+      // Ya anotado: se conserva el `since` de la primera vez. El marcador del
+      // título parpadea, y un bloqueo que se reinicia cada segundo no dura.
+      if (open?.kind === 'permission') return;
+      this.waiting.set(d.id, declared);
+      this.note('alert', `${d.callsign} pide una respuesta en su terminal (lo dice su CLI)`, d.id);
+      return;
+    }
+    // Lo declaró y ya no: alguien contestó, o el CLI siguió solo.
+    if (open?.kind === 'permission') { this.waiting.delete(d.id); return; }
+    if (open) return;
+    const block = stallSignal(d.state(now), stillMs, now, STALL_MS);
+    if (!block) return;
+    this.waiting.set(d.id, block);
+    this.note('warn', `${d.callsign} lleva ${Math.round(stillMs / 1000)}s parado esperando input`, d.id);
   }
 
   /**
@@ -1029,6 +1099,10 @@ class Collector {
           kind: 'peer', summary: peer.summary,
           messageId: peer.messageId, waitingOn: peer.waitingOn, since: peer.since,
         });
+      } else if (this.waiting.has(d.id)) {
+        // Espera algo que nadie ha sabido leer: va detrás de todo lo que sí
+        // tiene nombre, porque ninguna de sus dos señales dice qué se pregunta.
+        d.setBlock(this.waiting.get(d.id)!);
       } else {
         d.setBlock(this.screenPrompts.get(d.id)?.block ?? this.jobStates.get(d.ref.sessionId) ?? null);
       }
@@ -1671,6 +1745,67 @@ class Collector {
 }
 
 /* ── helpers de módulo ────────────────────────────────────────────── */
+
+/**
+ * El CLI dice de sí mismo que espera una respuesta, en el título de su pane.
+ *
+ * Codex escribe el título del terminal con OSC, y uno de los elementos que
+ * pinta —`activity`, en `[tui].terminal_title`— es literalmente «spinner
+ * mientras trabaja, mensaje de acción requerida mientras está bloqueado».
+ * Medido el 2026-09-07 contra codex-cli 0.153.4 en un tmux aislado:
+ *
+ *   Ready | proyecto                    fin de turno, nada pendiente
+ *   ⠸ Working | proyecto                turno abierto
+ *   [ ! ] Action Required | proyecto    esperando una respuesta   (parpadea a `[ . ]`)
+ *
+ * Es la mejor señal que hay para esto, y por eso va delante del parón: no es
+ * una deducción de ORCA sobre una pantalla, es el CLI declarando su estado. No
+ * dice QUÉ pregunta —para eso está `promptOn`, que sabe además qué tecla
+ * mandar—, así que el bloqueo no trae opciones: trae dónde contestarlo.
+ *
+ * Los spawns fuerzan el elemento en el argv (ver `codexArgv`) para no depender
+ * de lo que tenga el `config.toml` del operador. Si aun así no aparece —una
+ * sesión adoptada, una versión que lo renombre— queda el parón detrás.
+ *
+ * Claude Code está sin medir: escribe título, pero no se ha comprobado que
+ * marque nada al pedir permiso. Hasta comprobarlo, para Claude manda `promptOn`
+ * y detrás el parón, que es lo que ya había.
+ */
+export function titleSignal(title: string, now: number): BlockSignal | null {
+  if (!/\bAction Required\b/i.test(title)) return null;
+  return {
+    kind: 'permission',
+    summary: 'the CLI reports it is waiting for an answer; open its terminal to see what it asks',
+    since: now,
+  };
+}
+
+/**
+ * Nadie pinta nada y el turno sigue abierto: el agente espera a alguien.
+ *
+ * Es el respaldo de `promptOn`, y existe porque un diálogo que ORCA no sabe
+ * leer —una redacción nueva, una herramienta MCP con otros campos que los de la
+ * fixture— no puede acabar en silencio. Aquí no se afirma QUÉ se pregunta: sólo
+ * que la sesión está parada y que la respuesta está en su terminal. Por eso el
+ * bloqueo es `input` y no `permission`: decir «permiso» sería inventarse la
+ * causa, y ya se inventó una vez.
+ *
+ * Un `Bash` de diez minutos no cae aquí: las dos CLIs animan spinner, segundos
+ * y tokens mientras un comando corre, así que su pantalla cambia y `stillMs`
+ * vuelve a cero. Lo que no cambia es una TUI esperando una tecla.
+ *
+ * Sólo cuenta con el turno abierto. Un agente `idle` también tiene la pantalla
+ * quieta, y eso ya se llama idle: no es un bloqueo y no debe despertar a nadie.
+ */
+export function stallSignal(state: AgentState, stillMs: number, now: number, thresholdMs = STALL_MS): BlockSignal | null {
+  if (stillMs < thresholdMs) return null;
+  if (state !== 'working' && state !== 'thinking') return null;
+  return {
+    kind: 'input',
+    summary: `waiting on its terminal: nothing has been painted for ${Math.round(stillMs / 1000)}s with a turn open`,
+    since: now - stillMs,
+  };
+}
 
 /** Compara dos snapshots y devuelve sólo lo que cambió de verdad. */
 export function diffAgent(prev: Agent, next: Agent): Partial<Agent> | null {

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { CodexDeriver } from '../src/collector/codex.ts';
-import { codexArgv } from '../src/collector/commands.ts';
+import { codexArgv, CODEX_TITLE_CONFIG } from '../src/collector/commands.ts';
 import { TranscriptWatcher, codexRef, type LineBatch } from '../src/collector/watch.ts';
 import { ok, eq, test, sleep, type TestModule } from './harness.ts';
 
@@ -175,17 +175,48 @@ const tests = [
   }),
 
   test('codex: el argv traduce la postura de permisos y deja el prompt al final', () => {
-    const auto = codexArgv('/bin/codex', '/p', { prompt: 'hola' });
-    const plan = codexArgv('/bin/codex', '/p', { prompt: 'hola', permissionMode: 'plan', model: 'gpt-6-astra' });
-    const dash = codexArgv('/bin/codex', '/p', { prompt: '-rf everything' });
-    const bad = codexArgv('/bin/codex', '/p', { prompt: 'x', permissionMode: 'yolo' });
-    const semi = codexArgv('/bin/codex', '/p', { prompt: ';' });
+    const no = {} as NodeJS.ProcessEnv;
+    const auto = codexArgv('/bin/codex', '/p', { prompt: 'hola' }, no);
+    const plan = codexArgv('/bin/codex', '/p', { prompt: 'hola', permissionMode: 'plan', model: 'gpt-6-astra' }, no);
+    const dash = codexArgv('/bin/codex', '/p', { prompt: '-rf everything' }, no);
+    const bad = codexArgv('/bin/codex', '/p', { prompt: 'x', permissionMode: 'yolo' }, no);
+    const semi = codexArgv('/bin/codex', '/p', { prompt: ';' }, no);
+    const unsandboxed = '--dangerously-bypass-approvals-and-sandbox';
+    // El `-c` del título va en todo lanzamiento: es de dónde sale la señal de
+    // «esperando respuesta» que no depende de leer la pantalla.
+    const head = `/bin/codex -C /p -c ${CODEX_TITLE_CONFIG}`;
     return ok('codex: el argv traduce la postura de permisos y deja el prompt al final',
-      auto.ok && auto.argv.join(' ') === '/bin/codex -C /p -a on-request -s workspace-write hola'
-      && plan.ok && plan.argv.join(' ') === '/bin/codex -C /p -m gpt-6-astra -s read-only hola'
+      auto.ok && auto.argv.join(' ') === `${head} ${unsandboxed} hola`
+      && plan.ok && plan.argv.join(' ') === `${head} -m gpt-6-astra -s read-only hola`
       && dash.ok && dash.argv[dash.argv.length - 1] === ' -rf everything'
       && !bad.ok && semi.ok && semi.argv[semi.argv.length - 1] === ';',
       auto.ok ? auto.argv.join(' ') : auto.detail);
+  }),
+
+  /*
+   * El sandbox de Codex corta la red, así que `auto` lanza sin él y un worker
+   * con navegador funciona. Lo que se prueba aquí es que la vuelta atrás existe
+   * y que ningún modo emite ya `-a untrusted`: 0.153.4 sólo acepta `on-request`
+   * y `never`, y ese argv lo rechazaba el CLI antes de arrancar la sesión.
+   */
+  test('codex: ORCA_CODEX_APPROVALS=1 devuelve las aprobaciones y nadie pide untrusted', () => {
+    const asks = { ORCA_CODEX_APPROVALS: '1' } as NodeJS.ProcessEnv;
+    const no = {} as NodeJS.ProcessEnv;
+    const back = codexArgv('/bin/codex', '/p', { prompt: 'hola' }, asks);
+    const explicit = codexArgv('/bin/codex', '/p', { prompt: 'hola', permissionMode: 'bypassPermissions' }, asks);
+    const modes = ['auto', 'acceptEdits', 'manual', 'plan', 'dontAsk', 'bypassPermissions', undefined];
+    const argvs = modes.flatMap((permissionMode) => [asks, no].map((env) => codexArgv('/bin/codex', '/p', { prompt: 'x', permissionMode }, env)));
+    const policies = argvs.flatMap((r) => (r.ok ? r.argv.map((a, n) => (r.argv[n - 1] === '-a' ? a : null)) : [])).filter(Boolean);
+    return ok('codex: ORCA_CODEX_APPROVALS=1 devuelve las aprobaciones y nadie pide untrusted',
+      back.ok && back.argv.join(' ') === `/bin/codex -C /p -c ${CODEX_TITLE_CONFIG} -a on-request -s workspace-write hola`
+      // El título se fuerza en todas las posturas, o la señal se pierde justo
+      // en la que sí puede quedarse esperando una respuesta.
+      && argvs.every((r) => r.ok && r.argv.includes(CODEX_TITLE_CONFIG))
+      // Pedido a mano, el bypass manda: la variable sólo mueve el default.
+      && explicit.ok && explicit.argv.includes('--dangerously-bypass-approvals-and-sandbox')
+      && argvs.every((r) => r.ok)
+      && policies.length > 0 && policies.every((p) => p === 'on-request' || p === 'never'),
+      policies.join(','));
   }),
 ];
 

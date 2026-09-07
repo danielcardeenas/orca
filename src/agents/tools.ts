@@ -353,7 +353,7 @@ export const CEO_TOOLS: ToolSpec[] = [
         permission_mode: {
           type: ['string', 'null'],
           enum: ['auto', 'acceptEdits', 'plan', 'bypassPermissions', null],
-          description: 'How much the worker may do without asking. Null or "auto" (the default): the CLI decides by itself and never leaves a prompt waiting on a screen nobody watches. "plan": read-only reconnaissance, it cannot change anything. "bypassPermissions": it never stops to ask — only when the operator has explicitly asked for that. "acceptEdits": edits go through but shell commands ask — only when the operator will be sitting at its terminal.',
+          description: 'How much the worker may do without asking. Null or "auto" (the default): it never leaves a prompt waiting on a screen nobody watches — Claude decides for itself, and Codex runs with approvals and sandbox off, because its sandbox blocks the network and a worker that browses cannot work inside it. "plan": read-only reconnaissance, it cannot change anything. "acceptEdits": edits go through but shell commands ask — only when the operator will be sitting at its terminal. "bypassPermissions": never asks, no sandbox; on Codex it is what "auto" already does.',
         },
         budget_usd: {
           type: ['number', 'null'],
@@ -420,7 +420,7 @@ export const CEO_TOOLS: ToolSpec[] = [
         permission_mode: {
           type: ['string', 'null'],
           enum: ['auto', 'acceptEdits', 'plan', 'bypassPermissions', null],
-          description: 'How much every agent of the squad may do without asking. Null or "auto" (the default): the CLI decides by itself and never leaves a prompt waiting. "plan": read-only. "bypassPermissions": never asks — only when the operator explicitly asked for that. "acceptEdits": shell commands ask — only with the operator at the terminal.',
+          description: 'How much every agent of the squad may do without asking. Null or "auto" (the default): it never leaves a prompt waiting — Claude decides for itself, Codex runs with approvals and sandbox off. "plan": read-only. "acceptEdits": shell commands ask — only with the operator at the terminal. "bypassPermissions": never asks, no sandbox; on Codex it is what "auto" already does.',
         },
         budget_usd: { type: ['number', 'null'], description: 'Spend ceiling in dollars for EACH agent of the squad, lead included. Null: the ORCA_DEFAULT_BUDGET_USD default, or none.' },
         budget_min: { type: ['number', 'null'], description: 'Time ceiling in minutes for EACH agent. Null: the default, or none.' },
@@ -1166,10 +1166,10 @@ async function spawnAgent(ctx: CeoContext, input: Record<string, unknown>): Prom
     ...(model ? { model } : {}),
     ...(typeof input.runtime === 'string' && input.runtime ? { runtime: input.runtime } : {}),
     background: input.background !== false,
-    // `auto` salvo que CAPCOM pida otra cosa: el CLI decide solo y nunca deja
-    // un prompt esperando en una pantalla que nadie mira. Con `acceptEdits` un
-    // `Bash` se queda colgado hasta que alguien pulsa Yes — y en una flota
-    // autónoma ese alguien no está.
+    // `auto` salvo que CAPCOM pida otra cosa: nunca deja un prompt esperando en
+    // una pantalla que nadie mira. Con `acceptEdits` un `Bash` se queda colgado
+    // hasta que alguien pulsa Yes — y en una flota autónoma ese alguien no está.
+    // Qué significa `auto` lo traduce cada runtime (ver `codexArgv`).
     permissionMode,
   });
 
@@ -1224,7 +1224,7 @@ function modelOf(v: unknown): string | null {
 type WorkerPermissionMode = 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 const WORKER_PERMISSION_MODES: ReadonlySet<string> = new Set(['auto', 'acceptEdits', 'plan', 'bypassPermissions']);
 const PERMISSION_MODE_HELP =
-  'invalid permission_mode: use null or "auto" (the CLI decides, never blocks), "plan" (read-only), "bypassPermissions" (never asks) or "acceptEdits" (shell commands ask).';
+  'invalid permission_mode: use null or "auto" (never blocks), "plan" (read-only), "bypassPermissions" (never asks, no sandbox) or "acceptEdits" (shell commands ask).';
 
 /** Null and "" mean "auto"; anything else must be one of the four. */
 function permissionModeOf(v: unknown): WorkerPermissionMode | null {

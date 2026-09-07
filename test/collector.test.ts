@@ -21,7 +21,7 @@ import { KeyVault } from '../src/collector/keys.ts';
 import { LineageIndex } from '../src/collector/lineage.ts';
 import { matchesSlug, probeSlug } from '../src/collector/projects.ts';
 import { extractShortId } from '../src/collector/commands.ts';
-import { diffAgent, rollup } from '../src/collector/index.ts';
+import { diffAgent, rollup, stallSignal, titleSignal } from '../src/collector/index.ts';
 import { stableCallsign, isInside, safeJson, oneLine } from '../src/collector/util.ts';
 import { TranscriptWatcher, parseLines } from '../src/collector/watch.ts';
 import type { LineBatch, TranscriptRef } from '../src/collector/watch.ts';
@@ -921,6 +921,56 @@ const testDiff: Test = () => check('index: diffAgent sólo emite cambios percept
   assert.ok(bl?.block);
 });
 
+/*
+ * El respaldo de `promptOn`. Lo que se prueba es la regla, no el diálogo: una
+ * pantalla parada con el turno abierto es un agente esperando a alguien, sin
+ * importar qué diga la pantalla ni qué CLI la pinte.
+ */
+const testStall: Test = () => check('index: una pantalla quieta con el turno abierto es un bloqueo de input', () => {
+  const now = 1_000_000;
+  const umbral = 20_000;
+
+  // Debajo del umbral no se afirma nada: un modelo puede tardar en pintar.
+  assert.strictEqual(stallSignal('working', 19_999, now, umbral), null);
+
+  for (const state of ['working', 'thinking'] as const) {
+    const b = stallSignal(state, 30_000, now, umbral);
+    assert.ok(b, state);
+    // `input`, no `permission`: nadie ha leído qué se pregunta.
+    assert.strictEqual(b.kind, 'input');
+    assert.strictEqual(b.since, now - 30_000, 'el bloqueo empieza cuando se paró, no cuando se vio');
+    assert.ok(b.summary.includes('30s'));
+    assert.ok(/terminal/.test(b.summary), 'dice dónde se contesta');
+  }
+
+  // Sin turno abierto no hay nada que reportar: idle ya se llama idle, y un
+  // agente terminado con la pantalla quieta no es un bloqueo.
+  for (const state of ['idle', 'done', 'dead', 'blocked', 'booting'] as const) {
+    assert.strictEqual(stallSignal(state, 10 * 60_000, now, umbral), null, state);
+  }
+});
+
+/*
+ * Títulos capturados de codex-cli 0.153.4 con `display-message -p
+ * '#{pane_title}'`, en un tmux aislado, el 2026-09-07. El marcador alterna
+ * entre `[ ! ]` y `[ . ]` mientras espera; el texto es el que no cambia.
+ */
+const testTitle: Test = () => check('index: el título del pane declara cuándo el CLI espera respuesta', () => {
+  const now = 1_000_000;
+  for (const t of ['[ ! ] Action Required | titleprobe', '[ . ] Action Required | titleprobe', 'Action Required']) {
+    const b = titleSignal(t, now);
+    assert.ok(b, t);
+    // El CLI afirma que espera, así que el bloqueo se llama permiso; lo que no
+    // se sabe es QUÉ pregunta, y por eso no trae opciones.
+    assert.strictEqual(b.kind, 'permission');
+    assert.ok(/terminal/.test(b.summary));
+  }
+  // Los otros dos estados del mismo título no son un bloqueo.
+  for (const t of ['Ready | titleprobe', '⠸ Working | titleprobe', 'titleprobe', '', 'MacBook-Pro.local']) {
+    assert.strictEqual(titleSignal(t, now), null, t);
+  }
+});
+
 const testRollup: Test = () => check('index: rollup agrega por estado y cuenta bloqueados', () => {
   const r = rollup([
     fakeAgent({ state: 'working' }),
@@ -974,7 +1024,7 @@ const TESTS: Test[] = [
   testLineage, testLineageSpawn, testLineageOneCapcom, testLineageNoParent,
   testEscalation, testEscalationExpiry,
   testShortId, testPathGuard,
-  testDiff, testRollup,
+  testDiff, testStall, testTitle, testRollup,
   testJunkTolerance,
 ];
 

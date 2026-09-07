@@ -119,6 +119,56 @@ export default { suite: 'Fresh CAPCOM', tests: [
       return ok('Codex isolated readiness, atomic UUID publication and clean resume policy', true);
     } finally { r.dispose(); }
   }),
+  test('the archived transcript is not a second copy, and a superseded archive keeps its evidence without its bulk', () => {
+    const r = rig();
+    try {
+      const live = r.service.review(OLD, 'codex', 'gpt-6-astra', '', 'clean');
+      fs.writeFileSync(path.join(r.dir, 'codex-recovery.json'),
+        JSON.stringify({ handoffId: live.id, archive: live.archive, sessionId: NEW, model: 'gpt-6-astra', runtime: 'codex' }));
+      const stale = r.service.review(OLD, 'codex', 'gpt-6-astra', '', 'clean');
+      const source = path.join(stale.archive, 'source.jsonl');
+      const shared = fs.statSync(source).ino === fs.statSync(r.source).ino;
+      assert.equal(fs.readFileSync(source, 'utf8'), fs.readFileSync(r.source, 'utf8'));
+      const next = r.service.review(OLD, 'codex', 'gpt-6-astra', '', 'clean');
+      assert.equal(fs.existsSync(source), false);
+      assert.equal(fs.existsSync(stale.historyPath), false);
+      assert.ok(fs.existsSync(path.join(stale.archive, 'plan.json')) && fs.existsSync(stale.checkpointPath)
+        && fs.existsSync(path.join(stale.archive, 'manifest.json')));
+      assert.match(fs.readFileSync(path.join(stale.archive, 'PRUNED.md'), 'utf8'), /source\.jsonl, conversation\.md/);
+      assert.equal(r.service.status(stale.id).id, stale.id);
+      // The activated handoff and the one being prepared are never touched.
+      assert.ok(fs.existsSync(live.historyPath) && fs.existsSync(path.join(live.archive, 'source.jsonl')));
+      assert.ok(fs.existsSync(next.historyPath) && fs.existsSync(path.join(next.archive, 'source.jsonl')));
+      return ok('transcript archived by link; superseded bulk dropped, evidence and live archive intact',
+        true, shared ? 'source.jsonl shares the transcript inode' : 'links refused here: fell back to a copy');
+    } finally { r.dispose(); }
+  }),
+  test('the new destination directory is trusted before its pane opens, and a stuck resume keeps its screen', async () => {
+    const r = rig(); const home = process.env['CODEX_HOME'];
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-codex-home-'));
+    try {
+      process.env['CODEX_HOME'] = codexHome;
+      let atSpawn = '';
+      const cap = new CapcomSession({ dir: r.dir, bin: '/fake/claude', codexBin: '/fake/codex', hubUrl: 'ws://127.0.0.1:1', token: '',
+        alive: () => true, wait: async () => {}, note() {}, lineage: { noteSpawn() {}, bind() {}, demote() {} },
+        tmux: { available: () => true,
+          spawn: async () => { atSpawn = fs.readFileSync(path.join(codexHome, 'config.toml'), 'utf8'); return { ok: true, stdout: '', detail: '' }; },
+          // The dialog an unwatched pane can never answer.
+          capture: async () => ({ ok: true, stdout: 'Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit', detail: '' }),
+          kill: async () => ({ ok: true, stdout: '', detail: '' }),
+        },
+      });
+      cap.adopt(OLD); const plan = r.service.review(OLD, 'codex', 'gpt-6-astra', '', 'clean');
+      await assert.rejects(cap.activateHandoff(plan, NEW), /resume-screen\.txt/);
+      assert.ok(atSpawn.includes(`[projects."${plan.cwd}"]`) && atSpawn.includes('trust_level = "trusted"'));
+      assert.match(fs.readFileSync(path.join(plan.archive, 'resume-screen.txt'), 'utf8'), /Do you trust/);
+      assert.equal(cap.current(), OLD);
+      return ok('destination trusted before resume; its last screen survives the failure', true);
+    } finally {
+      if (home === undefined) delete process.env['CODEX_HOME']; else process.env['CODEX_HOME'] = home;
+      fs.rmSync(codexHome, { recursive: true, force: true }); r.dispose();
+    }
+  }),
   ...['spawn', 'capture', 'stop', 'timeout'].map(failure => test(`activation ${failure} failure does not retire the old CAPCOM`, async () => {
     const r = rig(); try {
       const killed: string[] = []; const prior = JSON.stringify({ runtime: 'codex', sessionId: OLD, model: 'gpt-6-astra' });

@@ -38,7 +38,7 @@ import { CEO_TOOLS } from '../src/agents/tools.ts';
 import { capcomBrief } from '../src/collector/briefs.ts';
 import {
   CapcomSession, CAPCOM_FIRST_PROMPT, CAPCOM_GRACE_MS, capcomRoots, capcomSettingsJson,
-  hubHttpUrl, mcpConfigJson, preTrust, wantsCapcom,
+  hubHttpUrl, mcpConfigJson, preTrust, preTrustCodex, wantsCapcom,
 } from '../src/collector/capcom.ts';
 import { squadsOf } from '../src/shared/squads.ts';
 import { startFakeFleet } from './fake-collector.ts';
@@ -850,6 +850,34 @@ const tests = [
         && broken === 'skipped' && missing === 'skipped'
         && readFileSync(file, 'utf8') === '{ not json',
         `${first}, ${again}, broken: ${broken}, missing: ${missing}`,
+      );
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('preTrustCodex appends folder trust once, keeps the rest of config.toml and respects an existing entry', () => {
+    const dir = tempDir();
+    try {
+      const file = join(dir, 'config.toml');
+      const target = join(dir, 'handoffs', 'plan', 'runtime');
+      const before = 'model = "gpt-6-astra"\n\n[projects."/elsewhere"]\ntrust_level = "trusted"';
+      writeFileSync(file, before);
+      const first = preTrustCodex(target, file);
+      const again = preTrustCodex(target, file);
+      const after = readFileSync(file, 'utf8');
+      const refused = join(dir, 'refused');
+      writeFileSync(file, `${after}\n[projects."${refused}"]\ntrust_level = "untrusted"\n`);
+      const kept = preTrustCodex(refused, file);
+      const created = join(dir, 'fresh.toml');
+      const blank = preTrustCodex(target, created);
+      const nowhere = preTrustCodex(target, join(dir, 'no-such-home', 'config.toml'));
+      return ok(
+        'trust is appended once, never overwrites a decision, and never invents a Codex home',
+        first === 'written' && again === 'already' && kept === 'already' && blank === 'written' && nowhere === 'skipped'
+        && after.startsWith(before) && after.includes(`[projects."${target}"]\ntrust_level = "trusted"\n`)
+        && after.includes('[projects."/elsewhere"]') && after.match(/trust_level/g)?.length === 2
+        && readFileSync(file, 'utf8').includes('trust_level = "untrusted"')
+        && readFileSync(created, 'utf8').includes(`[projects."${target}"]`),
+        `${first}, ${again}, refused: ${kept}, new file: ${blank}, no home: ${nowhere}`,
       );
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }),

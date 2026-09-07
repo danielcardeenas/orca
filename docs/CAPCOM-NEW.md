@@ -33,7 +33,7 @@ Archivos de proyectos, workers, tareas, reglas persistidas, transcripts original
 
 Cada acción crea `<capcom-dir>/handoffs/<planId>/`:
 
-- `source.jsonl`: copia exacta del transcript anterior.
+- `source.jsonl`: el transcript anterior, enlazado en duro cuando el sistema de archivos lo permite y copiado cuando no. Los mismos bytes bajo otro nombre: sobrevive a que el CLI pode su directorio de sesiones, sin duplicar decenas de megabytes en cada intento.
 - `conversation.md`: historial acumulado consultable desde TALK.
 - `manifest.json`: hashes del transcript, historial y notas.
 - `HANDOFF.md`: checkpoint de continuidad o acta del reset limpio, sin pendientes en el segundo caso.
@@ -41,7 +41,27 @@ Cada acción crea `<capcom-dir>/handoffs/<planId>/`:
 - `runtime/`: directorio propio de la sesión preparada, con `CLAUDE.md` y `AGENTS.md` específicos del modo.
 - `preparation.jsonl`, `preparation.stderr`, `destination-checkpoint.md` y `plan.json`: evidencia y resultado.
 
+Al preparar un traspaso se podan los archivos anteriores: de cada uno que no sea
+el activo — el que nombra `codex-recovery.json` — ni el que se está preparando,
+se quitan `source.jsonl` y `conversation.md`, y queda un `PRUNED.md` que lo dice.
+El plan, el checkpoint, los hashes del manifiesto, el recibo de preparación y la
+pantalla del destino atascado se conservan: son lo que se abre para entender un
+fallo. La conversación que contenían sigue en la sesión que la tiene y en el
+transcript del propio CLI. La poda es de mejor esfuerzo y nunca hace fallar un
+traspaso.
+
 Las credenciales MCP se añaden al directorio de ejecución solo al abrir el terminal de destino, después de preparar y verificar el recibo. La preparación elimina variables `ORCA_*`; Claude no dispone de herramientas/MCP y Codex utiliza la ruta existente `exec --ignore-user-config ... -s read-only`. No se debe borrar un directorio `runtime/` que esté referenciado por la recuperación activa.
+
+Ese directorio `runtime/` no existía un segundo antes, así que el CLI de destino
+pediría confirmar su confianza y se quedaría esperando en un pane que nadie mira:
+la verificación agota los dos minutos y el CAPCOM original se conserva. Antes de
+abrir el terminal se registra la confianza de la carpeta donde cada CLI la guarda
+— `~/.claude.json` para Claude, `[projects."<dir>"] trust_level = "trusted"` en
+`~/.codex/config.toml` para Codex —, sin tocar una decisión ya tomada para esa
+carpeta ni un archivo ilegible; si no se puede escribir, queda un aviso en el
+feed. Cada traspaso añade así una entrada de proyecto al config de Codex. Cuando
+la verificación falla de todos modos, la última pantalla del destino se guarda en
+`resume-screen.txt` dentro del archivo.
 
 El checkpoint de continuidad enumera hasta 16 elementos por sección, recorta líneas descriptivas a 240 caracteres y conserva identificadores y vías de consulta. El prompt preparado tiene un límite de 48 KiB. El historial archivado no comparte ese límite de contexto. Si el transcript cambia durante la preparación o queda incompleto durante una escritura, se rechaza el traspaso y se mantiene el original.
 

@@ -126,6 +126,45 @@ export function claudeConfigPath(env: Record<string, string | undefined> = proce
   return path.join(env['CLAUDE_CONFIG_DIR'] ?? os.homedir(), '.claude.json');
 }
 
+/** Where Codex keeps per-folder trust. `CODEX_HOME` moves it. */
+export function codexConfigPath(env: Record<string, string | undefined> = process.env): string {
+  return path.join(env['CODEX_HOME'] ?? path.join(os.homedir(), '.codex'), 'config.toml');
+}
+
+/**
+ * The same promise for Codex, whose trust lives in TOML instead of JSON.
+ *
+ * A handoff resumes its destination in a directory that did not exist a second
+ * earlier — `handoffs/<planId>/runtime` — so the TUI opens on "Do you trust the
+ * contents of this directory?" and stops there. Nobody is watching that pane:
+ * readiness times out, the original is retained, and a clean reset reports a
+ * failure while the old context stays exactly where it was.
+ *
+ * Only appends, and only when the folder has no entry at all: a `trust_level`
+ * the operator already chose — a refusal included — is left as it is, and so is
+ * a config that cannot be read. The dialog then appears in the TERMINAL.
+ */
+export function preTrustCodex(dir: string, file: string = codexConfigPath()): 'already' | 'written' | 'skipped' {
+  const key = path.resolve(dir).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const header = `[projects."${key}"]`;
+  let raw = '';
+  let mode = 0o600;
+  if (fs.existsSync(file)) {
+    try { raw = fs.readFileSync(file, 'utf8'); mode = fs.statSync(file).mode & 0o777; } catch { return 'skipped'; }
+  } else if (!fs.existsSync(path.dirname(file))) return 'skipped';
+  if (raw.split('\n').some(line => line.trim() === header)) return 'already';
+  const tmp = `${file}.orca-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, `${raw}${raw && !raw.endsWith('\n') ? '\n' : ''}\n${header}\ntrust_level = "trusted"\n`, { mode });
+    fs.renameSync(tmp, file);
+    return 'written';
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ya no está */ }
+    log('warn', SCOPE, `no pude marcar ${key} como de confianza: ${errText(err)}`);
+    return 'skipped';
+  }
+}
+
 /**
  * Tell Claude Code that CAPCOM's directory is trusted, before it asks.
  *
@@ -415,6 +454,12 @@ export class CapcomSession {
     const bin = plan.runtime === 'claude' ? this.deps.bin : this.deps.codexBin ?? runtimeBin('codex');
     if (!old || old !== plan.fromId || sessionId === old || !name || !isHostedId(sessionId) || !bin || !tmux?.capture || !tmux.kill) throw new Error('CAPCOM changed or the destination runtime is unavailable.');
     const cwd = plan.cwd ?? this.dir;
+    // The destination's directory is new, and an unattended pane cannot accept
+    // a trust dialog. Answer it before it is asked, in either CLI's own record.
+    if (this.deps.trust !== false && (plan.runtime === 'claude' ? preTrust(cwd) : preTrustCodex(cwd)) === 'skipped') {
+      this.deps.note('warn', `no pude marcar ${cwd} como de confianza para ${plan.runtime}: `
+        + 'el destino puede quedarse en el diálogo de confianza y el CAPCOM actual se conserva');
+    }
     this.writeConfig(cwd, plan.contextMode);
     const r = await tmux.spawn({ name, cwd, env: { ...paneEnv({}), ORCA_PANE: name }, argv: [bin, ...this.resumeArgs(plan.runtime, sessionId, plan.model, cwd)] });
     if (!r.ok) throw new Error(`Destination could not resume: ${r.detail}`);
@@ -427,7 +472,13 @@ export class CapcomSession {
         if (!screen.ok) throw new Error(`Destination terminal unavailable: ${screen.detail}`);
         if (i >= 7 && resumedPromptReady(screen.stdout, plan.runtime)) { ready = true; break; }
       }
-      if (!ready) throw new Error('Destination requires terminal setup or did not become ready. Original CAPCOM retained.');
+      if (!ready) {
+        // Whatever it stopped on dies with the pane. Keep the screen, or the
+        // next operator has to reproduce the resume by hand to see the dialog.
+        const last = await tmux.capture(name, 80);
+        if (last.ok) try { fs.writeFileSync(path.join(plan.archive, 'resume-screen.txt'), last.stdout, { mode: 0o600 }); } catch { /* la evidencia es mejor esfuerzo */ }
+        throw new Error('Destination requires terminal setup or did not become ready. Original CAPCOM retained; its last screen is resume-screen.txt in the backup.');
+      }
       const file = path.join(this.dir, 'codex-recovery.json');
       const config = { cwd, contextMode: plan.contextMode, cutoffAt: plan.at, runtime: plan.runtime, sessionId, model: plan.model, handoffModel: plan.model, handoffId: plan.id,
         previousSessionId: old, previousRuntime: plan.fromRuntime, previousModel: plan.fromModel,

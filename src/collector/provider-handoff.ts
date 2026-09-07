@@ -50,6 +50,25 @@ export function transcriptMarkdown(source: string, runtime: string, sessionId: s
   return messages.join('\n\n') + '\n';
 }
 
+/**
+ * The archived transcript, without a second copy of it on disk.
+ *
+ * A CAPCOM that has been commanding a fleet for days carries tens of megabytes
+ * of transcript, and every handoff — including the ones that fail and are
+ * retried — used to duplicate all of them. A hard link is the same bytes under
+ * a second name: it costs nothing, and it survives the CLI pruning its own
+ * sessions directory, which is the only reason the copy existed.
+ *
+ * The link is to a file the previous CAPCOM may still be appending to, so it
+ * is not frozen the instant it is made — but neither was the copy: the plan
+ * re-hashes the source before committing and refuses a transcript that moved,
+ * and after cutover the process that wrote it is dead. Across devices, or
+ * anywhere links are refused, this falls back to the copy.
+ */
+export function linkOrCopy(from: string, to: string): 'linked' | 'copied' {
+  try { fs.linkSync(from, to); return 'linked'; } catch { fs.copyFileSync(from, to); return 'copied'; }
+}
+
 interface Deps {
   priorHistory?(a: AgentHandle): string;
   cwd?(a: AgentHandle): string;
@@ -131,6 +150,44 @@ export class ProviderHandoffs {
     while (start > 0 && end - start < 12) { const size = Buffer.byteLength(sections[start - 1]!); if (bytes && bytes + size > 180000) break; if (size > 800000) throw new Error('An archived message is too large for chat. Open the history file to read it.'); bytes += size; start--; }
     return { text: sections.slice(start, end).join(''), next: start > 0 ? sections.length - start : null, total: sections.length };
   }
+  /**
+   * Drop the bulk of superseded archives, keep what explains them.
+   *
+   * Every archive but the live one and the one being prepared holds two heavy
+   * files that nothing reads any more: `source.jsonl`, whose bytes are the
+   * transcript the running session already owns or the CLI still keeps, and
+   * `conversation.md`, whose text the next archive copied into its own through
+   * `priorHistory`. A failed attempt's pair is pure duplication — the original
+   * CAPCOM it was copied from never stopped. Five attempts had left 154 MB
+   * behind on the machine this was written for.
+   *
+   * The small evidence stays: the plan, the checkpoint, the manifest with the
+   * hashes, the preparation receipt and the stuck destination's screen — which
+   * is what anyone asking "why did this fail" actually opens. Best effort by
+   * design: a handoff must never fail because housekeeping did.
+   */
+  private prune(keep: string): void {
+    const root = path.join(this.deps.dir(), 'handoffs');
+    const spare = new Set([path.basename(keep)]);
+    try {
+      const r = JSON.parse(fs.readFileSync(path.join(this.deps.dir(), 'codex-recovery.json'), 'utf8'));
+      for (const ref of [r.handoffId, r.archive && path.basename(r.archive)]) if (typeof ref === 'string' && ref) spare.add(ref);
+    } catch { /* no active recovery to protect */ }
+    let entries: string[] = [];
+    try { entries = fs.readdirSync(root); } catch { return; }
+    for (const entry of entries) {
+      if (spare.has(entry)) continue;
+      const removed: string[] = [];
+      for (const name of ['source.jsonl', 'conversation.md']) {
+        const file = path.join(root, entry, name);
+        try { fs.rmSync(file); removed.push(name); } catch { /* already gone, or not ours to remove */ }
+      }
+      if (!removed.length) continue;
+      try {
+        fs.writeFileSync(path.join(root, entry, 'PRUNED.md'), `# Superseded archive\n\nRemoved when a later handoff was prepared: ${removed.join(', ')}.\nThe plan, checkpoint, manifest hashes and preparation evidence in this directory are intact.\nThe conversation these held is in the CAPCOM session that owns it and in the CLI's own transcript.\n`, { mode: 0o600 });
+      } catch { /* the note is a courtesy, not the point */ }
+    }
+  }
   fresh(id: string, mode: 'continuity' | 'clean', checkpoint = ''): ProviderHandoffPlan {
     if (!['continuity', 'clean'].includes(mode)) throw new Error('Choose clean or continuity explicitly.');
     if (this.running === id && this.freshPlan && this.freshPlan.contextMode === mode) return this.status(this.freshPlan.id);
@@ -155,8 +212,9 @@ export class ProviderHandoffs {
       const brief = contextMode === 'clean' ? cleanCapcomBrief() : capcomBrief();
       for (const name of ['AGENTS.md', 'CLAUDE.md']) fs.writeFileSync(path.join(cwd, name), brief, { mode: 0o600 });
     }
+    this.prune(archive);
     const raw = fs.readFileSync(a.transcriptPath!);
-    fs.writeFileSync(path.join(archive, 'source.jsonl'), raw, { mode: 0o600 });
+    linkOrCopy(a.transcriptPath!, path.join(archive, 'source.jsonl'));
     // Keep control state and earlier archive references before any target process runs.
     for (const name of ['codex-recovery.json', 'session.json', 'CLAUDE.md', 'AGENTS.md', 'model-changes.jsonl']) {
       const file = path.join(this.deps.dir(), name);

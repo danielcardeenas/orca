@@ -30,6 +30,7 @@ import type {
 } from '../shared/types.ts';
 import { AGENT_STATES, LIVE_STATES, MAX_TALK, MAX_TALK_TEXT, TERMINAL_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
 import { squadName } from '../shared/squads.ts';
+import { capcomOf } from '../shared/capcom.ts';
 import type { ExcludedWorkspace } from '../shared/workspaces.ts';
 import { parseModelControl } from '../shared/model-control.ts';
 import {
@@ -523,6 +524,10 @@ export function sanitizeMachine(raw: unknown): Machine | null {
     online: true,
     lastSeen: n(o['lastSeen'], now),
     connectedAt: n(o['connectedAt'], now),
+    // Sólo el `true` explícito. Es una declaración que quita permisos, así que
+    // se acepta tal cual del cable; lo que no se acepta es un valor raro que
+    // luego se lea como cierto en otro sitio.
+    ...(o['synthetic'] === true ? { synthetic: true } : {}),
     load: {
       sessions: n(load['sessions']),
       activeSessions: n(load['activeSessions']),
@@ -984,6 +989,9 @@ export class World {
       connectedAt: prev?.connectedAt && m.online ? m.connectedAt || prev.connectedAt : m.connectedAt,
       lastSeen: this.now(),
       online: true,
+      // Fixture una vez, fixture siempre: nadie sale de la cuarentena porque un
+      // `hello` posterior —una reconexión, un mock más viejo— llegue sin marca.
+      ...(prev?.synthetic || m.synthetic ? { synthetic: true as const } : {}),
     };
     this.state.machines[m.id] = next;
     this.emit({ o: 'machine', id: m.id, v: next });
@@ -1288,6 +1296,22 @@ export class World {
    * responder de un agente que se va no bloquea a nadie y sí se puede tirar.
    */
   private dropTrafficFor(id: string): void {
+    /*
+     * Su pregunta se va con él. Un agente desalojado, archivado o cuya sesión
+     * ya no existe en disco no puede recibir la respuesta, así que dejarla
+     * `pending` es dejar en la cola del humano una pregunta que ya no le sirve
+     * a nadie: así es como el hub acabó con 130 preguntas de agentes muertos, y
+     * la mitad seguían ofreciéndosele al mando en cada barrido.
+     */
+    for (const e of Object.values(this.state.escalations)) {
+      if (e.agentId !== id || e.status === 'answered' || e.status === 'withdrawn') continue;
+      e.status = 'withdrawn';
+      this.emit({ o: 'escalation', id: e.id, v: e });
+      this.event({
+        at: this.now(), kind: 'escalation:withdraw', machineId: e.machineId,
+        text: 'el agente que preguntaba ya no está',
+      });
+    }
     for (const m of Object.values(this.state.messages)) {
       if (m.fromAgentId === id || (m.scope === 'agent' && m.toAgentId === id)) {
         delete this.state.messages[m.id];
@@ -2060,6 +2084,9 @@ export class World {
           id: m.id, hostname: m.hostname, platform: m.platform, online: m.online,
           lastSeenAgoMs: Math.max(0, this.now() - m.lastSeen),
           sessions: m.load.sessions, activeSessions: m.load.activeSessions,
+          // Sólo cuando lo es: quien lea esto de fuera —el arnés visual, el
+          // propio mock— pregunta por el arnés, no por la ausencia de arnés.
+          ...(m.synthetic ? { synthetic: true } : {}),
         })),
       },
       projects: Object.keys(this.state.projects).length,
@@ -2068,6 +2095,16 @@ export class World {
       blocked: this.state.fleet.blocked,
       costUSD: Number(this.state.fleet.costUSD.toFixed(4)),
       tokensPerSec: Number(this.state.fleet.tokensPerSec.toFixed(1)),
+      /*
+       * Quién manda aquí, si manda alguien. Es lo primero que necesita saber
+       * cualquiera que vaya a conectar algo a este hub: el arnés se niega a
+       * arrancar contra un hub con mando vivo, y para eso tiene que poder
+       * preguntarlo sin bajarse el mundo entero.
+       */
+      capcom: (() => {
+        const cap = capcomOf(this.state.agents);
+        return cap ? { id: cap.id, callsign: cap.callsign, machineId: cap.machineId, state: cap.state } : null;
+      })(),
       escalations: {
         total: Object.keys(this.state.escalations).length,
         pending: Object.values(this.state.escalations).filter((e) => e.status === 'pending' || e.status === 'with_ceo').length,

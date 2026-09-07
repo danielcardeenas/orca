@@ -20,6 +20,13 @@ export interface Machine {
   lastSeen: number;
   /** epoch ms when the collector first connected this run */
   connectedAt: number;
+  /**
+   * Esta máquina es un fixture, no un ordenador: la levanta
+   * `test/fake-collector.ts` y nada de lo que dice ocurrió. El hub la pone en
+   * cuarentena — ver shared/synthetic.ts — para que una pregunta inventada no
+   * acabe en el pane de un CAPCOM de verdad.
+   */
+  synthetic?: boolean;
   /** Load signals for the deck's machine strip. */
   load: {
     sessions: number;

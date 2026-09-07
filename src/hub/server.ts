@@ -33,9 +33,10 @@ import { WebSocket, WebSocketServer } from 'ws';
 import type { RawData } from 'ws';
 
 import type {
-  Agent, AgentMessage, CeoMessage, Collision, MessageKind,
+  Agent, AgentMessage, CeoMessage, Collision, Machine, MessageKind,
 } from '../shared/types.ts';
 import { TERMINAL_STATES } from '../shared/types.ts';
+import { sameWorld } from '../shared/synthetic.ts';
 import type {
   ClientFrame, CollectorFrame, Command, CommandFrame, PatchOp, ServerFrame, TermFrame,
 } from '../shared/protocol.ts';
@@ -620,6 +621,12 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
    * humano y cada pregunta que levanta un agente. Si no la hay, no manda nadie:
    * el mensaje se guarda, la pregunta va a la cola del humano, y el hub lo dice.
    */
+  /** La máquina donde vive el mando ahora mismo, o null si no manda nadie. */
+  function capcomMachine(): Machine | undefined {
+    const cap = capcomOf(world.state.agents);
+    return cap ? world.state.machines[cap.machineId] : undefined;
+  }
+
   const capcomRouter = new CapcomRouter({
     capcom: () => capcomOf(world.state.agents),
     say: (agentId, text) => { dispatchCommand(newId('cmd'), { k: 'say', agentId, text }, null); },
@@ -630,6 +637,9 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       // la cola del humano: `attachCeoAttempt` hace las dos cosas.
       world.attachCeoAttempt(id, { answer: '', confidence: 0, reason });
     },
+    // La cuarentena del arnés: una máquina que se declara sintética no le llega
+    // al mando de verdad. Ver shared/synthetic.ts.
+    routable: (machineId) => sameWorld(world.state.machines[machineId], capcomMachine()),
     callsign: (id) => world.state.agents[id]?.callsign ?? null,
     note: (text) => {
       log(text);
@@ -1169,6 +1179,28 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     // interrumpe a sí mismo, y en un `ask` se quedaría esperándose a sí mismo.
     // Quedarse fuera por ser el emisor no cuenta como omitido.
     targets = targets.filter((a) => a.id !== msg.fromAgentId);
+
+    /*
+     * Y nunca cruzando la cuarentena del arnés. Un `squad` o un `fleet` se
+     * resuelven por etiqueta y por nada más: un escuadrón sintético que se
+     * llame como uno de verdad le pegaría el mensaje en el pane a agentes de
+     * verdad —CAPCOM incluido— y ninguno de los dos lados lo notaría.
+     * Ver shared/synthetic.ts.
+     *
+     * Sólo cuando el emisor es un agente de una máquina. Lo que manda el
+     * operador (`fromAgentId:'ceo'`, sin máquina detrás) va a los dos mundos:
+     * es la voz del humano, y el humano manda también sobre el arnés.
+     */
+    const sender = world.state.agents[msg.fromAgentId];
+    if (sender) {
+      const from = world.state.machines[sender.machineId];
+      const crossWorld = targets.filter((a) => !sameWorld(from, world.state.machines[a.machineId]));
+      if (crossWorld.length > 0) {
+        targets = targets.filter((a) => !crossWorld.includes(a));
+        skipped += crossWorld.length;
+        reason = `cuarentena del arnés: ${crossWorld.length} destinatario(s) en el otro mundo`;
+      }
+    }
 
     if (msg.scope !== 'agent' && targets.length > MAX_BROADCAST) {
       const wanted = targets.length;

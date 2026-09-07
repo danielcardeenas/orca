@@ -14,12 +14,19 @@
  * herramienta con la que se desarrolla la UI.
  *
  *   npx tsx test/fake-collector.ts
- *   npx tsx test/fake-collector.ts --chaos
+ *   npx tsx test/fake-collector.ts --isolated
  *   npx tsx test/fake-collector.ts --hub=ws://localhost:4479 --token=... --speed=3
+ *
+ * Sus máquinas se declaran `synthetic` en el `hello`, y el hub las pone en
+ * cuarentena: nada de lo que inventen —una escalación, un mensaje de
+ * escuadrón— le llega a un CAPCOM de verdad. Ver src/shared/synthetic.ts.
+ * Además esto no arranca contra un hub con mando vivo salvo que se le diga.
  *
  * Flags:
  *   --hub=<url>     base ws del hub (default ws://localhost:4479)
  *   --token=<t>     token; si falta usa ORCA_TOKEN o ~/.orca/token
+ *   --isolated      su propio ORCA_HOME y su propio hub, como test/visual.ts
+ *   --anyway        arrancar aunque el hub tenga un CAPCOM vivo
  *   --chaos         desconecta y reconecta máquinas al azar
  *   --speed=<n>     multiplicador de ritmo (default 1)
  *   --agents=<n>    escala la flota hasta ~n agentes iniciales (default: 20)
@@ -323,6 +330,16 @@ interface Local {
   /** Escalación abierta, si la hay. */
   escalationId: string | null;
   spawnBudget: number;
+  /**
+   * Decorado: ni cambia de estado ni lo recicla el reaper.
+   *
+   * Los terminados normales se reciclan cada 20-60 s para que la flota no se
+   * apague, y un agente puesto a `done` a mano entra en esa rueda: el que
+   * produce la isla de fuera de la flota desaparecía a mitad de sesión: la isla
+   * que se iba a fotografiar se vaciaba sola, y un test que mira quién sigue en
+   * el mundo veía irse a alguien sin haber pedido nada.
+   */
+  pinned?: boolean;
 }
 
 /* ── artefactos de verdad ─────────────────────────────────────────── */
@@ -490,6 +507,14 @@ export class FakeMachine {
       id: spec.id, hostname: spec.hostname, platform: spec.platform,
       version: '0.1.0-fake', online: true, lastSeen: Date.now(), connectedAt: Date.now(),
       load: { sessions: 0, activeSessions: 0, cpuPct: rnd(8, 40), memPct: rnd(30, 70) },
+      /*
+       * Lo dice en el `hello`, y con eso el hub la pone en cuarentena: nada de
+       * lo que salga de aquí —una escalación sobre todo— le llega al CAPCOM de
+       * verdad. Ver src/shared/synthetic.ts. Es la protección que sigue en pie
+       * aunque alguien arranque esto a mano contra el puerto 4479, que es
+       * exactamente como se quemó un CAPCOM en nueve minutos.
+       */
+      synthetic: true,
     };
 
     this.projects = spec.projects.map((p) => ({
@@ -511,6 +536,25 @@ export class FakeMachine {
     }
 
     for (let i = 0; i < spec.agents; i++) this.spawn(null, 0);
+
+    /*
+     * Dos que viven fuera de la flota: uno en el directorio del mando y otro en
+     * un scratchpad de sesión. Ni son un proyecto ni salen en el campo sin
+     * SHOW ALL, y por eso están aquí: la isla que los agrupa —una, apagada, con
+     * su propio rótulo— sólo se puede fotografiar si alguien los produce.
+     */
+    for (const [where, slug] of [
+      ['capcom', '-Users-dan--orca-capcom-handoffs-2a9f9843-runtime'],
+      ['scratchpad', '-private-tmp-claude-501--Users-dan-projects-orca-abc-scratchpad-probe-a'],
+    ] as const) {
+      const stray = this.spawn(null, 0);
+      const local = this.agents.get(stray.id);
+      if (local) local.pinned = true;
+      stray.projectId = `${spec.id}/${slug}`;
+      stray.workspace = where;
+      stray.hidden = true;
+      stray.state = 'done';
+    }
 
     // Antes de conectar, para que el escuadrón entero viaje en el snapshot en
     // vez de en cuatro `agent:new` que se pierden si el socket todavía no está.
@@ -670,6 +714,46 @@ export class FakeMachine {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
     try { this.ws?.close(1000, 'fin'); } catch { /* da igual */ }
+  }
+
+  /**
+   * Retirarse: llevarse lo suyo antes de cerrar el socket.
+   *
+   * Un collector de verdad que se apaga deja atrás sesiones que SIGUEN
+   * existiendo en disco, así que el hub hace bien en conservarlas. Las de aquí
+   * no existen en ninguna parte: cuando este proceso muere no queda nada a lo
+   * que correspondan, y dejarlas es dejar basura con la que después hay que
+   * pelearse a mano (298 agentes muertos y 11 que el hub aún creía vivos, la
+   * última vez). Así que el mock se retira: `agent:gone` por cada uno, y antes
+   * la retirada de las preguntas abiertas, que si no se quedan `pending` en la
+   * cola del humano sin nadie que pueda leer la respuesta.
+   *
+   * Se espera al cierre del socket porque `process.exit` no espera a nadie: sin
+   * eso los frames se quedan en el buffer y el apagado limpio no limpia nada.
+   */
+  async standDown(): Promise<void> {
+    this.stopped = true;
+    for (const t of this.timers) clearInterval(t);
+    this.timers = [];
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) { this.ws = null; return; }
+
+    for (const local of this.agents.values()) {
+      if (local.escalationId) this.withdraw(local, 'el arnés se apagó');
+    }
+    for (const id of this.agents.keys()) {
+      this.send({ t: 'agent:gone', machineId: this.spec.id, id });
+    }
+    this.log(`retirados ${this.agents.size} agentes`);
+    this.agents.clear();
+
+    await new Promise<void>((resolve) => {
+      const done = (): void => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(done, 3000);
+      ws.once('close', done);
+      try { ws.close(1000, 'retirada'); } catch { done(); }
+    });
+    this.ws = null;
   }
 
   /** Corta el socket sin avisar: así se ve una máquina caer de verdad. */
@@ -890,6 +974,8 @@ export class FakeMachine {
     const dt = dtBase * this.speed;
     for (const local of [...this.agents.values()]) {
       const a = local.agent;
+      // Un decorado no vive: ni gasta, ni transiciona, ni lo recicla nadie.
+      if (local.pinned) continue;
       a.uptimeMs += dt;
 
       if (a.state === 'working' || a.state === 'thinking') {
@@ -1352,7 +1438,9 @@ export interface FakeFleetOptions {
 /** Nombre del escuadrón del preset cuando nadie pide otro. */
 export const DEFAULT_SQUAD = 'audit-01';
 
-export function startFakeFleet(opts: FakeFleetOptions = {}): { machines: FakeMachine[]; stop: () => void } {
+export function startFakeFleet(
+  opts: FakeFleetOptions = {},
+): { machines: FakeMachine[]; stop: () => void; standDown: () => Promise<void> } {
   const hub = opts.hub ?? `ws://localhost:${PORTS.hub}`;
   const token = opts.token ?? readToken();
   const speed = opts.speed ?? 1;
@@ -1387,7 +1475,90 @@ export function startFakeFleet(opts: FakeFleetOptions = {}): { machines: FakeMac
       if (chaosTimer) clearInterval(chaosTimer);
       for (const m of machines) m.stop();
     },
+    /** Retirar la flota entera del hub antes de irse. Ver `FakeMachine.standDown`. */
+    standDown: async () => {
+      if (chaosTimer) clearInterval(chaosTimer);
+      await Promise.all(machines.map((m) => m.standDown()));
+    },
   };
+}
+
+/* ── aislamiento ──────────────────────────────────────────────────── */
+
+/**
+ * A qué hub HTTP corresponde un hub ws. El mock habla ws; preguntar por el
+ * mando es HTTP, y las dos cosas viven en el mismo puerto.
+ */
+export function httpFromWs(url: string): string {
+  return url.replace(/^ws/, 'http').replace(/\/+$/, '');
+}
+
+/**
+ * ¿Manda alguien en ese hub? `null` cuando no, y también cuando no se puede
+ * preguntar: un hub que no contesta no tiene un CAPCOM que proteger.
+ */
+export async function liveCapcom(
+  hubHttp: string,
+): Promise<{ callsign: string; machineId: string } | null> {
+  try {
+    const res = await fetch(`${hubHttp}/api/health`, { signal: AbortSignal.timeout(2500) });
+    const health = await res.json() as { capcom?: { callsign?: string; machineId?: string } | null };
+    const cap = health.capcom;
+    return cap ? { callsign: cap.callsign ?? '?', machineId: cap.machineId ?? '?' } : null;
+  } catch { return null; }
+}
+
+/**
+ * Un mundo propio: su `ORCA_HOME`, su puerto, su hub.
+ *
+ * Mismo aislamiento que `test/visual.ts --isolated` y por la misma razón: lo
+ * que este proceso invente no tiene por qué aparecer en la consola de nadie.
+ * El hub escribe su token dentro del `ORCA_HOME` temporal, así que se lee de
+ * ahí y no del de la máquina.
+ */
+async function isolate(): Promise<{ hub: string; token: string; port: number; home: string }> {
+  const { spawn } = await import('node:child_process');
+  const { createServer } = await import('node:net');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+
+  const home = mkdtempSync(join(tmpdir(), 'orca-mock-'));
+  process.env['ORCA_HOME'] = home;
+  const port = await new Promise<number>((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const p = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close(() => resolve(p));
+    });
+  });
+
+  const root = new URL('..', import.meta.url).pathname;
+  const child = spawn('npx', ['tsx', 'src/hub/server.ts'], {
+    cwd: root, stdio: 'inherit',
+    env: { ...process.env, ORCA_PORT: String(port), ORCA_HOME: home },
+  });
+  child.unref();
+  process.on('exit', () => {
+    // El hub de este mundo es nuestro, y su ORCA_HOME no contenía más que su
+    // propio estado: los dos se van con nosotros. Igual que test/visual.ts.
+    try { child.kill('SIGTERM'); } catch { /* ya no está */ }
+    try { rmSync(home, { recursive: true, force: true }); } catch { /* da igual */ }
+  });
+
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok) break;
+    } catch { /* todavía no */ }
+    if (Date.now() > deadline) throw new Error(`el hub aislado no arrancó en ${port}`);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  console.log(`[fake] aislado: hub propio en ${port}, ORCA_HOME=${home}`);
+  console.log(`[fake] la consola de este mundo: ORCA_PORT=${port} npx vite`);
+  return { hub: `ws://127.0.0.1:${port}`, token: readToken(), port, home };
 }
 
 const runDirectly = (process.argv[1] ?? '').endsWith('fake-collector.ts');
@@ -1396,11 +1567,36 @@ if (runDirectly) {
   const speedFlag = process.argv.find((a) => a.startsWith('--speed='));
   const agentsFlag = process.argv.find((a) => a.startsWith('--agents='));
   const squadFlag = process.argv.find((a) => a === '--squad' || a.startsWith('--squad='));
+
+  const isolated = process.argv.includes('--isolated');
+  const anyway = process.argv.includes('--anyway');
+  const world = isolated
+    ? await isolate()
+    : { hub: hubFlag?.slice('--hub='.length) ?? `ws://localhost:${PORTS.hub}`, token: readToken() };
+
+  /*
+   * La puerta.
+   *
+   * Contra un hub con mando vivo esto no se arranca solo. La cuarentena del
+   * protocolo (src/shared/synthetic.ts) ya impide que una pregunta inventada
+   * le llegue, pero seguirían apareciendo trescientos agentes de mentira en la
+   * consola que alguien está usando para trabajar, y la confusión de raíz es
+   * ésa. `--isolated` da un mundo propio; `--anyway` dice "ya lo sé".
+   */
+  if (!isolated && !anyway) {
+    const cap = await liveCapcom(httpFromWs(world.hub));
+    if (cap) {
+      console.error(`[fake] ${world.hub} tiene mando vivo (${cap.callsign}).`);
+      console.error('[fake] no arranco ahí: usa --isolated para un hub propio, o --anyway si de verdad quieres.');
+      process.exit(1);
+    }
+  }
+
   const fleet = startFakeFleet({
     squad: squadFlag === undefined ? false
       : squadFlag === '--squad' ? true : squadFlag.slice('--squad='.length) || true,
-    hub: hubFlag?.slice('--hub='.length),
-    token: readToken(),
+    hub: world.hub,
+    token: world.token,
     chaos: process.argv.includes('--chaos'),
     speed: speedFlag ? Number(speedFlag.slice('--speed='.length)) || 1 : 1,
     agents: agentsFlag ? Number(agentsFlag.slice('--agents='.length)) || 0 : 0,
@@ -1408,7 +1604,15 @@ if (runDirectly) {
   });
   const total = fleet.machines.reduce((n, m) => n + m.spec.agents, 0);
   console.log(`[fake] ${fleet.machines.length} máquinas, ${total} agentes iniciales`);
-  const bye = (): void => { fleet.stop(); process.exit(0); };
+
+  // Retirarse antes de morir, y sólo una vez: un segundo Ctrl-C no puede dejar
+  // la retirada a medias, así que el segundo sale sin esperar.
+  let leaving = false;
+  const bye = (): void => {
+    if (leaving) process.exit(0);
+    leaving = true;
+    void fleet.standDown().then(() => process.exit(0), () => process.exit(0));
+  };
   process.on('SIGINT', bye);
   process.on('SIGTERM', bye);
 }

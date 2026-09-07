@@ -977,7 +977,11 @@ export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ h
   let fleetStarted = false;
   if (opts.fleet !== false && !await hasSyntheticFleet()) {
     console.log('[visual] starting synthetic fleet');
-    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=3']);
+    // `--anyway`: the fleet's own door refuses a hub with a live CAPCOM, and
+    // this harness has already decided what it is allowed to share (see
+    // `sharing`). Its machines declare themselves synthetic on the wire, so
+    // nothing they invent reaches that CAPCOM either way.
+    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=3', '--anyway']);
     fleetStarted = true;
   }
 
@@ -998,12 +1002,19 @@ export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ h
   return { hubWasUp, uiWasUp };
 }
 
-/** Is one of `test/fake-collector.ts`'s machines already reporting to the hub? */
+/**
+ * Is one of `test/fake-collector.ts`'s machines already reporting to the hub?
+ *
+ * By the flag it declares on the wire, not by its hostname: the hub has to know
+ * which machines are fixtures anyway — that is what keeps their questions off a
+ * real CAPCOM (src/shared/synthetic.ts) — and matching names would go quietly
+ * wrong the day the fake fleet is renamed.
+ */
 async function hasSyntheticFleet(): Promise<boolean> {
   try {
     const r = await fetch(`http://127.0.0.1:${hubPort()}/api/health`, { signal: AbortSignal.timeout(2000) });
-    const h = await r.json() as { machines?: { list?: { id: string; online: boolean }[] } };
-    return (h.machines?.list ?? []).some((m) => m.online && /^(mac-cascabel|vps-fra1|vps-nue2)/.test(m.id));
+    const h = await r.json() as { machines?: { list?: { online: boolean; synthetic?: boolean }[] } };
+    return (h.machines?.list ?? []).some((m) => m.online && m.synthetic === true);
   } catch { return false; }
 }
 

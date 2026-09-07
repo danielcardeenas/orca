@@ -33,7 +33,8 @@ import { createAuth } from '../src/hub/auth.ts';
 import { PATHS, newId, type ServerFrame } from '../src/shared/protocol.ts';
 import { emptyRollup, type Agent, type Project } from '../src/shared/types.ts';
 import {
-  CAPCOM_DIR_REFUSAL, excludedWorkspace, hiddenInWorkspace, pathToSlug,
+  CAPCOM_DIR_REFUSAL, OFF_FLEET_LABEL, OFF_FLEET_REFUSAL, excludedWorkspace, hiddenInWorkspace,
+  islandOf, isOffFleet, offFleetProjectId, pathToSlug,
 } from '../src/shared/workspaces.ts';
 import { ok, test, until, type TestModule } from './harness.ts';
 
@@ -325,7 +326,102 @@ const refusals = [
   }),
 ];
 
+/*
+ * La isla de fuera de la flota. Cuatro directorios distintos —el del mando, dos
+ * runtimes de relevo y un scratchpad— producían cuatro islas rotuladas con el
+ * `projectId` crudo, y cada relevo de CAPCOM añadía otra. Aquí se demuestra que
+ * son UNA, que sabe cómo se llama, y que nadie puede lanzar trabajo en ella.
+ */
+const island = [
+  test('every off-fleet directory folds into one island', () => {
+    const cap = agent({ id: 'c', workspace: 'capcom' });
+    const handoff = agent({
+      id: 'h', workspace: 'capcom',
+      projectId: `m1/${pathToSlug(`${CAPCOM}/handoffs/2a9f9843/runtime`)}`,
+    });
+    const scratch = agent({
+      id: 's', workspace: 'scratchpad',
+      projectId: 'm1/-private-tmp-claude-501--Users-dan-projects-orca-abc-scratchpad-probe-a',
+    });
+    const real = agent({ id: 'r', projectId: 'm1/-Users-dan-projects-axolots' });
+
+    const ids = new Set([cap, handoff, scratch].map(islandOf));
+    assert.equal(ids.size, 1, `tres directorios, ${ids.size} isla(s): ${[...ids].join(' ')}`);
+    assert.equal(islandOf(cap), offFleetProjectId('m1'), 'y es la de esta máquina');
+    assert.equal(islandOf(real), real.projectId, 'un proyecto de verdad sigue siendo el suyo');
+    assert.ok(isOffFleet(islandOf(cap)) && !isOffFleet(islandOf(real)), 'y se distingue una de otro');
+    // Dos máquinas no comparten isla, igual que no comparten proyecto.
+    assert.notEqual(offFleetProjectId('m1'), offFleetProjectId('m2'));
+    return ok(`una isla: ${offFleetProjectId('m1')}`, true);
+  }),
+
+  test('the class of the directory reaches the console', () => {
+    // La consola no puede volver a deducirla —reconocer el directorio de
+    // CAPCOM exige leer el entorno— así que tiene que VIAJAR.
+    assert.equal(sanitizeAgent({ ...agent({ workspace: 'capcom' }) }, 'm1')?.workspace, 'capcom');
+    assert.equal(sanitizeAgent({ ...agent() }, 'm1')?.workspace, undefined, 'un agente normal no la lleva');
+    assert.equal(sanitizeAgent({ ...agent(), workspace: 'nonsense' }, 'm1')?.workspace, undefined,
+      'un valor inventado no entra');
+    assert.deepEqual(sanitizeAgentPatch({ workspace: 'scratchpad' }), { workspace: 'scratchpad' });
+
+    const patch = diffAgent(agent({ id: 'x' }), agent({ id: 'x', workspace: 'capcom' }));
+    assert.equal(patch?.workspace, 'capcom', 'el diff la manda');
+    assert.equal(sanitizeAgentPatch(JSON.parse(JSON.stringify(patch)))?.workspace, 'capcom',
+      'y sobrevive al JSON y al hub');
+    return ok('la clase del sitio llega marcada y validada', true);
+  }),
+
+  test('the island draws as one second-class region, whatever it holds', async () => {
+    const { emptyLayout, layoutFleet } = await import('../src/ui/field/layout.ts');
+    const real: Project = {
+      id: 'm1/-Users-dan-projects-axolots', machineId: 'm1', slug: '-Users-dan-projects-axolots',
+      name: 'axolots', path: '/Users/dan/projects/axolots', code: 'AX', gitBranch: 'main',
+      gitDirty: false, keyNames: [], sessionIds: [], rollup: emptyRollup(),
+    };
+    const agents = [
+      agent({ id: 'w1', state: 'working', workspace: 'capcom' }),
+      agent({ id: 'w2', state: 'working', workspace: 'capcom',
+        projectId: `m1/${pathToSlug(`${CAPCOM}/handoffs/2a9f9843/runtime`)}` }),
+      agent({ id: 'w3', state: 'working', workspace: 'scratchpad',
+        projectId: 'm1/-private-tmp-claude-501--Users-dan-x-scratchpad-probe-a' }),
+      agent({ id: 'w4', state: 'working', projectId: real.id }),
+    ];
+    const layout = layoutFleet(agents, new Map([[real.id, real]]), new Map(), emptyLayout());
+    const off = layout.regions.filter((r) => r.offFleet);
+    assert.equal(off.length, 1, `una isla fuera de la flota, no ${off.length}`);
+    assert.equal(off[0]!.count, 3, 'con los tres que viven fuera');
+    assert.equal(off[0]!.code, OFF_FLEET_LABEL.code, 'rotulada, no con el id crudo');
+    assert.equal(off[0]!.name, OFF_FLEET_LABEL.name);
+    assert.ok(!off[0]!.name.includes('/'), 'y sin rastro del `machineId/slug`');
+    const work = layout.regions.filter((r) => !r.offFleet);
+    assert.equal(work.length, 1, 'el proyecto de verdad conserva la suya');
+    assert.equal(work[0]!.code, 'AX');
+    // Las teselas de dentro apuntan a la isla: el campo arrastra una región
+    // por este campo, y un spot que apuntara al directorio se quedaría atrás.
+    for (const id of ['w1', 'w2', 'w3']) {
+      assert.equal(layout.spots.get(id)?.projectId, off[0]!.id, `${id} está en la isla`);
+    }
+    return ok(`${off[0]!.code} ${off[0]!.name} · ${off[0]!.count}`, true);
+  }),
+
+  test('the island can be emptied but not launched into', () => {
+    const island = offFleetProjectId('m1');
+    const plan = archiveCandidates([
+      agent({ id: 'c', workspace: 'capcom' }),
+      agent({ id: 'h', workspace: 'capcom', projectId: 'm1/-Users-dan--orca-capcom-handoffs-2a9f-runtime' }),
+      agent({ id: 'r', projectId: 'm1/-Users-dan-projects-axolots' }),
+    ], { projectId: island });
+    assert.deepEqual(plan.archive.map((a) => a.id).sort(), ['c', 'h'],
+      'ARCHIVE FINISHED sobre la isla se lleva lo de todos sus directorios');
+
+    // Y la puerta de lanzar dice qué hacer, en vez de "proyecto desconocido".
+    assert.ok(isOffFleet(island));
+    assert.match(OFF_FLEET_REFUSAL, /not a project/);
+    return ok('se vacía entera y no se lanza nada en ella', true);
+  }),
+];
+
 export default {
   suite: 'Workspaces that are not projects',
-  tests: [...registry, ...marking, ...refusals],
+  tests: [...registry, ...marking, ...island, ...refusals],
 } satisfies TestModule;

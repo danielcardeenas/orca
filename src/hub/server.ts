@@ -81,6 +81,8 @@ const HELLO_TIMEOUT_MS = 8_000;
 const CMD_TIMEOUT_MS = 30_000;
 const PING_INTERVAL_MS = 15_000;
 const SWEEP_INTERVAL_MS = 2_000;
+// Margen que se da a las peticiones en vuelo al cerrar antes de cortar por lo sano.
+const CLOSE_GRACE_MS = 1_000;
 /** Si una consola acumula esto en el buffer, dejó de leer: no la ahogamos más. */
 const MAX_BUFFERED = 4 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
@@ -2229,7 +2231,16 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       }
       await new Promise<void>((resolve) => wssCollector.close(() => resolve()));
       await new Promise<void>((resolve) => wssConsole.close(() => resolve()));
-      await new Promise<void>((resolve) => http.close(() => resolve()));
+      // http.close() deja de aceptar conexiones pero espera a que las abiertas
+      // terminen solas: un socket keep-alive ocioso lo retrasa hasta su propio
+      // timeout, y un cliente que deja de leer el cuerpo de una respuesta lo
+      // retiene para siempre, de modo que el hub no llega a apagarse. Se sueltan
+      // las ociosas de inmediato y se le pone plazo a las demás.
+      http.closeIdleConnections();
+      await new Promise<void>((resolve) => {
+        const cut = setTimeout(() => http.closeAllConnections(), CLOSE_GRACE_MS);
+        http.close(() => { clearTimeout(cut); resolve(); });
+      });
       await store.close();
       await history.close();
     },

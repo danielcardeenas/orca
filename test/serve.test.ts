@@ -137,6 +137,9 @@ const tests = [
       fetch(`${base}/manifest.webmanifest`),
       asset ? fetch(`${base}${asset}`) : Promise.resolve(null),
     ]);
+    // Sólo interesan las cabeceras, pero un cuerpo sin consumir mantiene vivo el
+    // socket y el cierre del hub se queda esperándolo. Se descarta explícitamente.
+    await Promise.all([manifest, hashed].map((r) => r?.body?.cancel() ?? Promise.resolve()));
     const cc = (r: Response | null): string => r?.headers.get('cache-control') ?? '';
     return ok('sólo los assets con hash son immutable',
       cc(idx) === 'no-store' && !cc(manifest).includes('immutable') && (!hashed || cc(hashed).includes('immutable')),

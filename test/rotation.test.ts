@@ -36,7 +36,7 @@ import type { TranscriptRef } from '../src/collector/watch.ts';
 import {
   CapcomSession, CAPCOM_FIRST_PROMPT, CAPCOM_GRACE_MS, CAPCOM_RESTART_MS, CAPCOM_ROTATED_PROMPT,
 } from '../src/collector/capcom.ts';
-import { ROTATION_DEFAULTS, rotationConfig, rotationVerdict, type RotationObservation } from '../src/collector/rotation.ts';
+import { HANDOFF_RETRY_MS, ROTATION_DEFAULTS, rotationConfig, rotationRoute, rotationVerdict, type RotationObservation } from '../src/collector/rotation.ts';
 import { ok, test, until, type TestModule } from './harness.ts';
 
 const TOKEN = 'test-token-rotation-000';
@@ -86,7 +86,7 @@ function fakeClock() {
 const NOW = 5_000_000;
 function observation(over: Partial<RotationObservation> = {}): RotationObservation {
   return {
-    state: 'idle', turns: 10, compactions: 0, contextTokens: 50_000,
+    state: 'idle', turns: 10, compactions: 0, contextTokens: 50_000, contextWindow: 0,
     lastActivityAt: NOW - 120_000, lastDeliveryAt: NOW - 120_000, pendingEscalations: 0,
     ...over,
   };
@@ -192,7 +192,7 @@ const tests = [
     const byTurns = rotationVerdict(observation({ compactions: 0, turns: 300 }), ROTATION_DEFAULTS, NOW);
     const turnsOff = rotationVerdict(observation({ compactions: 0, turns: 9_999 }), { ...ROTATION_DEFAULTS, maxTurns: 0 }, NOW);
     const compactionsOff = rotationVerdict(observation({ compactions: 50 }), { ...ROTATION_DEFAULTS, maxCompactions: 0 }, NOW);
-    const allOff = rotationVerdict(observation({ compactions: 50, turns: 9_999 }), { maxCompactions: 0, maxTurns: 0, idleMs: 0 }, NOW);
+    const allOff = rotationVerdict(observation({ compactions: 50, turns: 9_999 }), { ...ROTATION_DEFAULTS, maxCompactions: 0, maxTurns: 0, maxContextFraction: 0, idleMs: 0 }, NOW);
     return ok(
       'compactions first, turns as the net, 0 disables',
       byTurns.rotate && byTurns.reason.includes('turns')
@@ -211,6 +211,51 @@ const tests = [
       && custom.maxCompactions === 4 && custom.maxTurns === 0 && custom.idleMs === 5000
       && junk.maxCompactions === 2 && junk.maxTurns === 300 && junk.idleMs === 30_000,
       JSON.stringify(custom),
+    );
+  }),
+
+  test('a filling window rotates before the first compaction, and an unreported window cannot', () => {
+    const filling = observation({ compactions: 0, turns: 10, contextTokens: 200_000, contextWindow: 258_400 });
+    const early = rotationVerdict(filling, ROTATION_DEFAULTS, NOW);
+    const roomLeft = rotationVerdict({ ...filling, contextTokens: 100_000 }, ROTATION_DEFAULTS, NOW);
+    const unreported = rotationVerdict({ ...filling, contextWindow: 0 }, ROTATION_DEFAULTS, NOW);
+    const disabled = rotationVerdict(filling, { ...ROTATION_DEFAULTS, maxContextFraction: 0 }, NOW);
+    return ok(
+      'the window fraction fires first, and only when the CLI reports the window',
+      early.rotate && early.reason.includes('77% of the context window')
+      && !roomLeft.due && roomLeft.reason.includes('39% of window')
+      && !unreported.due && !disabled.due,
+      early.reason,
+    );
+  }),
+
+  test('a prepared session rotates by preparing its replacement, and a failed attempt is not retried every tick', () => {
+    const due = observation({ compactions: 3 });
+    const claude = rotationRoute(due, { prepared: false, lastHandoffAt: 0 }, ROTATION_DEFAULTS, NOW);
+    const codex = rotationRoute(due, { prepared: true, lastHandoffAt: 0 }, ROTATION_DEFAULTS, NOW);
+    const justTried = rotationRoute(due, { prepared: true, lastHandoffAt: NOW - 60_000 }, ROTATION_DEFAULTS, NOW);
+    const longEnough = rotationRoute(due, { prepared: true, lastHandoffAt: NOW - HANDOFF_RETRY_MS - 1 }, ROTATION_DEFAULTS, NOW);
+    const busy = rotationRoute(observation({ compactions: 3, state: 'working' }), { prepared: true, lastHandoffAt: 0 }, ROTATION_DEFAULTS, NOW);
+    const clean = rotationRoute(due, { prepared: true, lastHandoffAt: 0 }, { ...ROTATION_DEFAULTS, mode: 'clean' }, NOW);
+    return ok(
+      'kill-and-relaunch only for a session ORCA named; prepared ones hand off, with a pause between attempts',
+      claude.act === 'relaunch' && codex.act === 'handoff' && codex.mode === 'continuity'
+      && justTried.act === 'wait' && justTried.reason.includes('attempted 1m ago')
+      && longEnough.act === 'handoff' && busy.act === 'wait' && clean.mode === 'clean',
+      `${claude.act} / ${codex.act} / ${justTried.act} / ${longEnough.act}`,
+    );
+  }),
+
+  test('the rotation mode is a setting, and continuity is what an unattended rotation uses', () => {
+    const defaults = rotationConfig({});
+    const clean = rotationConfig({ ORCA_CAPCOM_ROTATE_MODE: 'clean', ORCA_CAPCOM_MAX_CONTEXT_PCT: '60' });
+    const junk = rotationConfig({ ORCA_CAPCOM_ROTATE_MODE: 'wipe', ORCA_CAPCOM_MAX_CONTEXT_PCT: '900' });
+    return ok(
+      'mode and window threshold come from the environment; junk keeps the default',
+      defaults.mode === 'continuity' && defaults.maxContextFraction === 0.75
+      && clean.mode === 'clean' && clean.maxContextFraction === 0.6
+      && junk.mode === 'continuity' && junk.maxContextFraction === 0.75,
+      `${clean.mode} @ ${clean.maxContextFraction}`,
     );
   }),
 

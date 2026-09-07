@@ -119,6 +119,24 @@ const tests = [
       JSON.stringify({ in: m.inputTokens, cached: m.cacheReadTokens, out: m.outputTokens, think: m.thinkingTokens, cost: m.costUSD, tools: m.toolCalls }));
   }),
 
+  test('codex: las compactaciones se cuentan y la ventana se mide con el último prompt, no con el acumulado', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    // Lo que escribe el CLI de verdad: el acumulado del hilo, el del último
+    // turno —que es lo que está EN la ventana— y el tamaño de la ventana.
+    const FULL = { timestamp: ts(41), type: 'event_msg', payload: { type: 'token_count', info: {
+      total_token_usage: { input_tokens: 2_045_906, cached_input_tokens: 1_393_536, output_tokens: 2746, reasoning_output_tokens: 1188 },
+      last_token_usage: { input_tokens: 122_651, cached_input_tokens: 121_600, output_tokens: 170, reasoning_output_tokens: 78 },
+      model_context_window: 258_400,
+    } } };
+    const COMPACTED = { timestamp: ts(45), type: 'compacted', payload: { message: '', replacement_history: [] } };
+    d.ingest(batch([META, STARTED, PROMPT, SAY, COMPACTED, FULL, { ...COMPACTED, timestamp: ts(46) }, DONE]));
+    const m = d.snapshot().metrics;
+    return ok('codex: compactaciones contadas y ventana medida por el último turno',
+      m.compactions === 2 && m.contextTokens === 122_651 && m.contextWindow === 258_400 && m.inputTokens === 2_045_906,
+      `${m.compactions} compactaciones · ${m.contextTokens}/${m.contextWindow} en la ventana · ${m.inputTokens} acumulados`);
+  }),
+
   test('codex: una tool abierta 90s bajo una política que puede preguntar es un bloqueo de permiso', () => {
     const d = new CodexDeriver(ref(), 'm1', 'p1');
     alive(d);

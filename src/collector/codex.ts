@@ -80,6 +80,9 @@ export class CodexDeriver {
   private lastTool: Pending | null = null;
   private toolCalls = 0;
   private turns = 0;
+  private compactions = 0;
+  private contextTokens = 0;
+  private contextWindow = 0;
   private usage = { input: 0, cached: 0, output: 0, reasoning: 0 };
   private samples: Sample[] = [];
   private tpsSmooth = 0;
@@ -193,6 +196,10 @@ export class CodexDeriver {
         if (u) this.usageFrom(u, at, bootstrap);
         return;
       }
+      // Each one is memory the commander no longer has. The line is written
+      // when it happens and never rewritten, so counting it is the only way to
+      // know how much of the conversation is now a summary of a summary.
+      case 'compacted': this.compactions++; return;
       default: return;
     }
   }
@@ -261,6 +268,12 @@ export class CodexDeriver {
         const info = isRecord(p['info']) ? p['info'] : null;
         const total = info && isRecord(info['total_token_usage']) ? info['total_token_usage'] : null;
         if (total) this.usageFrom(total, at, bootstrap);
+        // `total_token_usage` accumulates over the thread and says nothing
+        // about the window; the last turn's prompt is what is actually in it.
+        const last = info && isRecord(info['last_token_usage']) ? info['last_token_usage'] : null;
+        if (last) this.contextTokens = num(last['input_tokens']);
+        const window = info ? num(info['model_context_window']) : 0;
+        if (window > 0) this.contextWindow = window;
         return;
       }
       case 'thread_settings_applied': {
@@ -408,6 +421,9 @@ export class CodexDeriver {
       toolCalls: this.toolCalls,
       toolDurationMs: 0, apiDurationMs: 0,
       turns: this.turns,
+      contextTokens: this.contextTokens,
+      ...(this.contextWindow ? { contextWindow: this.contextWindow } : {}),
+      compactions: this.compactions,
     };
   }
 

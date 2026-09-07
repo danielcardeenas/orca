@@ -244,6 +244,12 @@ export interface AgentMetrics {
    * cache read. The one number that says how full the window is.
    */
   contextTokens?: number;
+  /**
+   * How big that window is, when the CLI says so. With `contextTokens` it
+   * turns "122k tokens" — a number nobody can size by eye — into a fraction,
+   * which is what a rotation threshold can be written against.
+   */
+  contextWindow?: number;
   /** Times the CLI compacted this conversation. Each one is memory lost. */
   compactions?: number;
 }

@@ -43,7 +43,7 @@ import { MAX_TALK, TERMINAL_STATES, emptyRollup } from '../shared/types.ts';
 import { hiddenInWorkspace, type ExcludedWorkspace } from '../shared/workspaces.ts';
 import { ArtifactIndex } from './artifacts.ts';
 import { CapcomSession, capcomDir, wantsCapcom } from './capcom.ts';
-import { rotationConfig, rotationVerdict, type RotationConfig } from './rotation.ts';
+import { rotationConfig, rotationRoute, type RotationConfig } from './rotation.ts';
 import type { AgentHandle, SpawnLookup } from './commands.ts';
 import { CommandRunner, resolveClaudeBin } from './commands.ts';
 import type { BlockSignal, Deriver, Liveness } from './derive.ts';
@@ -200,6 +200,8 @@ class Collector {
   private lastCapcomSayAt = 0;
   /** Se dice una vez por sesión: "toca rotar pero está ocupado". */
   private rotationDueSaid = false;
+  /** Último traspaso de rotación pedido: el freno entre intentos. */
+  private rotationHandoffAt = 0;
 
   private derivers = new Map<string, Deriver>();
   private sent = new Map<string, Agent>();
@@ -1259,29 +1261,58 @@ class Collector {
     const cap = this.capcom;
     const id = cap?.current();
     if (!cap || !id) return;
-    try { if (cap.recovery()) return; } catch { return; }
+    // Una sesión preparada (Codex, o un traspaso ya activado) no se recicla
+    // matándola: su relevo se prepara antes de retirarla. La decisión de
+    // CUÁNDO es la misma; sólo cambia el camino.
+    let prepared = false;
+    try { prepared = !!cap.recovery(); } catch { return; }
     const d = this.capcomDeriver(id);
     if (!d) return;
     const now = Date.now();
     const m = d.metrics(now);
     const pending = this.escalations.list().filter((e) => e.status === 'pending').length + this.screenPrompts.size;
-    const verdict = rotationVerdict({
+    const route = rotationRoute({
       state: d.state(now),
       turns: m.turns,
       compactions: m.compactions ?? 0,
       contextTokens: m.contextTokens ?? 0,
+      contextWindow: m.contextWindow ?? 0,
       lastActivityAt: d.snapshot(now).updatedAt,
       lastDeliveryAt: this.lastCapcomSayAt,
       pendingEscalations: pending,
-    }, this.rotation, now);
-    if (!verdict.due) { this.rotationDueSaid = false; return; }
-    if (!verdict.rotate) {
-      if (!this.rotationDueSaid) { this.rotationDueSaid = true; log('info', SCOPE, `CAPCOM: toca rotar, espero: ${verdict.reason}`); }
+    }, { prepared, lastHandoffAt: this.rotationHandoffAt }, this.rotation, now);
+    if (route.act === 'none') { this.rotationDueSaid = false; return; }
+    if (route.act === 'wait') {
+      if (!this.rotationDueSaid) { this.rotationDueSaid = true; log('info', SCOPE, `CAPCOM: toca rotar, espero: ${route.reason}`); }
       return;
     }
     this.rotationDueSaid = false;
-    log('info', SCOPE, `CAPCOM: rotando (${verdict.reason})`);
+    if (route.act === 'handoff') return this.rotateByHandoff(d.id, route.reason, route.mode, now);
+    log('info', SCOPE, `CAPCOM: rotando (${route.reason})`);
     void cap.rotate({ turns: m.turns, compactions: m.compactions ?? 0, contextTokens: m.contextTokens ?? 0 });
+  }
+
+  /**
+   * Rotar preparando el relevo, que es la única forma con Codex.
+   *
+   * `New CAPCOM` con `continuity` es exactamente esto hecho a mano: prepara un
+   * hilo nuevo, comprueba que arranca, y sólo entonces retira al anterior. El
+   * checkpoint que hereda lo escribe el hub, no el modelo, y el correo queda
+   * retenido durante el cambio — todo eso ya está en `ProviderHandoffs`, así
+   * que aquí sólo se decide cuándo pedirlo.
+   *
+   * Un fallo —cuota agotada, sobre todo— deja al CAPCOM actual exactamente
+   * donde estaba; el freno entre intentos lo pone `rotationRoute`.
+   */
+  private rotateByHandoff(agentId: string, why: string, mode: 'continuity' | 'clean', now: number): void {
+    this.rotationHandoffAt = now;
+    try {
+      const plan = this.runner.handoffs.fresh(agentId, mode);
+      log('info', SCOPE, `CAPCOM: rotando por traspaso ${mode} (${why}); plan ${plan.id}`);
+      this.note('info', `CAPCOM rota a una sesión nueva (${mode}): ${why}. El relevo se prepara antes de retirar al actual.`);
+    } catch (err) {
+      log('warn', SCOPE, `CAPCOM: no pude rotar por traspaso (${why}): ${errText(err)}`);
+    }
   }
 
   /* ── handles para commands.ts ─────────────────────────────────── */

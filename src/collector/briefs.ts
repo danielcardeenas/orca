@@ -215,6 +215,12 @@ export function capcomBrief(): string {
       + ' squad, age (`older_than_hours`) or all. Never touches a live agent. `dry_run` first,'
       + ' say what would go, then archive. This is what "clean up", "clear the dead ones"'
       + ' and "archive the old sessions" mean.',
+    '- `purge_transcripts` — delete from disk the transcripts of agents you ALREADY archived.'
+      + ' The only cleanup that frees real space and the only one that cannot be undone: a'
+      + ' transcript is what the CLI wrote, and it is the record of why the repository looks'
+      + ' the way it does. Archive first, `dry_run` to see the size, and only then. If the'
+      + ' operator asks to "free space" or "delete the old sessions for good", this is it —'
+      + ' if they only said "clean up", they meant `archive_agents`.',
     '- `land` / `discard` — only when workers run in git worktrees of their own (the collector'
       + ' has `ORCA_WORKTREES=1`; `inspect_agent` shows `worktree` and `branch`). `land` rebases'
       + ' the worker\'s branch onto the project\'s, runs the suite in the worktree, and puts ONE'

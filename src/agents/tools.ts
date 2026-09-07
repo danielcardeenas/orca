@@ -120,6 +120,10 @@ export interface CeoContext {
    * Never touches a live agent, whatever the filter says.
    */
   archiveAgents(filter: ArchiveFilter, opts: { dryRun?: boolean; by?: string }): ArchiveOutcome;
+  /** Las lápidas vigentes: lo archivado, que es lo único purgable. */
+  archivedAgents?(): import('../shared/archive.ts').ArchivedAgent[];
+  /** Retirar una lápida cuyo transcript ya no existe. */
+  unarchive?(id: string): void;
 
   /**
    * Point every connected console's camera at something. Returns how many
@@ -550,6 +554,20 @@ export const CEO_TOOLS: ToolSpec[] = [
     strict: true,
   },
   {
+    name: 'purge_transcripts',
+    description:
+      'Delete from disk the transcripts of agents you already ARCHIVED. This is the only cleanup that frees real space and the only one that cannot be undone: archiving hides an agent and its tombstone weighs bytes, while a transcript is what the CLI wrote — the record of why the repository looks the way it does. It reaches archived agents only, so retiring them first is the first of two deliberate steps; a session that is somehow still alive is skipped and reported. Call with dry_run true to see the count and the size, then again with dry_run false.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        dry_run: { type: 'boolean', description: 'True: report what would be deleted and its size, delete nothing. False: delete it.' },
+      },
+      required: ['dry_run'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
     name: 'archive_agents',
     description:
       'Archive finished agents — state done or dead — so they stop cluttering list_fleet, list_agents and the console. Filters combine: a project, a squad, how long ago they finished (older_than_hours), one of the two states, or nothing for every finished agent. Live agents (booting, thinking, working, blocked, idle) are never archived, whatever you pass; a finished parent whose children are still alive is kept and reported. A squad whose last member is archived disappears with it. Nothing on disk is deleted: the transcript stays and a resumed session comes back on its own. Call with dry_run true first — it answers exactly what would go — then again with dry_run false.',
@@ -841,6 +859,7 @@ export async function runTool(
       case 'stop_agent': return await stopAgent(ctx, input);
       case 'set_budget': return setBudget(ctx, input);
       case 'archive_agents': return await archiveAgents(ctx, input);
+      case 'purge_transcripts': return await purgeTranscripts(ctx, input);
       case 'land': return await landWorktrees(ctx, input);
       case 'discard': return await discardWorktrees(ctx, input);
       case 'recall': return doRecall(ctx, input);
@@ -1900,6 +1919,57 @@ function setBudget(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
  * model types — a project code, "squad:audit-01", "24h" — into the filter the
  * hub takes, and dresses the outcome so the same call reads well in a dry run.
  */
+/**
+ * Borrar de disco los transcripts de lo ya archivado.
+ *
+ * Lo único de toda la limpieza que quita bytes y no se deshace. Archivar retira
+ * de la vista y las lápidas pesan kilobytes; esto borra lo que el CLI escribió,
+ * que es la respuesta a por qué el repo quedó como quedó.
+ *
+ * Por eso sólo alcanza a lo ARCHIVADO —hay que haberlo retirado antes, igual
+ * que una tarea— y por eso `dry_run` es el valor por defecto: quien quiera
+ * borrar tiene que decirlo dos veces, una al archivar y otra aquí.
+ */
+async function purgeTranscripts(ctx: CeoContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  if (!ctx.archivedAgents) return { result: 'this hub cannot list archived agents', summary: 'purge_transcripts unavailable', isError: true };
+  const dryRun = input.dry_run !== false;
+  const tombs = ctx.archivedAgents();
+  if (!tombs.length) return { result: 'nothing archived: purge only reaches agents you retired first', summary: 'purge_transcripts: nothing archived' };
+
+  // Un despacho por máquina: el collector sólo puede borrar sus propios archivos.
+  const byMachine = new Map<string, string[]>();
+  for (const t of tombs) {
+    const list = byMachine.get(t.machineId);
+    if (list) list.push(t.id); else byMachine.set(t.machineId, [t.id]);
+  }
+  const purged: string[] = []; const skipped: { id: string; why: string }[] = []; let bytes = 0;
+  const errors: string[] = [];
+  for (const [machineId, agentIds] of byMachine) {
+    try {
+      const out = await ctx.dispatch(machineId, { k: 'transcripts:purge', machineId, agentIds, dryRun }) as
+        { data?: { purged?: string[]; skipped?: { id: string; why: string }[]; bytes?: number } } | undefined;
+      const d = out?.data ?? (out as never as { purged?: string[]; skipped?: never[]; bytes?: number });
+      purged.push(...(d?.purged ?? []));
+      skipped.push(...(d?.skipped ?? []));
+      bytes += d?.bytes ?? 0;
+    } catch (err) { errors.push(`${machineId}: ${err instanceof Error ? err.message : String(err)}`); }
+  }
+  /*
+   * Borrado el archivo, la lápida deja de tener sentido: nadie va a reenviar a
+   * ese agente. Se retira aquí y no en el hub por su cuenta, porque es el único
+   * momento en que se sabe con certeza — que el collector deje de nombrarlo no
+   * significa nada, recicla lo terminado a los pocos segundos.
+   */
+  if (!dryRun && purged.length && ctx.unarchive) for (const id of purged) ctx.unarchive(id);
+  const kb = Math.round(bytes / 1024);
+  const head = dryRun ? `would purge ${purged.length} transcript(s), ${kb} KB` : `purged ${purged.length} transcript(s), ${kb} KB`;
+  return {
+    result: JSON.stringify({ dry_run: dryRun, purged, skipped, kilobytes: kb, machines: byMachine.size, errors }, null, 2),
+    summary: `purge_transcripts: ${head}${errors.length ? ` · ${errors.length} machine(s) failed` : ''}`,
+    ...(errors.length && !purged.length ? { isError: true } : {}),
+  };
+}
+
 async function archiveAgents(ctx: CeoContext, input: Record<string, unknown>): Promise<ToolOutcome> {
   const projectRef = typeof input.project_id === 'string' && input.project_id.trim() ? input.project_id.trim() : null;
   const project = projectRef ? findProject(ctx, projectRef) : undefined;

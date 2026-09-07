@@ -179,6 +179,21 @@ export type Command =
   | { k: 'land'; agentId: string; runTests: boolean; message: string | null }
   /** Remove a worker's worktree and branch. Refused with unlanded work unless `force`. */
   | { k: 'discard'; agentId: string; force: boolean }
+  /**
+   * Borrar de disco los transcripts de sesiones terminadas.
+   *
+   * Lo único de toda la limpieza que quita bytes de verdad y no se puede
+   * deshacer: el transcript es lo que el CLI escribió, y es la respuesta a por
+   * qué el repo está como está. Los ids los elige quien llama —el hub sólo
+   * propone los que ya archivó— y el collector se niega a tocar una sesión
+   * viva. `dryRun` cuenta sin borrar.
+   */
+  /*
+   * Lleva su `machineId` porque para cuando se manda, sus agentes ya no están
+   * en el mundo: archivarlos es lo que los saca, y es requisito para purgar.
+   * La lápida conserva de qué máquina eran, y es la única que lo sabe.
+   */
+  | { k: 'transcripts:purge'; machineId: string; agentIds: string[]; dryRun?: boolean }
   /** Send text to a running session — a reply, a nudge, an answer. */
   | { k: 'say'; agentId: string; text: string }
   /**

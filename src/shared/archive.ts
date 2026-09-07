@@ -80,6 +80,25 @@ export interface ArchivedAgent {
   by: string;
 }
 
+/**
+ * Una lápida sin transcript ya no rechaza nada.
+ *
+ * Existe para que el mundo rechace a un agente cuando su collector lo vuelva a
+ * mandar terminado. Borrado el transcript, no hay nada que rechazar: guarda el
+ * rechazo de algo que nadie va a proponer.
+ *
+ * Lo que NO sirve para saberlo es que el collector deje de nombrarlo. Se probó
+ * y es falso: el collector recicla lo terminado a los pocos segundos y deja de
+ * reportarlo con su transcript intacto en disco, así que esa regla tiraba
+ * lápidas buenas y los agentes reaparecían — justo lo que la lápida evitaba.
+ * La única señal fiable es haber borrado el archivo, y de eso da fe quien lo
+ * borra: `purgeTranscripts` en el collector.
+ */
+export function tombstonesFor(archived: readonly ArchivedAgent[], purgedIds: readonly string[]): ArchivedAgent[] {
+  const gone = new Set(purgedIds);
+  return archived.filter((t) => gone.has(t.id));
+}
+
 /** Un candidato que se quedó, y por qué. */
 export interface ArchiveKept {
   id: string;

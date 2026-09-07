@@ -253,6 +253,7 @@ export class CommandRunner {
         case 'spawn': return await this.spawn(cmd);
         case 'land': return await this.land(cmd);
         case 'discard': return await this.discard(cmd);
+        case 'transcripts:purge': return this.purgeTranscripts(cmd);
         case 'say': return await this.say(cmd);
         case 'interrupt': return await this.interrupt(cmd);
         case 'permit': return await this.permit(cmd);
@@ -979,6 +980,39 @@ export class CommandRunner {
       : `${a.callsign}: no aterrizado (${out.reason}): ${out.detail}`;
     log(out.ok ? 'info' : 'warn', SCOPE, `land ${detail}`);
     return { ok: true, detail, data: out };
+  }
+
+  /**
+   * Borrar los transcripts de sesiones terminadas. Irreversible, y por eso
+   * estrecho.
+   *
+   * Es lo único de la limpieza que quita bytes: archivar sólo retira de la
+   * vista, y las lápidas pesan trece kilobytes. Lo que se borra es lo que el
+   * CLI escribió — la razón por la que el repo está como está — así que aquí
+   * sólo se toca lo que se pide por id, y sólo si esa sesión está terminada y
+   * no tiene un pane vivo. Un agente vivo, o uno que este collector no conoce,
+   * se salta y se dice; nunca se adivina una ruta a partir de un id.
+   */
+  private purgeTranscripts(cmd: Extract<Command, { k: 'transcripts:purge' }>): CommandResult {
+    const ids = Array.isArray(cmd.agentIds) ? cmd.agentIds.slice(0, 500) : [];
+    const purged: string[] = []; const skipped: { id: string; why: string }[] = [];
+    let bytes = 0;
+    for (const id of ids) {
+      const a = this.deps.agent(id);
+      if (!a) { skipped.push({ id, why: 'unknown to this collector' }); continue; }
+      if (a.alive || (a.state && !['done', 'dead'].includes(a.state))) { skipped.push({ id, why: `still ${a.state ?? 'alive'}` }); continue; }
+      if (!a.transcriptPath) { skipped.push({ id, why: 'no transcript on disk' }); continue; }
+      try {
+        bytes += fs.statSync(a.transcriptPath).size;
+        if (cmd.dryRun !== true) fs.rmSync(a.transcriptPath);
+        purged.push(id);
+      } catch (err) { skipped.push({ id, why: errText(err) }); }
+    }
+    const kb = Math.round(bytes / 1024);
+    log(cmd.dryRun ? 'info' : 'warn', SCOPE,
+      `${cmd.dryRun ? 'purga en seco' : 'transcripts borrados'}: ${purged.length} de ${ids.length} (${kb} KB)`);
+    return { ok: true, detail: `${cmd.dryRun ? 'would purge' : 'purged'} ${purged.length} transcript(s), ${kb} KB`,
+      data: { purged, skipped, bytes, dryRun: cmd.dryRun === true } };
   }
 
   private async discard(cmd: Extract<Command, { k: 'discard' }>): Promise<CommandResult> {

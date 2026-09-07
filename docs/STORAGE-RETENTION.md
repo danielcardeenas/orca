@@ -42,6 +42,29 @@ el linaje, la misma regla que la retención). Los squads no tienen registro:
 uno cuyo último miembro se archiva desaparece solo, y la operación lo reporta
 como `squads_retired`.
 
+## Borrar transcripts (2026-09-07)
+
+Archivar no libera espacio: retira de la vista y deja una lápida de unos pocos
+cientos de bytes. Lo que ocupa son los transcripts, que no son de ORCA —los
+escribe el CLI en `~/.claude/projects` y `~/.codex/sessions`— y son el registro
+de por qué el repositorio quedó como quedó.
+
+`orca purge-transcripts` (herramienta `purge_transcripts`) los borra, y es lo
+único de toda la limpieza que no se deshace. Por eso son **dos pasos
+deliberados**: sólo alcanza a lo que ya se archivó, así que hay que retirarlo
+antes; y sin `--yes` cuenta y mide sin tocar nada. El collector, que es quien
+tiene los archivos, se niega a borrar el de una sesión viva o que no conozca, y
+nunca deriva una ruta de un id: la única que borra es la que ya tenía registrada
+para ese agente.
+
+Borrado el archivo, su lápida se retira: ya no rechaza nada, porque nadie va a
+reenviar a ese agente. Esa es la **única** razón por la que una lápida se
+retira sin que el agente vuelva vivo. Se intentó una regla más ambiciosa —tirar
+la lápida cuando el collector deja de nombrar al agente— y es falsa: el collector
+recicla lo terminado a los pocos segundos y deja de reportarlo con el transcript
+intacto. Probada contra la instalación real, tiraba lápidas buenas y los agentes
+reaparecían, que es justo lo que la lápida evita.
+
 Los parámetros están en `StoreOptions` (`retentionDays`, `maxDailyBytes`) y
 `HistoryOptions` (`retentionMs`, `maxFileBytes`, `maxSnapshots`, `maxEntries`).
 Los valores anteriores son los predeterminados. No hay que ejecutar un comando
@@ -52,3 +75,6 @@ timeline, 1,6 MiB de eventos y 0,65 MiB de overflow. El volumen observado no era
 urgente; los límites previenen el crecimiento posterior. Las pruebas de
 `test/retention.test.ts` cubren eliminación por edad, límite de tamaño, conservación
 de conversaciones, lecturas parciales y appends simultáneos con compactación.
+`test/transcript-purge.test.ts` cubre el borrado y, sobre todo, lo que se niega a
+borrar; `test/archive.test.ts` cubre que el silencio del collector no retira una
+lápida y que el borrado sí.

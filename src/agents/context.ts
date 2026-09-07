@@ -181,6 +181,8 @@ export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext 
     acknowledgeCollision: (id) => hub.acknowledgeCollision(id),
 
     archiveAgents: (filter, opts) => hub.archiveAgents(filter, opts),
+    archivedAgents: () => hub.archivedAgents(),
+    unarchive: (id) => { hub.world.dropTombstone(id); },
 
     // El libro de presupuestos, con la flota ya atada: las herramientas piden
     // "cuánto lleva K9" y no tienen que saber de dónde salen los agentes.

@@ -1410,6 +1410,19 @@ export class World {
     return false;
   }
 
+  /**
+   * Retirar una lápida porque su transcript se borró. Lo pide quien lo borró.
+   *
+   * Distinto de levantarla porque el agente volvió vivo: aquí no vuelve nadie,
+   * simplemente ya no hay nada que rechazar.
+   */
+  dropTombstone(id: string): boolean {
+    const tomb = this.archived.get(id);
+    if (!tomb) return false;
+    this.unarchive(id, tomb.machineId, 'transcript borrado: la lápida ya no rechaza nada', false);
+    return true;
+  }
+
   private unarchive(id: string, machineId: string, why: string, resync: boolean): void {
     const tomb = this.archived.get(id);
     if (!tomb) return;

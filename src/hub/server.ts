@@ -282,6 +282,8 @@ export interface Hub {
    * `dryRun` sólo cuenta. Nunca toca un agente vivo.
    */
   archiveAgents(filter: ArchiveFilter, opts: { dryRun?: boolean; by?: string }): ArchiveOutcome;
+  /** Las lápidas vigentes: lo retirado, que es lo único cuyo transcript se puede purgar. */
+  archivedAgents(): import('../shared/archive.ts').ArchivedAgent[];
   /**
    * La sesión CAPCOM viva de esta flota, o null.
    *
@@ -882,6 +884,11 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         return asker ? { machineId: asker.machineId, broadcast: false }
           : { machineId: null, broadcast: false, error: `el que preguntó ya no existe: ${m.fromAgentId}` };
       }
+      case 'transcripts:purge':
+        // La máquina viene en el comando: sus agentes ya no están en el mundo.
+        return world.state.machines[cmd.machineId]
+          ? { machineId: cmd.machineId, broadcast: false }
+          : { machineId: null, broadcast: false, error: `máquina desconocida: ${cmd.machineId}` };
       default: {
         const a = world.state.agents[cmd.agentId];
         return a ? { machineId: a.machineId, broadcast: false }
@@ -2267,6 +2274,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     dispatch(cmd) {
       return dispatchLocal(cmd);
     },
+    archivedAgents() { return world.archivedAgents(); },
     archiveAgents(filter, opts) {
       return archiveAgents(filter, opts);
     },

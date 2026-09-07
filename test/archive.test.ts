@@ -339,7 +339,38 @@ const endToEnd = test('hub: MCP y consola archivan lo mismo, el collector no lo 
   }
 }));
 
+/*
+ * La lápida se retira cuando su transcript se borra, y por ninguna otra razón.
+ *
+ * El intento anterior fue purgarla cuando el collector dejaba de nombrar al
+ * agente, y es falso: recicla lo terminado a los pocos segundos y deja de
+ * reportarlo con el archivo intacto. Se probó contra la instalación real y
+ * tiró lápidas buenas — ZG reapareció con su transcript en disco. Aquí se
+ * comprueban las dos mitades: que dejar de nombrarlo NO la retira, y que
+ * borrar el archivo sí.
+ */
+const tombstoneOutlivesSilence = test('world: callar sobre un archivado no retira su lápida; borrar su transcript sí', () => {
+  const clock = Date.now();
+  const { world, events } = worldWith(() => clock);
+  world.archiveAgents({ squad: 's1' }, { by: 'test' });
+  const archivedIds = world.archivedAgents().map((t) => t.id).sort();
+
+  // Un snapshot que ya no lo nombra: es lo que hace el collector al reciclar.
+  world.applyCollector({ t: 'snapshot', machineId: 'm1', projects: [project('p1', 'P1'), project('p2', 'P2')], agents: [], keys: [] } as never, 'm1');
+  const afterSilence = world.archivedAgents().map((t) => t.id).sort();
+
+  // Y el borrado, que sí es una razón: lo pide quien borró el archivo.
+  const target = archivedIds[0]!;
+  const dropped = world.dropTombstone(target);
+  const twice = world.dropTombstone(target);
+  const why = events.find((e) => e.kind === 'agent:unarchived' && e.agentId === target);
+  return eq('el silencio no retira la lápida; el borrado sí, y una sola vez',
+    { afterSilence, stillArchived: world.isArchived(target), dropped, twice, why: String(why?.text ?? '') },
+    { afterSilence: archivedIds, stillArchived: false, dropped: true, twice: false, why: 'transcript borrado: la lápida ya no rechaza nada' },
+    `${archivedIds.length} lápidas sobreviven al silencio; ${target.slice(0, 4)} se retira al borrarse`);
+});
+
 export default {
   suite: 'Archivar agentes terminados',
-  tests: [decides, filters, ages, dryRunTouchesNothing, leavesTheWorld, neverLive, snapshotCannotResurrect, survivesRestart, endToEnd],
+  tests: [decides, filters, ages, dryRunTouchesNothing, leavesTheWorld, neverLive, snapshotCannotResurrect, survivesRestart, tombstoneOutlivesSilence, endToEnd],
 } satisfies TestModule;

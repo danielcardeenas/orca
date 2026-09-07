@@ -106,6 +106,8 @@ function usage() {
   orca land <K9 | squad:name> [--no-tests] [--message "<title>"]
                                                rebase a worker's branch onto the project's, run the suite, one commit
   orca discard <K9 | squad:name> [--force]     drop a worker's worktree and branch; --force even with unlanded work
+  orca purge-transcripts [--yes]                delete the transcripts of ALREADY ARCHIVED agents;
+                                               frees real space and cannot be undone; counts without --yes
   orca archive [--project <p>] [--squad <s>] [--older-than 24h|2d] [--state done|dead] [--hidden] [--dry-run]
                                                archive finished agents on the hub; --dry-run only counts;
                                                --hidden only the ones left in CAPCOM's directory or a scratchpad
@@ -594,6 +596,28 @@ async function main() {
       });
       if (json || out.isError) return print(out);
       return printArchive(out.result, out.summary);
+    }
+
+    /*
+     * Lo único que borra de verdad, y por eso pide dos pasos: primero
+     * `orca archive`, que retira; y sólo lo retirado llega aquí. Sin
+     * `--yes` cuenta y no toca nada.
+     */
+    case 'purge-transcripts': {
+      const out = await tool('purge_transcripts', { dry_run: opts.yes !== true });
+      if (json || out.isError) return print(out);
+      // Sin nada archivado la herramienta contesta en prosa: es el caso normal
+      // de quien no ha retirado nada todavía, no un resultado que desglosar.
+      const raw = out.result;
+      if (typeof raw === 'string' && !raw.trimStart().startsWith('{')) return console.log(raw);
+      const d = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (d.dry_run) {
+        console.log(`${d.purged.length} transcript(s), ${d.kilobytes} KB — nothing deleted`);
+        if (d.skipped.length) for (const s of d.skipped.slice(0, 10)) console.log(`  kept ${s.id}: ${s.why}`);
+        console.log('run again with --yes to delete them for good');
+      } else console.log(`deleted ${d.purged.length} transcript(s), ${d.kilobytes} KB`);
+      if (d.errors?.length) for (const e of d.errors) console.log(`  ! ${e}`);
+      return;
     }
 
     case 'traffic': {

@@ -1235,18 +1235,46 @@ kbd.key.is-echo { color: var(--lime); }
 .file__media { flex: 1; min-height: 0; width: 100%; background: #000; object-fit: contain; }
 .file__audio { display: grid; place-items: center; flex: 1; padding: 20px; }
 .file__audio audio { width: 100%; max-width: 480px; }
-/* A coordinator handoff remains visible above the new session's transcript. */
+/*
+ * An account of something that already happened — a handoff, a clean context.
+ * One line until asked, because the conversation under it is the window.
+ */
+.notice { display: flex; align-items: flex-start; gap: 6px; color: var(--ink); }
+.notice__d { flex: 1; min-width: 0; }
+.notice__head {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;
+  padding: 6px 0; cursor: pointer; color: var(--ink-mid); list-style: none;
+}
+.notice__head::-webkit-details-marker { display: none; }
+.notice__head:hover, .notice__head:focus-visible { color: var(--ink); }
+/* The triangle, drawn rather than typed: it turns where the text sits. */
+.notice__mark {
+  width: 0; height: 0; flex: none; align-self: center;
+  border: 4px solid transparent; border-left-color: currentColor;
+  transition: transform 120ms ease;
+}
+.notice__d[open] .notice__mark { transform: rotate(90deg) translateX(1px); }
+.notice__title { color: var(--ink); }
+.notice__sum { flex: 1; min-width: 0; font-size: 11px; color: var(--ink-dim); overflow-wrap: anywhere; }
+.notice__head time { font-size: 11px; color: var(--ink-dim); }
+.notice__body { padding-bottom: 8px; }
+.notice__body p { margin: 2px 0 10px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.notice__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.notice__actions .chip { white-space: normal; text-align: left; }
+.notice__x {
+  flex: none; margin-top: 4px; padding: 0 6px; line-height: 1.4;
+  background: none; border: 1px solid transparent; color: var(--ink-dim);
+  font: inherit; cursor: pointer;
+}
+.notice__x:hover, .notice__x:focus-visible { color: var(--ink); border-color: var(--line); }
+@media (prefers-reduced-motion: reduce) { .notice__mark { transition: none; } }
+
+/* A coordinator handoff sits above the new session's transcript. */
 .capcom__handoff {
-  padding: 12px 16px;
+  padding: 4px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--screen-in);
-  color: var(--ink);
 }
-.capcom__handoff-title { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; color: var(--ink-mid); }
-.capcom__handoff-models { margin-top: 6px; overflow-wrap: anywhere; }
-.capcom__handoff p { margin: 6px 0 10px; font-size: 12px; line-height: 1.5; }
-.capcom__handoff-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.capcom__handoff-actions .chip { white-space: normal; text-align: left; }
 .capcom__model { padding: 8px 12px; border-top: 1px solid var(--line); flex-shrink: 0; }
 .capcom__model[hidden] { display: none; }
 .capcom__model-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -1258,6 +1286,7 @@ kbd.key.is-echo { color: var(--lime); }
 .capcom__transfer[hidden] { display: none; }
 .capcom__transfer p { font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .capcom__transfer .row { flex-wrap: wrap; gap: 6px; }
+.capcom__transfer-go { margin: 4px 0 6px; }
 .capcom__archive { padding: 10px 12px; }
 .capcom__archive > p { font-size: 11px; overflow-wrap: anywhere; }
 .capcom__archive-text { margin-top: 14px; overflow-wrap: anywhere; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; }

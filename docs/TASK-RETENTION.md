@@ -43,13 +43,20 @@ Desde la barra:
 
 ```text
 /tasks archive [task_id]     retira la abierta, o la que se nombre
+/tasks archived              lista las retiradas, con su id
 /tasks restore <task_id>     la devuelve
-/tasks purge [task_id]       borra, sólo si ya estaba archivada; pide confirmación
+/tasks purge <task_id>       borra, sólo si ya estaba archivada; pide confirmación
 /tasks finished              archiva de golpe todas las terminadas
 ```
 
 `/tasks finished` es el gesto de limpieza habitual: lo que se acumula sin que
 nadie lo mire son las `completed` y `failed`.
+
+`restore` y `purge` necesitan el id, y archivar deselecciona la conversación
+—seguir escribiendo en algo que ya no se ve no tendría sentido—, así que no hay
+ninguna abierta sobre la que actuar. Para eso está `/tasks archived`: lo
+retirado no sale en el selector, que es justo el punto, y sin ese listado su id
+no estaría en ninguna parte de la consola.
 
 ## Qué NO hace un New CAPCOM limpio
 

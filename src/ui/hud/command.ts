@@ -54,7 +54,7 @@ const COMMANDS: { name: string; help: string }[] = [
   { name: 'ceo', help: 'talk to CAPCOM, the command session' },
   { name: 'capcom-new', help: 'New CAPCOM · /capcom-new clean|continuity · same provider/model' },
   { name: 'capcom', help: 'talk to CAPCOM, the command session' },
-  { name: 'tasks', help: 'retire task conversations · /tasks archive|restore|purge|finished [id]' },
+  { name: 'tasks', help: 'retire task conversations · /tasks archive|restore|purge|finished|archived [id]' },
   { name: 'feed', help: 'telemetry' },
   { name: 'fleet', help: 'machines, projects, everyone' },
   { name: 'tilt', help: 'tilt the field to see depth' },
@@ -291,10 +291,22 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
       case 'tasks': {
         const [what = '', which = ''] = rest;
         const verb = what.toLowerCase();
-        if (!['archive', 'restore', 'purge', 'finished'].includes(verb)) {
-          c.note('Use /tasks archive|restore|purge [task_id], or /tasks finished', 'warn'); break;
+        if (!['archive', 'restore', 'purge', 'finished', 'archived'].includes(verb)) {
+          c.note('Use /tasks archive|restore|purge [task_id], /tasks finished, or /tasks archived', 'warn'); break;
         }
         const tasks = store.world.tasks ?? {};
+        /*
+         * Lo archivado no sale en el selector — ése es el punto — así que sin
+         * este listado su id no está en ninguna parte de la consola, y
+         * `restore` y `purge`, que lo exigen, no se podrían escribir.
+         */
+        if (verb === 'archived') {
+          const gone = Object.values(tasks).filter((t) => t.archivedAt).sort((a, b) => b.archivedAt! - a.archivedAt!);
+          if (!gone.length) { c.note('No archived task conversations'); break; }
+          for (const t of gone) c.note(`${t.id} · ${t.status} · ${t.title}`);
+          c.note(`${gone.length} archived · /tasks restore <id> brings one back · /tasks purge <id> deletes it`);
+          break;
+        }
         if (verb === 'finished') {
           const done = archivableTasks(tasks);
           if (!done.length) { c.note('No finished task conversations to archive'); break; }

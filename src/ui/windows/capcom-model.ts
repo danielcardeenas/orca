@@ -26,12 +26,25 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   const pickerHost = host.querySelector<HTMLElement>('[data-picker]')!;
   const review = document.createElement('section'); review.className = 'capcom__transfer'; review.hidden = true;
   review.setAttribute('aria-label', 'Provider handoff review');
-  review.innerHTML = '<strong class="px">PROVIDER HANDOFF</strong><p class="mono" data-transfer-text></p><div class="row"><button class="chip" type="button" data-checkpoint>REVIEW CONTEXT</button><button class="chip" type="button" data-history>REVIEW HISTORY</button><button class="chip" type="button" data-confirm>CONFIRM HANDOFF</button><button class="chip" type="button" data-dismiss>CANCEL</button></div>';
+  /*
+   * Plegado por defecto, como el acta de traspaso: una vez leído "el contexto
+   * limpio está activo", su sitio es una línea. Se abre solo cuando hay algo
+   * que decidir —una revisión pendiente de confirmar— porque entonces sí es
+   * una pregunta y no un recibo.
+   */
+  review.innerHTML = '<details class="notice__d" data-transfer-details><summary class="notice__head"><span class="notice__mark" aria-hidden="true"></span><strong class="px notice__title">PROVIDER HANDOFF</strong><span class="mono notice__sum" data-transfer-sum></span></summary><div class="notice__body"><p class="mono" data-transfer-text></p><div class="row"><button class="chip" type="button" data-checkpoint>REVIEW CONTEXT</button><button class="chip" type="button" data-history>REVIEW HISTORY</button><button class="chip" type="button" data-confirm>CONFIRM HANDOFF</button><button class="chip" type="button" data-dismiss>CANCEL</button></div></div></details>';
   host.appendChild(review);
-  const continued = document.createElement('button'); continued.type = 'button'; continued.className = 'chip'; continued.textContent = 'OPEN CONTINUED AGENT'; continued.hidden = true;
-  review.querySelector('.row')!.appendChild(continued);
+  // Fuera del plegado a propósito: es la acción que sigue a un traspaso
+  // completo —ir al agente que continúa—, y un recibo se pliega con ella a la
+  // vista. Lo que se esconde es el texto, no lo que hay que poder pulsar.
+  const continued = document.createElement('button'); continued.type = 'button'; continued.className = 'chip capcom__transfer-go'; continued.textContent = 'OPEN CONTINUED AGENT'; continued.hidden = true;
+  review.appendChild(continued);
   continued.addEventListener('click', () => { if (plan?.toId) options?.openAgent(plan.toId); });
   const transferText = review.querySelector<HTMLElement>('[data-transfer-text]')!;
+  const transferSum = review.querySelector<HTMLElement>('[data-transfer-sum]')!;
+  const transferDetails = review.querySelector<HTMLDetailsElement>('[data-transfer-details]')!;
+  /** Plan y fase mostrados: plegar o abrir se decide una vez por cada cambio. */
+  let shownPlan = '';
   const confirm = review.querySelector<HTMLButtonElement>('[data-confirm]')!;
   const dismiss = review.querySelector<HTMLButtonElement>('[data-dismiss]')!;
   let plan: ProviderHandoffPlan | undefined;
@@ -62,6 +75,20 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     continued.hidden = !options || plan?.phase !== 'complete' || !plan.toId;
     if (plan) {
       review.querySelector('strong')!.textContent = plan.contextMode ? (plan.contextMode === 'clean' ? 'CAPCOM · CLEAN CONTEXT' : 'CAPCOM · CONTINUITY') : 'PROVIDER HANDOFF';
+      /*
+       * Se pliega lo único que no pide nada: el recibo de algo que salió bien.
+       * Una revisión espera confirmación, una preparación está en marcha y un
+       * fallo hay que leerlo —dice qué se conservó y si se puede reintentar—,
+       * así que esos se abren. Va por fase y no sólo por plan, porque el paso
+       * de `preparing` a `complete` es justo cuando deja de merecer la ventana.
+       * Abrirlo o cerrarlo a mano se respeta hasta el siguiente cambio de fase.
+       */
+      const at = `${plan.id}:${plan.phase}`;
+      if (at !== shownPlan) {
+        shownPlan = at;
+        transferDetails.open = plan.phase !== 'complete';
+      }
+      transferSum.textContent = `${plan.runtime}/${plan.model} · ${plan.phase}`;
       transferText.textContent = `${plan.fromRuntime}/${plan.fromModel ?? 'current model'} → ${plan.runtime}/${plan.model}. ${plan.phase === 'review' ? 'Sends the saved conversation and pending-work checkpoint to a new session. Current session stays until the destination confirms. Model context limits apply.' : plan.detail} Backup: ${(plan.bytes / 1024).toFixed(0)} KB.`;
       confirm.hidden = plan.phase !== 'review'; confirm.disabled = busy || !connected;
       dismiss.hidden = plan.phase === 'preparing'; dismiss.textContent = plan.phase === 'review' ? 'CANCEL' : 'CLOSE';

@@ -37,11 +37,21 @@ try {
   await page.getByText('CAPCOM · CONTINUITY', { exact: true }).waitFor();
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string, mode?: string}) => c.k === 'capcom:new').at(-1)?.mode), 'continuity');
   await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).complete());
+  // Un recibo de algo que salió bien se pliega solo: no hay nada que decidir y
+  // el alto es de la conversación. El titular y la fase siguen en la línea.
+  await page.locator('[data-transfer-sum]').getByText('complete').waitFor();
+  assert.equal(await page.locator('[data-transfer-details]').evaluate((d) => (d as HTMLDetailsElement).open), false);
+  assert.equal(await page.locator('[data-transfer-text]').isVisible(), false);
+  assert.equal(await page.getByRole('button', { name: 'CLOSE', exact: true }).isVisible(), false);
+  await page.getByText('CAPCOM · CONTINUITY', { exact: true }).waitFor();
+  // Y se abre con un clic, con su CLOSE dentro.
+  await page.locator('[data-transfer-details] summary').click();
   await page.getByRole('button', { name: 'CLOSE', exact: true }).waitFor();
+  assert.match(await page.locator('[data-transfer-text]').innerText(), /Backup:/);
   await input.fill('/capcom-new invalid'); await input.press('Enter');
   assert.match(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).notes.at(-1)), /clean.*continuity/);
   await input.fill('/capcom-new clean'); await input.press('Enter');
   await page.getByText('CAPCOM · CLEAN CONTEXT', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
-  console.log('Fresh UI passed: visible modes, scope, same model, draft, progress, failure/retry, clean/continuity slash commands, desktop/mobile.');
+  console.log('Fresh UI passed: visible modes, scope, same model, draft, progress, failure/retry, folded receipt, clean/continuity slash commands, desktop/mobile.');
 } finally { await browser.close(); await server.close(); }

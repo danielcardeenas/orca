@@ -81,6 +81,26 @@ Los mensajes nuevos de TALK, tareas y entregas directas al CAPCOM se retienen. E
 
 La activación mantiene un único CAPCOM con autoridad. Durante la verificación puede haber dos procesos CLI vivos: el original y el destino preparado, sin turno activo ni rol de CAPCOM todavía. No se debe escribir directamente en el tmux de destino ni usar comandos del CLI para cambiar de sesión al margen de ORCA.
 
+## Los avisos, plegados
+
+Un traspaso deja su acta —«SESSION CHANGED», con enlaces a la conversación
+anterior y a las notas— y el propio traspaso deja la suya, con el estado del
+plan. Son útiles una vez y referencia después, pero desplegadas ocupaban entre
+las dos dos tercios del alto de la ventana, y la conversación viva quedaba en
+una franja de cuatro líneas; la del traspaso, además, no se podía cerrar de
+ninguna manera, así que ese recorte era permanente.
+
+Ahora el estado normal de un aviso es una línea: título, resumen y hora. Se abre
+con un clic y se descarta con la ×, y ambas cosas se recuerdan en este navegador
+por id del aviso —descartar el acta de un traspaso no esconde la del siguiente,
+que es cuando hace falta leerla—. El aviso sigue en el hub: otra consola lo verá.
+
+El acta del plan se abre sola mientras hay algo que decidir o algo en marcha
+—una revisión pendiente de confirmar, una preparación, un fallo que explica qué
+se conservó— y se pliega en cuanto es el recibo de algo que salió bien. La
+acción que sigue a un traspaso completo, ir al agente que continúa, queda fuera
+del plegado: se esconde el texto, no lo que hay que poder pulsar.
+
 ## Activación operativa pendiente
 
 1. Integrar estos cambios y ponerlos en servicio mediante el procedimiento habitual, en una ventana autorizada. Esta tarea no ejecutó ese paso.
@@ -101,6 +121,7 @@ npm test -- wake
 npm test -- provider-handoff
 npm test -- worker-recovery
 node --import tsx test/capcom-new.visual.ts
+node --import tsx test/capcom-handoff.visual.ts
 ```
 
 La prueba visual crea su propio servidor Vite sin la configuración/proxy del proyecto ni conexión al hub real. Guarda capturas en `test/shots/capcom-new-{desktop,mobile}.png` y comprueba botón, ambos modos/comandos, alcance, modelo, borrador, fallo/reintento y overflow.

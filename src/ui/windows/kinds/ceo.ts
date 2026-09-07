@@ -44,6 +44,7 @@ import { echoLanded, foldTalk, toolLabel, type TalkGroup } from '../talk.ts';
 import { refIndex, type RefIndex } from '../refs.ts';
 import { linkPaths } from '../paths.ts';
 import { handoffNotice } from '../capcom-handoff.ts';
+import { dismissNotice, noticeDismissed, setNoticeOpen } from '../notice.ts';
 import { handoffText } from '../../../shared/handoff.ts';
 import { mountCapcomModel } from '../capcom-model.ts';
 import type { HistoryPage } from '../../../shared/provider-handoff.ts';
@@ -211,10 +212,26 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   const handoffHost = body.querySelector<HTMLElement>('[data-handoff]')!;
   let handoffSig = '';
   handoffHost.addEventListener('click', (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLElement>('[data-handoff-file]');
+    const target = event.target as HTMLElement;
+    const drop = target.closest<HTMLElement>('[data-notice-dismiss]');
+    if (drop?.dataset.noticeDismiss) {
+      dismissNotice(drop.dataset.noticeDismiss);
+      // Vaciar aquí, no dejárselo a `render`: sin aviso su firma es la vacía,
+      // que es la que ya había, y el repintado se saltaría con el aside puesto.
+      handoffHost.innerHTML = ''; handoffSig = '';
+      render();
+      return;
+    }
+    const button = target.closest<HTMLElement>('[data-handoff-file]');
     if (!button?.dataset.handoffFile) return;
     c.openFile({ path: button.dataset.handoffFile, agentId: capcomOf()?.id ?? null });
   });
+  // Abrir un aviso es una decisión: se recuerda, y sobrevive al re-render.
+  handoffHost.addEventListener('toggle', (event) => {
+    const details = event.target as HTMLDetailsElement;
+    const id = details.closest<HTMLElement>('[data-notice]')?.dataset.notice;
+    if (id) setNoticeOpen(id, details.open);
+  }, true);
   const band = body.querySelector<HTMLElement>('[data-band]')!;
   const status = body.querySelector<HTMLElement>('[data-status]')!;
   const orders = body.querySelector<HTMLElement>('[data-orders]')!;
@@ -647,7 +664,8 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     refs = refIndex(store.world.agents);
     const a = capcomOf();
     modelControl.update(a, store.linkUp);
-    const handoff = (store.world.capcomHandoffs ?? []).filter((h) => !a || h.toId === a.id).at(-1);
+    const handoff = (store.world.capcomHandoffs ?? []).filter((h) => !a || h.toId === a.id)
+      .filter((h) => !noticeDismissed(`handoff:${h.id}`)).at(-1);
     handoffHost.hidden = !handoff || !!selected || tab !== 'talk';
     const nextHandoffSig = handoff ? JSON.stringify(handoff) : '';
     if (handoffSig !== nextHandoffSig) {

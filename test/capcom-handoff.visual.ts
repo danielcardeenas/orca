@@ -9,9 +9,19 @@ try {
   await page.route('**/handoff-fixture', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head><link rel="stylesheet" href="/src/ui/styles/tokens.css"><link rel="stylesheet" href="/src/ui/styles/window.css"></head><body style="background:#0b0a0d;margin:0"><main class="win__body" style="display:flex;flex-direction:column;width:min(640px,calc(100vw - 20px));height:calc(100dvh - 24px);margin:12px auto"></main></body></html>' }));
   await page.addInitScript('window.__name = (fn) => fn');
   await page.goto('http://127.0.0.1:4478/handoff-fixture');
+  // Sólo aquí: lo que se pliega y lo que se descarta se recuerda entre recargas,
+  // y eso es justo lo que este recorrido comprueba más abajo.
+  await page.evaluate(() => localStorage.removeItem('orca.capcom.notices'));
   await page.evaluate(async () => { await import('/test/capcom-handoff.fixture.ts' as string); });
   await page.getByRole('complementary', { name: 'CAPCOM session handoff' }).waitFor();
+  // Plegado: una línea con su título y su hora, y el cuerpo fuera de la vista.
+  assert.equal(await page.locator('.capcom__handoff details').evaluate((d) => (d as HTMLDetailsElement).open), false);
+  assert.equal(await page.getByRole('button', { name: 'OPEN PREVIOUS CONVERSATION' }).isVisible(), false);
+  const folded = (await page.locator('.capcom__handoff').boundingBox())!.height;
+  assert.match(await page.locator('.capcom__handoff').innerText(), /SESSION CHANGED/);
+  await page.locator('.capcom__handoff summary').click();
   assert.match(await page.locator('[data-handoff]').innerText(), /Earlier messages are archived/);
+  assert.ok((await page.locator('.capcom__handoff').boundingBox())!.height > folded * 2, 'unfolding is what costs the room');
   await page.getByRole('button', { name: 'OPEN PREVIOUS CONVERSATION' }).click();
   await page.getByRole('button', { name: 'HANDOFF NOTES' }).focus();
   await page.keyboard.press('Enter');
@@ -36,6 +46,15 @@ try {
   await page.evaluate(async () => { await import('/test/capcom-handoff.fixture.ts' as string); });
   await page.locator('.capcom__handoff').waitFor();
   assert.equal(await page.locator('.capcom__handoff').count(), 1);
+  // Abrirlo fue una decisión: sigue abierto tras recargar.
+  assert.equal(await page.locator('.capcom__handoff details').evaluate((d) => (d as HTMLDetailsElement).open), true);
+  // Y descartarlo devuelve el alto entero a la conversación, también al volver.
+  await page.getByRole('button', { name: 'Dismiss this notice' }).click();
+  assert.equal(await page.locator('.capcom__handoff').count(), 0);
+  await page.reload();
+  await page.evaluate(async () => { await import('/test/capcom-handoff.fixture.ts' as string); });
+  await page.locator('[data-in]').waitFor();
+  assert.equal(await page.locator('.capcom__handoff').count(), 0);
   assert.deepEqual(errors, []);
-  console.log('Handoff UI: desktop/mobile, history buttons, keyboard, draft, replay and reload passed.');
+  console.log('Handoff UI: folded by default, unfolds, history buttons, keyboard, draft, replay, dismiss and reload passed.');
 } finally { await browser.close(); }

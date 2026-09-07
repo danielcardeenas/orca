@@ -137,3 +137,66 @@ export function hiddenInWorkspace(
 ): boolean {
   return where !== null && role !== 'capcom';
 }
+
+/* ── la isla de lo que no es un proyecto ──────────────────────────── */
+
+/**
+ * El slug sintético de la única isla que no es un proyecto.
+ *
+ * Un directorio excluido no se registra como proyecto —esa es la decisión de
+ * arriba— pero el agente que vive ahí conserva un `projectId` derivado de su
+ * slug, porque el tipo `Agent` exige uno. La consola, que agrupa por ese campo,
+ * dibujaba entonces una isla por DIRECTORIO, rotulada con el id crudo
+ * (`a303…d07a/-Users-dan--orca-capcom-handoffs-2a9f…-runtime`) porque no hay
+ * proyecto del que sacar código ni nombre.
+ *
+ * Y crecía sin techo: cada relevo de CAPCOM estrena `handoffs/<planId>/runtime`,
+ * un slug nuevo y una isla más. Medido: cuatro islas con el mismo aspecto.
+ *
+ * Ahora son UNA, la misma para el directorio del mando y para los scratchpads.
+ * No se parte por clase porque la distinción que importa al mirar el campo no
+ * es capcom-o-scratchpad: es que nada de eso es trabajo. La clase sigue en el
+ * agente (`workspace`) para quien la necesite en una lista.
+ */
+export const OFF_FLEET_SLUG = '~off';
+
+/** Su `projectId`. Lleva `machineId` delante, como cualquier proyecto. */
+export function offFleetProjectId(machineId: string): string {
+  return `${machineId}/${OFF_FLEET_SLUG}`;
+}
+
+/**
+ * A qué isla pertenece este agente: su proyecto, o la de fuera de la flota.
+ *
+ * La clase viaja en el propio agente (`workspace`, que pone el collector) y no
+ * se vuelve a deducir aquí: reconocerla exige saber dónde vive CAPCOM, que se
+ * lee del entorno, y en la consola no hay entorno que leer.
+ */
+export function islandOf(
+  a: { machineId: string; projectId: string; workspace?: ExcludedWorkspace },
+): string {
+  return a.workspace ? offFleetProjectId(a.machineId) : a.projectId;
+}
+
+/** ¿Es este `projectId` el de la isla de fuera de la flota? */
+export function isOffFleet(projectId: string): boolean {
+  return projectId.slice(projectId.indexOf('/') + 1) === OFF_FLEET_SLUG;
+}
+
+/**
+ * Cómo se rotula. El código no son dos letras como el de un proyecto —no lo
+ * es— y el nombre dice en inglés lo mismo que la isla entera: esto no está en
+ * la flota.
+ */
+export const OFF_FLEET_LABEL = { code: '··', name: 'off-fleet' } as const;
+
+/**
+ * Lo que se le contesta a quien intenta lanzar trabajo sobre la isla.
+ *
+ * No es un proyecto y además no es UN directorio: agrupa varios. Sin este
+ * texto el hub contestaría "proyecto desconocido", que invita a reintentar con
+ * otro id en vez de decir que ahí no se lanza.
+ */
+export const OFF_FLEET_REFUSAL =
+  'that island is not a project: it groups CAPCOM\'s own directory, its handoff '
+  + 'runtimes and the session scratchpads. Pick a work project.';

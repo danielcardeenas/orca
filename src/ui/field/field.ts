@@ -40,6 +40,7 @@ import * as THREE from 'three';
 import gsap from 'gsap';
 import type { Agent, AgentMessage, AgentState, Artifact, Placement, Project, WorldState } from '../../shared/types.ts';
 import { squadsOf, type Squad } from '../../shared/squads.ts';
+import { OFF_FLEET_LABEL, islandOf } from '../../shared/workspaces.ts';
 import { store } from '../store.ts';
 import { esc, STATE_HEX, STATE_VAR } from '../util.ts';
 import { CAPCOM_BITS, sigilBits, sigilHTML } from '../gfx/sigil.ts';
@@ -541,6 +542,14 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     // Both, and both per feed: a title that only repeats the project's name is
     // no title, and `labels.ts` needs the name as well as the code to see it.
     for (const p of projects.values()) { rememberProjectCode(p.id, p.code); rememberProjectName(p.id, p.name); }
+    // La isla de fuera de la flota no llega en `projects` —no es uno— así que
+    // su rótulo se registra igual, o cada tesela de ahí dentro diría `??`.
+    for (const a of Object.values(w.agents)) {
+      if (!a.workspace) continue;
+      const id = islandOf(a);
+      rememberProjectCode(id, OFF_FLEET_LABEL.code);
+      rememberProjectName(id, OFF_FLEET_LABEL.name);
+    }
     for (const m of Object.values(w.machines ?? {})) rememberMachine(m.id, m.hostname);
     agents = Object.values(w.agents);
     byId.clear();
@@ -555,7 +564,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     for (const e of Object.values(w.escalations ?? {})) {
       if (e.status !== 'pending' && e.status !== 'with_ceo') continue;
       pendingAgents.add(e.agentId);
-      const pid = byId.get(e.agentId)?.projectId ?? e.projectId;
+      const a = byId.get(e.agentId);
+      const pid = a ? islandOf(a) : e.projectId;
       pendingByProject.set(pid, (pendingByProject.get(pid) ?? 0) + 1);
     }
     readCommandFlags();
@@ -783,7 +793,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   /** Every agent standing in a block: same project, same squad. */
   function membersOf(q: SquadBlock): string[] {
     const out: string[] = [];
-    for (const a of agents) if (a.projectId === q.projectId && squadOf(a) === q.name) out.push(a.id);
+    for (const a of agents) if (islandOf(a) === q.projectId && squadOf(a) === q.name) out.push(a.id);
     return out;
   }
 
@@ -867,7 +877,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     const sig = sigilHTML(sigilBits(q.name));
     let html = `<span class="squad__sigil sigil--lg">${sig}</span><span class="squad__roster">${roster}</span>`;
     if (tier >= 2) {
-      html += `<span class="squad__k">${esc(q.name)} · ${groupOrigin(agents.filter((a) => a.projectId === q.projectId && squadOf(a) === q.name))}</span><span class="squad__n">${q.count}</span>`;
+      html += `<span class="squad__k">${esc(q.name)} · ${groupOrigin(agents.filter((a) => islandOf(a) === q.projectId && squadOf(a) === q.name))}</span><span class="squad__n">${q.count}</span>`;
     }
     if (tier >= 3) {
       if (lead) html += `<span class="squad__lead">LEAD ${esc(lead.callsign)}</span>`;
@@ -985,12 +995,15 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         regionEls.set(r.id, el);
       }
       el.classList.toggle('is-moved', r.moved);
+      // Ciudadanos de segunda: la isla de fuera de la flota lleva su propia
+      // clase y se dibuja apagada, para que no se lea como un proyecto más.
+      el.classList.toggle('rgn--off', r.offFleet);
       const sig = `${r.code}|${r.name}|${r.count}|${r.blocked}`;
       if (el.dataset.sig !== sig) {
         el.dataset.sig = sig;
         el.innerHTML = `<span class="rgn__code">${esc(r.code)}</span><span class="rgn__name">${esc(r.name)}</span>`
           + `<span class="rgn__n">${r.blocked ? `${r.blocked} NEED YOU · ` : ''}${r.count}</span>`
-          + `<span class="rgn__open" title="Open this project">▸</span>`;
+          + `<span class="rgn__open" title="${r.offFleet ? 'Open what is off the fleet' : 'Open this project'}">▸</span>`;
         el.classList.toggle('has-blocked', r.blocked > 0);
       }
     }
@@ -1539,7 +1552,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       let mine = 0;
       for (const id of selected) {
         if (!pendingAgents.has(id)) continue;
-        if (key === DECK_YOU || byId.get(id)?.projectId === key) { mine = 1; break; }
+        const ka = byId.get(id);
+        if (key === DECK_YOU || (ka && islandOf(ka) === key)) { mine = 1; break; }
       }
       pipes.port(you.x, you.y, 0.03, C_AMBER, 1.7, mine);
     }
@@ -1557,7 +1571,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         const touch = selected.has(a.id) || selected.has(other);
         pipes.add(messageRoute(s, b, a.id), Math.min(s.z, b.z) - 0.02, touch ? C_LIME : C_BLUE, kind, 0, 1, touch ? 1 : 0);
       } else if (pendingAgents.has(a.id)) {
-        const you = youOf(lmode.kind === 'deck' ? DECK_YOU : a.projectId);
+        const you = youOf(lmode.kind === 'deck' ? DECK_YOU : islandOf(a));
         if (!you || drawn.has(`${a.id}>you`)) continue;
         drawn.add(`${a.id}>you`);
         pipes.add(landOn(messageRoute(s, you, a.id), you), Math.min(s.z, 0.05) - 0.02, C_AMBER, kind, 0, 1, selected.has(a.id) ? 1 : 0);

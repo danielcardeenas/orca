@@ -9,7 +9,7 @@ import { CapcomSession } from '../src/collector/capcom.ts';
 import { CapcomRouter } from '../src/hub/capcom.ts';
 import { cleanCapcomBrief } from '../src/collector/briefs.ts';
 import { freshCapcomCheckpoint } from '../src/hub/capcom-checkpoint.ts';
-import type { ProviderHandoffPlan } from '../src/shared/provider-handoff.ts';
+import type { ProviderHandoffPlan, ProviderModel } from '../src/shared/provider-handoff.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
 import type { Agent, Escalation, WorldState } from '../src/shared/types.ts';
 import { test, ok } from './harness.ts';
@@ -27,7 +27,7 @@ function rig(runtime = 'codex') {
   let effective = a.model ?? null;
   const prompts: string[] = []; const holds: boolean[] = []; const activated: string[] = [];
   const deps = { dir: () => dir, agent: (id: string) => id === OLD ? a : null, owns: () => true, busy: () => false,
-    model: () => effective, models: () => [], context: () => 'OLD_FLEET_CONTEXT_SENTINEL',
+    model: () => effective, models: (): ProviderModel[] => [], context: () => 'OLD_FLEET_CONTEXT_SENTINEL',
     hold: (_id: string, on: boolean) => { holds.push(on); },
     prepare: async (p: ProviderHandoffPlan, prompt: string) => { prompts.push(prompt); return { sessionId: NEW, receipt: `ORCA_HANDOFF_READY_${p.id}` }; },
     activate: async (_p: ProviderHandoffPlan, id: string) => { activated.push(id); },
@@ -117,6 +117,50 @@ export default { suite: 'Fresh CAPCOM', tests: [
       assert.equal((await cap.ensure()).ok, true);
       assert.ok(!argv[1]!.some(arg => /briefing|reconcile|quota-blocked/.test(arg)));
       return ok('Codex isolated readiness, atomic UUID publication and clean resume policy', true);
+    } finally { r.dispose(); }
+  }),
+  test('the guard watches the origin, not the destination: a different target model is not a changed CAPCOM', async () => {
+    const r = rig();
+    try {
+      // Un traspaso de proveedor tiene, por definición, destino distinto del
+      // origen. La guarda comparaba con el destino y sólo se libraba de
+      // rechazarlo porque no se aplicaba fuera de `contextMode`: cualquier
+      // relevo con modelo elegido caía justo ahí.
+      r.deps.models = () => [{ runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: true }];
+      const p = r.service.review(OLD, 'claude', 'sonnet');
+      assert.equal(p.fromRuntime, 'codex'); assert.equal(p.fromModel, 'gpt-6-astra');
+      assert.notEqual(p.model, p.fromModel);
+      const committed = r.service.commit(OLD, p.id);
+      assert.equal(committed.phase, 'preparing');
+      await r.settle();
+      assert.equal(r.service.status(p.id).phase, 'complete');
+      assert.deepEqual(r.activated, [NEW]);
+      return ok('a destination that differs on purpose is not mistaken for a moved origin', true);
+    } finally { r.dispose(); }
+  }),
+  test('and it still refuses when the origin really moved, before and during preparation', async () => {
+    const r = rig();
+    try {
+      r.deps.models = () => [{ runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: true }];
+      const p = r.service.review(OLD, 'claude', 'sonnet');
+      r.model('gpt-5.6-luna');
+      assert.throws(() => r.service.commit(OLD, p.id), /no longer the runtime\/model this handoff was prepared from/);
+      assert.deepEqual(r.activated, [], 'nothing was retired on a plan that no longer describes its source');
+
+      // Y el mismo cambio a mitad de preparación deja vivo al original.
+      const r2 = rig();
+      try {
+        r2.deps.models = () => [{ runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: true }];
+        const late = r2.service.review(OLD, 'claude', 'sonnet');
+        r2.deps.prepare = async plan => { r2.model('gpt-5.6-luna'); return { sessionId: NEW, receipt: `ORCA_HANDOFF_READY_${plan.id}` }; };
+        r2.service.commit(OLD, late.id);
+        await r2.settle();
+        const after = r2.service.status(late.id);
+        assert.equal(after.phase, 'failed');
+        assert.match(after.detail, /changed runtime or model during preparation/);
+        assert.deepEqual(r2.activated, []);
+      } finally { r2.dispose(); }
+      return ok('a source that moved still stops the handoff, both before and during', true);
     } finally { r.dispose(); }
   }),
   test('after a native /clear the role sticks: the record the watchdog reads points at the new session', async () => {

@@ -21,6 +21,7 @@
  */
 
 import { squadName } from '../../shared/squads.ts';
+import { OFF_FLEET_LABEL, islandOf, isOffFleet } from '../../shared/workspaces.ts';
 import type { Agent, AgentState, Placement, Project } from '../../shared/types.ts';
 import { TRAY_CELLS } from './blocks.ts';
 
@@ -157,6 +158,13 @@ export interface Region {
   id: string;
   code: string;
   name: string;
+  /**
+   * True para la isla de fuera de la flota: el directorio del mando, sus
+   * runtimes de relevo y los scratchpads de sesión. No es un proyecto y se
+   * dibuja como lo que es —apagada, al margen— para que quien mira el campo no
+   * la lea como una isla más. Ver `shared/workspaces.ts`.
+   */
+  offFleet: boolean;
   machineId: string;
   cx: number; cy: number;
   hw: number; hh: number;
@@ -270,11 +278,11 @@ export function layoutFleet(
   const byProject = new Map<string, Agent[]>();
   for (const a of agents) {
     if (folded.has(a.id) || a === capcom) continue;
-    const list = byProject.get(a.projectId);
-    if (list) list.push(a); else byProject.set(a.projectId, [a]);
+    const list = byProject.get(islandOf(a));
+    if (list) list.push(a); else byProject.set(islandOf(a), [a]);
   }
   const countOf = new Map<string, number>();
-  for (const a of agents) if (a !== capcom) countOf.set(a.projectId, (countOf.get(a.projectId) ?? 0) + 1);
+  for (const a of agents) if (a !== capcom) countOf.set(islandOf(a), (countOf.get(islandOf(a)) ?? 0) + 1);
   // Projects that have gone quiet keep their slot; new ones take the next.
   const ids = [...byProject.keys()].sort((p, q) => (projects.get(p)?.name ?? p).localeCompare(projects.get(q)?.name ?? q));
   for (const id of ids) if (!order.has(id)) order.set(id, order.size);
@@ -306,11 +314,16 @@ export function layoutFleet(
     const cy = placedRegion ? placedRegion.y : Math.round(Math.sin(ang) * r * 2) / 2;
 
     const p = projects.get(s.id);
+    // La isla de fuera de la flota no tiene proyecto del que sacar rótulo: lo
+    // trae puesto. El id crudo sólo queda para lo que no es ni una cosa ni la
+    // otra, que es un proyecto que aún no ha llegado en el snapshot.
+    const off = !p && isOffFleet(s.id);
     const region: Region = {
       id: s.id,
-      code: p?.code ?? '??',
-      name: p?.name ?? s.id,
-      machineId: p?.machineId ?? '',
+      code: p?.code ?? (off ? OFF_FLEET_LABEL.code : '??'),
+      name: p?.name ?? (off ? OFF_FLEET_LABEL.name : s.id),
+      offFleet: off,
+      machineId: p?.machineId ?? s.id.slice(0, Math.max(0, s.id.indexOf('/'))),
       cx, cy, hw: s.w / 2, hh: s.h / 2,
       count: countOf.get(s.id) ?? 0,
       blocked: 0,
@@ -386,8 +399,8 @@ export function layoutFleet(
           const kz = depthOf(k);
           const old = prev.spots.get(k.id);
           spots.set(k.id, old
-            ? { ...old, tx: kx, ty: ky, tz: kz, pinned: false, projectId: k.projectId, scale: g.scale, trayOf: e.parent.id }
-            : { id: k.id, x: kx, y: ky, z: kz, tx: kx, ty: ky, tz: kz, pinned: false, projectId: k.projectId, scale: g.scale, trayOf: e.parent.id });
+            ? { ...old, tx: kx, ty: ky, tz: kz, pinned: false, projectId: islandOf(k), scale: g.scale, trayOf: e.parent.id }
+            : { id: k.id, x: kx, y: ky, z: kz, tx: kx, ty: ky, tz: kz, pinned: false, projectId: islandOf(k), scale: g.scale, trayOf: e.parent.id });
         });
         void TRAY_INSET;
         minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
@@ -404,8 +417,8 @@ export function layoutFleet(
 
       const old = prev.spots.get(a.id);
       const spot: Spot = old
-        ? { ...old, tx, ty, tz, pinned, projectId: a.projectId, scale: 1, trayOf: null }
-        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: a.projectId, scale: 1, trayOf: null };
+        ? { ...old, tx, ty, tz, pinned, projectId: islandOf(a), scale: 1, trayOf: null }
+        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: islandOf(a), scale: 1, trayOf: null };
       spots.set(a.id, spot);
 
       minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
@@ -461,8 +474,8 @@ export function layoutFleet(
     const tz = depthOf(capcom);
     const old = prev.spots.get(capcom.id);
     spots.set(capcom.id, old
-      ? { ...old, tx, ty, tz, pinned, projectId: capcom.projectId, scale: CAPCOM_SCALE, trayOf: null }
-      : { id: capcom.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: capcom.projectId, scale: CAPCOM_SCALE, trayOf: null });
+      ? { ...old, tx, ty, tz, pinned, projectId: islandOf(capcom), scale: CAPCOM_SCALE, trayOf: null }
+      : { id: capcom.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: islandOf(capcom), scale: CAPCOM_SCALE, trayOf: null });
     minX = Math.min(minX, tx - hw); maxX = Math.max(maxX, tx + hw);
     minY = Math.min(minY, ty - hh); maxY = Math.max(maxY, ty + hh);
   }
@@ -586,8 +599,8 @@ function layoutDeck(agents: Agent[], projects: Map<string, Project>, prev: Layou
     const tz = depthOf(a);
     const old = prev.spots.get(a.id);
     spots.set(a.id, old
-      ? { ...old, tx, ty, tz, pinned: false, projectId: a.projectId, scale: 1, trayOf: null }
-      : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned: false, projectId: a.projectId, scale: 1, trayOf: null });
+      ? { ...old, tx, ty, tz, pinned: false, projectId: islandOf(a), scale: 1, trayOf: null }
+      : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned: false, projectId: islandOf(a), scale: 1, trayOf: null });
   });
 
   const bounds: Bounds = {

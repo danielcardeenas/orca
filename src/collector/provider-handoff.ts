@@ -102,6 +102,28 @@ export class ProviderHandoffs {
     return a;
   }
   private idle(a: AgentHandle) { return a.state === 'idle' || (a.state === 'blocked' && a.blockKind === 'error'); }
+  /**
+   * ¿Sigue siendo el CAPCOM del que se preparó esto?
+   *
+   * Contra el ORIGEN, no contra el destino. La distinción no importaba mientras
+   * un contexto nuevo obligara a conservar runtime y modelo —origen y destino
+   * eran lo mismo, y comparar con cualquiera daba igual—, pero eso era una
+   * coincidencia, no la intención: lo que la guarda protege es que el plan siga
+   * describiendo la sesión que va a retirarse. Comparar con el destino
+   * rechazaría precisamente el relevo que sí cambia de modelo.
+   *
+   * Y ahora se aplica a todo traspaso, no sólo a los de contexto nuevo: que el
+   * original cambiara de modelo a mitad de una preparación de proveedor no era
+   * más aceptable, sólo pasaba inadvertido.
+   *
+   * Un plan viejo sin `fromRuntime` se acepta: no hay con qué comparar, y el
+   * resto de comprobaciones —transcript, hashes, estado— siguen en pie.
+   */
+  private sameOrigin(a: AgentHandle, p: ProviderHandoffPlan): boolean {
+    if (p.fromRuntime && a.runtime !== p.fromRuntime) return false;
+    if (p.fromModel && (this.deps.model?.(a) ?? a.model) !== p.fromModel) return false;
+    return true;
+  }
   private planFile(id: string) {
     if (!uuid(id)) throw new Error('Invalid handoff id');
     return path.join(this.deps.dir(), 'handoffs', id, 'plan.json');
@@ -239,7 +261,7 @@ export class ProviderHandoffs {
     const manifest = JSON.parse(fs.readFileSync(path.join(p.archive, 'manifest.json'), 'utf8'));
     const history = fs.readFileSync(p.historyPath, 'utf8'); const checkpoint = fs.readFileSync(p.checkpointPath, 'utf8');
     if (hash(history) !== manifest.historySha256 || hash(checkpoint) !== manifest.checkpointSha256 || hash(fs.readFileSync(path.join(p.archive, 'source.jsonl'))) !== p.sha256) throw new Error('Backup integrity check failed. Prepare a fresh handoff.');
-    if (!!p.contextMode && (a.runtime !== p.runtime || (this.deps.model?.(a) ?? a.model) !== p.model)) throw new Error('CAPCOM model changed. Request a new checkpoint.');
+    if (!this.sameOrigin(a, p)) throw new Error('The current CAPCOM is no longer the runtime/model this handoff was prepared from. Prepare a fresh one.');
     const prompt = p.contextMode === 'clean'
       ? `${cleanCapcomBrief()}\n\nPrepare an empty CAPCOM context. Do not call tools, read files or history, recall rules, run briefing, dispatch workers, or execute tasks. Reply only ORCA_HANDOFF_READY_${p.id}. The old session still owns command; after activation wait for new messages. No historical obligations are supplied or authorized. This mode overrides inherited startup and post-compaction instructions to run briefing/recall. Files, workers and persisted hub rules are unchanged.`
       : !!p.contextMode
@@ -260,7 +282,7 @@ export class ProviderHandoffs {
       fs.writeFileSync(path.join(p.archive, 'destination-checkpoint.md'), result.receipt, { mode: 0o600 });
       const a = this.target(p.fromId);
       if (!this.idle(a) || hash(fs.readFileSync(a.transcriptPath!)) !== p.sha256) throw new Error('The original session changed during preparation. It remains active; prepare a fresh handoff.');
-      if (p.contextMode && (a.runtime !== p.runtime || (this.deps.model?.(a) ?? a.model) !== p.model)) throw new Error('CAPCOM model changed during preparation. Original retained.');
+      if (!this.sameOrigin(a, p)) throw new Error('The original CAPCOM changed runtime or model during preparation. It remains active; prepare a fresh handoff.');
       await this.deps.activate(p, result.sessionId);
       p.phase = 'complete'; p.toId = result.sessionId; p.detail = p.contextMode === 'clean' ? 'Clean CAPCOM is active and waiting for new instructions. Files, history, rules and workers preserved.' : 'Handoff activated. Both conversation segments remain available in TALK.';
     } catch (e) {

@@ -263,6 +263,18 @@
 .rgn--capcom .rgn__name { color: var(--cyan); opacity: 0.7; }
 .rgn--capcom:hover { border-color: var(--cyan); box-shadow: 0 0 8px var(--cyan-glow); }
 
+/*
+ * Fuera de la flota: el directorio del mando, sus runtimes de relevo y los
+ * scratchpads de sesión. Una isla, no un proyecto — ciudadanos de segunda.
+ * El borde discontinuo y la tinta apagada lo dicen sin una palabra más: se
+ * distingue de un vistazo a cualquier zoom, y sigue siendo pinchable para
+ * quien quiera mirar lo que quedó dentro.
+ */
+.rgn--off { border-style: dashed; border-color: var(--line-soft); background: rgba(11,10,13,0.45); opacity: 0.62; }
+.rgn--off .rgn__code { color: var(--ink-dim); letter-spacing: 0.2em; }
+.rgn--off .rgn__name { color: var(--ink-dimmer); }
+.rgn--off:hover { opacity: 1; border-color: var(--line); }
+
 /* The squad rótulo, its outline legend and roster live in squad.css. */
 
 /*

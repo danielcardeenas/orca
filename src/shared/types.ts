@@ -135,6 +135,22 @@ export interface Agent {
    */
   hidden?: boolean;
 
+  /**
+   * Qué clase de directorio no-proyecto es su casa: `'capcom'` o
+   * `'scratchpad'`. Ausente para un agente de un proyecto de verdad.
+   *
+   * Lo pone el collector, que es quien lo sabe —tiene la ruta y sabe dónde vive
+   * el mando— y viaja hasta la consola porque allí no se puede volver a
+   * deducir: reconocer el directorio de CAPCOM exige leer el entorno. Con esto
+   * la consola agrupa por CLASE (una isla `capcom`, una `scratch`) en vez de
+   * una isla por carpeta rotulada con el id crudo. Ver `shared/workspaces.ts`.
+   *
+   * Va aparte de `hidden` porque las dos preguntas son distintas: `hidden` es
+   * si se dibuja, y ésta es dónde. El CAPCOM vivo llega con `hidden:false` y
+   * con `workspace:'capcom'`, que es la verdad en los dos campos.
+   */
+  workspace?: import('./workspaces.ts').ExcludedWorkspace;
+
   /** Verified launch provenance, inherited by native children. */
   origin?: 'orca' | 'external';
   /**

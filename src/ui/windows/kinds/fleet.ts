@@ -17,6 +17,7 @@ import { agentOrigin, originLabel, groupOrigin } from '../../../shared/origin.ts
 import { getPref, setPref } from '../../prefs.ts';
 import type { Agent } from '../../../shared/types.ts';
 import { squadsOf, type Squad } from '../../../shared/squads.ts';
+import { OFF_FLEET_LABEL, islandOf, isOffFleet } from '../../../shared/workspaces.ts';
 import { alive, store } from '../../store.ts';
 import { drafts, draftKey } from '../../drafts.ts';
 import { hub } from '../../net/client.ts';
@@ -51,7 +52,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     <div class="row row--split" style="padding:0 8px 8px">
       <div class="row">
         <button class="btn" type="button" data-frame data-key="f">FRAME</button>
-        ${scope === 'project' ? `<button class="btn" type="button" data-spawn data-key="n">SPAWN HERE</button>` : ''}
+        ${scope === 'project' && !isOffFleet(p.id ?? '') ? `<button class="btn" type="button" data-spawn data-key="n">SPAWN HERE</button>` : ''}
         ${scope === 'group' ? `<button class="btn" type="button" data-select>SELECT</button>` : ''}
       </div>
       <button class="btn" type="button" data-stop data-key="x">STOP ALL</button>
@@ -129,7 +130,9 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   function members(): Agent[] {
     const all = Object.values(store.world.agents);
     switch (scope) {
-      case 'project': return all.filter((a) => a.projectId === p.id);
+      // Por ISLA, no por proyecto: la de fuera de la flota agrupa varios
+      // directorios que nunca fueron uno. Ver `shared/workspaces.ts`.
+      case 'project': return all.filter((a) => islandOf(a) === p.id);
       case 'machine': return all.filter((a) => a.machineId === p.id);
       case 'squad': {
         const sq = squad();
@@ -175,8 +178,11 @@ export function mountFleet(ctx: WinCtx, c: Console) {
 
     if (scope === 'project') {
       const pr = store.world.projects[p.id ?? ''];
-      ctx.setCallsign(pr?.code ?? '??');
-      ctx.setTitle(`${pr?.name ?? p.id}${pr?.gitBranch ? ` · ${pr.gitBranch}${pr.gitDirty ? '*' : ''}` : ''}`);
+      const off = !pr && isOffFleet(p.id ?? '');
+      ctx.setCallsign(pr?.code ?? (off ? OFF_FLEET_LABEL.code : '??'));
+      ctx.setTitle(off
+        ? `${OFF_FLEET_LABEL.name} · capcom's own directory and session scratchpads`
+        : `${pr?.name ?? p.id}${pr?.gitBranch ? ` · ${pr.gitBranch}${pr.gitDirty ? '*' : ''}` : ''}`);
     } else if (scope === 'machine') {
       const m = store.world.machines[p.id ?? ''];
       ctx.setCallsign(m?.hostname?.toUpperCase().slice(0, 12) ?? '??');

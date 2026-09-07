@@ -113,6 +113,16 @@ feed. Cada traspaso añade así una entrada de proyecto al config de Codex. Cuan
 la verificación falla de todos modos, la última pantalla del destino se guarda en
 `resume-screen.txt` dentro del archivo.
 
+Antes de retirar al anterior se comprueba que el plan siga describiéndolo: mismo
+runtime y mismo modelo efectivo que cuando se preparó (`fromRuntime`/`fromModel`).
+La comprobación se hace contra el **origen**, no contra el destino, y se aplica a
+todo traspaso. Comparar con el destino sólo funcionaba porque un contexto nuevo
+obligaba a conservar modelo —origen y destino coincidían— y habría rechazado
+justo el relevo que sí lo cambia; y dejarla fuera de los traspasos de proveedor
+significaba que un original que cambiaba de modelo a mitad de preparación pasaba
+inadvertido. Un plan anterior a estos campos se acepta: no hay con qué comparar,
+y el transcript, los hashes y el estado se siguen exigiendo igual.
+
 El checkpoint de continuidad enumera hasta 16 elementos por sección, recorta líneas descriptivas a 240 caracteres y conserva identificadores y vías de consulta. El prompt preparado tiene un límite de 48 KiB. El historial archivado no comparte ese límite de contexto. Si el transcript cambia durante la preparación o queda incompleto durante una escritura, se rechaza el traspaso y se mantiene el original.
 
 ## Coordinación y mensajes

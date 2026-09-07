@@ -20,6 +20,7 @@
  */
 
 import type { Agent, AgentState } from './types.ts';
+import { islandOf } from './workspaces.ts';
 import { TERMINAL_STATES } from './types.ts';
 import { squadsOf } from './squads.ts';
 
@@ -144,7 +145,9 @@ export function archiveCandidates(
     // La regla que no se negocia: un agente vivo no se archiva nunca.
     if (!TERMINAL_STATES.has(a.state)) continue;
     if (filter.state && a.state !== filter.state) continue;
-    if (filter.projectId && a.projectId !== filter.projectId) continue;
+    // La isla, no el directorio: `projectId` puede ser el de la isla de fuera
+    // de la flota, que agrupa varios slugs que nunca fueron un proyecto.
+    if (filter.projectId && a.projectId !== filter.projectId && islandOf(a) !== filter.projectId) continue;
     if (filter.squad && a.squad !== filter.squad) continue;
     if (only && !only.has(a.id)) continue;
     if (filter.hidden && a.hidden !== true) continue;

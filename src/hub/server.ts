@@ -56,7 +56,7 @@ import { nextSquadName, SQUAD_SEQ_FILE } from './squad-seq.ts';
 import { parsePresetList } from '../shared/fleets.ts';
 import { squadName } from '../shared/squads.ts';
 import { archivableState, type ArchiveFilter, type ArchiveOutcome } from '../shared/archive.ts';
-import { excludedWorkspace, refusalFor } from '../shared/workspaces.ts';
+import { OFF_FLEET_REFUSAL, excludedWorkspace, isOffFleet, refusalFor } from '../shared/workspaces.ts';
 import { readBody } from './mcp.ts';
 import { History, HISTORY_RETENTION_MS } from './history.ts';
 import { AnswerMemory, MEMORY_FILE } from './memory.ts';
@@ -847,6 +847,8 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
          */
         const why = excludedWorkspace(cmd.projectId.slice(cmd.projectId.indexOf('/') + 1));
         if (why) return { machineId: null, broadcast: false, error: refusalFor(why) };
+        // La isla que agrupa todo eso tampoco es un sitio donde lanzar.
+        if (isOffFleet(cmd.projectId)) return { machineId: null, broadcast: false, error: OFF_FLEET_REFUSAL };
         const p = world.state.projects[cmd.projectId];
         return p ? { machineId: p.machineId, broadcast: false }
           : { machineId: null, broadcast: false, error: `proyecto desconocido: ${cmd.projectId}` };

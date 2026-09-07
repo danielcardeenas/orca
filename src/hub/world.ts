@@ -30,6 +30,7 @@ import type {
 } from '../shared/types.ts';
 import { AGENT_STATES, LIVE_STATES, MAX_TALK, MAX_TALK_TEXT, TERMINAL_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
 import { squadName } from '../shared/squads.ts';
+import type { ExcludedWorkspace } from '../shared/workspaces.ts';
 import { parseModelControl } from '../shared/model-control.ts';
 import {
   MAX_ARCHIVED, archiveBy, archiveCandidates, tombstone,
@@ -298,6 +299,15 @@ function agentRole(v: unknown): AgentRole {
   return v === 'capcom' ? 'capcom' : 'agent';
 }
 
+/**
+ * La clase de directorio no-proyecto donde vive la sesión. Sólo hay dos
+ * valores; cualquier otra cosa es ausencia, que significa "un proyecto de
+ * verdad" y es el defecto sano para un registro escrito antes de este campo.
+ */
+function workspaceKind(v: unknown): ExcludedWorkspace | undefined {
+  return v === 'capcom' || v === 'scratchpad' ? v : undefined;
+}
+
 function metrics(raw: unknown): AgentMetrics {
   const o = obj(raw) ?? {};
   return {
@@ -349,6 +359,7 @@ export function sanitizeAgentPatch(raw: unknown): Partial<Agent> {
   if (o['origin'] === 'orca' || o['origin'] === 'external') p.origin = o['origin'];
   if (has(o, 'subagent')) p.subagent = b(o['subagent']);
   if (has(o, 'hidden')) p.hidden = b(o['hidden']);
+  if (has(o, 'workspace')) p.workspace = workspaceKind(o['workspace']);
   if (has(o, 'role')) p.role = agentRole(o['role']);
   if (has(o, 'state')) p.state = agentState(o['state'], 'booting');
   if (has(o, 'block')) p.block = block(o['block']);
@@ -399,6 +410,7 @@ export function sanitizeAgent(raw: unknown, machineId: string): Agent | null {
     ...(o['origin'] === 'orca' || o['origin'] === 'external' ? { origin: o['origin'] } : {}),
     ...(has(o, 'subagent') ? { subagent: b(o['subagent']) } : {}),
     ...(has(o, 'hidden') ? { hidden: b(o['hidden']) } : {}),
+    ...(workspaceKind(o['workspace']) ? { workspace: workspaceKind(o['workspace'])! } : {}),
     state: agentState(o['state']),
     block: block(o['block']),
     parentId: validId(o['parentId']) ? o['parentId'] : null,

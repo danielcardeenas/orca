@@ -53,6 +53,7 @@ import { originLabel } from '../../shared/origin.ts';
  */
 
 import type { Agent } from '../../shared/types.ts';
+import { islandOf } from '../../shared/workspaces.ts';
 import { esc, money, nameOf, plain, runtimeCode, tokens } from '../util.ts';
 
 export interface LabelItem {
@@ -180,9 +181,9 @@ function pillClass(a: Agent): string {
  */
 function echoesProject(a: Agent, title: string): boolean {
   const t = title.toLowerCase();
-  const n = (names.get(a.projectId) ?? '').toLowerCase();
+  const n = (names.get(islandOf(a)) ?? '').toLowerCase();
   if (n && t.startsWith(n)) return true;
-  const c = (codes.get(a.projectId) ?? '').toLowerCase();
+  const c = (codes.get(islandOf(a)) ?? '').toLowerCase();
   return c.length > 0 && t.startsWith(c);
 }
 
@@ -331,7 +332,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
         // transform and the box run every frame; this does not. The project's
         // name and code are in it too — they decide whether the title is an
         // echo, and they can land after the label already exists.
-        const sig = `${a.origin}|${a.role}|${tier}|${unit}|${amber ? 'A' : ''}|${a.state}|${a.block?.kind ?? ''}|${a.title}|${a.mission}|${a.tool}|${a.toolDetail}|${a.lastSay}|${a.callsign}|${projectCode(a)}|${names.get(a.projectId) ?? ''}`
+        const sig = `${a.origin}|${a.role}|${tier}|${unit}|${amber ? 'A' : ''}|${a.state}|${a.block?.kind ?? ''}|${a.title}|${a.mission}|${a.tool}|${a.toolDetail}|${a.lastSay}|${a.callsign}|${projectCode(a)}|${names.get(islandOf(a)) ?? ''}`
           + (tier >= 4 ? `|${a.metrics.costUSD.toFixed(2)}|${Math.round(a.metrics.tokensPerSec)}|${Math.round(a.uptimeMs / 1000)}|${a.metrics.turns}` : '')
           + (tier >= 5 ? `|${a.model}|${a.machineId}` : '');
         if (sig !== rec.sig) {
@@ -397,7 +398,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
  */
 const codes = new Map<string, string>();
 export function rememberProjectCode(projectId: string, code: string) { codes.set(projectId, code); }
-function projectCode(a: Agent): string { return codes.get(a.projectId) ?? '??'; }
+function projectCode(a: Agent): string { return codes.get(islandOf(a)) ?? '??'; }
 
 /**
  * The project's full name, for the echo test only — it is never painted. If

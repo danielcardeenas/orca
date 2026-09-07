@@ -540,6 +540,10 @@ class Collector {
     // campo ausente dejaría al hub creyendo que sigue escondido. Un agente de
     // un proyecto normal no lleva el campo en absoluto.
     if (where) snap.hidden = hiddenInWorkspace(where, snap.role);
+    // La CLASE del sitio viaja siempre que haya sitio, `hidden` o no: es lo
+    // que la consola necesita para agrupar en una isla `capcom` y una
+    // `scratch` en vez de una por directorio. Ver `shared/workspaces.ts`.
+    if (where) snap.workspace = where;
     return snap;
   }
 
@@ -1855,7 +1859,7 @@ export function diffAgent(prev: Agent, next: Agent): Partial<Agent> | null {
   };
 
   for (const k of ['state', 'title', 'callsign', 'model', 'tool', 'toolDetail',
-    'lastPrompt', 'lastSay', 'mission', 'squad', 'lead', 'role', 'origin', 'hidden', 'parentId', 'depth',
+    'lastPrompt', 'lastSay', 'mission', 'squad', 'lead', 'role', 'origin', 'hidden', 'workspace', 'parentId', 'depth',
     // `pane` llega tarde: el transcript aparece antes de que tmux liste el
     // pane, así que sin diffearlo el hub se queda con `false` para siempre y
     // TERMINAL dice "no pane" sobre un agente que sí lo tiene.

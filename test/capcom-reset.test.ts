@@ -16,12 +16,61 @@ import os from 'node:os';
 import path from 'node:path';
 import { CapcomResets, RESET_RECEIPT, resetContext, resetPrompt } from '../src/collector/capcom-reset.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
+import { modelPromptReady } from '../src/collector/model-control.ts';
+import { TmuxHost, resolveTmuxBin } from '../src/collector/tmux.ts';
 import { sanitizeAgentPatch } from '../src/hub/world.ts';
 import { test, ok, type TestModule } from './harness.ts';
 
 const OLD = '11111111-2222-4333-8444-555555555555';
 const NEW = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const IDLE = '› Ask Codex to do anything\n  ? for shortcuts';
+
+/*
+ * Un CAPCOM de Claude ocioso tal como lo devuelve `capture-pane -e`, copiado
+ * de las pantallas reales (CAPCOM y una sesión de Claude Code 2.1.267, el
+ * 2026-09-10) con las reglas horizontales recortadas. Al acabar cada turno el
+ * CLI sugiere el siguiente mensaje DENTRO del cuadro de entrada, atenuado
+ * (SGR 2). Sin `-e` esa sugerencia es indistinguible de un borrador, y NEW
+ * CAPCOM fallaba justo con CAPCOM idle — dos entregas en verde no lo vieron
+ * porque todos los dobles pintaban un prompt vacío.
+ */
+const RULE = '─'.repeat(24);
+const SUGGESTION = '\x1b[2mavisame cuando termine mission-17\x1b[0m';
+const CLAUDE_IDLE = [
+  '\x1b[38;5;239m\x1b[48;5;237m❯ \x1b[38;5;231mReply with just the word OK.\x1b[39m\x1b[49m',
+  '\x1b[38;5;246m✻\x1b[39m \x1b[38;5;246mBaked for 2m 21s · done 9:17 PM\x1b[39m',
+  `\x1b[38;5;244m${RULE} CAPCOM ─`,
+  `\x1b[39m❯ ${SUGGESTION}          `,
+  `\x1b[38;5;244m${RULE}`,
+  '\x1b[39m  \x1b[38;5;246m⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent\x1b[39m   \x1b[38;5;114m\x1b]8;id=1xh72bs;https://claude.ai/code/session_x?from=cli\x1b\\/rc\x1b[39m\x1b]8;;\x1b\\',
+].join('\n');
+/** Lo mismo sin `-e`: lo único que ORCA miraba hasta ahora. */
+const unstyled = (s: string) => s.replace(/\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
+
+/** Como el tmux real: con `styled` devuelve los escapes; sin él, sólo el texto. */
+function styledPane(screen: () => string) {
+  const pasted: string[] = [];
+  const asked: boolean[] = [];
+  return {
+    pasted, asked,
+    tmux: {
+      capture: async (_n: string, _l: number, o?: { styled?: boolean }) => {
+        asked.push(!!o?.styled);
+        return { ok: true, stdout: o?.styled ? screen() : unstyled(screen()), detail: '' };
+      },
+      paste: async (_n: string, text: string) => { pasted.push(text); return { ok: true, stdout: '', detail: '' }; },
+      keys: async () => ({ ok: true, stdout: '', detail: '' }),
+      rename: async () => ({ ok: true, stdout: '', detail: '' }),
+    },
+  };
+}
+
+/** Hasta que el intento lanzado por `tick()` termine, por el camino que sea. */
+async function settle(service: CapcomResets, a: AgentHandle) {
+  for (let i = 0; i < 200 && (service.state(a)?.phase === 'applying' || service.locked(a.sessionId)); i++) {
+    await new Promise(r => setImmediate(r));
+  }
+}
 
 function agent(over: Partial<AgentHandle> = {}): AgentHandle {
   return { id: OLD, sessionId: OLD, runtime: 'codex', model: 'gpt-6-astra', pane: `orca-${OLD}`,
@@ -306,6 +355,136 @@ export default {
         for (let i = 0; i < 100 && service.locked(OLD); i++) await Promise.resolve();
         return ok('once applying, cancel is refused instead of racing the /clear', true);
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    /*
+     * Lo que la consola real hacía y los dobles no: un CAPCOM de Claude idle
+     * con la sugerencia atenuada en el prompt.
+     */
+    test('the suggestion Claude Code paints dim in an idle prompt is not a draft; a typed draft still is', () => {
+      const draft = CLAUDE_IDLE.replace(SUGGESTION, 'half-typed order for the fleet');
+      const green = CLAUDE_IDLE.replace(SUGGESTION, '\x1b[38;5;2mhalf-typed order\x1b[39m');
+      const turn = CLAUDE_IDLE.replace('Baked for 2m 21s · done 9:17 PM', '\x1b[2mThinking… (esc to interrupt)\x1b[0m');
+      const codex = '\x1b[39m› \x1b[2mAsk Codex to do anything\x1b[0m\n  ? for shortcuts';
+      assert.equal(modelPromptReady(CLAUDE_IDLE, 'claude'), true, 'styled: the suggestion is dropped');
+      assert.equal(modelPromptReady(unstyled(CLAUDE_IDLE), 'claude'), false, 'plain: it reads as a draft — the bug');
+      assert.equal(modelPromptReady(draft, 'claude'), false, 'a typed draft is never dim');
+      assert.equal(modelPromptReady(green, 'claude'), false, 'colour 2 (38;5;2) is not the dim attribute');
+      assert.equal(modelPromptReady(turn, 'claude'), false, 'a dim "esc to interrupt" still means a turn in flight');
+      assert.equal(modelPromptReady(codex, 'codex'), true, 'Codex placeholder, styled');
+      return ok('dim suggestion ignored, drafts and turns still refused', true);
+    }),
+
+    test('an idle Claude CAPCOM showing that suggestion gets its NEW CAPCOM — the case that failed in the real console', async () => {
+      const p = styledPane(() => CLAUDE_IDLE);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-suggestion-'));
+      try {
+        const live = agent({ runtime: 'claude', model: 'sonnet', state: 'idle' });
+        const adopted: [string, string][] = [];
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => { throw new Error('same model: must not change it'); },
+          discover: async () => agent({ id: NEW, sessionId: NEW, runtime: 'claude' }),
+          hold: () => {}, adopt: (from, to) => adopted.push([from, to]), note: () => {}, dir: () => dir,
+        });
+        service.request(OLD, 'clean', 'sonnet');
+        service.tick(live);
+        await settle(service, live);
+        const s = service.state(live)!;
+        assert.equal(s.phase, 'ready', s.detail);
+        assert.deepEqual(adopted, [[OLD, NEW]]);
+        assert.equal(p.pasted[0], '/clear');
+        assert.ok(p.asked.length > 0 && p.asked.every(Boolean), 'every look at the prompt asks tmux for the styles');
+        return ok('idle with a suggestion: cleared on the first tick, no re-click', true, s.detail);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('idle but the prompt is not free: the request waits in the queue with its reason, then applies — never failed', async () => {
+      let screen = CLAUDE_IDLE.replace(SUGGESTION, 'half-typed order for the fleet');
+      const p = styledPane(() => screen);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-draft-'));
+      try {
+        let clock = 1_000;
+        const holds: boolean[] = [];
+        const live = agent({ runtime: 'claude', model: 'sonnet', state: 'idle' });
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW, runtime: 'claude' }),
+          hold: (_id, on) => holds.push(on), adopt: () => {}, note: () => {}, dir: () => dir, now: () => clock,
+        });
+        service.request(OLD, 'clean', 'sonnet');
+        service.tick(live);
+        await settle(service, live);
+        let s = service.state(live)!;
+        assert.equal(s.phase, 'queued', s.detail);
+        assert.match(s.detail, /prompt to clear/);
+        assert.deepEqual(p.pasted, [], 'nothing typed over the draft');
+        assert.deepEqual(holds, [], 'mail is not held for a prompt that could not be used');
+        const looks = p.asked.length;
+        clock += 1_000;
+        service.tick(live);
+        await settle(service, live);
+        assert.equal(p.asked.length, looks, 'a busy prompt is not re-read on every tick');
+        screen = CLAUDE_IDLE; // el operador borró el borrador
+        clock += 1_500;
+        service.tick(live);
+        await settle(service, live);
+        s = service.state(live)!;
+        assert.equal(s.phase, 'ready', s.detail);
+        assert.equal(p.pasted[0], '/clear');
+        return ok('draft: queued with a reason; draft gone: applied on its own', true);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('a prompt that never clears fails at the deadline and says why', async () => {
+      const p = styledPane(() => CLAUDE_IDLE.replace(SUGGESTION, 'half-typed order for the fleet'));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-draft-timeout-'));
+      try {
+        let clock = 1_000;
+        const live = agent({ runtime: 'claude', model: 'sonnet', state: 'idle' });
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW, runtime: 'claude' }),
+          hold: () => {}, adopt: () => { throw new Error('must not adopt'); }, note: () => {}, dir: () => dir, now: () => clock,
+        });
+        service.request(OLD, 'clean', 'sonnet');
+        service.tick(live);
+        await settle(service, live);
+        clock += 11 * 60_000;
+        service.tick(live);
+        const s = service.state(live)!;
+        assert.equal(s.phase, 'failed');
+        assert.match(s.detail, /prompt did not clear within 10 minutes/);
+        assert.deepEqual(p.pasted, []);
+        return ok('a draft that stays: a loud failure with the reason, at the deadline', true, s.detail);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('a real tmux keeps the dim attribute that tells a suggestion from a draft', async () => {
+      if (!resolveTmuxBin()) return ok('no tmux on this machine: skipped', true);
+      // Socket propio de la prueba, nunca el de ORCA.
+      const t = new TmuxHost(`orca-test-reset-${process.pid}`);
+      try {
+        const paint = (name: string, text: string) => t.spawn({ name, cwd: '/', env: {},
+          argv: ['/bin/sh', '-c', `printf '${text}\\n'; sleep 30`] });
+        // ❯ + NBSP, como lo pinta Claude Code; en octal para printf.
+        const prompt = '\\033[39m\\342\\235\\257\\302\\240';
+        assert.ok((await paint('orca-reset-suggestion', `${prompt}\\033[2mwrite the script\\033[0m`)).ok);
+        assert.ok((await paint('orca-reset-draft', `${prompt}write the script`)).ok);
+        let styled = ''; let plain = ''; let draft = '';
+        for (let i = 0; i < 50 && !(styled.includes('write') && draft.includes('write')); i++) {
+          await new Promise(r => setTimeout(r, 60));
+          styled = (await t.capture('orca-reset-suggestion', 10, { styled: true })).stdout;
+          draft = (await t.capture('orca-reset-draft', 10, { styled: true })).stdout;
+        }
+        plain = (await t.capture('orca-reset-suggestion', 10)).stdout;
+        assert.equal(modelPromptReady(styled, 'claude'), true, JSON.stringify(styled));
+        assert.equal(modelPromptReady(plain, 'claude'), false, 'without -e the attribute is gone');
+        assert.equal(modelPromptReady(draft, 'claude'), false, JSON.stringify(draft));
+        return ok('capture -e carries SGR 2 end to end; a typed draft still refuses', true);
+      } finally { await t.killServer(); }
     }),
   ],
 } satisfies TestModule;

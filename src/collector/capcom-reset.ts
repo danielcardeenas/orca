@@ -84,6 +84,28 @@ export interface ResetOutcome {
   renamed: boolean;
 }
 
+/**
+ * El prompt no está libre: un borrador, un diálogo o un turno que aún pinta.
+ *
+ * Se distingue del resto de fallos porque se lanza antes de tocar nada — ni
+ * `/clear`, ni el correo, ni el contexto —, así que un pedido encolado puede
+ * esperar y volver a intentarlo en vez de darse por fallido.
+ */
+export class PromptNotReady extends Error {}
+
+/**
+ * ¿Se puede teclear en el pane ahora mismo?
+ *
+ * Con estilos: la sugerencia que Claude Code pinta atenuada tras cada turno no
+ * es un borrador, y sin el atributo no hay forma de distinguirla de uno.
+ */
+async function promptFree(a: AgentHandle, tmux: ResetDeps['tmux']): Promise<void> {
+  const screen = await tmux.capture(a.pane!, 40, { styled: true });
+  if (!screen.ok) throw new Error(`CAPCOM terminal unavailable: ${screen.detail}`);
+  // Un menú abierto o un turno en marcha se tragarían `/clear` como texto.
+  if (!modelPromptReady(screen.stdout, a.runtime)) throw new PromptNotReady('Finish the current turn or close the terminal dialog, then try again.');
+}
+
 /** Cuánto se espera a que el CLI acepte el comando y vuelva a su prompt. */
 const PROMPT_TRIES = 40;
 /** Y a que el transcript del relevo aparezca tras el primer turno. */
@@ -104,10 +126,7 @@ export async function resetContext(
   if (!a.pane || !a.alive) throw new Error('CAPCOM must be hosted and alive to clear its context.');
   if (!['claude', 'codex'].includes(a.runtime)) throw new Error('Unknown CAPCOM runtime; nothing was cleared.');
 
-  const screen = await deps.tmux.capture(a.pane, 40);
-  if (!screen.ok) throw new Error(`CAPCOM terminal unavailable: ${screen.detail}`);
-  // Un menú abierto o un turno en marcha se tragarían `/clear` como texto.
-  if (!modelPromptReady(screen.stdout, a.runtime)) throw new Error('Finish the current turn or close the terminal dialog, then try again.');
+  await promptFree(a, deps.tmux);
 
   const cutoffAt = now();
   const cleared = await deps.tmux.paste(a.pane, '/clear');
@@ -118,7 +137,7 @@ export async function resetContext(
   let ready = false;
   for (let i = 0; i < PROMPT_TRIES && !ready; i++) {
     await pause(250);
-    const after = await deps.tmux.capture(a.pane, 40);
+    const after = await deps.tmux.capture(a.pane, 40, { styled: true });
     if (!after.ok) throw new Error(`CAPCOM terminal unavailable after /clear: ${after.detail}`);
     ready = resumedPromptReady(after.stdout, a.runtime);
   }
@@ -169,10 +188,16 @@ interface ResetState extends CapcomResetControl { checkpoint: string }
 
 /** Cuánto se espera encolado a que CAPCOM quede idle antes de fallar con un motivo. */
 const QUEUE_TIMEOUT_MS = 10 * 60_000;
+/** Tras encontrar el prompt ocupado, cuánto se deja pasar antes de volver a mirar. */
+const RETRY_MS = 2_000;
+/** Lo que dice la cola mientras un borrador o un diálogo tapa el prompt. */
+const PROMPT_WAIT = 'Waiting for the CAPCOM prompt to clear (a typed draft or an open dialog).';
 
 export class CapcomResets {
   private running: string | null = null;
   private last: ResetOutcome | null = null;
+  /** No antes de esto: un prompt ocupado no se vuelve a mirar en cada tick. */
+  private retryAt = new Map<string, number>();
   private states = new Map<string, ResetState>();
   private loaded = new Set<string>();
   constructor(private deps: ResetServiceDeps) {}
@@ -262,9 +287,14 @@ export class CapcomResets {
 
   /**
    * Reintenta un pedido encolado. Llamado desde el mismo ciclo que ya llama
-   * a `ModelController.tick()`. No hace nada mientras la sesión sigue ocupada
-   * o el pane no ha vuelto a un prompt limpio; sólo entonces llama a `run()`,
-   * que es quien de verdad manda el `/clear`.
+   * a `ModelController.tick()`. No hace nada mientras la sesión sigue ocupada;
+   * cuando está idle llama a `run()`, que mira el pane antes de tocar nada.
+   *
+   * Idle no es lo mismo que prompt libre: el operador puede tener un borrador a
+   * medias, un diálogo abierto o el turno puede estar aún pintándose. Eso lo
+   * dice `PromptNotReady`, y como se lanza antes del `/clear`, el pedido vuelve
+   * a la cola en vez de fallar. `failed` queda para lo que no se arregla
+   * esperando: el pane que desaparece, el plazo que vence, un fallo real.
    */
   tick(a: AgentHandle): void {
     if (!this.deps.owns(a) || !['claude', 'codex'].includes(a.runtime)) return;
@@ -276,15 +306,26 @@ export class CapcomResets {
     }
     const now = (this.deps.now ?? Date.now)();
     if (now - s.requestedAt > QUEUE_TIMEOUT_MS) {
-      s.phase = 'failed'; s.detail = `CAPCOM did not go idle within ${Math.round(QUEUE_TIMEOUT_MS / 60_000)} minutes. The context was not cleared.`;
+      const minutes = Math.round(QUEUE_TIMEOUT_MS / 60_000);
+      s.phase = 'failed';
+      s.detail = s.detail === PROMPT_WAIT
+        ? `The CAPCOM prompt did not clear within ${minutes} minutes (a typed draft or an open dialog). The context was not cleared.`
+        : `CAPCOM did not go idle within ${minutes} minutes. The context was not cleared.`;
       this.save(s); return;
     }
-    if (this.deps.busy(a.sessionId) || !this.idle(a)) return;
+    if (this.deps.busy(a.sessionId) || !this.idle(a) || now < (this.retryAt.get(a.sessionId) ?? 0)) return;
     s.phase = 'applying'; s.detail = 'Clearing context.'; this.save(s);
     void this.run(a.sessionId, s.mode, s.model, s.checkpoint)
-      .then(out => { s.phase = 'ready'; s.detail = `Context cleared; now ${out.toId}.`; this.save(s); })
+      .then(out => { this.retryAt.delete(s.sessionId); s.phase = 'ready'; s.detail = `Context cleared; now ${out.toId}.`; this.save(s); })
       .catch(e => {
-        s.phase = 'failed'; s.detail = e instanceof Error ? e.message : String(e);
+        if (e instanceof PromptNotReady) {
+          // Nada se tocó todavía: a la cola otra vez, con su motivo a la vista.
+          s.phase = 'queued'; s.detail = PROMPT_WAIT;
+          this.retryAt.set(s.sessionId, (this.deps.now ?? Date.now)() + RETRY_MS);
+        } else {
+          this.retryAt.delete(s.sessionId);
+          s.phase = 'failed'; s.detail = e instanceof Error ? e.message : String(e);
+        }
         try { this.save(s); } catch { this.states.set(s.sessionId, structuredClone(s)); }
       });
   }
@@ -298,6 +339,9 @@ export class CapcomResets {
     if (!(a.state === 'idle' || (a.state === 'blocked' && a.blockKind === 'error'))) throw new Error('Finish the current turn before clearing the context.');
 
     this.running = id;
+    // Antes de retener el correo o cambiar el modelo: con un borrador o un
+    // diálogo delante, ni el selector nativo ni `/clear` llegarían a buen puerto.
+    try { await promptFree(a, this.deps.tmux); } catch (e) { this.running = null; throw e; }
     const cutoffAt = (this.deps.now ?? Date.now)();
     this.deps.hold(id, true, cutoffAt, mode);
     try {

@@ -354,13 +354,19 @@ export class TmuxHost {
     };
   }
 
-  /** The last `lines` of the pane as plain text — what LOGS shows for a hosted agent. */
-  async capture(name: string, lines: number): Promise<TmuxResult> {
+  /**
+   * The last `lines` of the pane as plain text — what LOGS shows for a hosted agent.
+   *
+   * `styled` keeps the SGR escapes (`-e`). Only a reader that must tell painted
+   * from typed asks for them: Claude Code draws its next-prompt suggestion dim
+   * inside the input box, and without the attribute it reads as a draft.
+   */
+  async capture(name: string, lines: number, opts: { styled?: boolean } = {}): Promise<TmuxResult> {
     if (!this.bin) return { ok: false, stdout: '', detail: 'tmux no disponible' };
     if (!NAME_RE.test(name)) return { ok: false, stdout: '', detail: 'nombre de pane inválido' };
     const n = Math.max(1, Math.min(5000, Math.floor(lines) || 200));
     // -J une las líneas que el ancho del pane partió; sin -e no hay escapes.
-    return this.run(['capture-pane', '-p', '-J', '-t', `=${name}:`, '-S', `-${n}`], 10_000);
+    return this.run(['capture-pane', '-p', '-J', ...(opts.styled ? ['-e'] : []), '-t', `=${name}:`, '-S', `-${n}`], 10_000);
   }
 
   /**

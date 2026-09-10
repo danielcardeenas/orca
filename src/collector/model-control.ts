@@ -23,18 +23,66 @@ export function modelMenu(screen: string, runtime: string): Row[] {
   });
 }
 
-/** Refuse drafts, active turns and unknown dialogs rather than type into them. */
+/** Lo que `capture-pane -e` intercala: SGR y el resto de CSI, OSC (enlaces) y cambios de juego de caracteres. */
+const ESCAPES = /\x1b\[([0-9;:?]*)([A-Za-z])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>]/g;
+
+/**
+ * La pantalla tal como se ve (`plain`) y sólo lo que alguien tecleó (`typed`).
+ *
+ * Claude Code, al acabar un turno, sugiere el siguiente mensaje dentro del
+ * propio cuadro de entrada: texto atenuado (SGR 2) que desaparece en cuanto se
+ * teclea. Sin el atributo, un CAPCOM ocioso con el prompt vacío se leía como un
+ * borrador a medias, y NEW CAPCOM y el menú de modelos se negaban justo cuando
+ * les tocaba actuar. Lo que teclea una persona no se pinta atenuado, así que
+ * `typed` lo descarta. Los saltos de línea se conservan siempre, para que las
+ * dos versiones se puedan leer línea a línea en paralelo. Sobre texto sin
+ * escapes, las dos son el propio texto.
+ */
+function screenText(screen: string): { plain: string; typed: string } {
+  let plain = ''; let typed = ''; let dim = false; let last = 0;
+  const text = (s: string) => { plain += s; typed += dim ? s.replace(/[^\n]/g, '') : s; };
+  for (const m of screen.matchAll(ESCAPES)) {
+    text(screen.slice(last, m.index));
+    last = m.index! + m[0].length;
+    if (m[2] !== 'm') continue;
+    const ps = (m[1] || '0').split(';');
+    for (let i = 0; i < ps.length; i++) {
+      const p = Number(ps[i]!.split(':')[0] || 0);
+      // 38/48/58;5;n y ;2;r;g;b son colores: su «2» no es atenuado.
+      if ((p === 38 || p === 48 || p === 58) && !ps[i]!.includes(':')) { i += ps[i + 1] === '5' ? 2 : ps[i + 1] === '2' ? 4 : 0; continue; }
+      if (p === 0 || p === 22) dim = false;
+      else if (p === 2) dim = true;
+    }
+  }
+  text(screen.slice(last));
+  return { plain, typed };
+}
+
+/**
+ * Refuse drafts, active turns and unknown dialogs rather than type into them.
+ *
+ * Give it a styled capture (`capture(…, { styled: true })`) wherever the
+ * answer decides whether to type: only then is a dim suggestion told apart
+ * from a draft. A plain capture still works, and still reads a suggestion as
+ * a draft — the safe side.
+ */
 export function modelPromptReady(screen: string, runtime: string): boolean {
-  if (/esc to interrupt|Esc to interrupt|Select Model|Select model|Select Reasoning|Do you want to proceed\?|Enter to confirm/i.test(screen.slice(-3500))) return false;
+  const { plain, typed } = screenText(screen);
+  if (/esc to interrupt|Esc to interrupt|Select Model|Select model|Select Reasoning|Do you want to proceed\?|Enter to confirm/i.test(plain.slice(-3500))) return false;
   const marker = runtime === 'codex' ? '›' : '❯';
-  const lines = screen.replace(/\u00a0/g, ' ').split('\n');
-  const line = lines.filter(l => l.trimStart().startsWith(marker)).at(-1)?.trim().slice(1).trim();
-  return line !== undefined && (line === '' || (runtime === 'codex' ? line === 'Ask Codex to do anything' : /^Try "/.test(line)));
+  const lines = plain.replace(/\u00a0/g, ' ').split('\n');
+  // La línea del prompt se busca en lo que se ve; lo que hay escrito en ella, en lo tecleado.
+  let at = -1;
+  for (let i = lines.length - 1; i >= 0 && at < 0; i--) if (lines[i]!.trimStart().startsWith(marker)) at = i;
+  if (at < 0) return false;
+  const rest = (typed.split('\n')[at] ?? '').trim();
+  const line = (rest.startsWith(marker) ? rest.slice(1) : rest).trim();
+  return line === '' || (runtime === 'codex' ? line === 'Ask Codex to do anything' : /^Try "/.test(line));
 }
 
 /** tmux scrollback can retain the startup "model: loading" banner above the current one. */
 export function resumedPromptReady(screen: string, runtime: string): boolean {
-  const model = [...screen.matchAll(/model:\s+(\S+)/g)].at(-1)?.[1];
+  const model = [...screenText(screen).plain.matchAll(/model:\s+(\S+)/g)].at(-1)?.[1];
   return model !== 'loading' && modelPromptReady(screen, runtime);
 }
 
@@ -117,8 +165,8 @@ export class ModelController {
   private offered(runtime: string, model: string): boolean {
     try { return (this.deps.catalog?.(runtime) ?? []).some(c => c.id === model); } catch { return false; }
   }
-  private async screen(a: AgentHandle) {
-    const r = await this.deps.tmux.capture(a.pane!, 80);
+  private async screen(a: AgentHandle, styled = false) {
+    const r = await this.deps.tmux.capture(a.pane!, 80, styled ? { styled } : undefined);
     if (!r.ok) throw new Error(r.detail);
     return r.stdout;
   }
@@ -128,7 +176,7 @@ export class ModelController {
     await this.wait(180);
   }
   private async open(a: AgentHandle) {
-    if (!this.idle(this.target(a.id)) || !modelPromptReady(await this.screen(a), a.runtime)) throw new Error('Clear the terminal input or finish its dialog, then try again.');
+    if (!this.idle(this.target(a.id)) || !modelPromptReady(await this.screen(a, true), a.runtime)) throw new Error('Clear the terminal input or finish its dialog, then try again.');
     const r = await this.deps.tmux.paste(a.pane!, '/model');
     if (!r.ok) throw new Error(r.detail);
     for (let i = 0; i < 12; i++) {

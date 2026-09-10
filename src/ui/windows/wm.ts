@@ -127,10 +127,15 @@ import {
   assemble, cascade, check, collapse, collapseShort, echoKbd, foldTo, sendToCanvas, stopAssemble,
   unfoldFrom, wipe,
 } from './fx.ts';
+import { WIN_KINDS } from '../../shared/gestures.ts';
+import { gesture } from '../gestures.ts';
 
-export type WinKind =
-  | 'agent' | 'interrupt' | 'queue' | 'ceo' | 'feed' | 'fleet' | 'spawn' | 'artifact' | 'breach' | 'help' | 'settings'
-  | 'gallery' | 'launch' | 'timeline' | 'sfx' | 'music' | 'terminal' | 'file' | 'hygiene' | 'mission';
+/**
+ * La lista vive en `shared/gestures.ts` porque el hub, que no tiene ventanas,
+ * es quien escribe «estas clases no se abrieron ni una vez» en el informe
+ * de AUTOMEJORA. Aquí sólo se deriva el tipo.
+ */
+export type WinKind = typeof WIN_KINDS[number];
 
 export interface WinSpec {
   kind: WinKind;
@@ -322,6 +327,10 @@ export class WindowManager {
     }
     const mount = this.kinds.get(spec.kind);
     if (!mount) throw new Error(`no window kind ${spec.kind}`);
+    // Un gesto para AUTOMEJORA: qué clase de ventana se abre, y cuántas veces.
+    // La restauración de la sesión no cuenta — lo que se reabre solo al cargar
+    // no lo tocó nadie. Y volver a una ya abierta tampoco: es un foco.
+    if (!this.reviving) gesture('win', spec.kind);
 
     const el = document.createElement('section');
     el.className = `win is-${spec.kind}`;
@@ -746,7 +755,7 @@ export class WindowManager {
     if (!next) return null;
     this.cycling = true;
     try { this.activate(next); } finally { this.cycling = false; }
-    if (!this.ev.plane && next.spec.anchor && this.offView(next.spec.anchor)) this.ev.onReveal?.(next.spec.anchor);
+    if (!this.ev.plane && next.spec.anchor && this.tileOffView(next.spec.anchor)) this.ev.onReveal?.(next.spec.anchor);
     return next;
   }
 
@@ -971,7 +980,8 @@ export class WindowManager {
     this.watchers.set(win.id, () => { obs.disconnect(); if (pending) cancelAnimationFrame(pending); });
   }
 
-  private offView(agentId: string): boolean {
+  /** Its tile: gone from the field, or past the edge of the viewport. */
+  private tileOffView(agentId: string): boolean {
     const r = this.ev.tileRect(agentId);
     return !r || !r.visible || outsideViewport(r);
   }

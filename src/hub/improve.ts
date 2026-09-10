@@ -49,11 +49,13 @@ import {
   IMPROVE_DEFAULTS, MAX_COUNTERS, MAX_NOTE, MAX_NOTES, MAX_PER_REPORT, MAX_PROPOSALS,
   BUDGET_MAX, BUDGET_MIN, MAX_REVIEWS, REVIEWER_BUDGET_TOKENS, REVIEWER_IDLE_MS, REVIEW_MAX_MS,
   STOP_ATTEMPTS, STOP_BACKOFF_MS, activeReview, dueForReview, effectiveChoice, validateChoice,
-  effectiveStatus, emptyState, emptyUsage, findDuplicate, normalizeDraft, openProposals,
+  MISSION_STATUSES, effectiveStatus, emptyState, emptyUsage, findDuplicate, linkedStatus, normalizeDraft, openProposals,
   redact, reviewerBrief, topCounters,
   type ImproveConfig, type ImproveProposal, type ImproveReview, type ImproveState,
   type ImproveUsage, type ProposalDraft, type ReviewStatus, type TelemetryDigest,
 } from '../shared/improve.ts';
+import type { CapcomMission } from '../shared/missions.ts';
+import { GESTURE_FAMILY_LABELS, GESTURE_PREFIX, foldGesture, gesturesByFamily, windowKindsNeverOpened } from '../shared/gestures.ts';
 import type { AutonomyDeps } from './autonomy.ts';
 import type { JournalApi, JournalStats } from './journal.ts';
 import type { CapcomTimer } from './capcom.ts';
@@ -259,9 +261,22 @@ export class ImproveStore {
    * No escribe a disco: son miles al día y el fichero se guarda cuando pasa
    * algo que importa. Lo peor que puede perder un reinicio es un puñado de
    * cuentas, y ninguna decisión depende de una.
+   *
+   * Un gesto de la interfaz (`gesture:…`) pasa además por su techo de familia
+   * (`foldGesture`): pasado `MAX_GESTURE_NAMES` nombres distintos en una
+   * familia, lo nuevo se funde en `other`. Un nombre con ese prefijo que no
+   * sea un gesto válido no entra. Es lo que impide que la consola —que manda
+   * lotes que escribe un navegador— llene el tope global de contadores y deje
+   * fuera a las herramientas de CAPCOM.
    */
   record(name: string, n = 1): void {
     if (!/^[a-z]+:[A-Za-z0-9_:.-]{1,60}$/.test(name)) return;
+    if (!Number.isFinite(n) || n <= 0) return;
+    if (name.startsWith(GESTURE_PREFIX)) {
+      const folded = foldGesture(name, this.data.usage.counts);
+      if (!folded) return;
+      name = folded;
+    }
     for (const bucket of [this.data.usage, this.data.signal]) {
       if (bucket.counts[name] === undefined && Object.keys(bucket.counts).length >= MAX_COUNTERS) continue;
       bucket.counts[name] = (bucket.counts[name] ?? 0) + n;
@@ -518,7 +533,9 @@ export class ImproveStore {
         break;
       }
       case 'reopen':
-        if (p.status === 'sent') throw new Error('This proposal is already a mission');
+        // Enviada, terminada o archivada: sigue siendo una misión, y una misión
+        // no se reabre desde el tablero sino desde su ventana.
+        if (p.missionId) throw new Error('This proposal is already a mission');
         p.status = 'open';
         delete p.snoozeUntil;
         break;
@@ -552,6 +569,62 @@ export class ImproveStore {
     return structuredClone(p);
   }
 
+  /* ── lo que hace la misión ──────────────────────────────────────── */
+
+  /**
+   * La misión le cuenta a su propuesta cómo va.
+   *
+   * El enlace `missionId` era de ida: SEND lo escribía y nadie volvía a
+   * mirarlo. Una misión terminada dejaba la propuesta en `sent` para siempre,
+   * y una archivada dejaba en el tablero una fila viva de un trabajo que el
+   * panel de misiones ya no enseñaba —dos paneles diciendo cosas distintas
+   * del mismo hecho, y trabajo terminado que parecía pendiente. Aquí la
+   * propuesta copia lo que la misión dice (`linkedStatus`), en las dos
+   * direcciones: cerrar y archivar, pero también reabrir y desarchivar,
+   * porque el operador hace las dos cosas desde la ventana de la misión.
+   *
+   * Sólo toca las propuestas enlazadas a ESA misión y que ya estén en un
+   * estado de misión: una descartada no resucita porque alguien escriba en
+   * la misión. Cada cambio deja una nota `system` en el hilo, que es donde el
+   * operador lee qué pasó. Devuelve las que cambiaron.
+   */
+  syncMission(mission: Pick<CapcomMission, 'id' | 'status' | 'archivedAt'>): ImproveProposal[] {
+    const changed = this.mirror(mission);
+    if (changed.length) this.save();
+    return changed;
+  }
+
+  /**
+   * El barrido de arranque: lo que les pasó a las misiones mientras el hub
+   * no estaba, o antes de que supiera contarlo. Una misión que ya no existe
+   * (purgada) no dice nada, y la propuesta se queda como la dejó el archivo
+   * previo. Una sola escritura para todas.
+   */
+  syncMissions(missions: Record<string, Pick<CapcomMission, 'id' | 'status' | 'archivedAt'>>): ImproveProposal[] {
+    const changed: ImproveProposal[] = [];
+    for (const m of Object.values(missions)) changed.push(...this.mirror(m));
+    if (changed.length) this.save();
+    return changed;
+  }
+
+  private mirror(mission: Pick<CapcomMission, 'id' | 'status' | 'archivedAt'>): ImproveProposal[] {
+    const want = linkedStatus(mission);
+    const now = this.now();
+    const changed: ImproveProposal[] = [];
+    for (const p of Object.values(this.data.proposals)) {
+      if (p.missionId !== mission.id || !MISSION_STATUSES.includes(p.status) || p.status === want) continue;
+      const text = want === 'archived' ? 'Mission archived: it leaves the board with it.'
+        : p.status === 'archived' ? 'Mission restored from the archive.'
+          : want === 'completed' ? 'Mission completed.' : 'Mission reopened.';
+      p.notes.push({ id: newId('n'), role: 'system', text, at: now });
+      p.notes = p.notes.slice(-MAX_NOTES);
+      p.status = want;
+      p.updatedAt = now;
+      changed.push(structuredClone(p));
+    }
+    return changed;
+  }
+
   /**
    * Poda por el final cerrado.
    *
@@ -564,7 +637,7 @@ export class ImproveStore {
     const all = Object.values(this.data.proposals);
     if (all.length <= MAX_PROPOSALS) return;
     const closed = all
-      .filter((p) => p.status === 'dismissed' || p.status === 'sent')
+      .filter((p) => p.status === 'dismissed' || MISSION_STATUSES.includes(p.status))
       .sort((a, b) => a.updatedAt - b.updatedAt);
     for (const p of closed) {
       if (Object.keys(this.data.proposals).length <= MAX_PROPOSALS) break;
@@ -627,7 +700,22 @@ export function buildDigest(input: {
   const tools = topCounters({ ...usage, counts: Object.fromEntries(Object.entries(usage.counts).filter(([k]) => k.startsWith('mcp:'))) }, 10);
   const ui = topCounters({ ...usage, counts: Object.fromEntries(Object.entries(usage.counts).filter(([k]) => k.startsWith('ui:'))) }, 10);
   lines.push(`capcom tool calls (${tools.reduce((a, t) => a + t.n, 0)}): ${tools.length ? tools.map((t) => `${t.name.slice(4)} ${t.n}`).join(' · ') : 'none recorded'}`);
-  lines.push(`console requests (${ui.reduce((a, t) => a + t.n, 0)}): ${ui.length ? ui.map((t) => `${t.name.slice(3)} ${t.n}`).join(' · ') : 'none recorded'}`);
+  lines.push(`console requests to the hub (${ui.reduce((a, t) => a + t.n, 0)}): ${ui.length ? ui.map((t) => `${t.name.slice(3)} ${t.n}`).join(' · ') : 'none recorded'}`);
+
+  /*
+   * Los GESTOS: lo que el operador hizo en la interfaz, que es distinto de lo
+   * que la consola pidió. Tres líneas porque son tres preguntas: qué se tocó
+   * más, cuánto por familia (con los ceros, que es la mitad interesante), y
+   * qué clases de ventana no se abrieron ni una vez — la línea que permite
+   * proponer retirar o acercar algo con una cifra detrás.
+   */
+  const families = gesturesByFamily(usage.counts);
+  const gestures = families.flatMap((f) => f.names.map((x) => ({ name: `${f.family}:${x.detail}`, n: x.n })))
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name)).slice(0, 12);
+  lines.push(`console gestures (${families.reduce((a, f) => a + f.n, 0)}): ${gestures.length ? gestures.map((g) => `${g.name} ${g.n}`).join(' · ') : 'none recorded'}`);
+  lines.push(`gestures by family: ${families.map((f) => `${f.family} ${f.n} (${GESTURE_FAMILY_LABELS[f.family]})`).join(' · ')}`);
+  const never = windowKindsNeverOpened(usage.counts);
+  lines.push(never.length ? `window kinds never opened in this window: ${never.join(', ')}` : 'every window kind was opened at least once');
   // Lo que NO se usó es tan interesante como lo que sí, y es la mitad que
   // nadie mira: una herramienta con cero llamadas o sobra, o no se encuentra.
   lines.push('counters are names and counts only: no paths, no transcripts, no secrets');
@@ -1198,8 +1286,8 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
 }
 
 /** Cuántas propuestas hay en cada estado. La cabecera del panel. */
-export function improveCounts(state: ImproveState, now: number): { open: number; unseen: number; questions: number; sent: number; dismissed: number } {
-  let open = 0, unseen = 0, questions = 0, sent = 0, dismissed = 0;
+export function improveCounts(state: ImproveState, now: number): { open: number; unseen: number; questions: number; sent: number; completed: number; archived: number; dismissed: number } {
+  let open = 0, unseen = 0, questions = 0, sent = 0, completed = 0, archived = 0, dismissed = 0;
   for (const p of Object.values(state.proposals)) {
     const s = effectiveStatus(p, now);
     if (s === 'open') {
@@ -1207,7 +1295,9 @@ export function improveCounts(state: ImproveState, now: number): { open: number;
       if (p.seenAt === undefined) unseen += 1;
       if (p.question && !p.notes.some((n) => n.role === 'human')) questions += 1;
     } else if (s === 'sent') sent += 1;
+    else if (s === 'completed') completed += 1;
+    else if (s === 'archived') archived += 1;
     else if (s === 'dismissed') dismissed += 1;
   }
-  return { open, unseen, questions, sent, dismissed };
+  return { open, unseen, questions, sent, completed, archived, dismissed };
 }

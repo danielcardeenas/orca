@@ -13,6 +13,7 @@ import { transcribeHandler, vocabulary, whisperConfig } from './transcribe.ts';
 import { FILE_ROOTS_FILE, FileRoots } from './file-roots.ts';
 import { MISSION_ID, leadPrompt, missionLeadOf, missionPrompt, type CapcomMission } from '../shared/missions.ts';
 import { implementerBrief, implementerSquad, proposalHandoff, proposalMissionTitle } from '../shared/improve.ts';
+import { normalizeGestures } from '../shared/gestures.ts';
 import { buildDebrief } from '../shared/debrief.ts';
 /**
  * ORCA hub — servidor HTTP + WebSocket.
@@ -890,6 +891,9 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       missionResultTimers.delete(mission.id); missionResultSeen.delete(mission.id);
     } else (world.state.missions ??= {})[mission.id] = mission;
     broadcast({ t: 'mission', mission, ...(purged ? { purged: true } : {}) });
+    // La propuesta de AUTOMEJORA que abrió esta misión copia su cierre y su
+    // archivo, y los deshace si la misión vuelve. Ver `ImproveStore.syncMission`.
+    if (!purged) autonomy.improve.store.syncMission(mission);
     const last = mission.messages.at(-1);
     // Una misión retirada no despierta a CAPCOM con la actividad de sus workers.
     if (purged || mission.archivedAt || mission.status !== 'active' || last?.role !== 'agent' || missionResultSeen.get(mission.id) === last.id) return;
@@ -1030,6 +1034,11 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     const sent = capcomRouter.humanSays(text);
     if (!sent) options.onUnrouted?.(text, hub);
   };
+
+  // Lo que les pasó a las misiones mientras el hub no estaba —o antes de que
+  // supiera contarlo— llega a sus propuestas de AUTOMEJORA al arrancar.
+  const resynced = autonomy.improve.store.syncMissions(missions.all());
+  if (resynced.length > 0) log(`propuestas de AUTOMEJORA puestas al día con su misión: ${resynced.length}`);
 
   // La conversación con CAPCOM sobrevive a los reinicios del hub.
   const archivedBefore = store.loadArchived();
@@ -2098,10 +2107,23 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
      * El TIPO de frame y nada más — ni el texto, ni el agente, ni la ruta. Con
      * eso se ve qué partes de ORCA se usan y cuáles no, que es la pregunta; el
      * contenido no la respondería mejor y es justo lo que no debe guardarse.
-     * Los latidos no cuentan: son el reloj, no un gesto de nadie.
+     * Los latidos no cuentan: son el reloj, no un gesto de nadie. Y el lote
+     * de gestos tampoco cuenta como petición: es un sobre, y lo que se cuenta
+     * es lo que trae dentro (más abajo).
      */
-    if (frame.t !== 'beat') autonomy.improve.record(`ui:${frame.t}`);
+    if (frame.t !== 'beat' && frame.t !== 'gestures') autonomy.improve.record(`ui:${frame.t}`);
     switch (frame.t) {
+      /*
+       * La mitad que faltaba: lo que el operador HACE en la interfaz y no le
+       * pide nada al hub. Cada entrada del lote es un nombre `gesture:…` y una
+       * cuenta, ya validados y recortados por `normalizeGestures`; el techo
+       * por familia lo aplica el almacén al contar.
+       */
+      case 'gestures': {
+        for (const [name, n] of Object.entries(normalizeGestures(frame.counts))) autonomy.improve.record(name, n);
+        return;
+      }
+
       // El hello ya se validó al aceptar la conexión; repetirlo no es un error.
       case 'hello':
         return;

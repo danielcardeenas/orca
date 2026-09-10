@@ -31,9 +31,9 @@ import {
 import {
   BUDGET_MAX, BUDGET_MIN, IMPROVE_DEFAULTS, MAX_PROPOSALS, REVIEWER_BUDGET_TOKENS, REVIEWER_IDLE_MS,
   REVIEW_MAX_MS, STOP_ATTEMPTS, activeReview, dueForReview,
-  effectiveStatus, emptyState, findDuplicate, improveKey, normalizeDraft, openProposals,
-  proposalHandoff, redact, reviewerBrief, reviewerIds, unseenProposals,
-  type ImproveState, type ImproveReview, type ProposalDraft,
+  effectiveStatus, emptyState, findDuplicate, improveKey, linkedStatus, normalizeDraft, openProposals,
+  proposalHandoff, redact, reviewerBrief, reviewerIds, sortProposals, unseenProposals,
+  type ImproveProposal, type ImproveState, type ImproveReview, type ProposalDraft,
 } from '../src/shared/improve.ts';
 import type { Command, SpawnAck } from '../src/shared/protocol.ts';
 import type { Project } from '../src/shared/types.ts';
@@ -1208,6 +1208,90 @@ const tests = [
       findDuplicate(state, 'queue-order', 'anything else')?.id === 'imp_1'
       && findDuplicate(state, 'unrelated-key', 'QUEUE  ORDER by age!')?.id === 'imp_1'
       && findDuplicate(state, 'unrelated-key', 'Something completely different') === null);
+  }),
+
+  /*
+   * La misión le devuelve a la propuesta su cierre y su archivo. Hasta aquí el
+   * enlace era de ida: una misión terminada dejaba la propuesta en `sent` y
+   * una archivada la dejaba huérfana en el tablero.
+   */
+  test('a mission tells its proposal how it went, and takes it back when it comes back', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-improve-'));
+    try {
+      let now = T0;
+      const store = new ImproveStore(dir, () => now);
+      const id = store.file('rev_1', [draft()]).proposals[0]!.id;
+      const other = store.file('rev_1', [draft({ key: 'other-idea', title: 'Another idea entirely' })]).proposals[0]!.id;
+      store.act(id, { act: 'sent', missionId: 'mission_a' });
+      store.act(other, { act: 'dismiss' });
+      const mission = { id: 'mission_a', status: 'active' as const };
+
+      now += 1000;
+      const untouched = store.syncMission(mission).length;
+      now += 1000;
+      const done = store.syncMission({ ...mission, status: 'completed' });
+      now += 1000;
+      const archived = store.syncMission({ ...mission, status: 'completed', archivedAt: now });
+      let reopenRefused = false;
+      try { store.act(id, { act: 'reopen' }); } catch { reopenRefused = true; }
+      now += 1000;
+      const restored = store.syncMission({ ...mission, status: 'completed' });
+      now += 1000;
+      const back = store.syncMission(mission);
+      const p = store.get(id);
+      const words = p.notes.filter((n) => n.role === 'system').map((n) => n.text);
+      return ok('completed and archived reach the proposal; unarchiving and reopening undo them',
+        untouched === 0
+        && done[0]?.status === 'completed' && archived[0]?.status === 'archived' && reopenRefused
+        && restored[0]?.status === 'completed' && back[0]?.status === 'sent'
+        && p.missionId === 'mission_a' && p.updatedAt === now
+        && store.get(other).status === 'dismissed'
+        && words.length === 4 && /completed/.test(words[0]!) && /archived/.test(words[1]!)
+        && /restored/.test(words[2]!) && /reopened/.test(words[3]!)
+        && new ImproveStore(dir, () => now).get(id).notes.length === 4,
+        words.join(' | '));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('the start-up sweep catches what happened to the missions while nobody looked', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-improve-'));
+    try {
+      const store = new ImproveStore(dir, () => T0);
+      const a = store.file('rev_1', [draft()]).proposals[0]!.id;
+      const b = store.file('rev_1', [draft({ key: 'purged-idea', title: 'An idea whose mission is gone' })]).proposals[0]!.id;
+      const c = store.file('rev_1', [draft({ key: 'open-idea', title: 'An idea nobody sent' })]).proposals[0]!.id;
+      store.act(a, { act: 'sent', missionId: 'mission_a' });
+      store.act(b, { act: 'sent', missionId: 'mission_gone' });
+      const changed = store.syncMissions({
+        mission_a: { id: 'mission_a', status: 'completed', archivedAt: T0 },
+        mission_c: { id: 'mission_c', status: 'completed' },
+      });
+      const again = store.syncMissions({ mission_a: { id: 'mission_a', status: 'completed', archivedAt: T0 } });
+      return ok('only the linked proposal moves, once, and a purged mission leaves its proposal as it was',
+        changed.length === 1 && changed[0]!.id === a && store.get(a).status === 'archived'
+        && store.get(b).status === 'sent' && store.get(c).status === 'open' && again.length === 0,
+        changed.map((p) => `${p.key}:${p.status}`).join(','));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('archived beats completed, failed stays sent, and the board sinks them in that order', () => {
+    const words = [
+      linkedStatus({ status: 'active' }), linkedStatus({ status: 'failed' }),
+      linkedStatus({ status: 'completed' }), linkedStatus({ status: 'completed', archivedAt: T0 }),
+      linkedStatus({ status: 'active', archivedAt: T0 }),
+    ];
+    const row = (id: string, status: ImproveProposal['status']): ImproveProposal => ({
+      id, key: id, reviewId: 'r', at: T0, updatedAt: T0, title: id, area: 'ui', kind: 'observed',
+      summary: 's', evidence: [], status, raised: 1, lastRaisedAt: T0, notes: [],
+    });
+    const order = sortProposals([
+      row('archived', 'archived'), row('dismissed', 'dismissed'), row('completed', 'completed'),
+      row('sent', 'sent'), row('open', 'open'),
+    ], T0).map((p) => p.id).join(' ');
+    return ok('one rule for the mission word, and closed work below open work',
+      words.join(' ') === 'sent sent completed archived archived'
+      && order === 'open sent completed dismissed archived',
+      `${words.join(' ')} / ${order}`);
   }),
 ];
 

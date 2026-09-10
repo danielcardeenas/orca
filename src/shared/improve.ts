@@ -62,6 +62,8 @@
  * guarda.
  */
 
+import type { CapcomMission } from './missions.ts';
+
 /* ── vocabulario ──────────────────────────────────────────────────── */
 
 /** De qué va la propuesta. Ordena la lista y nada más. */
@@ -85,9 +87,19 @@ export const IMPROVE_KINDS: readonly ImproveKind[] = ['observed', 'hypothesis'];
  * `open` la propuesta está delante. `snoozed` se pospuso hasta una fecha y
  * vuelve sola. `dismissed` se descartó (se conserva: es lo que impide que la
  * siguiente revisión la vuelva a proponer). `sent` ya es una misión.
+ *
+ * Los dos últimos los dice la MISIÓN, no el operador desde aquí: `completed`
+ * es una enviada cuya misión terminó, y `archived` una cuya misión se retiró
+ * de la consola. Existen porque el enlace `missionId` era de ida —SEND lo
+ * escribía y nadie volvía a mirarlo— y el tablero seguía enseñando como
+ * «enviada» un trabajo que el panel de misiones daba por terminado o ya no
+ * enseñaba. Van y vuelven con la misión (ver `linkedStatus`); lo que no cambia
+ * es que las tres siguen siendo una misión, con su enlace y su marca.
  */
-export type ImproveStatus = 'open' | 'snoozed' | 'dismissed' | 'sent';
-export const IMPROVE_STATUSES: readonly ImproveStatus[] = ['open', 'snoozed', 'dismissed', 'sent'];
+export type ImproveStatus = 'open' | 'snoozed' | 'dismissed' | 'sent' | 'completed' | 'archived';
+export const IMPROVE_STATUSES: readonly ImproveStatus[] = ['open', 'snoozed', 'dismissed', 'sent', 'completed', 'archived'];
+/** Los estados que sólo existen porque hay una misión detrás. */
+export const MISSION_STATUSES: readonly ImproveStatus[] = ['sent', 'completed', 'archived'];
 
 export type ImproveGrade = 'low' | 'medium' | 'high';
 export const IMPROVE_GRADES: readonly ImproveGrade[] = ['low', 'medium', 'high'];
@@ -135,7 +147,12 @@ export interface ImproveProposal {
   seenAt?: number;
   /** `snoozed` hasta aquí; pasada la fecha vuelve a `open` sola. */
   snoozeUntil?: number;
-  /** La misión que se creó al enviarla a CAPCOM. Es lo que impide duplicarla. */
+  /**
+   * La misión que se creó al enviarla a CAPCOM. Es lo que impide duplicarla,
+   * y lo que la misión usa para devolverle a la propuesta su cierre y su
+   * archivo (`linkedStatus`). Nunca se borra: una misión purgada deja la
+   * propuesta en `archived`, que es donde la dejó el archivo previo.
+   */
   missionId?: string;
   /** Cuántas revisiones han llegado a esta misma idea. */
   raised: number;
@@ -733,6 +750,23 @@ export function effectiveStatus(p: ImproveProposal, now: number): ImproveStatus 
   return p.status;
 }
 
+/**
+ * Lo que una propuesta enviada tiene que decir de su misión, mirando la
+ * misión y nada más.
+ *
+ * Archivada gana a terminada: una misión retirada de la consola se retira del
+ * tablero aunque acabara bien, porque lo que el operador quiso al archivarla
+ * es no verla. Una `failed` sigue en `sent`: sigue siendo una misión abierta
+ * en el panel de misiones, y el operador la reabre desde allí escribiéndole.
+ * Es una función y no un campo copiado para que sólo haya UNA regla, y sea la
+ * misma en el hub, en el barrido de arranque y en cualquier prueba.
+ */
+export function linkedStatus(m: Pick<CapcomMission, 'status' | 'archivedAt'>): 'sent' | 'completed' | 'archived' {
+  if (m.archivedAt) return 'archived';
+  if (m.status === 'completed') return 'completed';
+  return 'sent';
+}
+
 const AREA_ORDER = new Map(IMPROVE_AREAS.map((a, i) => [a, i]));
 const GRADE_WEIGHT: Record<ImproveGrade, number> = { high: 2, medium: 1, low: 0 };
 
@@ -745,7 +779,7 @@ const GRADE_WEIGHT: Record<ImproveGrade, number> = { high: 2, medium: 1, low: 0 
 export function sortProposals(list: ImproveProposal[], now: number): ImproveProposal[] {
   const rank = (p: ImproveProposal) => {
     const s = effectiveStatus(p, now);
-    return s === 'open' ? 0 : s === 'snoozed' ? 1 : s === 'sent' ? 2 : 3;
+    return s === 'open' ? 0 : s === 'snoozed' ? 1 : s === 'sent' ? 2 : s === 'completed' ? 3 : s === 'dismissed' ? 4 : 5;
   };
   const score = (p: ImproveProposal) => {
     if (!p.impact && !p.effort) return 0;

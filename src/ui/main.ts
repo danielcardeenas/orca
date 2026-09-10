@@ -21,6 +21,7 @@ import type { Artifact, Escalation, WorldState } from '../shared/types.ts';
 import type { InterruptOutcome } from '../shared/interrupt.ts';
 import { store } from './store.ts';
 import { hub, uploadFile } from './net/client.ts';
+import { gesture, mountGestures } from './gestures.ts';
 import { guardStrayDrops, stage, uploadAll } from './windows/attach.ts';
 import { fieldKindOf, isPlacedFileId, placedFiles } from './placed-files.ts';
 import { draftKey } from './drafts.ts';
@@ -117,6 +118,10 @@ const replayEl = hudEl.querySelector<HTMLElement>('[data-replay]')!;
 replayEl.querySelector('[data-replay-live]')!.addEventListener('click', () => { c.setReplay(null); wm.closeKey('timeline'); });
 
 hub.connect();
+// Los gestos de la interfaz salen hacia AUTOMEJORA por el enlace, en lotes.
+// Se conecta aquí, antes de que exista nada que pulsar: lo que se cuente
+// mientras el enlace sube espera en el contador y sale con el primer lote.
+mountGestures((counts) => hub.gestures(counts));
 
 /* ── Window manager, before the field so the field can hand it events ── */
 
@@ -209,6 +214,10 @@ const field = createField(fieldEl, {
     void uploadAll(rest, uploadFile, c.note).then((paths) => stage(toAgent ? draftKey('agent', a.id) : draftKey('capcom'), paths));
   },
 });
+// A flight lands in the clear: the windows standing on the glass —front and
+// pinned, in screen pixels— are what a tile can end up behind. Canvas windows
+// move with the plane, so the camera cannot get a tile out from under one.
+field.setObstacles(() => wm.stack().filter((w) => w.mode !== 'canvas').map((w) => ({ x: w.x, y: w.y, w: w.w, h: w.h })));
 /** The operator's placed files are drawn with the artifacts; this hands the field the current list. */
 function syncPlacedFiles() { field.setExtraMedia(placedFiles.artifacts()); field.feed(); }
 syncPlacedFiles();
@@ -320,6 +329,7 @@ const c: Console = {
     // En estrecho la sección es una hoja: desplegarla sin abrirla la dejaría
     // desplegada detrás de una media query que la esconde.
     if (sections.sheetMode('improve')) sections.open('improve');
+    else gesture('hud', 'improve-reveal');
     improvePanel.reveal();
   },
   openGallery: () => { wm.open({ kind: 'gallery', key: 'gallery', callsign: 'GALLERY' }); },
@@ -687,20 +697,29 @@ const spaceHold = keyHold(' ');
  */
 const talkHold = keyHold('KeyV', { whileTyping: true });
 
+/**
+ * Cada atajo que se ATIENDE es un gesto para AUTOMEJORA, con el nombre de la
+ * tecla y nada más: `alt-c`, `mod-k`, `slash`, `f`. Se cuenta en el punto en
+ * el que el atajo hace algo, no al pulsar — una tecla que no se atendió no
+ * dice nada de la interfaz, y una que sí dice qué camino se usa de verdad.
+ */
+const keyed = (detail: string) => gesture('key', detail);
+const altName = (code: string) => `alt-${code.startsWith('Key') ? code.slice(3).toLowerCase() : code.toLowerCase()}`;
+
 window.addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement | null;
   const typing = typingIn(e);
   if (e.altKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyV' && voice.supported) {
     e.preventDefault();
     if (e.repeat || talkHold.held()) return;
-    talkHold.down({ key: e.code, repeat: e.repeat, target: e.target }, () => voice.start());
+    if (talkHold.down({ key: e.code, repeat: e.repeat, target: e.target }, () => voice.start())) keyed('alt-v');
     return;
   }
   if (e.key === 'Escape' && talkHold.held()) { e.preventDefault(); talkHold.cancel(); voice.cancel(); return; }
   if (e.altKey && e.key === 'Tab') {
     e.preventDefault();
     if (!wm.all().length) return;
-    if (!switching) { switching = true; if (!wm.trayMode()) wm.enterTrayMode(); }
+    if (!switching) { switching = true; keyed('alt-tab'); if (!wm.trayMode()) wm.enterTrayMode(); }
     wm.handleKey(synth(e.shiftKey ? 'ArrowLeft' : 'ArrowRight'));
     return;
   }
@@ -719,21 +738,23 @@ window.addEventListener('keydown', (e) => {
     if (key) wm.handleKey(synth(key, e.shiftKey));
     return;
   }
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && e.code === 'KeyK') { e.preventDefault(); cmd.focus(); return; }
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && e.code === 'KeyK') { e.preventDefault(); keyed('mod-k'); cmd.focus(); return; }
   if (e.altKey && !e.metaKey && !e.ctrlKey) {
     const open = ALT_OPEN[e.code];
-    if (open) { e.preventDefault(); open(); return; }
+    if (open) { e.preventDefault(); keyed(altName(e.code)); open(); return; }
     if (e.code >= 'Digit1' && e.code <= 'Digit9') {
       e.preventDefault();
       const n = Number(e.code.slice(5));
+      keyed(e.shiftKey ? 'alt-shift-digit' : 'alt-digit');
       if (e.shiftKey) marks.save(n);
       else { marks.push(); if (!marks.go(n)) c.note(`bookmark ${n} is empty · ⌥⇧${n} to set it`); }
       return;
     }
   }
-  if (!typing && wm.handleKey(e)) return;
+  if (!typing && wm.handleKey(e)) { keyed('window'); return; }
   if (e.key === 'Escape') {
     if (typing) { (t as HTMLElement).blur(); return; }
+    keyed('escape');
     const top = wm.focused();
     if (top) wm.close(top);
     else { field.select([]); cmd.setSelection([]); selbar.hidden = true; }
@@ -743,24 +764,25 @@ window.addEventListener('keydown', (e) => {
   if (e.key === ' ') {
     e.preventDefault();
     if (e.repeat || spaceHold.held()) return;
-    if (spaceHold.down(e, () => field.setFocus(true))) getSound()?.play('focus.on');
+    if (spaceHold.down(e, () => field.setFocus(true))) { keyed('space'); getSound()?.play('focus.on'); }
     else { hintEl.textContent = 'SELECT AN AGENT FIRST · CLICK, OR SHIFT+DRAG A LASSO'; hintEl.classList.add('is-on'); setTimeout(() => hintEl.classList.remove('is-on'), 2500); }
     return;
   }
-  if (e.key === '/') { e.preventDefault(); cmd.focus(); return; }
-  if (e.key === 'F11') { e.preventDefault(); void toggleFullscreen(); return; }
+  if (e.key === '/') { e.preventDefault(); keyed('slash'); cmd.focus(); return; }
+  if (e.key === 'F11') { e.preventDefault(); keyed('f11'); void toggleFullscreen(); return; }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === 'Backspace') { e.preventDefault(); if (!marks.back()) c.note('nowhere to go back to'); return; }
+  if (e.key === 'Backspace') { e.preventDefault(); keyed('backspace'); if (!marks.back()) c.note('nowhere to go back to'); return; }
   if (wm.focused()) return;
   switch (e.key.toLowerCase()) {
-    case 'f': marks.push(); field.frameAll(); getSound()?.play('frame'); break;
-    case 'o': field.setTilt(!field.tilted()); mast.setTilt(field.tilted()); getSound()?.play(field.tilted() ? 'tilt.on' : 'tilt.off'); break;
-    case 'd': c.deck(); break;
-    case 'm': minimap.toggle(); break;
-    case 'z': void toggleFullscreen(); break;
-    case '?': c.openHelp(); break;
+    case 'f': keyed('f'); marks.push(); field.frameAll(); getSound()?.play('frame'); break;
+    case 'o': keyed('o'); field.setTilt(!field.tilted()); mast.setTilt(field.tilted()); getSound()?.play(field.tilted() ? 'tilt.on' : 'tilt.off'); break;
+    case 'd': keyed('d'); c.deck(); break;
+    case 'm': keyed('m'); minimap.toggle(); break;
+    case 'z': keyed('z'); void toggleFullscreen(); break;
+    case '?': keyed('help'); c.openHelp(); break;
     case 'tab': {
       e.preventDefault();
+      keyed('tab');
       const blocked = store.blockedAgents().filter((a) => a.block?.kind !== 'peer');
       if (!blocked.length) { c.note('nobody is waiting on you'); break; }
       tabIdx = (tabIdx + 1) % blocked.length;
@@ -883,6 +905,8 @@ void start();
 (window as unknown as { __orca: Record<string, unknown> }).__orca = {
   frame: () => field.frameAll(),
   open: (id: string) => c.openAgent(id),
+  /** Un vuelo a un tile, como `go`: para fotografiar dónde aterriza con ventanas delante (framing.shots.ts). */
+  fly: (id: string) => c.go(id),
   /** El visor de un archivo, para el arnés visual: igual que pinchar una ruta en una conversación. */
   openFile: (path: string, at?: { x: number; y: number }) => c.openFile({ path }, { at }),
   openKind: (k: string) => { ({ ceo: c.openCeo, queue: c.openQueue, feed: c.openFeed, fleet: c.openFleet, help: c.openHelp } as Record<string, () => void>)[k]?.(); },

@@ -75,13 +75,14 @@ export const IMPROVE_TOOLS: ToolSpec[] = [
   {
     name: 'list_improvements',
     description:
-      'The self-improvement board as it stands: every proposal with its key, status, whether it became a mission,'
+      'The self-improvement board as it stands: every proposal with its key, status (a sent one follows its mission:'
+      + ' completed once the mission is, archived once the mission is), whether it became a mission,'
       + ' the question it asked the operator and whatever the operator answered. Read it before filing so you reuse keys'
       + ' instead of duplicating ideas, and so you do not re-propose something already dismissed.',
     input_schema: {
       type: 'object',
       properties: {
-        status: { type: 'string', description: 'open | snoozed | sent | dismissed | all. Default open.' },
+        status: { type: 'string', description: 'open | snoozed | sent | completed | archived | dismissed | all. Default open.' },
         limit: { type: 'number', description: 'How many. Default 20.' },
       },
       required: [],

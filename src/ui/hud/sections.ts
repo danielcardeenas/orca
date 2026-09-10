@@ -38,6 +38,7 @@ import { store } from '../store.ts';
 import { visibleMissions } from '../../shared/missions.ts';
 import { openProposals } from '../../shared/improve.ts';
 import { isOpen, missionRows } from './mission-status.ts';
+import { gesture } from '../gestures.ts';
 
 export type SectionId = 'missions' | 'improve';
 
@@ -116,6 +117,9 @@ export function mountSections(host: HTMLElement, panels: SectionPanels): Section
   }
 
   function open(id: SectionId) {
+    // Un gesto para AUTOMEJORA: qué sección se abre como hoja. Sólo la apertura
+    // — cerrarla es soltar, y volver a una ya abierta no ocurre (una a la vez).
+    if (current() !== id) gesture('hud', `sheet-${id}`);
     document.body.dataset['sheet'] = id;
     paintState();
     // Traer el principio de la lista, que es lo que se viene a leer.

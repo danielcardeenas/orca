@@ -148,6 +148,8 @@ export const GPU_ARGS = ['--use-gl=angle', '--enable-gpu', '--ignore-gpu-blockli
 export interface OrcaHook {
   frame(): void;
   open(id: string): void;
+  /** Un vuelo a un tile, como `go`. Ver framing.shots.ts. */
+  fly?(id: string): void;
   /** El visor de un archivo, como pinchar una ruta en una conversación. Ver file-viewer.shots.ts. */
   openFile?(path: string, at?: { x: number; y: number }): void;
   openKind(k: string): void;
@@ -175,6 +177,8 @@ export interface OrcaHook {
   openHygiene(): void;
   /** El rectángulo en pantalla de un tile, para recortar una foto sobre él. */
   screenOf(id: string): { x: number; y: number; w: number; h: number } | null;
+  /** Dónde está un tile en el mundo, para saber si la flota lo movió. */
+  spotOf?(id: string): { x: number; y: number; z: number } | undefined;
 }
 
 declare global {

@@ -538,6 +538,15 @@ export type ClientFrame =
   | { t: 'improve:config'; id: string; patch: Partial<import('./improve.ts').ImproveConfig & { budgetTokens: number }> }
   | { t: 'resync' }
   | { t: 'beat' }
+  /**
+   * AUTOMEJORA: un lote de gestos de la interfaz —ventana abierta por clase,
+   * sección desplegada, atajo usado, cámara volada— como nombres y cuentas
+   * (ver `shared/gestures.ts`). Sin `id` y sin ack, como el latido: es
+   * telemetría, y perder un lote no cambia ninguna decisión. Lo que la
+   * consola PIDE al hub ya se cuenta solo, por el tipo de trama; esto es lo
+   * que el operador HACE y el hub no vería de otra forma.
+   */
+  | { t: 'gestures'; counts: Record<string, number> }
   /** A terminal attachment; routed to the machine that hosts the agent's pane. */
   | TermFrame;
 

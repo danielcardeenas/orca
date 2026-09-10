@@ -1,4 +1,5 @@
 import { groupOrigin } from '../../shared/origin.ts';
+import { gesture } from '../gestures.ts';
 /**
  * The field — the only stage.
  *
@@ -47,6 +48,7 @@ import { reviewerIds } from '../../shared/improve.ts';
 import { esc, STATE_HEX, STATE_VAR } from '../util.ts';
 import { CAPCOM_BITS, sigilBits, sigilHTML } from '../gfx/sigil.ts';
 import { FieldCamera } from './camera.ts';
+import type { Rect as PxRect } from './framing.ts';
 import { createGround, GROUND_Z } from './ground.ts';
 import { createLabels, rememberMachine, rememberProjectCode, rememberProjectName, type LabelItem } from './labels.ts';
 import { createMedia } from './media.ts';
@@ -101,8 +103,22 @@ export interface FieldHandle {
   setActive(on: boolean): void;
   /** Pull the world from the store and re-lay it out. Coalesced per frame. */
   feed(): void;
+  /**
+   * Fly to a tile. It lands centred, unless a window in front (`front` or
+   * `pinned`, see `setObstacles`) would cover it there: then the camera aims
+   * so the tile sits in the clear. Squads, projects and the whole fleet frame
+   * the same way. `flyToPoint` is the raw flight — bookmarks and the minimap
+   * mean a place, not a thing to be seen.
+   */
   flyTo(agentId: string, distance?: number): void;
   flyToPoint(x: number, y: number, distance?: number): void;
+  /**
+   * Who is standing in front of the glass, in canvas pixels, read at the
+   * moment of every flight. The console answers with the window manager's
+   * screen-fixed windows; a canvas window moves with the plane and no
+   * flight can get out from under it.
+   */
+  setObstacles(fn: () => PxRect[]): void;
   frameAll(): void;
   frameProject(projectId: string): void;
   setTilt(on: boolean): void;
@@ -2382,6 +2398,11 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     camera.frame({ minX: rg.cx - rg.hw, maxX: rg.cx + rg.hw, minY: rg.cy - rg.hh, maxY: rg.cy + rg.hh }, 1.3);
   }
 
+  /** The world box a tile stands on: what a flight to it has to keep in the clear. Same extent `screenOf` reports. */
+  function tileBox(s: Spot): { minX: number; minY: number; maxX: number; maxY: number } {
+    return { minX: s.x - TILE_W / 2, maxX: s.x + TILE_W / 2, minY: s.y - TILE_H / 2, maxY: s.y + TILE_H / 2 };
+  }
+
   /* ── Public ─────────────────────────────────────────────────────── */
   const handle: FieldHandle = {
     setActive(on) {
@@ -2391,11 +2412,16 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       else { cancelAnimationFrame(raf); raf = 0; }
     },
     feed() { dirty = true; },
+    // Los dos vuelos son gestos para AUTOMEJORA, y se cuentan aquí y no en
+    // cada botón que los pide porque aquí es donde el campo decide que fue
+    // el operador quien movió la cámara (`userMoved`). Sin el agente ni el
+    // punto: sólo que se voló, y a qué clase de cosa.
     flyTo(id, distance = 4.2) {
       const s = layout.spots.get(id);
-      if (s) { userMoved = true; camera.flyTo(s.x, s.y, distance); }
+      if (s) { userMoved = true; gesture('fly', 'agent'); camera.show(tileBox(s), distance); }
     },
-    flyToPoint(x, y, distance = 6) { userMoved = true; camera.flyTo(x, y, distance); },
+    flyToPoint(x, y, distance = 6) { userMoved = true; gesture('fly', 'point'); camera.flyTo(x, y, distance); },
+    setObstacles(fn) { camera.setObstacles(fn); },
     frameAll() { if (dirty) feedNow(); userMoved = false; lastFramedCount = agents.length; camera.frame(layout.bounds); },
     frameProject,
     setTilt(on) { camera.setTilt(on); },
@@ -2492,7 +2518,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     frameAgents(ids) {
       const spots = ids.map((id) => layout.spots.get(id)).filter((s): s is Spot => !!s);
       if (!spots.length) return false;
-      if (spots.length === 1) { userMoved = true; camera.flyTo(spots[0]!.x, spots[0]!.y, 4.2); return true; }
+      if (spots.length === 1) { userMoved = true; camera.show(tileBox(spots[0]!), 4.2); return true; }
       userMoved = true;
       camera.frame({
         minX: Math.min(...spots.map((s) => s.x)) - TILE_W, maxX: Math.max(...spots.map((s) => s.x)) + TILE_W,

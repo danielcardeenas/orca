@@ -360,6 +360,12 @@ class HubLink {
   resync() { this.send({ t: 'resync' }); }
 
   /**
+   * Un lote de gestos de la interfaz para AUTOMEJORA. Sin ack: devuelve si
+   * salió por el cable, y quien lo manda conserva el lote si no salió.
+   */
+  gestures(counts: Record<string, number>): boolean { return this.send({ t: 'gestures', counts }); }
+
+  /**
    * Pide el relevo del hub y de los collectors supervisados.
    *
    * Sin ack y sin promesa: lo que contestaría se está muriendo. Quien confirma

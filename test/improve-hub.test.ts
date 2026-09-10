@@ -11,9 +11,11 @@
  *   - que contestar una propuesta queda en su hilo
  *   - que los límites que se tocan en el panel sobreviven al reinicio del hub
  *   - que la telemetría cuenta lo que la consola pide, y sólo el tipo de trama
+ *   - que un lote de gestos de la interfaz entra como contadores `gesture:…`
+ *     y el sobre que los trae no se cuenta como petición
  */
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -65,6 +67,8 @@ class Wire {
     });
   }
   pushed(): ServerFrame[] { return this.frames; }
+  /** Manda una trama SIN id, de las que no tienen ack: el latido, los gestos. */
+  push(frame: Record<string, unknown>): void { this.ws.send(JSON.stringify(frame)); }
   close(): void { try { this.ws.close(); } catch { /* ya */ } }
 }
 
@@ -322,6 +326,24 @@ const tests = [
     } finally { wire.close(); }
   })),
 
+  test('a batch of gestures lands as gesture counters, and the envelope itself is not a request', () => withHub(async (hub) => {
+    const wire = new Wire(hub.port);
+    await wire.open();
+    try {
+      wire.push({ t: 'gestures', counts: { 'gesture:win:agent': 3, 'gesture:key:alt-c': 1, 'ui:cmd': 50, 'gesture:win:/etc/passwd': 1, 'gesture:nope:x': 2 } });
+      // El mismo socket entrega en orden: cuando llega este ack, el lote ya se contó.
+      await wire.ask({ t: 'improve:get' });
+      const usage = hub.autonomy.improve.store.usage();
+      return ok('counted what is a gesture, nothing else',
+        usage.counts['gesture:win:agent'] === 3 && usage.counts['gesture:key:alt-c'] === 1
+        && usage.counts['ui:gestures'] === undefined
+        && usage.counts['ui:cmd'] === undefined
+        && !Object.keys(usage.counts).some((n) => n.includes('/') || n.includes('nope'))
+        && usage.counts['ui:improve:get'] === 1,
+        Object.keys(usage.counts).join(', '));
+    } finally { wire.close(); }
+  })),
+
   test('report_improvements reaches the board through the hub\'s own MCP endpoint', () => withHub(async (hub) => {
     const res = await fetch(`http://127.0.0.1:${hub.port}/mcp?token=${TOKEN}`, {
       method: 'POST',
@@ -341,6 +363,84 @@ const tests = [
       res.status === 200 && !!body.result && filed?.key === 'queue-order' && counted === 1,
       body.result?.content[0]?.text.slice(0, 80));
   })),
+
+  /*
+   * El panel de misiones y el tablero cuentan lo mismo del mismo trabajo:
+   * cerrar la misión —lo hace CAPCOM con `update_mission`— y archivarla —lo
+   * hace la consola con `mission:archive`— llegan a la propuesta por el mismo
+   * socket por el que salió el SEND, y desarchivar la devuelve.
+   */
+  test('closing and archiving the mission reach the proposal it came from, over the wire', () => withHub(async (hub) => {
+    const wire = new Wire(hub.port);
+    await wire.open();
+    try {
+      const id = hub.autonomy.improve.store.file('rev_x', [DRAFT]).proposals[0]!.id;
+      const sent = await wire.ask({ t: 'improve:send', proposalId: id, missionId: 'mission_sync_1' });
+      const board = async () => {
+        const ack = await wire.ask({ t: 'improve:get' });
+        return (ack.data as { state: ImproveState }).state.proposals[id]!;
+      };
+      const whileActive = (await board()).status;
+
+      hub.missions.message('mission_sync_1', 'capcom', 'Shipped and verified.', 'completed');
+      const done = await board();
+      const archive = await wire.ask({ t: 'mission:archive', missionId: 'mission_sync_1' });
+      const gone = await board();
+      const restore = await wire.ask({ t: 'mission:archive', missionId: 'mission_sync_1', on: false });
+      const restored = await board();
+      const pushed = wire.pushed().filter((f) => f.t === 'improve').length;
+
+      return ok('sent → completed → archived → completed, each pushed to the console',
+        sent.ok && whileActive === 'sent'
+        && done.status === 'completed' && archive.ok && gone.status === 'archived'
+        && restore.ok && restored.status === 'completed' && restored.missionId === 'mission_sync_1'
+        && restored.notes.filter((n) => n.role === 'system').length === 3 && pushed >= 3,
+        `${whileActive} → ${done.status} → ${gone.status} → ${restored.status} · ${pushed} pushes`);
+    } finally { wire.close(); }
+  })),
+
+  test('a mission closed and archived while the hub was down catches up with its proposal at boot', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-improve-hub-'));
+    const boot = () => startHub({
+      port: 0, host: '127.0.0.1', quiet: true,
+      auth: createAuth({ ORCA_TOKEN: TOKEN } as NodeJS.ProcessEnv),
+      store: new HubStore({ dir }),
+      memory: new AnswerMemory(join(dir, 'memory.jsonl')),
+    });
+    return (async () => {
+      let hub = await boot();
+      let id = '';
+      try {
+        const wire = new Wire(hub.port);
+        await wire.open();
+        id = hub.autonomy.improve.store.file('rev_x', [DRAFT]).proposals[0]!.id;
+        await wire.ask({ t: 'improve:send', proposalId: id, missionId: 'mission_stale_1' });
+        wire.close();
+      } finally { await hub.close(); }
+
+      // Lo que el hub de antes no sabía contar: la misión acaba y se archiva
+      // en disco sin que la propuesta se entere. Es exactamente la forma de
+      // las dos propuestas huérfanas que motivaron esto.
+      const file = join(dir, 'missions.json');
+      const missions = JSON.parse(readFileSync(file, 'utf8')) as Record<string, { status: string; archivedAt?: number }>;
+      missions['mission_stale_1']!.status = 'completed';
+      missions['mission_stale_1']!.archivedAt = Date.now();
+      writeFileSync(file, JSON.stringify(missions));
+      const stale = (JSON.parse(readFileSync(join(dir, IMPROVE_DIR, IMPROVE_FILE), 'utf8')) as ImproveState).proposals[id]!.status;
+
+      hub = await boot();
+      try {
+        const back = hub.autonomy.improve.store.get(id);
+        return ok('the boot sweep archives the proposal its mission left behind',
+          stale === 'sent' && back.status === 'archived' && back.missionId === 'mission_stale_1'
+          && back.notes.some((n) => n.role === 'system' && /archived/.test(n.text)),
+          `${stale} → ${back.status}`);
+      } finally {
+        await hub.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+  }),
 ];
 
 export default { suite: 'AUTOMEJORA · hub', tests } satisfies TestModule;

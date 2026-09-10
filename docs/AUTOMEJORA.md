@@ -63,7 +63,9 @@ ordena por ellos, y una estimación inventada le hace ordenar mal.
 
 ## Estados y acciones
 
-`open` · `snoozed` (vuelve sola al vencer) · `dismissed` · `sent`.
+`open` · `snoozed` (vuelve sola al vencer) · `dismissed` · `sent` · `completed` ·
+`archived`. Los dos últimos no los pone el operador desde el tablero: los pone
+la **misión** (ver [Lo que la misión le devuelve](#lo-que-la-misión-le-devuelve)).
 
 - **REPLY** — contesta en el hilo de la propuesta *y* le pega el turno a CAPCOM
   con la respuesta, que contesta con `note_improvement`. La conversación entera
@@ -71,7 +73,8 @@ ordena por ellos, y una estimación inventada le hace ordenar mal.
 - **LATER · 3D** — pospone. Una semana entierra; un día no descansa.
 - **DISMISS** — descarta. Se **conserva**: es lo que impide que la siguiente
   revisión la vuelva a proponer.
-- **REOPEN** — la devuelve. No para una ya enviada.
+- **REOPEN** — la devuelve. No para una que ya es misión (enviada, terminada
+  o archivada): una misión se reabre desde su ventana, no desde aquí.
 - **IMPLEMENT** (hasta el 2026-09-09, `SEND TO CAPCOM`) — lo único de la
   sección que produce trabajo. Abre una misión normal titulada `AUTOMEJORA · …`
   con la propuesta entera dentro (resumen, evidencia, hipótesis, detalle y la
@@ -91,6 +94,44 @@ ordena por ellos, y una estimación inventada le hace ordenar mal.
   flota, o no hay máquina— la misión queda escrita con una línea de ORCA que
   dice por qué, y la consola lo avisa; escribirle a esa misión va a CAPCOM,
   porque no tiene líder.
+
+## Lo que la misión le devuelve
+
+Hasta el 2026-09-10 el enlace `missionId` era de ida: IMPLEMENT lo escribía y
+nadie volvía a mirarlo. Una misión que CAPCOM cerraba con `report_mission`
+dejaba la propuesta en `sent` para siempre, y una que el operador archivaba
+desde su ventana dejaba en el tablero una fila viva de un trabajo que el panel
+de misiones ya no enseñaba: dos paneles diciendo cosas distintas del mismo
+hecho, y trabajo terminado que parecía pendiente.
+
+Ahora la propuesta copia lo que su misión dice, con una sola regla
+(`linkedStatus` en `shared/improve.ts`):
+
+| La misión está | La propuesta pasa a |
+| --- | --- |
+| `active` o `failed`, sin archivar | `sent` |
+| `completed`, sin archivar | `completed` |
+| archivada, acabara como acabara | `archived` |
+
+Y en las dos direcciones: reabrir la misión (escribirle) la devuelve a `sent`,
+desarchivarla la devuelve a lo que diga su estado. Cada cambio deja una línea
+`system` en la conversación de la propuesta (`Mission completed.`, `Mission
+archived: …`, `Mission restored from the archive.`, `Mission reopened.`), que
+es donde el operador lee qué pasó.
+
+Dónde ocurre: `ImproveStore.syncMission`, llamado desde el `changed` del
+`MissionStore` en el hub —el mismo punto que publica la misión a las consolas—
+y `syncMissions` una vez al arrancar, para lo que les pasó a las misiones
+mientras el hub no estaba (o antes de que supiera contarlo: así se pusieron al
+día las dos propuestas huérfanas que motivaron esto). Sólo toca propuestas
+enlazadas a esa misión y ya en estado de misión: una descartada no resucita
+porque alguien escriba en la misión, y una `failed` sigue en `sent`, porque
+sigue siendo una misión abierta en el otro panel.
+
+En el tablero, una `completed` sigue llevando la marca de misión (la barra lima
+y OPEN MISSION) y dice `DONE` en la fila; una `archived` no se enseña, ni
+desplegando las cerradas, que es lo que evita dos versiones del mismo trabajo.
+`list_improvements` las devuelve si se le pide `status: completed | archived`.
 
 ## Deduplicación
 
@@ -294,9 +335,24 @@ Mínima, existente y sin contenido. Dos fuentes, ninguna nueva:
   contestó y cuánto esperaron—, rotaciones de CAPCOM, aterrizajes, y lo mismo
   por proyecto usando su **código** (`AX`).
 - **Contadores de uso** (`UsageMeter`): `mcp:<tool>` cada vez que CAPCOM llama
-  una herramienta, `ui:<frame>` cada vez que la consola pide algo al hub. Un
-  **nombre y una cuenta**, nunca los argumentos. Es lo que enseña qué se usa de
+  una herramienta, `ui:<frame>` cada vez que la consola pide algo al hub, y
+  `gesture:<familia>:<detalle>` cada vez que el operador **hace** algo en la
+  interfaz que al hub no le pide nada: abre una ventana (`win:agent`,
+  `win:terminal`, `win:gallery`…), despliega una sección (`hud:sheet-improve`,
+  `hud:missions-unfold`), usa un atajo (`key:alt-c`, `key:f`) o vuela la
+  cámara (`fly:agent`, `fly:point`). Un **nombre y una cuenta**, nunca los
+  argumentos: ni qué agente, ni qué archivo. Es lo que enseña qué se usa de
   verdad y qué no se encuentra.
+
+  Los gestos se acumulan en la consola y salen en lotes cada 15 s (o antes,
+  con 50 acumulados) en una trama `gestures` sin ack (`src/ui/gestures.ts`).
+  Las familias son una **lista cerrada** (`win`, `hud`, `key`, `fly`) y cada
+  una tiene un techo de 24 nombres distintos; lo que pasa del techo se funde
+  en `<familia>:other`, para que un cliente con un fallo no llene los 200
+  contadores del tablero y deje fuera a las herramientas de CAPCOM
+  (`src/shared/gestures.ts`). El informe del revisor los enseña en tres
+  líneas: los más tocados, el total por familia (con los ceros) y **qué
+  clases de ventana no se abrieron ni una vez** en la ventana de 24 h.
 
 Lo que **no** entra en un informe: rutas, briefs, transcripciones, preguntas o
 respuestas de nadie, y ningún secreto. Además todo lo que escribe CAPCOM pasa
@@ -357,6 +413,8 @@ que el resto (`/mcp`) y están nombradas en el brief de CAPCOM
 |---|---|
 | `src/shared/improve.ts` | tipos, validación, deduplicación, `dueForReview`, el prompt y el traspaso a misión |
 | `src/hub/improve.ts` | `UsageMeter`, `ImproveStore` (disco), `buildDigest`, el reloj y el ciclo de vida del revisor |
+| `src/shared/gestures.ts` | el vocabulario de gestos: familias, techos, validación del lote, agregado por familia |
+| `src/ui/gestures.ts` | el contador de la consola: acumula gestos y los manda en lotes |
 | `bin/orca-improve.mjs` | el CLI con el que archiva el revisor |
 | `src/collector/improve-drop.ts` | el buzón `<proyecto>/.orca/improve/` |
 | `src/collector/shims.ts` | el tercer juego de comandos: el del revisor |
@@ -375,7 +433,7 @@ peor que una que no existe.
 ## Verificación
 
 ```
-npm test -- improve                 las cuatro suites
+npm test -- improve gestures        las suites de la sección y la de gestos
 npx tsx test/hud-improve.shots.ts   la sección, fotografiada contra la consola
 ```
 
@@ -389,5 +447,7 @@ orca-improve` (el CLI de verdad como subproceso contra el vigilante de verdad).
 navegador el color propio, el sigilo pintado, la barra continua contra la
 discontinua, el orden abiertas-antes-que-cerradas, los medidores sólo cuando hay
 fundamento, la cuenta de novedades, evidencia contra hipótesis al abrir, las
-acciones, que una enviada enseñe su misión y no un SEND, la geometría contra
-mástil, reloj, panel de misiones y radar, y el pliegue.
+acciones, que una enviada enseñe su misión y no un SEND, que una terminada
+diga DONE y conserve la marca de misión mientras la archivada no está ni
+detrás del pliegue, la geometría contra mástil, reloj, panel de misiones y
+radar, y el pliegue. Se corre solo: `npx tsx test/hud-improve.shots.ts`.

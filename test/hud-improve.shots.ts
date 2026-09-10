@@ -139,11 +139,15 @@ async function main() {
     })));
     const mine = rows.filter((r) => r.id.startsWith('imp_shot_'));
     const by = (id: string) => mine.find((r) => r.id === id)!;
-    assert.equal(mine.length, 6, 'every proposal shows');
-    // Lo que espera decisión va delante de lo pospuesto, lo enviado y lo descartado.
-    const closed = ['imp_shot_2', 'imp_shot_3', 'imp_shot_4'].map((id) => mine.findIndex((r) => r.id === id));
+    // Siete de ocho: la archivada se fue con su misión y no está ni plegada.
+    assert.equal(mine.length, 6, 'every proposal on the board shows, and the archived one is not on it');
+    assert.equal(mine.some((r) => r.id === 'imp_shot_7'), false, 'an archived proposal left with its mission');
+    // Lo que espera decisión va delante de lo pospuesto, lo enviado y lo
+    // terminado; lo descartado queda detrás del pliegue cuando ya no cabe.
+    const closed = ['imp_shot_2', 'imp_shot_3', 'imp_shot_6'].map((id) => mine.findIndex((r) => r.id === id));
     const open = ['imp_shot_0', 'imp_shot_1', 'imp_shot_5'].map((id) => mine.findIndex((r) => r.id === id));
-    assert.ok(Math.max(...open) < Math.min(...closed), 'open proposals all come before the closed ones');
+    assert.ok(Math.min(...closed) >= 0 && Math.max(...open) < Math.min(...closed), 'open proposals all come before the closed ones');
+    assert.equal(mine.some((r) => r.id === 'imp_shot_4'), false, 'the dismissed one folded away, below the finished mission');
     assert.ok(by('imp_shot_5').cls.includes('is-new'), 'the unseen proposal is marked new');
     assert.ok(!by('imp_shot_0').cls.includes('is-new'), 'and one already read is not');
     // El área y cuándo se movió. De qué está hecha la idea lo dice la barra del
@@ -154,7 +158,11 @@ async function main() {
     assert.match(by('imp_shot_1').tags, /UI · \d/);
     assert.doesNotMatch(by('imp_shot_1').tags, /HYPOTHESIS/);
     assert.deepEqual(by('imp_shot_0').meters, ['IMP ▮▮▮', 'EFF ▮▯▯'], 'impact and effort read as meters');
-    assert.deepEqual(by('imp_shot_4').meters, [], 'a proposal with no grounds shows no estimate at all');
+    assert.deepEqual(by('imp_shot_6').meters, [], 'a proposal with no grounds shows no estimate at all');
+    // Una misión terminada lo dice en la fila, y sigue llevando la marca de misión.
+    assert.match(by('imp_shot_6').tags, /WORKFLOW · DONE · \d/, 'a finished mission says DONE on the row');
+    assert.ok(by('imp_shot_6').cls.includes('is-completed') && by('imp_shot_6').cls.includes('is-mission'), 'and keeps the mission mark');
+    assert.ok(by('imp_shot_3').cls.includes('is-mission') && !by('imp_shot_0').cls.includes('is-mission'), 'the mark is the link, not the status');
     assert.equal(await page.locator('.improve [data-n]').textContent(), '1 NEW', 'the unseen one is counted, once');
     // La línea de estado habla del reloj y de la ÚLTIMA CERRADA; la que está
     // en vuelo tiene su propia fila, y no se dice dos veces.
@@ -198,6 +206,25 @@ async function main() {
     assert.equal(await sent.locator(':text-is("OPEN MISSION")').count(), 1, 'it links the mission it became');
     assert.equal(await sent.locator(':text-is("IMPLEMENT")').count(), 0, 'and cannot be sent twice');
     assert.match(await sent.innerText(), /CONVERSATION[\s\S]*YOU[\s\S]*put the last report on the row/i);
+
+    /* ── Una terminada sigue siendo misión, y lo dice en el hilo ────── */
+
+    await page.locator('.imp[data-imp="imp_shot_6"] .imp__title').click();
+    await page.waitForTimeout(300);
+    const done = page.locator('.imp[data-imp="imp_shot_6"]');
+    assert.equal(await done.locator(':text-is("OPEN MISSION")').count(), 1, 'a finished mission still links its mission');
+    assert.equal(await done.locator(':text-is("IMPLEMENT")').count(), 0, 'and cannot be sent again');
+    assert.equal(await done.locator(':text-is("REOPEN")').count(), 0, 'nor reopened from here');
+    assert.match(await done.innerText(), /system[\s\S]*Mission completed/i, 'the closing is a line in its conversation');
+    await page.locator('.imp[data-imp="imp_shot_6"] .imp__title').click();
+    await page.waitForTimeout(300);
+    // Detrás del pliegue está la descartada, y la archivada sigue sin estar.
+    await page.locator('.improve__more').first().click();
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('.imp[data-imp="imp_shot_4"]').count(), 1, 'unfolding brings the dismissed one back');
+    assert.equal(await page.locator('.imp[data-imp="imp_shot_7"]').count(), 0, 'and never the archived one');
+    await page.locator('.improve__more').first().click();
+    await page.waitForTimeout(300);
 
     /* ── No tapa nada que reporte ─────────────────────────────────── */
 
@@ -586,6 +613,25 @@ async function seed(page: Page, crew: { id: string | null; callsign: string | nu
           summary: 'Every worker brief re-states the squad rules that the hub could hand it once.',
           evidence: ['briefs average 2.1k tokens, 0.9k of them identical across the squad'],
           area: 'cost', seenAt: undefined,
+        }),
+        // Una enviada cuya misión terminó: sigue siendo misión —barra, OPEN
+        // MISSION— y lo dice con una palabra en la fila y una línea en el hilo.
+        p({
+          title: 'Reviewer briefs should name the counters they read',
+          summary: 'The reviewer quotes figures without saying which counter they came from.',
+          evidence: ['4 of 6 proposals cite a number with no counter name'],
+          area: 'workflow',
+          status: 'completed', missionId: 'mission_shot_done', seenAt: now - 3_000_000, updatedAt: now - 1_800_000,
+          notes: [{ id: 'n4', role: 'system', text: 'Mission completed.', at: now - 1_800_000 }],
+        }),
+        // Una cuya misión se archivó: se fue con ella, y no está ni desplegando.
+        p({
+          title: 'Retire the legacy tasks.json reader',
+          summary: 'Nobody has a tasks.json any more.',
+          evidence: ['0 of 3 installs still carry tasks.json'],
+          area: 'other',
+          status: 'archived', missionId: 'mission_shot_gone', seenAt: now - 3_000_000, updatedAt: now - 1_700_000,
+          notes: [{ id: 'n5', role: 'system', text: 'Mission archived: it leaves the board with it.', at: now - 1_700_000 }],
         }),
       ]) (state.proposals as Record<string, unknown>)[(item as { id: string }).id] = item;
       window.__orca!.improve(

@@ -76,6 +76,7 @@ import {
 } from '../gfx/algn.ts';
 import { PHASE_WORD, isOpen, missionRows, type MissionPhase, type MissionRow } from './mission-status.ts';
 import { visibleMissions } from '../../shared/missions.ts';
+import { gesture } from '../gestures.ts';
 
 /** Callsigns named in an open row's detail before the rest become a count. */
 const CREW_SHOWN = 8;
@@ -183,6 +184,7 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
     folded = !folded;
     setPref('missionsFolded', folded);
     setFolded(folded, true);
+    gesture('hud', folded ? 'missions-fold' : 'missions-unfold');
   });
 
   /**

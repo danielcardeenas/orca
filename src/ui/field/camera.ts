@@ -10,10 +10,11 @@
 import * as THREE from 'three';
 import { clamp } from '../util.ts';
 import { REDUCE } from '../motion.ts';
+import { aim, FOV, type Box, type Rect } from './framing.ts';
 
+export { FOV };
 export const Z_MIN = 1.4;
 export const Z_MAX = 420;
-export const FOV = 30;
 export const TILT_MAX = 0.62;
 
 export interface CamState { x: number; y: number; z: number; pitch: number }
@@ -128,15 +129,34 @@ export class FieldCamera {
     this.cam.y = this.target.y;
   }
 
+  /** Look at a point on the plane from `z`. Raw: whatever is in front stays in front. */
   flyTo(x: number, y: number, z: number) {
     this.target.x = x; this.target.y = y; this.target.z = clamp(z, Z_MIN, Z_MAX);
   }
 
-  frame(b: { minX: number; minY: number; maxX: number; maxY: number }, pad = 1.25) {
+  /**
+   * The windows standing in front of the glass — `front` and `pinned`, in
+   * canvas pixels — read at the moment of a flight, so `show` and `frame`
+   * can put the target where they are not. Nothing set means nothing to
+   * avoid, and every flight lands on the centre as it always did.
+   */
+  setObstacles(fn: () => Rect[]) { this.obstacles = fn; }
+  private obstacles: () => Rect[] = () => [];
+
+  /**
+   * Fly so a world box is seen from `z`: on the centre of the glass when
+   * nothing is in front, in the clear when a window is. See `framing.ts`.
+   */
+  show(b: Box, z: number) {
+    const a = aim(b, clamp(z, Z_MIN, Z_MAX), { w: this.w, h: this.h }, this.obstacles());
+    this.flyTo(a.x, a.y, a.z);
+  }
+
+  frame(b: Box, pad = 1.25) {
     const w = Math.max(2, b.maxX - b.minX), h = Math.max(2, b.maxY - b.minY);
     const aspect = this.w / this.h;
     const need = Math.max(h, w / aspect) / (2 * Math.tan((FOV * Math.PI) / 360));
-    this.flyTo((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, need * pad + 1.5);
+    this.show(b, need * pad + 1.5);
   }
 
   setTilt(on: boolean) { this.target.pitch = on ? TILT_MAX : 0; }

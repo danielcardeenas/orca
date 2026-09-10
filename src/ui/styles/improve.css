@@ -281,9 +281,10 @@
 .imp.is-new.is-hypothesis::before {
   background: repeating-linear-gradient(to bottom, var(--auto) 0 3px, transparent 3px 6px);
 }
-.imp.is-snoozed, .imp.is-dismissed { opacity: 0.5; }
-.imp.is-snoozed:hover, .imp.is-dismissed:hover { opacity: 0.85; }
-.imp.is-sent::before { background: var(--lime); }
+.imp.is-snoozed, .imp.is-dismissed, .imp.is-completed { opacity: 0.5; }
+.imp.is-snoozed:hover, .imp.is-dismissed:hover, .imp.is-completed:hover { opacity: 0.85; }
+/* Convertida en misión: la barra lo dice mientras haya enlace, terminada o no. */
+.imp.is-mission::before { background: var(--lime); }
 
 .imp__tags {
   min-width: 0; font-size: 9px; letter-spacing: 0.14em; color: var(--auto-dim);

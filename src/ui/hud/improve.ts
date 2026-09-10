@@ -77,6 +77,7 @@ import {
 } from '../../shared/improve.ts';
 import { stateVar, stateWord } from '../util.ts';
 import { isSendChord } from '../windows/composer.ts';
+import { gesture } from '../gestures.ts';
 
 /** Cuántas cerradas se enseñan antes de plegar el resto bajo una cuenta. */
 const CLOSED_SHOWN = 3;
@@ -195,9 +196,12 @@ function detailHtml(p: ImproveProposal, status: ImproveStatus): string {
  * todas las letras al abrirlo.
  */
 function rowHtml(p: ImproveProposal, status: ImproveStatus, open: boolean, now: number): string {
+  // Una terminada lo dice con una palabra: la barra ya dice que es una misión,
+  // y sin esto una misión cerrada y una en marcha se leían igual.
   const when = status === 'snoozed' && p.snoozeUntil
     ? `BACK IN ${Math.max(1, Math.round((p.snoozeUntil - now) / 86_400_000))}D`
-    : ago(p.updatedAt, now);
+    : status === 'completed' ? `DONE · ${ago(p.updatedAt, now)}`
+      : ago(p.updatedAt, now);
   const raised = p.raised > 1 ? ` · RAISED ${p.raised}×` : '';
   return `
     <i class="imp__dot" aria-hidden="true"></i>
@@ -359,6 +363,7 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     folded = !folded;
     setPref('improveFolded', folded);
     setFolded(folded, true);
+    gesture('hud', folded ? 'improve-fold' : 'improve-unfold');
   });
 
   /* ── acciones ───────────────────────────────────────────────────── */
@@ -825,8 +830,12 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     }
 
     const open = openProposals(state, now);
+    // Una archivada se fue con su misión: no está en el panel de misiones y
+    // tampoco aquí, que es lo que evita dos tableros con dos versiones del
+    // mismo trabajo. Sigue en el estado, y `list_improvements` la enseña si se
+    // le pide por su nombre.
     const closed = sortProposals(
-      Object.values(state.proposals).filter((p) => effectiveStatus(p, now) !== 'open'), now,
+      Object.values(state.proposals).filter((p) => { const s = effectiveStatus(p, now); return s !== 'open' && s !== 'archived'; }), now,
     );
     const unseen = open.filter((p) => p.seenAt === undefined);
     countEl.textContent = unseen.length ? `${unseen.length} NEW` : String(open.length);
@@ -846,7 +855,10 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     for (const p of shown) {
       const status = effectiveStatus(p, now);
       const card = document.createElement('article');
-      card.className = `imp is-${status} is-${p.kind}`;
+      // `is-mission` es la marca de «convertida en misión» y la lleva mientras
+      // haya enlace, esté la misión en marcha o terminada: el color no cambia
+      // con el estado, sólo la palabra de la fila.
+      card.className = `imp is-${status} is-${p.kind}${p.missionId ? ' is-mission' : ''}`;
       card.dataset.imp = p.id;
       card.classList.toggle('is-new', p.seenAt === undefined && status === 'open');
       card.classList.toggle('is-open', opened.has(p.id));

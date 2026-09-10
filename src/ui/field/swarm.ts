@@ -30,7 +30,7 @@
  * back, and nothing else on the field may wear that colour. Its *turn* —
  * a faster beat and a solid outline while it works, amber while it waits on
  * the operator — arrives as the `uCap` uniform from field/command.ts, which
- * also draws the halo of tasks around it.
+ * also draws the halo of missions around it.
  *
  * No text here. Text at this scale is what kills a scene, and the field
  * solves it by not trying: labels are DOM, and only for tiles big enough to
@@ -85,6 +85,7 @@ const FRAG = /* glsl */ `
   uniform float uLinePx;
   uniform vec3 uLime;
   uniform vec3 uCyan;
+  uniform vec3 uAuto;
   uniform vec3 uInk;
   uniform float uReduce;
   uniform float uFocus;
@@ -165,6 +166,16 @@ const FRAG = /* glsl */ `
      */
     float rt = vAux.w;
     float isCap = step(8.5, rt);
+    /*
+     * Un agente revisor de AUTOMEJORA (runtime 8). Lleva una línea violeta
+     * permanente y un sigilo violeta, igual que CAPCOM lleva la suya cian: es
+     * una IDENTIDAD —qué función cumple— y por eso no toca el color del
+     * cuerpo ni la banda del borde izquierdo, que siguen diciendo su estado
+     * real. Un revisor bloqueado se ve ámbar y uno muerto se ve rojo; lo
+     * violeta sólo dice quién es. Corre en Claude Code, así que su trama es
+     * la sólida por serlo, no por ser 8.
+     */
+    float isRev = step(7.5, rt) * step(rt, 8.5);
     float capTurn = isCap * uCap.x;
     float capWait = isCap * uCap.y;
     float capPulse = isCap * uCap.z;
@@ -208,6 +219,9 @@ const FRAG = /* glsl */ `
     // rest, with the pulse on, it sits at 72 % so the turn has room to be solid.
     vec3 capLine = uCyan * mix(1.0, mix(0.72, 1.0, capTurn), capPulse);
     lineCol = mix(lineCol, capLine, isCap);
+    // El revisor, igual pero sin latido: no manda, sólo mira. Se apaga bajo la
+    // selección, que sigue siendo lima y sigue ganando.
+    lineCol = mix(lineCol, uAuto, isRev * step(sel, 0.5));
 
     vec3 col;
     float a;
@@ -216,6 +230,9 @@ const FRAG = /* glsl */ `
       // The command's body: the same dark, cast a shade toward cyan. Linear
       // space: 2.5 % of a bright cyan on a body this dark already reads.
       col = mix(col, uCyan, isCap * (1.0 - full) * (0.025 + 0.03 * capTurn * capBeat));
+      // Un tinte violeta del mismo orden que el del mando: a la distancia a la
+      // que el cuerpo es lo único que se ve, el tile ya dice qué es.
+      col = mix(col, uAuto, isRev * (1.0 - full) * 0.03);
       /*
        * The trace (§1.3): one cyan line crossing the tile top to bottom every
        * ~6 s with a short wake behind it, the way a beam crosses a scope. It
@@ -271,7 +288,7 @@ const FRAG = /* glsl */ `
       float lead = step(0.5, vAux.z);
       float on = mix(bit, 1.0 - bit, lead);
       // CAPCOM's mark is cyan ink: the C reads as the command's own seal.
-      col = mix(col, mix(mix(uInk, uCyan, isCap), uBody, full), inSg * on);
+      col = mix(col, mix(mix(mix(uInk, uCyan, isCap), uAuto, isRev), uBody, full), inSg * on);
       /*
        * Life (§2.3). Done: a perforation along the bottom margin — the tear
        * line of a used ticket. It runs at y 0.09, in the strip under the
@@ -373,6 +390,7 @@ export function createSwarm(scene: THREE.Scene): SwarmHandle {
       uLime: { value: lin(0xc0f94a) },
       // `--cyan`: CAPCOM's, and nobody else's.
       uCyan: { value: lin(0x4fe3ff) },
+      uAuto: { value: lin(0xb47cff) },
       uInk: { value: lin(0xf2f4f0) },
       uReduce: { value: shaderMotion().reduce ? 1 : 0 },
       uBreathe: { value: shaderMotion().breathe },

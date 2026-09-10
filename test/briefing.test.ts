@@ -1,10 +1,10 @@
 /**
  * The tools that let CAPCOM command without memory.
  *
- * `list_tasks`, `inspect_task` and `briefing` exist so that a session that has
+ * `list_missions`, `inspect_mission` and `briefing` exist so that a session that has
  * just booted — or just compacted — can read what it owes off the hub instead
  * of off its own context. What is tested is the one rule they all share: in a
- * task, everything after the last CAPCOM message is unanswered. And that the
+ * mission, everything after the last CAPCOM message is unanswered. And that the
  * briefing is short, capped, and names things by the id the next tool takes.
  */
 
@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { Agent, Escalation, Project } from '../src/shared/types.ts';
-import { TaskStore } from '../src/hub/tasks.ts';
+import { MissionStore } from '../src/hub/missions.ts';
+import { MISSION_ID, visibleMissions } from '../src/shared/missions.ts';
 import { CEO_TOOLS, runTool, type CeoContext } from '../src/agents/tools.ts';
 import { mcpTools } from '../src/hub/mcp.ts';
 import { ok, test, type TestModule } from './harness.ts';
@@ -65,14 +66,14 @@ function escalation(over: Partial<Escalation> = {}): Escalation {
 
 /** A world in a box: only what these three tools read. Everything else refuses. */
 function ctx(o: {
-  agents?: Agent[]; projects?: Project[]; escalations?: Escalation[]; tasks?: TaskStore;
+  agents?: Agent[]; projects?: Project[]; escalations?: Escalation[]; missions?: MissionStore;
   rules?: { question: string; answer: string; projectId: string | null; at: number }[];
 }): CeoContext {
   const agents = o.agents ?? [];
   const projects = o.projects ?? [];
   const refuse = (): never => { throw new Error('not in this test'); };
   return {
-    tasks: o.tasks,
+    missions: o.missions,
     agents: () => agents,
     projects: () => projects,
     agent: (id) => agents.find((a) => a.id === id),
@@ -87,9 +88,16 @@ function ctx(o: {
   };
 }
 
-function withStore<T>(fn: (store: TaskStore) => T): T {
+/**
+ * Un store de misiones en un directorio que se borra al terminar.
+ *
+ * Espera a la promesa antes de borrar: un `fn` async con un `await` en medio
+ * seguía escribiendo cuando el `finally` ya se había llevado el directorio, y
+ * la escritura siguiente moría con ENOENT dentro del propio test.
+ */
+async function withStore<T>(fn: (store: MissionStore) => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'orca-briefing-'));
-  try { return fn(new TaskStore(dir)); } finally { rmSync(dir, { recursive: true, force: true }); }
+  try { return await fn(new MissionStore(dir)); } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
 function parse<T>(out: { result: string }): T { return JSON.parse(out.result) as T; }
@@ -104,21 +112,76 @@ const tests = [
     const second = await runTool(c, 'briefing', {});
     return ok('model change knowledge is not consumed by reading', [first, second].every(r => r.result.includes('CAPCOM MODEL CHANGES') && r.result.includes('Same conversation')));
   }),
-  test('the three tools are advertised over MCP with strict, complete schemas', () => {
+  test('the mission tools are advertised over MCP with strict, complete schemas', () => {
     const names = mcpTools().map((t) => t.name);
-    const specs = CEO_TOOLS.filter((t) => ['list_tasks', 'inspect_task', 'briefing'].includes(t.name));
+    const wanted = ['open_mission', 'list_missions', 'inspect_mission', 'briefing'];
+    const specs = CEO_TOOLS.filter((t) => wanted.includes(t.name));
     const complete = specs.every((t) => {
       const schema = t.input_schema as { properties: Record<string, unknown>; required: string[] };
       return t.strict === true && Object.keys(schema.properties).every((k) => schema.required.includes(k));
     });
+    // Los nombres viejos siguen despachando mientras haya un CAPCOM en vuelo
+    // con el esquema anterior en su contexto, pero no se anuncian: quien llega
+    // nuevo sólo ve el vocabulario de hoy.
+    const legacyHidden = !names.some((n) => ['report_task', 'list_tasks', 'inspect_task'].includes(n));
     return ok(
-      'list_tasks, inspect_task and briefing are advertised over MCP',
-      names.includes('list_tasks') && names.includes('inspect_task') && names.includes('briefing') && specs.length === 3 && complete,
-      names.filter((n) => n.includes('task') || n === 'briefing').join(', '),
+      'open_mission, list_missions, inspect_mission and briefing are advertised over MCP',
+      wanted.every((n) => names.includes(n)) && specs.length === wanted.length && complete && legacyHidden,
+      names.filter((n) => n.includes('mission') || n === 'briefing').join(', '),
     );
   }),
 
-  test('list_tasks says which tasks are waiting on CAPCOM, and only_pending keeps those', async () => {
+  /*
+   * Parte 2: CAPCOM abre sus propias misiones.
+   *
+   * Lo que se comprueba no es que la herramienta devuelva algo, sino que lo
+   * que devuelve sea indistinguible de lo que crea el botón NEW MISSION: el
+   * mismo store, un id con el prefijo de hoy, y una fila que el panel puede
+   * pintar. Si esto se separa, CAPCOM acaba abriendo hilos de segunda que la
+   * consola no sabe enseñar.
+   */
+  test('open_mission creates a mission the console cannot tell from the operator\'s own', async () => {
+    return withStore(async (store) => {
+      const c = ctx({
+        missions: store,
+        agents: [agent({ id: 'a9', callsign: 'K9', state: 'working' })],
+        projects: [project()],
+      });
+      const out = await runTool(c, 'open_mission', {
+        title: 'Migrate the payment webhook', first_message: 'El operador quiere el webhook migrado hoy',
+        project_id: 'p1', agent_ids: ['a9'],
+      });
+      const created = parse<{ mission_id: string; title: string; status: string; project: string | null; agents: { callsign: string | null }[] }>(out);
+      const stored = store.get(created.mission_id);
+      // Un id con el prefijo nuevo, no uno inventado ni uno `task_`.
+      const freshId = created.mission_id.startsWith('mission_') && MISSION_ID.test(created.mission_id);
+      // La conversación arranca legible y el proyecto va en su primera línea.
+      const opening = stored.messages.length === 1 && stored.messages[0]?.role === 'capcom'
+        && stored.messages[0].text === '[AX] El operador quiere el webhook migrado hoy';
+      // Y el agente ya vivo quedó adoptado, que es el caso "esto que ya lancé".
+      const adopted = stored.agentIds.includes('a9') && created.agents[0]?.callsign === 'K9';
+      // La misma forma que ve el panel: sale en visibleMissions, activa y sin archivar.
+      const onPanel = visibleMissions(store.all()).some((m) => m.id === created.mission_id && m.status === 'active' && !m.archivedAt);
+
+      const noTitle = await runTool(c, 'open_mission', { title: '  ', first_message: null, project_id: null, agent_ids: null });
+      const badProject = await runTool(c, 'open_mission', { title: 'x', first_message: null, project_id: 'p_nope', agent_ids: null });
+      const badAgent = await runTool(c, 'open_mission', { title: 'x', first_message: null, project_id: null, agent_ids: ['ghost'] });
+
+      // Y lo que devuelve sirve para lo siguiente: report_mission sobre ese id.
+      const reported = await runTool(c, 'report_mission', { mission_id: created.mission_id, text: 'K9 lanzado', status: 'active', agent_ids: [] });
+
+      return ok(
+        'open_mission opens a real mission, adopts live agents and refuses bad input',
+        !out.isError && freshId && created.title === 'Migrate the payment webhook' && created.status === 'active'
+        && created.project === 'AX' && opening && adopted && onPanel
+        && noTitle.isError === true && badProject.isError === true && badAgent.isError === true
+        && !reported.isError && store.get(created.mission_id).messages.length === 2,
+        `${created.mission_id} · ${store.get(created.mission_id).messages.length} msg · agents=${stored.agentIds.join(',')}`,
+      );
+    });
+  }),
+
+  test('list_missions says which missions are waiting on CAPCOM, and only_pending keeps those', async () => {
     return withStore(async (store) => {
       // answered: human, then CAPCOM replied.
       store.create('task_answered', 'New task');
@@ -143,33 +206,86 @@ const tests = [
       store.message('task_done', 'human', 'thanks');
 
       const c = ctx({
-        tasks: store,
+        missions: store,
         agents: [agent({ id: 'a2', callsign: 'K2', state: 'working' }), agent({ id: 'a3', callsign: 'K3', state: 'done' })],
       });
-      const all = parse<{ tasks: { id: string; awaiting_reply: boolean; unreported_results: number; agents: { callsign: string | null; state: string }[]; pending_human: { text: string } | null }[]; total: number }>(
-        await runTool(c, 'list_tasks', { status: null, only_pending: false, limit: 20 }));
-      const pending = parse<{ tasks: { id: string }[]; total: number }>(
-        await runTool(c, 'list_tasks', { status: null, only_pending: true, limit: 20 }));
-      const active = parse<{ total: number }>(await runTool(c, 'list_tasks', { status: 'active', only_pending: false, limit: 20 }));
-      const by = Object.fromEntries(all.tasks.map((t) => [t.id, t]));
+      const all = parse<{ missions: { id: string; awaiting_reply: boolean; unreported_results: number; agents: { callsign: string | null; state: string }[]; pending_human: { text: string } | null }[]; total: number }>(
+        await runTool(c, 'list_missions', { status: null, only_pending: false, limit: 20 }));
+      const pending = parse<{ missions: { id: string }[]; total: number }>(
+        await runTool(c, 'list_missions', { status: null, only_pending: true, limit: 20 }));
+      const active = parse<{ total: number }>(await runTool(c, 'list_missions', { status: 'active', only_pending: false, limit: 20 }));
+      const by = Object.fromEntries(all.missions.map((t) => [t.id, t]));
       const owed = by['task_owed'];
       const results = by['task_results'];
       return ok(
-        'list_tasks says which tasks are waiting on CAPCOM',
+        'list_missions says which missions are waiting on CAPCOM',
         all.total === 4
         && by['task_answered']?.awaiting_reply === false && by['task_answered']?.unreported_results === 0
         && owed?.awaiting_reply === true && owed.pending_human?.text === 'Also add the webhook'
         && owed.agents[0]?.callsign === 'K2' && owed.agents[0]?.state === 'working'
         && results?.awaiting_reply === false && results.unreported_results === 1
         && by['task_done']?.awaiting_reply === false
-        && pending.total === 2 && pending.tasks.map((t) => t.id).sort().join(',') === 'task_owed,task_results'
+        && pending.total === 2 && pending.missions.map((t) => t.id).sort().join(',') === 'task_owed,task_results'
         && active.total === 3,
-        `pending: ${pending.tasks.map((t) => t.id).join(', ')}`,
+        `pending: ${pending.missions.map((t) => t.id).join(', ')}`,
       );
     });
   }),
 
-  test('inspect_task returns the conversation, the agents with their last result, and what is owed', async () => {
+  /*
+   * El caso que trajo todo esto: una misión activa cuyo encargo no salió no
+   * debe ni un mensaje, así que `awaiting_reply` es false y
+   * `unreported_results` es 0 — y antes de esto eso bastaba para que
+   * `only_pending`, `inspect_mission` y el briefing la dieran por sana.
+   */
+  test('una misión activa cuyo envío falló sale en only_pending, con motivo, y deja de decir «owed: nothing»', async () => {
+    return withStore(async (store) => {
+      store.create('mission_stuck', 'New mission');
+      store.message('mission_stuck', 'human', 'Rehaz los iconos de CAPCOM');
+      store.message('mission_stuck', 'capcom', 'Mandado a WO', 'active');
+      store.assign('mission_stuck', ['aw']);
+      store.dispatched('mission_stuck', {
+        agentId: 'aw', callsign: 'WO', at: Date.now(), delivered: false,
+        detail: 'máquina no conectada: mac-2',
+      });
+      // Y una sana al lado, para que se vea que no marca todo lo que se mueve.
+      store.create('mission_fine', 'New mission');
+      store.message('mission_fine', 'human', 'Y esto otro');
+      store.message('mission_fine', 'capcom', 'K3 en ello', 'active');
+      store.assign('mission_fine', ['ak']);
+
+      const c = ctx({
+        missions: store,
+        agents: [
+          agent({ id: 'aw', callsign: 'WO', state: 'idle', updatedAt: NOW - H }),
+          agent({ id: 'ak', callsign: 'K3', state: 'working' }),
+        ],
+      });
+      type Row = { id: string; awaiting_reply: boolean; unreported_results: number; stalled: { reason: string; detail: string } | null };
+      const all = parse<{ missions: Row[] }>(await runTool(c, 'list_missions', { status: null, only_pending: false, limit: 20 }));
+      const pending = parse<{ missions: { id: string }[]; total: number }>(
+        await runTool(c, 'list_missions', { status: null, only_pending: true, limit: 20 }));
+      const stuck = all.missions.find((m) => m.id === 'mission_stuck');
+      const fine = all.missions.find((m) => m.id === 'mission_fine');
+      const deep = parse<{ owed: string; stalled: { reason: string } | null; last_orders: { agent: string; delivery: string }[] }>(
+        await runTool(c, 'inspect_mission', { mission_id: 'mission_stuck' }));
+      const brief = (await runTool(c, 'briefing', {})).result;
+      return ok(
+        'sin deber un mensaje y aun así pendiente, con el motivo del hub y el último encargo',
+        stuck?.awaiting_reply === false && stuck.unreported_results === 0
+        && stuck.stalled?.reason === 'send-failed' && stuck.stalled.detail.includes('mac-2')
+        && fine?.stalled === null
+        && pending.total === 1 && pending.missions[0]?.id === 'mission_stuck'
+        && deep.owed.includes('unstick it (send-failed)') && deep.stalled?.reason === 'send-failed'
+        && deep.last_orders[0]?.agent === 'WO' && deep.last_orders[0].delivery === 'failed'
+        && brief.includes('MISSIONS ACTIVE WITH NO PROGRESS')
+        && brief.includes('mission_stuck') && !brief.includes('mission_fine'),
+        `${JSON.stringify(stuck?.stalled)} · ${deep.owed}`,
+      );
+    });
+  }),
+
+  test('inspect_mission returns the conversation, the agents with their last result, and what is owed', async () => {
     return withStore(async (store) => {
       store.create('task_x', 'New task');
       store.message('task_x', 'human', 'Fix the flaky test');
@@ -178,22 +294,22 @@ const tests = [
       store.message('task_x', 'agent', 'Found the race in retention.test.ts', undefined, 'a9');
       store.message('task_x', 'human', 'Is it fixed yet?');
       const c = ctx({
-        tasks: store,
+        missions: store,
         agents: [agent({ id: 'a9', callsign: 'K9', state: 'done', lastSay: 'Fixed and green' })],
         projects: [project()],
       });
-      const out = await runTool(c, 'inspect_task', { task_id: 'task_x' });
+      const out = await runTool(c, 'inspect_mission', { mission_id: 'task_x' });
       const t = parse<{
         conversation: { role: string; agent: string | null; text: string }[];
-        agents: { callsign: string | null; state: string; last_say: string | null; last_result_in_task: string | null }[];
+        agents: { callsign: string | null; state: string; last_say: string | null; last_result_in_mission: string | null }[];
         pending_human: { text: string }[]; unreported_results: { agent: string | null; text: string }[]; owed: string;
       }>(out);
-      const missing = await runTool(c, 'inspect_task', { task_id: 'task_nope' });
+      const missing = await runTool(c, 'inspect_mission', { mission_id: 'task_nope' });
       return ok(
-        'inspect_task returns the conversation, the agents and what is owed',
+        'inspect_mission returns the conversation, the agents and what is owed',
         !out.isError && t.conversation.length === 4 && t.conversation[2]?.agent === 'K9'
         && t.agents[0]?.callsign === 'K9' && t.agents[0].state === 'done' && t.agents[0].last_say === 'Fixed and green'
-        && t.agents[0].last_result_in_task === 'Found the race in retention.test.ts'
+        && t.agents[0].last_result_in_mission === 'Found the race in retention.test.ts'
         && t.pending_human.length === 1 && t.pending_human[0]?.text === 'Is it fixed yet?'
         && t.unreported_results.length === 1 && t.unreported_results[0]?.agent === 'K9'
         && t.owed === 'reply to 1 human message(s); report 1 worker result(s)'
@@ -211,7 +327,7 @@ const tests = [
       store.assign('task_pay', ['a2', 'a3']);
       store.message('task_pay', 'agent', 'Migration done, tests green', undefined, 'a3');
       store.message('task_pay', 'human', 'How is it going?');
-      // a4 finished in a task CAPCOM already reported on: not unreported.
+      // a4 finished in a mission CAPCOM already reported on: not unreported.
       store.create('task_old', 'New task');
       store.message('task_old', 'human', 'Lint everything');
       store.assign('task_old', ['a4']);
@@ -229,7 +345,7 @@ const tests = [
         agent({ id: 'cap', callsign: 'CC', role: 'capcom', projectId: 'pc', state: 'idle' }),
       ];
       const c = ctx({
-        tasks: store, agents,
+        missions: store, agents,
         projects: [project(), project({ id: 'pc', code: 'CP', name: 'capcom', rollup: { ...project().rollup, total: 1 } }), project({ id: 'p0', code: 'ZZ', name: 'empty', rollup: { ...project().rollup, total: 0 } })],
         escalations: [escalation(), escalation({ id: 'esc_old', status: 'answered' })],
         rules: [{ question: 'Which key on staging?', answer: 'always the test key', projectId: 'p1', at: NOW }],
@@ -253,7 +369,7 @@ const tests = [
         && blockedHead.includes('(2)') && has('K1 [AX] waiting 4m BLOCKING: "Which Stripe key on staging?" · options: test | production (esc_1)')
         && has('K7 [AX] permission')
         && has('task_pay "Migrate payments to the new API" — human waiting') && has('1 unreported result(s) from K3')
-        && finishedHead.includes('(2)') && has('K3 [AX] done 20m ago · task_pay') && has('K5 [AX] dead 10m ago · no task: "segfault"')
+        && finishedHead.includes('(2)') && has('K3 [AX] done 20m ago · task_pay') && has('K5 [AX] dead 10m ago · no mission: "segfault"')
         && !has('K4 [AX]') && !has('K6 [AX]')
         && has('audit-01 (2 members: 1 done, 1 dead)') && !has('pay-01 (')
         && has('AX axolots @main · 1 working, 1 blocked · $1.50') && !has('CP capcom') && !has('ZZ empty')
@@ -276,11 +392,11 @@ const tests = [
     return ok(
       'briefing caps every section',
       head.includes('(12)') && shown === 8 && out.result.includes('…and 4 more')
-      && out.result.includes('TASKS WAITING ON YOU — inspect_task, then report_task: none'),
+      && out.result.includes('MISSIONS WAITING ON YOU — inspect_mission, then report_mission: none'),
       `${shown} shown of 12`,
     );
   }),
 ];
 
-const suite: TestModule = { suite: 'briefing · list_tasks · inspect_task', tests };
+const suite: TestModule = { suite: 'briefing · list_missions · inspect_mission', tests };
 export default suite;

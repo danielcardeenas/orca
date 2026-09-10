@@ -490,6 +490,9 @@ function markup(): string {
                   <rect x="92" y="114" width="8" height="8" fill="#c0f94a"/>
                 </g>
                 <g data-node-on><rect x="92" y="20" width="8" height="40" fill="#c0f94a"/></g>
+                <!-- Tiny5, fixed: these six caps are 26 units wide inside their own
+                     chips at 6 px, and any wider face runs out of the rectangle.
+                     A drawing from the comp, not a label the console sets. -->
                 <text x="125" y="24" fill="#111" font-size="6" font-family="Tiny5, monospace">NULL</text>
                 <text x="125" y="42" fill="#111" font-size="6" font-family="Tiny5, monospace">NULL</text>
                 <text x="125" y="60" fill="#111" font-size="6" font-family="Tiny5, monospace">NULL</text>

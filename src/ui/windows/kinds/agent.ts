@@ -19,7 +19,8 @@ import { agentOrigin, originLabel } from '../../../shared/origin.ts';
 import type { Agent, Escalation } from '../../../shared/types.ts';
 import { store } from '../../store.ts';
 import { drafts, draftKey } from '../../drafts.ts';
-import { authedUrl, hub } from '../../net/client.ts';
+import { authedUrl, hub, uploadFile } from '../../net/client.ts';
+import { bindAttach } from '../attach.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { ago, dur, esc, money, runtimeOf, stateVar, stateWord, tokens, nameOf } from '../../util.ts';
@@ -27,6 +28,8 @@ import { glyphBurst, slabBusy, slabFlash } from '../fx.ts';
 import { mountAgentConversation } from '../agent-conversation.ts';
 import { mountTerminal } from './terminal.ts';
 import { toggle, type ToggleHandle } from '../../controls.ts';
+import { bindComposer, composerHint } from '../composer.ts';
+import { longPress } from '../../hud/longpress.ts';
 
 export function mountAgent(ctx: WinCtx, c: Console) {
   const id = ctx.win.spec.params?.agentId ?? '';
@@ -47,8 +50,8 @@ export function mountAgent(ctx: WinCtx, c: Console) {
     <div data-agent-model></div>
     <div data-agent-recovery></div>
     <div class="ceo__in" data-composer>
-      <textarea class="input" data-say rows="2" aria-label="Message agent" placeholder="message agent · enter sends, shift+enter newline"></textarea>
-      <button class="slab-btn" type="button" data-send data-key="s">SEND</button>
+      <textarea class="input" data-say rows="2" aria-label="Message agent" placeholder="message agent"></textarea>
+      <button class="slab-btn" type="button" data-send>SEND</button>
     </div>
     <div class="row row--split" style="padding:0 8px 8px">
       <div class="row">
@@ -101,6 +104,10 @@ export function mountAgent(ctx: WinCtx, c: Console) {
     });
   });
   const scroll = body.querySelector<HTMLElement>('[data-scroll]')!;
+  // Los chips de un agente y de un artefacto llevan su menú; con el dedo,
+  // manteniéndolos pulsados. Una vez al montar: el contenido se repinta, el
+  // contenedor no.
+  longPress(scroll, { allow: (t) => !!t.closest('[data-go], [data-art]') });
   const band = body.querySelector<HTMLElement>('[data-band]')!;
   const sayIn = body.querySelector<HTMLTextAreaElement>('[data-say]')!;
   // The unsent line to this agent survives a reload (drafts.ts).
@@ -153,7 +160,7 @@ export function mountAgent(ctx: WinCtx, c: Console) {
     // Interrumpir es sobre un turno en vuelo: sin sesión viva no hay ninguno.
     body.querySelector<HTMLButtonElement>('[data-interrupt]')!.disabled = !canSend;
     body.querySelector<HTMLButtonElement>('[data-interrupt]')!.textContent = sayIn.value.trim() ? 'INTERRUPT + SEND' : 'INTERRUPT';
-    sayIn.placeholder = !store.linkUp ? 'Disconnected — reconnect to send' : !canSend ? 'This session has ended' : 'message agent · enter sends, shift+enter newline';
+    sayIn.placeholder = !store.linkUp ? 'Disconnected — reconnect to send' : !canSend ? 'This session has ended' : composerHint('message agent');
     const m = store.world.machines[a.machineId];
     ctx.setCallsign(a.callsign, p?.code);
     ctx.setTitle(nameOf(a));
@@ -199,7 +206,7 @@ export function mountAgent(ctx: WinCtx, c: Console) {
           ${esca.context ? `<div class="mono" style="margin-top:6px;color:var(--ink-dim)">${esc(esca.context)}</div>` : ''}
           ${esca.ceoAttempt ? `<div class="block__tried mono"><b>CAPCOM TRIED · ${Math.round(esca.ceoAttempt.confidence * 100)}%</b>${esc(esca.ceoAttempt.answer)}<br/><span style="color:var(--ink-dimmer)">punted: ${esc(esca.ceoAttempt.reason)}</span></div>` : ''}
           <div class="block__opts">${esca.options.map((o) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" ${esca.permission?.phase === 'pending' ? 'disabled' : ''} data-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
-          ${esca.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><input class="input" data-ans placeholder="type an answer" /><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-ans-send>SEND</button></div>`}
+          ${esca.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><textarea class="input" rows="2" data-ans aria-label="Answer" placeholder="${esc(composerHint('type an answer'))}"></textarea><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-ans-send>SEND</button></div>`}
           <div data-remember style="margin-top:8px"></div>
         </div>`;
       } else if (a.block.kind === 'permission') {
@@ -285,11 +292,12 @@ export function mountAgent(ctx: WinCtx, c: Console) {
       }
       const remember = () => (!esca.permission && remembering?.checked() ? esca.question : null);
       scroll.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) => b.addEventListener('click', () => { slabFlash(b); c.answer(esca.id, b.dataset.opt!, remember()); }));
-      const ans = scroll.querySelector<HTMLInputElement>('[data-ans]');
+      const ans = scroll.querySelector<HTMLTextAreaElement>('[data-ans]');
       const ansBtn = scroll.querySelector<HTMLElement>('[data-ans-send]');
       const send = () => { const v = ans?.value.trim(); if (v) { slabFlash(ansBtn); c.answer(esca.id, v, remember()); ans!.value = ''; } };
       ansBtn?.addEventListener('click', send);
-      ans?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+      // Varias líneas: Enter salta, ⌘/⌃Enter manda. Ver `windows/composer.ts`.
+      if (ans) bindComposer(ans, send);
     }
   }
 
@@ -343,7 +351,11 @@ export function mountAgent(ctx: WinCtx, c: Console) {
       if (t && (out?.message === 'pasted' || out?.message === 'queued')) { sayIn.value = ''; draft.clear(); }
     } finally { interrupting = false; done(); draft.save(); }
   });
-  sayIn.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void send(); } });
+  // Enter salta línea; manda ⌘/⌃Enter y manda el botón. Ver `windows/composer.ts`.
+  const unbindComposer = bindComposer(sayIn, () => void send());
+  // Un archivo soltado o pegado en la caja sube al hub y su ruta entra en el
+  // texto; el lienzo deja aquí los que se soltaron sobre la baldosa (attach.ts).
+  const unbindAttach = bindAttach(sayIn, { key: draftKey('agent', id), upload: uploadFile, note: c.note });
   // La etiqueta sigue a lo que hay escrito: el mismo botón corta a secas o
   // corta y entrega, y el operador tiene que ver cuál de las dos va a pasar.
   sayIn.addEventListener('input', () => {
@@ -395,5 +407,5 @@ export function mountAgent(ctx: WinCtx, c: Console) {
   });
   const tick = window.setInterval(render, 5000);
   render();
-  return { dispose() { models.dispose(); recovery.dispose(); offConversation(); terminal?.dispose(); body.classList.remove('agent-workspace'); off(); clearInterval(tick); stopGlyphs?.(); remembering?.dispose(); draft.dispose(); } };
+  return { dispose() { models.dispose(); recovery.dispose(); offConversation(); terminal?.dispose(); body.classList.remove('agent-workspace'); off(); clearInterval(tick); stopGlyphs?.(); remembering?.dispose(); unbindComposer(); unbindAttach(); draft.dispose(); } };
 }

@@ -109,6 +109,28 @@ const tests = [
       `say="${a.lastSay}" model=${a.model} turns=${a.metrics.turns}`);
   }),
 
+  /*
+   * El modelo, en el hueco que dejaba `thread_settings_applied`.
+   *
+   * Una sesión preparada por un traspaso nace de un `codex exec` y ese evento
+   * no llega hasta que la TUI aplica sus ajustes — 79 segundos y un mensaje
+   * humano después, medido en un relevo real el 2026-09-08. `turn_context` lo
+   * dice desde el primer turno, y en ese hueco la consola anunciaba
+   * «model unknown» sobre un CAPCOM que sí sabía con qué corría.
+   */
+  test('codex: el modelo se sabe desde el primer turn_context, sin esperar a thread_settings', () => {
+    const d = new CodexDeriver(ref(), 'm1', 'p1');
+    alive(d);
+    const context = { timestamp: ts(11), type: 'turn_context', payload: { cwd: CWD, model: 'gpt-6-astra', approval_policy: 'never', sandbox_policy: { type: 'read-only' } } };
+    d.ingest(batch([META, STARTED, context, PROMPT, DONE]));
+    const early = d.snapshot();
+    const late = new CodexDeriver(ref(), 'm1', 'p1');
+    late.ingest(batch([META, STARTED, context, PROMPT, DONE, MODEL]));
+    return ok('codex: el modelo se sabe desde el primer turn_context, sin esperar a thread_settings',
+      early.model === 'gpt-6-astra' && late.snapshot().model === 'gpt-6-astra',
+      `turn_context=${early.model} con thread_settings=${late.snapshot().model}`);
+  }),
+
   test('codex: los tokens vienen de token_count y el costo es cero (suscripción)', () => {
     const d = new CodexDeriver(ref(), 'm1', 'p1');
     alive(d);
@@ -172,9 +194,21 @@ const tests = [
   test('codex: el watcher descubre rollouts en YYYY/MM/DD y su primer lote trae el session_meta', async () => {
     const root = mkdtempSync(join(tmpdir(), 'orca-codex-'));
     try {
-      const day = join(root, '2026', '09', '05');
+      /*
+       * El día de HOY, no una fecha escrita a mano.
+       *
+       * El escaneo de Codex descarta directorios de día que caen fuera de la
+       * ventana de flota, así que un `2026/09/05` fijo dejó de descubrirse el
+       * 2026-09-08 sin que cambiara una línea de `watch.ts`: la prueba llevaba
+       * dentro su propia fecha de caducidad.
+       */
+      const now = new Date();
+      const yyyy = String(now.getUTCFullYear());
+      const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(now.getUTCDate()).padStart(2, '0');
+      const day = join(root, yyyy, mm, dd);
       mkdirSync(day, { recursive: true });
-      writeFileSync(join(day, `rollout-2026-09-05T22-46-01-${SID}.jsonl`), [META, STARTED, PROMPT].map((l) => JSON.stringify(l)).join('\n') + '\n');
+      writeFileSync(join(day, `rollout-${yyyy}-${mm}-${dd}T22-46-01-${SID}.jsonl`), [META, STARTED, PROMPT].map((l) => JSON.stringify(l)).join('\n') + '\n');
       writeFileSync(join(day, 'unrelated.jsonl'), '{}\n');
       const w = new TranscriptWatcher({ layout: 'codex', root, pollMs: 200, rescanMs: 500 });
       const got: LineBatch[] = [];

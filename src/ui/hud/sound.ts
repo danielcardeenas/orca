@@ -5,7 +5,7 @@
  *
  * Four words, and they are not the same word:
  *
- *   - an **event** (`SoundName`) is something the console did. There are 47,
+ *   - an **event** (`SoundName`) is something the console did. There are 48,
  *     in five groups: FLEET, WINDOWS, NAVIGATION, DECK, REPLAY.
  *   - a **clip** is one audio file. There are 32 in a pack, because siblings
  *     share: the five windows that open a list of rows all ring `open.list`,
@@ -37,13 +37,19 @@
  *
  * ── What it costs to be loud ─────────────────────────────────────────
  *
- * Muted by default and persisted, because the only event that has earned the
- * right to reach an operator who is not looking is `interrupt` — an agent that
- * needs a human. Master volume is `orca.sfx.vol.v1`, ten steps in the window.
- * `prefers-reduced-motion` is about motion, not audio, and silences nothing.
+ * Audible by default and persisted. It used to start muted, and the cost of
+ * that default was invisible: the console is one origin per address, so the
+ * same console on `127.0.0.1` and on the tailnet address are two different
+ * `localStorage` stores, and opening ORCA anywhere new brought back a silence
+ * that read as a bug rather than as a setting. Silence is a choice the
+ * operator makes once and it is remembered; it is not a thing to rediscover
+ * at every address. Master volume is `orca.sfx.vol.v1`, ten steps in the
+ * window. `prefers-reduced-motion` is about motion, not audio, and silences
+ * nothing.
  *
- * Nothing is fetched or decoded until it is first heard, so a muted console
- * has spent nothing on 160 files.
+ * Nothing is fetched or decoded until it is first heard, and no browser makes
+ * a sound before the first gesture, so an unattended console that nobody has
+ * touched still costs nothing and stays quiet.
  *
  * Coalescing: one sound of a kind per 400 ms, three per second in total. The
  * deck's arrival is the exception — `deck.tick` and `replay.step` may fire six
@@ -61,6 +67,7 @@
  *   agent → dead ............. dead
  *   link up / down ........... link / breach
  *   a new artifact ........... artifact
+ *   CAPCOM starts on your line  capcom.thinking   within 30 s of something you sent it
  *
  * Everything else is a gesture the console made, not a fact the world
  * reported, so its caller rings it: `getSound()?.play('deck.enter')`. The
@@ -76,13 +83,16 @@
  */
 
 import type { AgentState, EscalationStatus } from '../../shared/types.ts';
+import { turnStarted } from '../../shared/capcom.ts';
 import { store } from '../store.ts';
 
 /* ── The taxonomy ───────────────────────────────────────────────────── */
 
 export type FleetSound =
   | 'interrupt' | 'answer' | 'spawn' | 'launch' | 'squad'
-  | 'dead' | 'breach' | 'link' | 'artifact' | 'placed';
+  | 'dead' | 'breach' | 'link' | 'artifact' | 'placed'
+  /** CAPCOM took your line: the turn started moments after you sent it. */
+  | 'capcom.thinking';
 
 export type WindowSound =
   | 'open.agent' | 'open.interrupt' | 'open.queue' | 'open.capcom' | 'open.feed'
@@ -110,7 +120,7 @@ export interface SoundGroup {
 export const SOUND_GROUPS: readonly SoundGroup[] = [
   {
     id: 'fleet', label: 'FLEET',
-    names: ['interrupt', 'answer', 'spawn', 'launch', 'squad', 'dead', 'breach', 'link', 'artifact', 'placed'],
+    names: ['interrupt', 'answer', 'spawn', 'launch', 'squad', 'dead', 'breach', 'link', 'artifact', 'placed', 'capcom.thinking'],
   },
   {
     id: 'windows', label: 'WINDOWS',
@@ -150,6 +160,9 @@ export const CLIP_OF: Record<SoundName, string> = {
   link: 'link',
   artifact: 'artifact',
   placed: 'placed',
+  // The smallest sound in the set: CAPCOM starting on your line is a blink,
+  // not an announcement. The deck's tile tick is already that.
+  'capcom.thinking': 'tick',
 
   /* windows — an agent, an alert, a list, a tool, a channel */
   'open.agent': 'open.agent',
@@ -626,7 +639,8 @@ export function mountSound(): SoundHandle {
     const n = Number(raw);
     return Number.isFinite(n) && n >= 0 && n <= 1 ? n : DEFAULT_VOL;
   }
-  function loadMuted(): boolean { return read(MUTE_KEY) !== '0'; }
+  /** Only an explicit mute silences the console; anything else is sound on. */
+  function loadMuted(): boolean { return read(MUTE_KEY) === '1'; }
 
   /** Only keys that are events and values that are strings survive the trip. */
   function sane(j: unknown): SoundOverrides {
@@ -707,6 +721,19 @@ export function mountSound(): SoundHandle {
   /** Three tiles appearing in one patch is a squadron, not three spawns. */
   const SQUAD_AT = 3;
 
+  /**
+   * Nada del arnés suena.
+   *
+   * Las máquinas de fixture nacen, se mueren y preguntan a un ritmo que no es
+   * el de nadie: veinte teselas apareciendo a la vez y una pregunta cada pocos
+   * segundos, durante todo lo que dure `npm run visual`. El oído no distingue
+   * un mundo del otro, así que un arnés en marcha convierte la banda sonora
+   * de la consola en un timbre continuo y deja de significar nada — que es
+   * justo lo contrario de para qué está. Se mira si hace falta (la cola sigue
+   * llena, el mástil sigue contando); no se oye. Ver `shared/synthetic.ts`.
+   */
+  const real = (x: { machineId: string } | undefined | null) => !!x && !store.fromHarness(x);
+
   const off = store.on((e) => {
     // The boot owns the screen and has its own rhythm; it does not need a
     // chorus for a fleet that is only now arriving.
@@ -720,10 +747,16 @@ export function mountSound(): SoundHandle {
         reseed();
         break;
       case 'alarm':
-        if (e.on) play('interrupt');
+        // La alarma se enciende igual —la pregunta está ahí y se ve— pero no
+        // suena si la levantó el arnés y nadie más: no hay nadie esperando.
+        if (e.on && store.pending().some(real)) play('interrupt');
         break;
       case 'agents': {
-        let births = 0, death = false;
+        let births = 0, death = false, turn = false;
+        // The last thing the console sent CAPCOM, from any of its mouths —
+        // the command line, the composer, ⌥V. Missions included: CAPCOM
+        // answers those too.
+        const sentAt = store.outgoing.filter((m) => m.agentId === null).at(-1)?.at ?? null;
         for (const id of e.ids) {
           const a = store.world.agents[id];
           if (!a) { seenAgents.delete(id); agentState.delete(id); continue; }
@@ -731,17 +764,19 @@ export function mountSound(): SoundHandle {
             seenAgents.add(id);
             // Only a spawn has a parent; a root agent is the operator's doing
             // and already had its own confirmation on the command line.
-            if (a.parentId) births++;
+            if (a.parentId && real(a)) births++;
           }
           const before = agentState.get(id);
           agentState.set(id, a.state);
-          if (before !== 'dead' && a.state === 'dead') death = true;
+          if (before !== 'dead' && a.state === 'dead' && real(a)) death = true;
+          if (a.role === 'capcom' && real(a) && turnStarted(before, a.state, sentAt, Date.now())) turn = true;
         }
         // Death outranks birth: a patch that carries both should not sound
         // cheerful. One beat per patch either way.
         if (death) play('dead');
         else if (births >= SQUAD_AT) play('squad');
         else if (births) play('spawn');
+        else if (turn) play('capcom.thinking');
         break;
       }
       case 'escalations': {
@@ -751,7 +786,7 @@ export function mountSound(): SoundHandle {
           if (!x) { escState.delete(id); continue; }
           const before = escState.get(id);
           escState.set(id, x.status);
-          if (before !== 'answered' && x.status === 'answered') answered = true;
+          if (before !== 'answered' && x.status === 'answered' && real(x)) answered = true;
         }
         if (answered) play('answer');
         break;
@@ -759,10 +794,11 @@ export function mountSound(): SoundHandle {
       case 'artifacts': {
         let fresh = false;
         for (const id of e.ids) {
-          if (!store.world.artifacts?.[id]) { seenArt.delete(id); continue; }
+          const art = store.world.artifacts?.[id];
+          if (!art) { seenArt.delete(id); continue; }
           if (seenArt.has(id)) continue;
           seenArt.add(id);
-          fresh = true;
+          if (real(art)) fresh = true;
         }
         if (fresh) play('artifact');
         break;

@@ -356,17 +356,41 @@ export default {
         `net=${g?.netBytes.confidence} rate=${g?.netBytesPerSec.confidence} note=${g?.netBytes.note?.slice(0, 60)}`);
     })),
 
-    test('memory in use on macOS is a ceiling, and says so', () => withFixture(async () => {
+    /*
+     * Memory used to be the panel's ceiling: `total - free`, marked `≤`, and
+     * on darwin that counted every page of file cache as memory in use — a
+     * machine with nine gigabytes free drew a nearly-full bar. The sampler now
+     * asks vm_stat or /proc/meminfo what is committed, so the reading is a
+     * measurement; the ceiling survives only as the fallback for a machine
+     * whose tool would not answer. See collector/memory.ts and memory.test.ts.
+     */
+    test('memory in use is measured, and cache is not counted as used', () => withFixture(async () => {
       const r = await sampler().sample();
       const m = r.memUsedBytes;
-      if (process.platform !== 'darwin') {
-        return ok('memory is counted where the platform means it', m.confidence === 'measured',
-          `${process.platform}: ${m.confidence}`);
+      const supported = process.platform === 'darwin' || process.platform === 'linux';
+      if (!supported) {
+        return ok('an unsupported platform falls back to the ceiling and says so',
+          m.confidence === 'atMost' && formatReading(m).startsWith('≤'), `${process.platform}: ${m.confidence}`);
       }
-      return ok('the reclaimable cache makes it a ceiling, never a floor',
-        m.confidence === 'atMost' && formatReading(m).startsWith('≤')
-        && (m.note ?? '').includes('purgeable'),
-        `${formatReading(m)} · ${m.note?.slice(0, 60)}`);
+      const total = r.memTotalBytes.value ?? 0;
+      return ok('what is committed, counted — not everything the machine has not handed back',
+        m.confidence === 'measured' && (m.value ?? 0) > 0 && (m.value ?? 0) < total
+        && (m.note ?? '').length > 0,
+        `${formatReading(m)} of ${formatReading(r.memTotalBytes)} · ${m.note?.slice(0, 48)}`);
+    })),
+
+    test('cache and swap travel with the memory reading, and cache is separate from it', () => withFixture(async () => {
+      const r = await sampler().sample();
+      if (process.platform !== 'darwin' && process.platform !== 'linux') {
+        return ok('nothing is invented where the platform will not say',
+          r.memCachedBytes?.confidence === 'unavailable', process.platform);
+      }
+      const used = r.memUsedBytes.value ?? 0, cached = r.memCachedBytes?.value ?? 0;
+      const total = r.memTotalBytes.value ?? 0;
+      return ok('two rows, two facts, and they still fit in the machine',
+        r.memCachedBytes?.confidence === 'measured' && cached > 0 && used + cached <= total
+        && !!r.swapUsedBytes && !!r.swapTotalBytes,
+        `${formatReading(r.memCachedBytes!)} cached · swap ${formatReading(r.swapUsedBytes!)}`);
     })),
 
     test('a candidate found by a truncated walk is a floor too', () => {
@@ -486,6 +510,21 @@ export default {
       return ok('a malformed reading loses its category, not the hub',
         !!clean && clean.categories.length === 1 && clean.categories[0]!.category === 'logs',
         `${clean?.categories.length} categories survived`);
+    }),
+
+    test('cache and swap survive the wire, and an older collector’s report still lands', () => {
+      const withMem = JSON.parse(JSON.stringify(report())) as Record<string, unknown>;
+      withMem['memCachedBytes'] = measured(7 * 1024 ** 3);
+      withMem['swapUsedBytes'] = measured(4 * 1024 ** 3);
+      withMem['swapTotalBytes'] = measured(5 * 1024 ** 3);
+      const clean = sanitizeReport(withMem);
+      // A collector from before this existed sends nothing; the field must be
+      // absent, because a zero here would say the machine has no cache at all.
+      const older = sanitizeReport(JSON.parse(JSON.stringify(report())));
+      return ok('the three new readings cross, and their absence is absence',
+        clean?.memCachedBytes?.value === 7 * 1024 ** 3 && clean?.swapUsedBytes?.value === 4 * 1024 ** 3
+        && older !== null && older.memCachedBytes === undefined && older.swapUsedBytes === undefined,
+        `cached=${clean?.memCachedBytes?.value} older=${older?.memCachedBytes === undefined ? 'absent' : 'present'}`);
     }),
 
     test('sanitize rejects a frame that is not a report at all', () => {

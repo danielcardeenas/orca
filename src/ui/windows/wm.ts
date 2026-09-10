@@ -1,14 +1,11 @@
 /**
  * The window manager.
  *
- * A window is a small instrument in the comp's HUD shell. It is either
- * anchored to an agent — it follows the tile as the camera moves and draws a
- * pipe to it — or docked to the screen. Drag the header to move it, the
- * corner to resize it, `—` to fold it into the tray, `×` to close it.
- *
- * Kinds register a mount function; the manager only knows chrome, geometry,
- * focus and persistence. Docked windows come back on reload; anchored ones
- * do not, because the agent they were anchored to may not.
+ * Windows occupy world coordinates on the canvas. FRONT temporarily brings
+ * one to screen coordinates; CANVAS returns it; PIN keeps it on screen.
+ * Kinds keep their mounted content through these moves. The tray retrieves
+ * any window, including off-screen ones, and reports its placement mode.
+ * Hosts without camera callbacks retain the legacy anchored/docked behavior.
  *
  * ── The contract with the rest of the console ──────────────────────────
  *
@@ -30,7 +27,7 @@
  *   trayRow(): Win[]            what the tray paints: open, then folded
  *   trayMode(): boolean         is the row holding the keyboard
  *   enterTrayMode() / exitTrayMode()
- *   toggleWindow(win)           folded → unfold · behind → raise · in front → close
+ *   toggleWindow(win)           folded → unfold · distant → fly to · active visible → fold
  *   toggleKey(key, open)        the same switch by key, for the mast
  *   trayCursorId(): string|null the window under the tray cursor
  *   kbdLabel(spec): string      (module export) a chord in the platform's hand
@@ -54,10 +51,8 @@
  * inside the mode is the fast path: it raises as it walks. While the mode is
  * on, every one of those keys is consumed — `main.ts` never sees them.
  *
- * `Enter` is `toggleWindow`, so on the window already in front it closes
- * rather than re-raising, and the row stays open to keep going. `` ` `` puts
- * the cursor on what it raised, so `Escape` — not `Enter` — is how you keep
- * what you just cycled to.
+ * `Enter` uses the same retrieval/return action as clicking a tray tile.
+ * Backspace/Delete closes explicitly; Escape leaves tray mode.
  *
  * **Every button says its key.** A kind writes `data-key="s"` (a space-separated
  * list is allowed, and `shift+x` for a modified one); the manager injects the
@@ -68,10 +63,10 @@
  *
  * The assignment, from PLAN §12:
  *
- *   agent      S say · F fly · L logs · C spawn child · X stop (armed, twice)
+ *   agent      F fly · L logs · C spawn child · X stop (armed, twice)
  *   interrupt  1…9 options · Enter send · O open agent · D dismiss
  *   fleet      A say all · L say lead · F frame · N spawn here · X stop all
- *   capcom     Enter send · 1…5 orders
+ *   capcom     —
  *   spawn      Enter spawn
  *   launch     Enter launch · E edit presets
  *   artifact   P place/remove · R raw
@@ -83,7 +78,15 @@
  * Single letters stay single inside a window: they are bounded to whichever
  * window is active, so nothing global has to give way for them.
  *
- * Universal, with a window active: `Esc` closes, `-` folds (and hands the
+ * **Sending a message is not in this table, on purpose.** A composer of more
+ * than one line —CAPCOM, a mission, an agent— sends with ⌘/⌃Enter from inside
+ * the box, and Enter there is a line break; a `data-key` would be a second
+ * spelling of the same thing, and one that only works while the box does NOT
+ * have the focus, which is never when you are writing. See
+ * `windows/composer.ts`. A one-line `<input>` —an escalation answer, a word to
+ * a fleet— keeps Enter as its send: there is no line to break.
+ *
+ * Universal, with a window active: `Esc` returns from front, otherwise closes, `-` folds (and hands the
  * keyboard down the stack), `v` reveals an anchored window's tile when it is
  * off screen, and `` ` `` opens tray mode.
  *
@@ -119,13 +122,15 @@ import { esc, hexNoise } from '../util.ts';
 import { typing } from '../keys.ts';
 import { dur, EASE, REDUCE, T } from '../motion.ts';
 import { getSound } from '../hud/sound.ts';
+import { longPress } from '../hud/longpress.ts';
 import {
-  assemble, cascade, check, collapse, collapseShort, echoKbd, foldTo, stopAssemble, unfoldFrom, wipe,
+  assemble, cascade, check, collapse, collapseShort, echoKbd, foldTo, sendToCanvas, stopAssemble,
+  unfoldFrom, wipe,
 } from './fx.ts';
 
 export type WinKind =
   | 'agent' | 'interrupt' | 'queue' | 'ceo' | 'feed' | 'fleet' | 'spawn' | 'artifact' | 'breach' | 'help' | 'settings'
-  | 'gallery' | 'launch' | 'timeline' | 'sfx' | 'music' | 'terminal' | 'file' | 'hygiene';
+  | 'gallery' | 'launch' | 'timeline' | 'sfx' | 'music' | 'terminal' | 'file' | 'hygiene' | 'mission';
 
 export interface WinSpec {
   kind: WinKind;
@@ -178,12 +183,42 @@ export interface Win {
    * keeps it at 1 and never uses it.
    */
   anchorFill: number;
+  mode: 'canvas' | 'front' | 'pinned';
+  canvas?: { x: number; y: number; ppu: number };
+  scale: number;
+  /**
+   * The last answer `offView` gave for this window, so `reproject` can tell
+   * the tray the moment it changes instead of on every frame. Nothing reads
+   * it: ask `offView(win)`, which is always current.
+   */
+  away?: boolean;
   inst: { dispose?(): void; update?(): void; start?(): void; state?(): unknown } | void;
 }
 
+/** One canvas window's place in the world, for whoever draws the world. */
+export interface Seat {
+  id: string;
+  /** Top-left corner in world units; `y` grows upward, so the seat is `y` down to `y - h`. */
+  x: number; y: number; w: number; h: number;
+  focused: boolean;
+  /** Not touching the screen right now. */
+  off: boolean;
+}
+
 export interface WmEvents {
-  /** Screen rect of a tile, for anchoring. */
-  tileRect(agentId: string): { x: number; y: number; w: number; h: number; visible: boolean } | null;
+  /** Flat working plane, shared with the field camera. */
+  project?(x: number, y: number): { x: number; y: number };
+  unproject?(x: number, y: number): { x: number; y: number };
+  onZoom?(e: WheelEvent): void;
+  agentOrigin?(id: string): { x: number; y: number } | null;
+  onLocateWindow?(bounds: { minX: number; minY: number; maxX: number; maxY: number }): void;
+  plane?(): { origin: { x: number; y: number }; ppu: number };
+  /**
+   * Screen rect of a tile, for anchoring. `visible` is on screen or near it;
+   * `ahead` (absent means yes) is in front of the camera, so the rect is a
+   * real place on the glass however far off it — a pipe can be drawn to it.
+   */
+  tileRect(agentId: string): { x: number; y: number; w: number; h: number; visible: boolean; ahead?: boolean } | null;
   onTray(list: Win[]): void;
   onFocus(win: Win | null): void;
   /**
@@ -208,14 +243,33 @@ export interface WmEvents {
 
 const MOBILE = () => matchMedia('(max-width: 720px)').matches;
 const KEY = 'orca.windows.v2';
+/** A standard agent tile is one world unit wide; a 640px window occupies two. */
+const AGENT_WINDOW_PPU = 320;
 /** A9: the comp's scrambling column re-randomises every 70ms. */
 const TELE_MS = 70;
 /** The dock — command line, hints, tray — owns the bottom band; windows stay above it. */
 const DOCK_H = 100;
+/**
+ * The camera scale under which a canvas window is too small to read or to
+ * work in. Below it a tray retrieval flies to it, a click on its title no
+ * longer means "bring to front", and a press anywhere on it — body included —
+ * is a drag: from that far the only thing to do with a window is move it.
+ */
+const READING_SCALE = 0.55;
+/**
+ * Where a window opens. In front: screen-fixed and at reading size, because a
+ * window that arrives at the camera's scale arrives unreadable — clicking a
+ * tile from any ordinary zoom used to hand back a housing the size of a stamp,
+ * and the operator had to fly in to read what they had just asked for. The
+ * canvas is still where windows live; it is now somewhere you send them
+ * (`CANVAS`), not where they land.
+ */
+const OPEN_MODE: Win['mode'] = 'front';
 
 export class WindowManager {
   private layer: HTMLElement;
   private tether: SVGSVGElement;
+  private canvasLayer: HTMLElement;
   private wins = new Map<string, Win>();
   private byKey = new Map<string, Win>();
   private kinds = new Map<WinKind, KindMount>();
@@ -241,14 +295,19 @@ export class WindowManager {
   private teles = new Map<string, number>();
   /** True while `restoreSession` is rebuilding: a reload is not a gesture. */
   private reviving = false;
+  /** See `stamp()`: one number that says "a window may have moved". */
+  private placeRev = 0;
 
   constructor(host: HTMLElement, ev: WmEvents) {
     this.ev = ev;
     this.layer = document.createElement('div');
     this.layer.className = 'wm';
+    this.canvasLayer = document.createElement('div');
+    this.canvasLayer.className = 'wm wm--canvas';
+    host.appendChild(this.canvasLayer);
     this.tether = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.tether.setAttribute('class', 'tether');
-    this.layer.appendChild(this.tether);
+    this.canvasLayer.appendChild(this.tether);
     host.appendChild(this.layer);
   }
 
@@ -258,8 +317,7 @@ export class WindowManager {
   open(spec: WinSpec): Win {
     const existing = this.byKey.get(spec.key);
     if (existing) {
-      if (existing.minimized) this.restore(existing);
-      this.focus(existing);
+      this.activate(existing);
       return existing;
     }
     const mount = this.kinds.get(spec.kind);
@@ -272,6 +330,8 @@ export class WindowManager {
     const body = el.querySelector<HTMLElement>('.win__body')!;
     const id = `w${(this.zTop++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
+    el.dataset.windowId = id;
+    if (spec.anchor) el.dataset.windowSource = spec.anchor;
     const w = spec.w ?? defaultSize(spec.kind).w;
     const h = spec.h ?? defaultSize(spec.kind).h;
     const win: Win = {
@@ -279,12 +339,18 @@ export class WindowManager {
       minimized: false, focused: false, stateVar: null,
       // An anchored window draws its pipe as it arrives; a docked one has none.
       anchorFill: spec.anchor && !REDUCE.value ? 0 : 1,
+      mode: OPEN_MODE, scale: 1,
       inst: undefined,
     };
     this.place(win);
-    this.layer.appendChild(el);
+    // Even a window that opens in front learns its place on the canvas now, so
+    // `CANVAS` later drops it beside its tile at reading scale instead of
+    // wherever the glass happened to hold it.
+    this.captureCanvas(win);
+    ((this.ev.plane && !MOBILE() && win.mode === 'canvas') ? this.canvasLayer : this.layer).appendChild(el);
     this.wins.set(id, win);
     this.byKey.set(spec.key, win);
+    this.reproject();
     this.wire(win);
 
     const ctx: WinCtx = {
@@ -435,10 +501,137 @@ export class WindowManager {
     for (const w of this.wins.values()) { w.focused = false; w.el.classList.remove('is-focus'); }
     win.focused = true;
     win.z = ++this.zTop;
-    win.el.style.zIndex = String(win.z);
+    win.el.style.zIndex = String(win.z + (win.mode !== 'canvas' ? 100000 : 0));
     win.el.classList.add('is-focus');
     this.ev.onFocus(win);
     this.emitStack();
+  }
+
+  private captureCanvas(win: Win) {
+    // Every window gets world coordinates, whatever mode it is wearing: they
+    // are what `CANVAS` returns to, and `reproject` needs them to tell a
+    // screen-fixed window from one that follows its tile.
+    const p = this.ev.plane?.();
+    if (!p || MOBILE()) return;
+    if (!win.canvas && win.spec.anchor) {
+      const r = this.ev.tileRect(win.spec.anchor);
+      const origin = this.ev.agentOrigin?.(win.spec.anchor) ?? (r
+        ? this.ev.unproject?.(r.x + r.w, r.y) ?? { x: (r.x + r.w - p.origin.x) / p.ppu, y: (p.origin.y - r.y) / p.ppu }
+        : null);
+      if (origin) {
+        win.canvas = { x: origin.x + 18 / AGENT_WINDOW_PPU, y: origin.y - 8 / AGENT_WINDOW_PPU, ppu: AGENT_WINDOW_PPU };
+        return;
+      }
+    }
+    win.canvas = { ...(this.ev.unproject?.(win.x, win.y) ?? { x: (win.x - p.origin.x) / p.ppu, y: (p.origin.y - win.y) / p.ppu }),
+      ppu: win.canvas?.ppu ?? p.ppu };
+  }
+
+  /** On the canvas and below reading scale: too small to read, only to move. */
+  private far(win: Win): boolean {
+    return !!this.ev.plane && !MOBILE() && win.mode === 'canvas' && win.scale < READING_SCALE;
+  }
+
+  private needsLocate(win: Win): boolean {
+    return !!this.ev.plane && !MOBILE() && win.mode === 'canvas' && !!win.canvas &&
+      (this.far(win) || win.x < 8 || win.y < 112 ||
+       win.x + win.w * win.scale > window.innerWidth - 8 ||
+       win.y + win.h * win.scale > window.innerHeight - DOCK_H);
+  }
+
+  /**
+   * Out of view: the housing does not touch the screen at all.
+   *
+   * Three different things get confused here, so they have three names.
+   * `far` is visible and too small to work in; `needsLocate` is visible but
+   * badly placed, and is what decides whether retrieving one flies the
+   * camera; this is the hard case — nothing on the glass, and the window's
+   * tile in the tray is the only evidence it exists. That is why the tray
+   * says it (`hud/tray.ts`) and why the minimap draws it (`hud/minimap.ts`).
+   */
+  offView(win: Win): boolean {
+    if (!this.ev.plane || MOBILE() || win.minimized || win.mode !== 'canvas') return false;
+    return outsideViewport({ x: win.x, y: win.y, w: win.w * win.scale, h: win.h * win.scale });
+  }
+
+  /**
+   * Where the canvas windows sit, in world units, for whoever draws the
+   * world. The minimap is the caller: a window sent out of view leaves no
+   * mark on the field itself, and the radar is where an operator looks to
+   * find out where something is.
+   */
+  seats(): Seat[] {
+    const out: Seat[] = [];
+    for (const w of this.wins.values()) {
+      if (w.minimized || w.mode !== 'canvas' || !w.canvas) continue;
+      out.push({ id: w.id, x: w.canvas.x, y: w.canvas.y,
+        w: w.w / w.canvas.ppu, h: w.h / w.canvas.ppu, focused: w.focused, off: this.offView(w) });
+    }
+    return out;
+  }
+
+  /**
+   * Bumped whenever a window's placement can have changed. A drawing that is
+   * not on the console's own redraw path — the minimap throttles itself on
+   * the camera and the world's revision — reads this to know it is stale.
+   */
+  stamp(): number { return this.placeRev; }
+
+  /** Retrieve in the existing mode; the camera travels to canvas windows. */
+  activate(win: Win) {
+    if (!this.wins.has(win.id)) return;
+    if (win.minimized) { this.restore(win); return; }
+    this.reproject(); this.focus(win);
+    if (this.needsLocate(win)) {
+      const p = win.canvas!;
+      this.ev.onLocateWindow?.({ minX: p.x, maxX: p.x + win.w / p.ppu,
+        minY: p.y - win.h / p.ppu, maxY: p.y });
+    }
+  }
+
+  /** A source tile opens, then closes its window on the next activation. */
+  toggleSource(key: string, open: () => void) {
+    const win = this.byKey.get(key);
+    if (!win) open();
+    else if (win.minimized) this.restore(win);
+    else this.close(win);
+  }
+
+  bringForward(win: Win) {
+    if (!this.wins.has(win.id)) return;
+    if (win.minimized) this.restore(win, false);
+    if (!this.ev.plane || MOBILE()) { this.focus(win); return; }
+    if (win.mode === 'canvas') {
+      win.mode = 'front'; win.scale = 1;
+      win.x = (window.innerWidth - win.w) / 2;
+      win.y = (window.innerHeight - DOCK_H - win.h) / 2;
+      this.clampToView(win);
+    }
+    this.apply(win); this.focus(win); this.persist();
+  }
+
+  returnToCanvas(win: Win) {
+    const hadFocus = win.focused;
+    // Where it is on the glass, read before the mode moves it: the housing
+    // lands on the canvas in the same frame, and the flight is drawn from
+    // here to there so the operator sees which way it went.
+    const from = win.el.getBoundingClientRect();
+    win.mode = 'canvas';
+    if (!win.canvas) this.captureCanvas(win);
+    win.focused = false; win.el.classList.remove('is-focus');
+    if (win.el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+    if (hadFocus) this.ev.onFocus(null);
+    this.reproject(); this.apply(win);
+    if (!MOBILE() && from.width && from.height) {
+      sendToCanvas(win.el, { x: from.left, y: from.top, w: from.width, h: from.height });
+    }
+    this.persist(); this.emitStack();
+  }
+
+  pinToScreen(win: Win) {
+    this.bringForward(win);
+    win.mode = win.mode === 'pinned' ? 'front' : 'pinned';
+    this.apply(win); this.persist(); this.emitStack();
   }
 
   focused(): Win | null { for (const w of this.wins.values()) if (w.focused && !w.minimized) return w; return null; }
@@ -482,32 +675,28 @@ export class WindowManager {
     this.persist();
     this.emitStack();
   }
-  restore(win: Win) {
+  restore(win: Win, locate = true) {
     getSound()?.play('unfold');
     // Read the tile before the stack moves it: it is where the window comes
     // from, and `focus` redraws the row underneath us.
     const from = this.trayRect(win);
     win.minimized = false;
     win.el.classList.remove('is-min');
-    this.focus(win);
-    if (!MOBILE()) unfoldFrom(win.el, from);
+    if (locate) this.activate(win); else this.focus(win);
+    if (!MOBILE() && win.mode !== 'canvas') unfoldFrom(win.el, from);
     this.persist();
   }
   trayList(): Win[] { return [...this.wins.values()].filter((w) => w.minimized); }
 
   /* ── One gesture, three answers ─────────────────────────────────── */
 
-  /**
-   * A window is a switch, and the tray tile, the mast button and `Enter` in
-   * tray mode are all the same switch: folded unfolds, open-but-behind comes
-   * forward, and the one already in front — the one you are looking at, with
-   * the keyboard — closes. Pressing the same thing twice puts it away.
-   */
+  /** Tray/mast: retrieve a distant or inactive window; minimize the visible active one. */
   toggleWindow(win: Win): void {
     if (!this.wins.has(win.id)) return;
+    this.reproject();
     if (win.minimized) this.restore(win);
-    else if (win.focused) this.close(win);
-    else this.focus(win);
+    else if (win.focused && !this.needsLocate(win)) this.minimize(win);
+    else this.activate(win);
   }
 
   /**
@@ -556,12 +745,12 @@ export class WindowManager {
     const next = this.wins.get(seq[(i + (dir > 0 ? 1 : seq.length - 1)) % seq.length]!);
     if (!next) return null;
     this.cycling = true;
-    try { this.focus(next); } finally { this.cycling = false; }
-    if (next.spec.anchor && this.offView(next.spec.anchor)) this.ev.onReveal?.(next.spec.anchor);
+    try { this.activate(next); } finally { this.cycling = false; }
+    if (!this.ev.plane && next.spec.anchor && this.offView(next.spec.anchor)) this.ev.onReveal?.(next.spec.anchor);
     return next;
   }
 
-  private emitStack() { this.ev.onStack?.(this.stack()); this.ev.onTray(this.trayList()); }
+  private emitStack() { this.placeRev++; this.ev.onStack?.(this.stack()); this.ev.onTray(this.trayList()); }
 
   /* ── Tray mode: the stack under the keyboard ────────────────────── */
 
@@ -648,17 +837,6 @@ export class WindowManager {
       case 'shift+`': case 'shift+~': case '~': this.syncCursor(this.cycle(-1)); return eat();
       case 'enter': {
         if (!win) { this.exitTrayMode(); return eat(); }
-        // The same switch the tile is: the one already in front closes, and
-        // there is nothing to leave the row for, so the row stays open.
-        if (!win.minimized && win.focused) {
-          const at = row.findIndex((w) => w.id === win.id);
-          this.close(win);
-          const left = this.trayRow();
-          if (!left.length) { this.exitTrayMode(); return eat(); }
-          this.cursor = left[Math.min(at, left.length - 1)]!.id;
-          this.emitStack();
-          return eat();
-        }
         this.toggleWindow(win);
         this.exitTrayMode();
         return eat();
@@ -739,7 +917,7 @@ export class WindowManager {
     }
 
     switch (tok) {
-      case 'escape': e.preventDefault(); this.close(win); return true;
+      case 'escape': e.preventDefault(); if (win.mode === 'front') this.returnToCanvas(win); else this.close(win); return true;
       case '-': case 'shift+_': case '_': e.preventDefault(); this.minimize(win); return true;
       case 'v':
         if (win.spec.anchor) { e.preventDefault(); this.ev.onReveal?.(win.spec.anchor); return true; }
@@ -801,8 +979,39 @@ export class WindowManager {
   /** Called every frame: anchored windows follow their tiles. */
   reproject() {
     let paths = '';
+    // A window crossing the edge of the screen is news for the tray, and it
+    // happens under a camera that moves, not under a click. Only the crossing
+    // is reported: this runs every frame.
+    let crossed = false;
     for (const win of this.wins.values()) {
-      if (win.minimized || MOBILE()) continue;
+      if (win.minimized) continue;
+      if (this.ev.plane && !win.canvas && !MOBILE()) this.captureCanvas(win);
+      if (this.ev.plane && win.canvas) {
+        if (win.mode === 'canvas' && !MOBILE()) {
+          const p = this.ev.plane();
+          const at = this.ev.project?.(win.canvas.x, win.canvas.y) ?? { x: p.origin.x + win.canvas.x * p.ppu, y: p.origin.y - win.canvas.y * p.ppu };
+          win.x = at.x; win.y = at.y;
+          win.scale = p.ppu / win.canvas.ppu;
+        } else { win.scale = 1; if (!MOBILE()) this.clampToView(win); }
+        this.apply(win);
+        const away = this.offView(win);
+        if (away !== (win.away ?? false)) { win.away = away; crossed = true; }
+        // The pipe belongs to the pair, not to the mode: a window in front is
+        // still that agent's window, and the line is how the operator reads
+        // whose. It runs from the tile to the housing's edge in screen space,
+        // so it works the same whether the housing moves with the camera or
+        // stays on the glass. A tile that has left the screen still gets its
+        // line: the window is on the canvas because the operator put it there,
+        // and the pipe running off the edge is what says where it came from
+        // once the zoom or a pan has lost the tile. Only a tile behind the
+        // camera has no line — its projection is a mirror, not a place.
+        if (win.spec.anchor) {
+          const r = this.ev.tileRect(win.spec.anchor);
+          if (r && r.ahead !== false) paths += this.tetherPath(win, r);
+        }
+        continue;
+      }
+      if (MOBILE()) continue;
       if (!win.spec.anchor) continue;
       const r = this.ev.tileRect(win.spec.anchor);
       if (!r) { this.showOff(win, null); continue; }
@@ -844,9 +1053,9 @@ export class WindowManager {
   private tetherPath(win: Win, r: { x: number; y: number; w: number; h: number }): string {
     const fill = Math.max(0, Math.min(1, win.anchorFill));
     if (fill <= 0.001) return '';
-    const left = win.x + win.w / 2 < r.x + r.w / 2;
+    const left = win.x + win.w * win.scale / 2 < r.x + r.w / 2;
     const x0 = left ? r.x : r.x + r.w, y0 = r.y + r.h / 2;
-    const x1 = left ? win.x + win.w : win.x, y1 = win.y + 15;
+    const x1 = left ? win.x + win.w * win.scale : win.x, y1 = win.y + 15 * win.scale;
     const mx = (x0 + x1) / 2;
     const pts = cutPolyline([[x0, y0], [mx, y0], [mx, y1], [x1, y1]], fill);
     const cls = win.el.classList.contains('is-blocked') ? 'is-blocked' : '';
@@ -889,12 +1098,12 @@ export class WindowManager {
     try {
       const raw = localStorage.getItem(KEY);
       if (!raw) return;
-      const list = JSON.parse(raw) as Array<{ spec: WinSpec; x: number; y: number; w: number; h: number; minimized: boolean }>;
+      const list = JSON.parse(raw) as Array<{ spec: WinSpec; x: number; y: number; w: number; h: number; minimized: boolean; canvas?: Win['canvas']; mode?: Win['mode'] }>;
       for (const s of list) {
         if (!s?.spec?.kind || s.spec.anchor) continue;
         open({ ...s.spec, at: undefined, w: s.w, h: s.h });
         const w = this.byKey.get(s.spec.key);
-        if (w) { w.x = s.x; w.y = s.y; this.apply(w); if (s.minimized) this.minimize(w); }
+        if (w) { w.x = s.x; w.y = s.y; w.canvas = s.canvas ?? w.canvas; w.mode = s.mode ?? OPEN_MODE; this.reproject(); this.apply(w); if (s.minimized) this.minimize(w); }
       }
     } catch { /* corrupt or private: start clean */ } finally { this.reviving = false; }
   }
@@ -907,10 +1116,11 @@ export class WindowManager {
     if (win.spec.anchor) {
       const r = this.ev.tileRect(win.spec.anchor);
       if (r) {
-        // Open on whichever side of the tile has room; the tether adapts.
-        if (r.x + r.w + 18 + win.w > vw - 8 && r.x - 18 - win.w > 8) win.ax = -win.w - 18;
-        if (r.y + win.h > vh - 64) win.ay = Math.max(-r.y + 44, vh - 64 - win.h - r.y);
-        win.x = r.x + r.w + win.ax; win.y = Math.min(r.y + win.ay, window.innerHeight - win.h - DOCK_H);
+        const to = this.beside(win, r);
+        win.x = to.x; win.y = to.y;
+        // The offsets the tile-following path reads, so a housing placed here
+        // keeps the side it was given when the camera moves the tile.
+        win.ax = win.x - (r.x + r.w); win.ay = win.y - r.y;
       } else { win.x = vw / 2 - win.w / 2; win.y = vh / 2 - win.h / 2; }
     } else if (at) {
       win.x = at.x + 14; win.y = at.y - 20;
@@ -925,19 +1135,86 @@ export class WindowManager {
     this.apply(win);
   }
 
+  /**
+   * Where a window opens next to its tile: the first side with room, tried
+   * right, left, below, above, and the roomiest of the four when none has
+   * enough. Landing on top of its own tile is not just untidy — the tile is
+   * the switch that closes the window again, and a covered switch cannot be
+   * pressed. It used to be enough to try right and then left, back when a
+   * housing arrived at the camera's scale and was too small to cover anything.
+   */
+  private beside(win: Win, r: { x: number; y: number; w: number; h: number }): { x: number; y: number } {
+    const gap = 18;
+    const vw = window.innerWidth;
+    const top = this.ev.plane ? 112 : 44, bottom = window.innerHeight - DOCK_H;
+    const alignY = Math.max(top, Math.min(bottom - win.h, r.y - 8));
+    const alignX = Math.max(8, Math.min(vw - win.w - 8, r.x));
+    const sides = [
+      { x: r.x + r.w + gap, y: alignY, free: vw - 8 - (r.x + r.w + gap), need: win.w },
+      { x: r.x - gap - win.w, y: alignY, free: (r.x - gap) - 8, need: win.w },
+      { x: alignX, y: r.y + r.h + gap, free: bottom - (r.y + r.h + gap), need: win.h },
+      { x: alignX, y: r.y - gap - win.h, free: (r.y - gap) - top, need: win.h },
+    ];
+    // Nowhere fits: take the side that gives the most and let the clamp do the
+    // rest. Some of the tile will go under the housing, and that is the least
+    // bad answer a viewport this small has.
+    const pick = sides.find((s) => s.free >= s.need) ?? sides.reduce((a, b) => (b.free > a.free ? b : a));
+    return {
+      x: Math.max(8, Math.min(vw - win.w - 8, pick.x)),
+      y: Math.max(top, Math.min(bottom - win.h, pick.y)),
+    };
+  }
+
   private clampToView(win: Win) {
     const vw = window.innerWidth, vh = window.innerHeight;
+    const top = this.ev.plane ? 112 : 44;
     win.w = Math.min(win.w, vw - 16);
-    win.h = Math.min(win.h, vh - 44 - DOCK_H);
+    win.h = Math.min(win.h, Math.max(120, vh - top - DOCK_H));
     win.x = Math.max(8, Math.min(vw - win.w - 8, win.x));
-    win.y = Math.max(44, Math.min(vh - win.h - DOCK_H, win.y));
+    win.y = Math.max(top, Math.min(vh - win.h - DOCK_H, win.y));
   }
 
   /** Position lives in left/top so GSAP can own `transform` for arrivals. */
   private apply(win: Win) {
     // The one place a position is written, so the dock band is honoured by
     // every path: docked, dragged, anchored, clamped to an edge.
-    if (!MOBILE()) win.y = Math.max(44, Math.min(window.innerHeight - win.h - DOCK_H, win.y));
+    if (!MOBILE() && !(this.ev.plane && win.mode === 'canvas')) win.y = Math.max(44, Math.min(window.innerHeight - win.h - DOCK_H, win.y));
+    const spatial = !!this.ev.plane && !MOBILE();
+    const parent = spatial && win.mode === 'canvas' ? this.canvasLayer : this.layer;
+    if (win.el.isConnected && win.el.parentElement !== parent) {
+      // Atomic moves preserve iframe documents, terminal state and selection.
+      const target = parent as HTMLElement & { moveBefore?: (node: Node, child: Node | null) => void };
+      if (target.moveBefore) target.moveBefore(win.el, null);
+      // Older engines retain their original layer rather than reload embedded work.
+    }
+    win.el.style.setProperty('--canvas-scale', String(win.scale));
+    // A canvas window is the window, at the camera's scale, at every distance.
+    // There is no far rendering — no card, no fade, no threshold: what you see
+    // from afar is the housing small, and zooming in makes it bigger. The tray
+    // owns finding one.
+    win.el.style.scale = spatial ? String(win.scale) : '';
+    win.el.style.transformOrigin = 'top left';
+    win.el.classList.toggle('is-canvas', spatial && win.mode === 'canvas');
+    // Too small to work in: the body stops taking the pointer, so a press
+    // anywhere on the housing is the drag. See `READING_SCALE`.
+    win.el.classList.toggle('is-far', this.far(win));
+    win.el.style.zIndex = String(win.z + (win.mode !== 'canvas' ? 100000 : 0));
+    const front = win.el.querySelector<HTMLButtonElement>('[data-w-front]');
+    if (front) {
+      front.hidden = !spatial;
+      front.textContent = win.mode === 'canvas' ? 'FRONT' : 'CANVAS';
+      front.title = win.mode === 'canvas' ? 'Bring to front' : 'Return to canvas';
+      front.setAttribute('aria-label', front.title);
+    }
+    const pinButton = win.el.querySelector<HTMLButtonElement>('[data-w-pin]');
+    if (pinButton && !spatial && this.ev.plane) pinButton.hidden = true;
+    if (pinButton && spatial) {
+      pinButton.hidden = win.mode === 'canvas';
+      pinButton.classList.toggle('is-on', win.mode === 'pinned');
+      pinButton.title = win.mode === 'pinned' ? 'Unfix from screen' : 'Fix to screen';
+      pinButton.setAttribute('aria-label', pinButton.title);
+      pinButton.setAttribute('aria-pressed', String(win.mode === 'pinned'));
+    }
     win.el.style.left = `${Math.round(win.x)}px`;
     win.el.style.top = `${Math.round(win.y)}px`;
     win.el.style.width = `${Math.round(win.w)}px`;
@@ -954,6 +1231,15 @@ export class WindowManager {
     const ox = from ? from.x - win.x : win.w * 0.1;
     const oy = from ? from.y - win.y : win.h * 0.1;
     gsap.killTweensOf(win.el);
+    // A housing still in flight is not a target yet. It starts a third of the
+    // way toward the point that opened it, which at reading size can be over
+    // the tile that opened it — and the tile is the switch that closes the
+    // window again. A double click on a tile has to reach the tile twice.
+    // The timer, not the tween's `onComplete`: a fold or a close in the first
+    // frames kills the arrival, and a housing left unclickable forever is a
+    // far worse bug than one that eats a click it should not have had.
+    win.el.style.pointerEvents = 'none';
+    window.setTimeout(() => { if (this.wins.has(win.id)) win.el.style.pointerEvents = ''; }, dur(T.quick) * 1000);
     gsap.fromTo(win.el,
       { scale: 0.86, x: ox * 0.3, y: oy * 0.3 },
       { scale: 1, x: 0, y: 0, duration: dur(T.quick), ease: EASE.arrive, clearProps: 'transform' });
@@ -967,6 +1253,9 @@ export class WindowManager {
     el.addEventListener('pointerdown', () => { if (!win.focused) this.focus(win); }, { capture: true });
     // The chrome's own menu. Text fields and embedded pages keep the browser's;
     // a row inside the body that has its own menu stops the event before here.
+    // Con el dedo, la barra de título: mantenerla pulsada abre el mismo menú.
+    // Sólo la barra — en el cuerpo hay texto que se selecciona con ese gesto.
+    longPress(head);
     el.addEventListener('contextmenu', (e) => {
       const t = e.target as HTMLElement | null;
       if (t?.closest?.('input, textarea, select, iframe, [contenteditable], a[href], pre')) return;
@@ -976,10 +1265,15 @@ export class WindowManager {
 
     el.querySelector('[data-w-close]')!.addEventListener('click', () => this.close(win));
     el.querySelector('[data-w-min]')!.addEventListener('click', () => this.minimize(win));
+    el.addEventListener('wheel', e => {
+      if (win.mode === 'canvas' && (e.ctrlKey || e.metaKey) && this.ev.onZoom) { e.preventDefault(); this.ev.onZoom(e); }
+    }, { passive: false });
+    el.querySelector('[data-w-front]')!.addEventListener('click', () => win.mode === 'canvas' ? this.bringForward(win) : this.returnToCanvas(win));
     const pin = el.querySelector<HTMLElement>('[data-w-pin]');
     if (pin) {
       pin.classList.toggle('is-on', !!win.spec.anchor);
       pin.addEventListener('click', () => {
+        if (this.ev.plane && !MOBILE()) { this.pinToScreen(win); return; }
         // Toggle between following the tile and staying on the glass.
         // The button cuts to lime; the pipe is what eases. Unpinning drains it
         // before the anchor goes, so the last frame of the pipe is the tile.
@@ -1006,32 +1300,46 @@ export class WindowManager {
       });
     }
 
-    // Drag by the header.
+    // Drag by the header — or, from far enough that the window is a stamp,
+    // by any part of the housing: too small to read, it is only something to
+    // move, and a press-and-drag on it should not have to find the title bar.
+    // `is-far` takes the pointer away from the body so the press lands here.
     let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
-    head.addEventListener('pointerdown', (e) => {
-      if ((e.target as HTMLElement).closest('button')) return;
+    el.addEventListener('pointerdown', (e) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('button, .win__grip, .win__off')) return;
+      if (!t.closest('.win__head') && !this.far(win)) return;
       if (MOBILE()) return;
       dragging = true;
-      head.setPointerCapture(e.pointerId);
+      el.setPointerCapture(e.pointerId);
       sx = e.clientX; sy = e.clientY; ox = win.x; oy = win.y;
     });
-    head.addEventListener('pointermove', (e) => {
+    el.addEventListener('pointermove', (e) => {
       if (!dragging) return;
       win.x = ox + (e.clientX - sx); win.y = oy + (e.clientY - sy);
-      if (win.spec.anchor) {
+      if (win.spec.anchor && !this.ev.plane) {
         const r = this.ev.tileRect(win.spec.anchor);
         if (r) { win.ax = win.x - (r.x + r.w); win.ay = win.y - r.y; }
       }
-      this.apply(win);
+      this.captureCanvas(win); this.apply(win);
     });
     const endDrag = (e: PointerEvent) => {
       if (!dragging) return;
       dragging = false;
-      head.releasePointerCapture(e.pointerId);
-      this.clampToView(win); this.apply(win); this.persist();
+      el.releasePointerCapture(e.pointerId);
+      // A press on the header that did not move is a click, and a click on a
+      // canvas window's title means "this one, in front of everything": the
+      // same as its FRONT button. At reading scale a click used to raise it
+      // only among the canvas windows, under whatever was in front. A drag
+      // still arranges. From afar a still press is nothing: the tray, or the
+      // zoom, is how a stamp comes up to reading size.
+      const moved = Math.hypot(e.clientX - sx, e.clientY - sy) > 4;
+      if (!moved && win.mode === 'canvas' && this.ev.plane && !this.far(win)) { this.bringForward(win); return; }
+      if (!this.ev.plane || win.mode !== 'canvas') this.clampToView(win);
+      this.captureCanvas(win); this.apply(win); this.persist();
     };
-    head.addEventListener('pointerup', endDrag);
-    head.addEventListener('pointercancel', endDrag);
+    el.addEventListener('pointerup', endDrag);
+    el.addEventListener('pointercancel', endDrag);
     // No dblclick-to-fold: a window arrives under the cursor that opened it,
     // and the second click of a double-click would fold what the first opened.
 
@@ -1043,8 +1351,8 @@ export class WindowManager {
     });
     grip.addEventListener('pointermove', (e) => {
       if (!rs) return;
-      win.w = Math.max(240, rw + (e.clientX - sx));
-      win.h = Math.max(120, rh + (e.clientY - sy));
+      win.w = Math.max(240, rw + (e.clientX - sx) / win.scale);
+      win.h = Math.max(120, rh + (e.clientY - sy) / win.scale);
       this.apply(win);
     });
     const endRs = (e: PointerEvent) => { if (!rs) return; rs = false; grip.releasePointerCapture(e.pointerId); this.persist(); };
@@ -1071,12 +1379,13 @@ export class WindowManager {
 
   private persistTimer = 0;
   private persist() {
+    this.placeRev++;
     clearTimeout(this.persistTimer);
     this.persistTimer = window.setTimeout(() => {
       try {
         const list = [...this.wins.values()]
           .filter((w) => !w.spec.anchor && !w.spec.ephemeral)
-          .map((w) => ({ spec: { ...w.spec, at: undefined }, x: w.x, y: w.y, w: w.w, h: w.h, minimized: w.minimized }));
+          .map((w) => ({ spec: { ...w.spec, at: undefined }, x: w.x, y: w.y, w: w.w, h: w.h, minimized: w.minimized, canvas: w.canvas, mode: w.mode }));
         localStorage.setItem(KEY, JSON.stringify(list));
       } catch { /* nothing worth breaking over */ }
     }, 250);
@@ -1279,20 +1588,23 @@ function defaultSize(kind: WinKind): { w: number; h: number } {
     // Tall and narrow: it is a column of rows read top to bottom, one machine
     // after another, and every row is a label and a number.
     case 'hygiene': return { w: 460, h: 620 };
+    // Una misión: ancho para que una línea de resultado no se parta cada tres
+    // palabras, y alto porque debajo va la línea al líder.
+    case 'mission': return { w: 560, h: 640 };
   }
 }
 
 function chrome(spec: WinSpec): string {
   const cs = spec.callsign ? `<span class="win__cs">${esc(spec.callsign)}</span>` : `<span class="win__kind">${esc(spec.kind)}</span>`;
   const pj = spec.project ? `<span class="win__pj">${esc(spec.project)}</span>` : '';
-  const pinnable = spec.kind === 'agent' || spec.kind === 'interrupt' || spec.kind === 'artifact' || spec.kind === 'terminal';
   return `
     <i class="win__xh win__xh--tl"></i>
     <header class="win__head">
       <div class="win__id">${cs}${pj}</div>
       <div class="win__title">${esc(spec.title ?? '')}</div>
       <div class="win__ctl">
-        ${pinnable ? `<button class="win__btn" type="button" data-w-pin title="Follow the agent">PIN</button>` : ''}
+        <button class="win__btn" type="button" data-w-front hidden>FRONT</button>
+        <button class="win__btn" type="button" data-w-pin title="Follow the agent">PIN</button>
         <button class="win__btn" type="button" data-w-min title="Fold into the tray">—</button>
         <button class="win__btn win__btn--x" type="button" data-w-close title="Close">×</button>
       </div>

@@ -42,6 +42,7 @@
  */
 
 import gsap from 'gsap';
+import { markSVG } from './gfx/marks.ts';
 import { EASE, REDUCE, T, dur } from './motion.ts';
 
 /* ── pick ───────────────────────────────────────────────────────────── */
@@ -55,6 +56,15 @@ export interface PickOption {
   hint?: string;
   /** Listed, readable, unselectable. The console never hides what it cannot do. */
   disabled?: boolean;
+  /**
+   * Quién firma esta opción (`gfx/marks.ts`): `claude`, `openai`.
+   *
+   * Se dibuja en la CABECERA DE GRUPO, no en cada fila. En una lista agrupada
+   * por proveedor la fila ya está bajo su bloque: repetir la marca en las diez
+   * filas del bloque no añade nada y convierte una lista en un tapiz. Una
+   * opción sin `mark`, o sin `group`, no pinta nada y queda como estaba.
+   */
+  mark?: string;
 }
 
 export interface PickOpts {
@@ -82,6 +92,33 @@ export interface PickHandle {
 /** How far the menu may grow before it scrolls, and its gap to the button. */
 const MENU_MAX = 240;
 const MENU_GAP = 4;
+
+/**
+ * ¿Este selector se abre como DIÁLOGO en vez de como desplegable?
+ *
+ * Un menú anclado al botón funciona con un ratón: cae justo debajo, se apunta
+ * y se suelta. Con el pulgar no: en un teléfono el botón suele estar arriba,
+ * el menú cae hacia el borde o se voltea hacia arriba, las filas miden 25px y
+ * la lista larga se scrollea a ciegas entre el dedo y lo que tapa la mano.
+ *
+ * El mismo `pick` se abre entonces centrado, con su cabecera, su lista
+ * scrollable y su cierre a la vista. No es otro componente: es el mismo, con
+ * otra caja, así que todo lo que ya usa `pick` —MORE de misiones terminadas,
+ * los modelos de CAPCOM, proyecto/modelo/runtime/permiso de un spawn, las
+ * fuentes de ajustes, los presets de SFX— lo hereda sin tocar una línea.
+ *
+ * El criterio mira el DEDO y las DOS medidas, no sólo el ancho. Un teléfono
+ * girado tiene 844px de ancho y 390 de alto: por ancho parecía un escritorio y
+ * se quedaba con el desplegable, que es justo donde peor cae —un menú de 240px
+ * en una pantalla de 390 de alto no tiene sitio ni arriba ni abajo. Con puntero
+ * grueso basta que una de las dos medidas sea pequeña. Y se conserva el corte
+ * por ancho a secas para una ventana de escritorio encogida, donde el menú
+ * tampoco cabe.
+ */
+export const touchDialog = (): boolean => matchMedia('(max-width: 720px)').matches
+  || (matchMedia('(pointer: coarse)').matches
+    && matchMedia('(max-width: 900px), (max-height: 560px)').matches);
+const DIALOG = touchDialog;
 /** A type-ahead buffer this old is a new word. */
 const TYPE_RESET = 700;
 
@@ -134,6 +171,25 @@ export function pick(opts: PickOpts): PickHandle {
   menu.setAttribute('role', 'listbox');
   menu.hidden = true;
 
+  /*
+   * La cabecera existe siempre y sólo se ve en diálogo: qué se está eligiendo
+   * y una salida a la vista. Un menú modal sin cierre visible obliga a adivinar
+   * que tocar fuera vale, y con el pulgar «fuera» es un sitio pequeño.
+   */
+  const head = document.createElement('div');
+  head.className = 'pick__head';
+  head.hidden = true;
+  const headName = document.createElement('span');
+  headName.className = 'px pick__headt';
+  const headX = document.createElement('button');
+  headX.type = 'button';
+  headX.className = 'pick__x';
+  headX.setAttribute('aria-label', 'close');
+  headX.textContent = '×';
+  headX.addEventListener('click', () => { close(); returnTo?.focus(); });
+  head.append(headName, headX);
+  menu.appendChild(head);
+
   let search: HTMLInputElement | null = null;
   if (opts.search) {
     search = document.createElement('input');
@@ -149,6 +205,12 @@ export function pick(opts: PickOpts): PickHandle {
   menu.appendChild(list);
 
   let open = false;
+  /** Abierto como diálogo centrado (móvil) en vez de como desplegable. */
+  let dialog = false;
+  /** El fondo del diálogo: cierra al tocarlo y se come el gesto que llegaría al campo. */
+  let scrim: HTMLElement | null = null;
+  /** Adónde vuelve el foco al cerrar. */
+  let returnTo: HTMLElement | null = null;
   let active = 0;
   let shown: PickOption[] = options;
   let typed = '';
@@ -175,7 +237,14 @@ export function pick(opts: PickOpts): PickHandle {
     let lastGroup: string | undefined;
     rows = shown.map((o, i) => {
       if (o.group && o.group !== lastGroup) {
-        const group = document.createElement('div'); group.className = 'pick__group px'; group.setAttribute('role', 'presentation'); group.textContent = o.group; list.appendChild(group); lastGroup = o.group;
+        const group = document.createElement('div'); group.className = 'pick__group px'; group.setAttribute('role', 'presentation');
+        // La marca primero y el nombre después, y el nombre SIGUE SIENDO texto:
+        // el filtrado, el salto por letra y el lector de pantalla leen el
+        // grupo por su nombre, no por su dibujo.
+        const gmark = markSVG(o.mark);
+        if (gmark) { group.insertAdjacentHTML('beforeend', gmark); group.classList.add('has-mark'); }
+        group.insertAdjacentText('beforeend', o.group);
+        list.appendChild(group); lastGroup = o.group;
       }
       const row = document.createElement('div');
       row.className = 'pick__item';
@@ -195,8 +264,13 @@ export function pick(opts: PickOpts): PickHandle {
       s.className = 'mono';
       s.textContent = o.hint ?? '';
       row.append(b, s);
-      // mousedown, not click: the button must not lose focus before we commit.
-      row.addEventListener('mousedown', (e) => {
+      /*
+       * Con ratón, `mousedown`: el botón no puede perder el foco antes de que
+       * confirmemos. Con el dedo, `click`: `mousedown` llega emulado y tarde,
+       * y en un diálogo el foco no está en el botón, así que no hay nada que
+       * proteger. Uno u otro, nunca los dos, o se elegiría dos veces.
+       */
+      row.addEventListener(dialog ? 'click' : 'mousedown', (e) => {
         e.preventDefault();
         if (o.disabled) return;
         choose(o, row);
@@ -275,6 +349,8 @@ export function pick(opts: PickOpts): PickHandle {
   function openMenu() {
     if (open || !options.length) return;
     open = true;
+    dialog = DIALOG();
+    returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : btn;
     btn.setAttribute('aria-expanded', 'true');
     el.classList.add('is-open');
     shown = options;
@@ -283,19 +359,49 @@ export function pick(opts: PickOpts): PickHandle {
     if (search) search.value = '';
     cascade = true;
     paintList();
+    menu.classList.toggle('is-dialog', dialog);
+    if (dialog) {
+      // Un diálogo se anuncia como tal, y con el nombre del campo: quien lo
+      // oye tiene que saber qué está eligiendo, no sólo que hay una lista.
+      menu.setAttribute('role', 'dialog');
+      menu.setAttribute('aria-modal', 'true');
+      menu.setAttribute('aria-label', opts.name);
+      list.setAttribute('role', 'listbox');
+      list.setAttribute('aria-label', opts.name);
+      head.hidden = false;
+      headName.textContent = opts.placeholder ?? opts.name;
+      scrim = document.createElement('div');
+      scrim.className = 'pick__scrim';
+      // El fondo se come el gesto: sin esto, arrastrar sobre él pana el campo
+      // que hay debajo mientras se está eligiendo.
+      scrim.addEventListener('pointerdown', (e) => { e.preventDefault(); close(); returnTo?.focus(); });
+      document.body.appendChild(scrim);
+      document.body.classList.add('has-pick');
+    } else {
+      menu.setAttribute('role', 'listbox');
+      menu.removeAttribute('aria-modal');
+      menu.removeAttribute('aria-label');
+      list.removeAttribute('role');
+      list.removeAttribute('aria-label');
+      head.hidden = true;
+    }
     document.body.appendChild(menu);
     menu.hidden = false;
-    const up = place();
+    const up = dialog ? false : place();
+    if (dialog) { menu.style.left = ''; menu.style.top = ''; menu.style.bottom = ''; menu.style.width = ''; }
     paintActive();
     // Arrival, the console's: it grows into place and does not fade in.
     gsap.fromTo(menu,
       { scale: 0.96 },
-      { scale: 1, duration: dur(T.snap), ease: EASE.arrive, transformOrigin: up ? 'left bottom' : 'left top' });
+      { scale: 1, duration: dur(T.snap), ease: EASE.arrive, transformOrigin: dialog ? 'center center' : up ? 'left bottom' : 'left top' });
     document.addEventListener('pointerdown', onOutside, true);
     document.addEventListener('focusin', onOutside, true);
     window.addEventListener('resize', close);
     window.addEventListener('wheel', onWheel, { passive: true });
+    // El foco entra en el diálogo: en el filtro si lo hay, y si no en la lista,
+    // que es lo que hace que Escape y las flechas lleguen aquí y no al campo.
     if (search) search.focus();
+    else if (dialog) { list.tabIndex = -1; list.focus(); }
   }
 
   function close() {
@@ -308,6 +414,10 @@ export function pick(opts: PickOpts): PickHandle {
     gsap.killTweensOf(menu);
     menu.hidden = true;
     menu.remove();
+    scrim?.remove();
+    scrim = null;
+    document.body.classList.remove('has-pick');
+    dialog = false;
     typed = '';
     document.removeEventListener('pointerdown', onOutside, true);
     document.removeEventListener('focusin', onOutside, true);

@@ -14,8 +14,8 @@
  *  - `[ESCALATION <id>] K9 asks: …` — the hub relaying an agent's question,
  *    a `fleet` group: it is context for what CAPCOM does next, not a line
  *    the operator wrote
- *  - `[ORCA TASK <id>] …` — a task conversation's prompt, a `task` group with
- *    the task id on it, so the GENERAL view can point at the task instead of
+ *  - `[ORCA MISSION <id>] …` — a mission conversation's prompt, a `mission` group
+ *    with the mission id on it, so the GENERAL view can point at the mission instead of
  *    repeating a wall of context that lives there already
  *  - `You are online. …` — the collector's launch brief, a `system` group:
  *    ORCA talking, not the operator
@@ -24,7 +24,7 @@
 import type { TalkItem } from '../../shared/types.ts';
 import { ESCALATION_PREFIX } from '../../shared/capcom.ts';
 
-export type TalkRole = 'human' | 'capcom' | 'fleet' | 'task' | 'system';
+export type TalkRole = 'human' | 'capcom' | 'fleet' | 'mission' | 'system';
 
 /** One step CAPCOM took inside a reply: a thought, or a tool call with its result. */
 export interface TalkStep {
@@ -48,10 +48,10 @@ export interface TalkGroup {
   id: string;
   role: TalkRole;
   at: number;
-  /** For `human`, `fleet` and `task`: the prompt itself. */
+  /** For `human`, `fleet` and `mission`: the prompt itself. */
   text: string;
-  /** For `task`: the id inside the `[ORCA TASK …]` prefix. */
-  taskId?: string;
+  /** For `mission`: the id inside the `[ORCA MISSION …]` prefix. */
+  missionId?: string;
   /** For `fleet`: the escalation id inside the prefix. */
   escalationId?: string;
   /** For `capcom`: the reply, in reading order. */
@@ -60,16 +60,21 @@ export interface TalkGroup {
 
 import { HANDOFF_NOTICE_PREFIX } from '../../shared/handoff.ts';
 
-const TASK_RE = /^\s*\[ORCA TASK\s+([^\]\s]+)\]\s*/;
+/**
+ * `TASK` sigue aceptado: los transcripts de CAPCOM anteriores al renombrado
+ * llevan ese prefijo y se siguen leyendo desde disco. Lo que se escribe hoy es
+ * `MISSION` (ver shared/missions.ts).
+ */
+const MISSION_RE = /^\s*\[ORCA (?:MISSION|TASK)\s+([^\]\s]+)\]\s*/;
 /** The first line the collector types into a fresh CAPCOM (collector/capcom.ts). */
 const BRIEF_RE = /^\s*You are online\b/;
 const ESC_RE = new RegExp(`^\\s*\\[${ESCALATION_PREFIX}\\s+([^\\]\\s]+)\\]\\s*`);
 
 /** What a prompt is, from the way the hub wrapped it. */
-export function classifyPrompt(text: string): { role: TalkRole; taskId?: string; escalationId?: string; text: string } {
+export function classifyPrompt(text: string): { role: TalkRole; missionId?: string; escalationId?: string; text: string } {
   if (text.trimStart().startsWith(HANDOFF_NOTICE_PREFIX)) return { role: 'system', text: text.trimStart().slice(HANDOFF_NOTICE_PREFIX.length).trimStart() };
-  const task = TASK_RE.exec(text);
-  if (task) return { role: 'task', taskId: task[1]!, text: text.slice(task[0].length) };
+  const mission = MISSION_RE.exec(text);
+  if (mission) return { role: 'mission', missionId: mission[1]!, text: text.slice(mission[0].length) };
   const esc = ESC_RE.exec(text);
   if (esc) return { role: 'fleet', escalationId: esc[1]!, text: text.slice(esc[0].length) };
   if (BRIEF_RE.test(text)) return { role: 'system', text };
@@ -100,7 +105,7 @@ export function foldTalk(items: readonly TalkItem[]): TalkGroup[] {
         open = null;
         const c = classifyPrompt(it.text);
         const g: TalkGroup = { id: it.id, role: c.role, at: it.at, text: c.text, parts: [] };
-        if (c.taskId) g.taskId = c.taskId;
+        if (c.missionId) g.missionId = c.missionId;
         if (c.escalationId) g.escalationId = c.escalationId;
         groups.push(g);
         break;
@@ -156,4 +161,38 @@ export function toolLabel(name: string): string {
 export function stepLabel(step: TalkStep): string {
   if (step.kind === 'thinking') return step.text ? 'thought' : 'thinking';
   return step.tool ? toolLabel(step.tool) : 'tool';
+}
+
+/**
+ * Los ecos que todavía dicen algo: ni confirmados por el transcript, ni
+ * adelantados por uno que sí lo está.
+ *
+ * `echoLanded` compara texto, y el texto a veces no vuelve igual —el hub
+ * envuelve algunos prompts, el CLI junta lo que tenía en cola— así que un eco
+ * puede quedarse encendido para siempre. La segunda regla lo cierra sin
+ * adivinar: la entrada del CLI es una fila, y si algo que dijiste *después*
+ * ya está en el transcript, lo de antes ya pasó por ahí. Lo que no vale es
+ * mirar cualquier prompt más nuevo: un mensaje tuyo en cola se escribe cuando
+ * le toca, y borrar su eco por un prompt ajeno lo haría desaparecer de la
+ * pantalla justo mientras espera.
+ */
+export function pendingEchoes<T extends { at: number }>(echoes: readonly T[], landed: (echo: T) => boolean): T[] {
+  const marks = echoes.map((echo) => ({ echo, landed: landed(echo) }));
+  let last = -Infinity;
+  for (const m of marks) if (m.landed && m.echo.at > last) last = m.echo.at;
+  return marks.filter((m) => !m.landed && m.echo.at > last).map((m) => m.echo);
+}
+
+/**
+ * Un renglón del hilo, listo para pintar y con su hora encima.
+ *
+ * El transcript y los ecos locales son dos fuentes de la misma conversación, y
+ * hasta ahora se pintaban una detrás de otra: los grupos, y luego todos los
+ * ecos al final. Un eco que tardaba en confirmarse aparecía debajo de lo que ya
+ * había respondido CAPCOM —tu línea de hace cinco minutos, la última de la
+ * ventana—. Ordenar por hora los devuelve a su sitio; el empate deja el eco
+ * junto al grupo que lo confirmará, porque el orden estable respeta el de entrada.
+ */
+export function timeOrdered(rows: readonly { at: number; html: string }[]): string {
+  return rows.slice().sort((a, b) => a.at - b.at).map((r) => r.html).join('');
 }

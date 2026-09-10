@@ -49,6 +49,7 @@ const WHAT: Record<SoundName, string> = {
   link: 'THE LINK CAME BACK',
   artifact: 'AN ARTIFACT ARRIVED',
   placed: 'AN ARTIFACT WENT ON THE FIELD',
+  'capcom.thinking': 'CAPCOM TOOK YOUR LINE',
 
   'open.agent': 'AN AGENT WINDOW',
   'open.interrupt': 'A QUESTION OPENED ITSELF',

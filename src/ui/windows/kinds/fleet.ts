@@ -19,13 +19,15 @@ import type { Agent } from '../../../shared/types.ts';
 import { squadsOf, type Squad } from '../../../shared/squads.ts';
 import { OFF_FLEET_LABEL, islandOf, isOffFleet } from '../../../shared/workspaces.ts';
 import { alive, store } from '../../store.ts';
+import { bindComposer, composerHint } from '../composer.ts';
 import { drafts, draftKey } from '../../drafts.ts';
 import { hub } from '../../net/client.ts';
 import type { ArchiveFilter } from '../../../shared/archive.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { slabBusy, slabFlash } from '../fx.ts';
-import { ago, esc, money, stateVar, stateWord } from '../../util.ts';
+import { ago, clock, esc, money, stateVar, stateWord } from '../../util.ts';
+import { longPress } from '../../hud/longpress.ts';
 
 type Scope = 'project' | 'machine' | 'group' | 'squad' | 'all';
 
@@ -43,7 +45,8 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     <div class="sec row row--split" style="padding:8px 12px"><span class="px px--tiny" data-sum></span><span class="px px--tiny" data-cost></span></div>
     <div class="win__scroll scroll" data-list></div>
     <div class="slab-row" style="padding:8px;border-top:1px solid var(--line-soft)">
-      <input class="input" data-say placeholder="${scope === 'squad' ? 'say to the whole squad' : 'say to every agent here'}" />
+      <textarea class="input" rows="2" data-say aria-label="Message"
+        placeholder="${esc(composerHint(scope === 'squad' ? 'say to the whole squad' : 'say to every agent here'))}"></textarea>
       <div class="slab-pair">
         <button class="slab-btn" type="button" data-send data-key="a">SAY ALL</button>
         ${scope === 'squad' ? `<button class="slab-btn slab-btn--ghost" type="button" data-lead data-key="l">SAY LEAD</button>` : ''}
@@ -59,9 +62,12 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     </div>
   `;
   const list = body.querySelector<HTMLElement>('[data-list]')!;
+  // Cada fila lleva el menú de su sujeto; con el dedo, manteniéndola pulsada.
+  // Una vez al montar: las filas se repintan, la lista no.
+  longPress(list, { allow: (t) => !!t.closest('[data-agent], [data-project], [data-machine], [data-squad]') });
   const sum = body.querySelector<HTMLElement>('[data-sum]')!;
   const cost = body.querySelector<HTMLElement>('[data-cost]')!;
-  const sayIn = body.querySelector<HTMLInputElement>('[data-say]')!;
+  const sayIn = body.querySelector<HTMLTextAreaElement>('[data-say]')!;
   // The unsent line to this scope survives a reload (drafts.ts); the window key names the scope.
   const draft = drafts.bind(sayIn, draftKey('fleet', ctx.win.spec.key));
   draft.restore();
@@ -145,14 +151,27 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   }
   const rank = (a: Agent) => a.state === 'blocked' && a.block?.kind !== 'peer' ? 0 : a.state === 'working' ? 1 : a.state === 'thinking' ? 2 : a.state === 'blocked' ? 3 : a.state === 'booting' ? 4 : a.state === 'idle' ? 5 : 6;
 
+  /**
+   * Quién fue el mando, y hasta cuándo.
+   *
+   * Un CAPCOM retirado queda con `role:'agent'` —el linaje lo degrada al
+   * adoptar al siguiente, y si no lo hiciera el hub le seguiría hablando a la
+   * sesión que se va—, así que en la isla de fuera de la flota se ve igual que
+   * cualquier otra sesión terminada. El acta del relevo es lo único que
+   * conserva la diferencia, y es exactamente lo que se busca al abrir esa
+   * lista: cuál de esas dieciséis llevaba el mando y hasta qué hora.
+   */
+  const retired = (id: string) => (store.world.capcomHandoffs ?? []).find((h) => h.fromId === id);
+
   /** One agent row. `lead` only draws in a squad window, which has the column. */
   function rowOf(a: Agent, lead = false): string {
     const pr = store.world.projects[a.projectId];
+    const was = retired(a.id);
     return `<div class="arow ${scope === 'squad' ? 'arow--squad' : ''} ${a.state === 'blocked' && a.block?.kind !== 'peer' ? 'is-blocked' : ''}" data-agent="${esc(a.id)}" style="--arow-state:${stateVar(a)}">
       <i class="arow__st"></i>
       ${scope === 'squad' ? `<span class="arow__lead">${lead ? 'LEAD' : ''}</span>` : ''}
       <span class="arow__cs">${esc(a.callsign)}<br/><span class="win__pj">${esc(pr?.code ?? '')}</span></span>
-      <span class="arow__t mono"><span class="origin-badge" data-origin-kind="${agentOrigin(a)}">${originLabel(a)}</span><br/>${esc(a.title || a.mission || '')}<br/><span style="color:var(--ink-dim)">${a.state === 'working' && a.tool ? esc(a.tool) + ' ' + esc(a.toolDetail ?? '') : esc(stateWord(a))}</span></span>
+      <span class="arow__t mono"><span class="origin-badge" data-origin-kind="${agentOrigin(a)}">${originLabel(a)}</span><br/>${esc(a.title || a.mission || '')}<br/><span style="color:var(--ink-dim)">${a.state === 'working' && a.tool ? esc(a.tool) + ' ' + esc(a.toolDetail ?? '') : esc(stateWord(a))}${was ? ` · WAS CAPCOM UNTIL ${esc(clock(was.at))}` : ''}</span></span>
       <span class="arow__m">${money(a.metrics.costUSD)}<br/>${ago(a.updatedAt, Date.now())}</span>
     </div>`;
   }
@@ -204,7 +223,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
 
     // The squad label is part of the picture: an agent enlisted since the last
     // frame regroups the list, and a signature that ignores it would not redraw.
-    const s = ms.map((a) => `${a.id}${a.state}${a.title}${a.tool}${a.origin ?? ''}${a.role ?? ''}${a.squad ?? ''}${a.lead ? '!' : ''}`).join('|') + `|${Math.floor(now / 15000)}`;
+    const s = ms.map((a) => `${a.id}${a.state}${a.title}${a.tool}${a.origin ?? ''}${a.role ?? ''}${a.squad ?? ''}${a.lead ? '!' : ''}${retired(a.id)?.at ?? ''}`).join('|') + `|${Math.floor(now / 15000)}`;
     if (s === sig) return;
     sig = s;
 
@@ -298,7 +317,8 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   };
   sendBtn.addEventListener('click', () => void send());
   leadBtn?.addEventListener('click', () => void sendLead());
-  sayIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void send(); } });
+  // Un mensaje a una flota es un mensaje: Enter salta, ⌘/⌃Enter manda.
+  const unbindComposer = bindComposer(sayIn, () => void send());
   body.querySelector('[data-frame]')!.addEventListener('click', () => {
     if (scope === 'project' && p.id) c.field.frameProject(p.id);
     else if (scope === 'group' || scope === 'squad') { const ids = members().map((a) => a.id); c.field.select(ids); const first = ids[0]; if (first) c.field.flyTo(first, 9); }
@@ -324,5 +344,5 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   const off = store.on((e) => { if (e.k === 'world' || e.k === 'agents' || e.k === 'projects' || e.k === 'machines') render(); });
   const tick = window.setInterval(render, 5000);
   render();
-  return { dispose() { off(); clearInterval(tick); draft.dispose(); } };
+  return { dispose() { off(); clearInterval(tick); unbindComposer(); draft.dispose(); } };
 }

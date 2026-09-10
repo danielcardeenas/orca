@@ -10,6 +10,7 @@
 import type { AgentState } from '../../shared/types.ts';
 import { store } from '../store.ts';
 import type { Console } from '../console.ts';
+import { displayFont } from '../fonts.ts';
 
 export interface MinimapHandle {
   toggle(): void;
@@ -67,7 +68,8 @@ export function mountMinimap(host: HTMLElement, c: Console): MinimapHandle {
     // Regions.
     g.lineWidth = 1;
     g.strokeStyle = '#2a2e38';
-    g.font = '8px Tiny5, monospace';
+    // A canvas resolves no custom property; the chosen face is read per frame.
+    g.font = `8px ${displayFont().stack}`;
     g.textBaseline = 'bottom';
     for (const r of lay.regions) {
       const x = mx(r.cx - r.hw), y = my(r.cy + r.hh);

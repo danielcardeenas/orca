@@ -24,12 +24,12 @@
  * lo que hace `npx tsx test/visual.ts --isolated`.
  */
 
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { hubPort, isolatedRun, sharing, uiPort } from './visual.ts';
+import { RUNS_DIR, hubPort, isolatedRun, markOf, sharing, sweepStaleRuns, uiPort } from './visual.ts';
 import { PORTS } from '../src/shared/protocol.ts';
 // Estático a propósito, y no sólo por el caso por defecto: `--changed` sale del
 // grafo de imports, y un `import()` con query no aparece en él. Sin esta línea,
@@ -143,6 +143,59 @@ const tests = [
     } finally {
       if (antes.port === undefined) delete process.env['ORCA_PORT']; else process.env['ORCA_PORT'] = antes.port;
       if (antes.ui === undefined) delete process.env['ORCA_UI_PORT']; else process.env['ORCA_UI_PORT'] = antes.ui;
+    }
+  }),
+
+  /*
+   * El barrido de restos. Lo que se defiende: una corrida que muere sin poder
+   * despedirse —SIGKILL, una tarea cortada, un `--keep` interrumpido— deja sus
+   * servidores sirviendo para siempre, porque están en su propio grupo a
+   * propósito y ya no hay quien les mande una señal. Se acumulan: siete Vite
+   * de quince horas, cada uno con su esbuild.
+   *
+   * Y lo que NO puede pasar, que es lo que haría el barrido inaceptable: matar
+   * a un tercero. Un pid se recicla, y el número solo no prueba nada.
+   */
+  test('lo que dejó una corrida muerta se barre; lo de una viva y lo ajeno, no', async () => {
+    const owner = spawnSync('true');                       // un dueño que ya no existe
+    const mine = spawn('sleep', ['637'], { detached: true, stdio: 'ignore' });
+    // Su comando CONTIENE lo apuntado («sleep 638») pero no termina en ello:
+    // nombrar no es ejecutar, y un `includes` lo habría matado.
+    const theirs = spawn('sleep', ['638'], { detached: true, stdio: 'ignore' });
+    const live = spawn('sleep', ['639'], { detached: true, stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 150));
+    const dead = owner.pid ?? 999999;
+    mkdirSync(RUNS_DIR, { recursive: true });
+    const files = [
+      // Corrida muerta: uno suyo de verdad, y uno cuyo pid heredó otro proceso
+      // que NOMBRA lo que se lanzó sin ejecutarlo — el caso que el 2026-09-09
+      // paró a un agente por su brief (docs/SYNTHETIC-HARNESS.md).
+      [join(RUNS_DIR, `${dead}.json`), {
+        owner: dead, at: Date.now(), procs: [
+          { pid: mine.pid, mark: markOf('sleep', ['637']) },
+          { pid: theirs.pid, mark: markOf('sleep', ['638', 'y', 'algo', 'más']) },
+        ],
+      }],
+      // Corrida viva: puede ser un `--keep` a propósito, y no se toca.
+      [join(RUNS_DIR, `${process.pid + 100000}.json`), {
+        owner: process.pid, at: Date.now(), procs: [{ pid: live.pid, mark: markOf('sleep', ['639']) }],
+      }],
+    ] as const;
+    for (const [path, rec] of files) writeFileSync(path, JSON.stringify(rec), 'utf8');
+
+    try {
+      sweepStaleRuns();
+      await new Promise((r) => setTimeout(r, 250));
+      const gone = (p: ReturnType<typeof spawn>) => {
+        try { process.kill(p.pid!, 0); return false; } catch { return true; }
+      };
+      const barrido = gone(mine), ajeno = gone(theirs), viva = gone(live);
+      return ok('lo que dejó una corrida muerta se barre; lo de una viva y lo ajeno, no',
+        barrido && !ajeno && !viva,
+        `el suyo ${barrido ? 'cerrado' : 'SIGUE'} · el del pid reciclado ${ajeno ? 'MUERTO' : 'intacto'} · el de la corrida viva ${viva ? 'MUERTO' : 'intacto'}`);
+    } finally {
+      for (const p of [mine, theirs, live]) { try { process.kill(-p.pid!, 'SIGKILL'); } catch { /* ya no está */ } }
+      for (const [path] of files) rmSync(path, { force: true });
     }
   }),
 

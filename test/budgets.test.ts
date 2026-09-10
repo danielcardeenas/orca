@@ -1,20 +1,34 @@
 /**
- * Presupuestos por worker, escuadrón y tarea.
+ * Presupuestos por worker, escuadrón y misión.
  *
- * Lo que se comprueba es la política, no la fontanería: que el 80 % avisa una
- * vez, que el 100 % con progreso reciente NO para, que el 100 % sin progreso
- * sí para (y sólo con ORCA_BUDGET_ACTION=stop), que los defaults del entorno
- * alcanzan a quien no tiene techo propio, y que el techo de un escuadrón se
- * reparte entre sus miembros. Todo con un reloj en una variable y una flota
- * en un objeto; el hub de verdad se prueba al final, en un puerto libre, para
- * ver que el aviso llega a CAPCOM por su canal y al feed.
+ * Lo que se comprueba es la política, no la fontanería: que la unidad por
+ * defecto son TOKENS y no dólares, que el dinero sólo cuenta con el modo
+ * encendido, que el 80 % avisa una vez, que el 100 % con progreso reciente NO
+ * para, que el 100 % sin progreso sí para, que los defaults del entorno
+ * alcanzan a quien no tiene techo propio y que el techo de un escuadrón se
+ * reparte entre sus miembros.
+ *
+ * Y lo que salió de dos incidentes reales, que son la mitad de esta suite:
+ *
+ *  - un agente en idle no genera un solo aviso, por mucho reloj que pase;
+ *  - un agente al que ya se paró sale del ciclo y no vuelve a avisar NUNCA;
+ *  - la marca de progreso se siembra en la última actividad real, así que un
+ *    hub reiniciado no declara "still making progress (0s ago)" de un muerto;
+ *  - lo que gasta un subagente `Task` se carga a su ancestro EN LA MISMA
+ *    PASADA, que es lo que faltaba para que el aviso llegase a tiempo;
+ *  - hay un freno de descendencia, por número y por profundidad;
+ *  - una ráfaga de avisos llega a CAPCOM como UN mensaje.
+ *
+ * Todo con un reloj en una variable y una flota en un objeto; el hub de verdad
+ * se prueba al final, en un puerto libre, para ver que el aviso llega a CAPCOM
+ * por su canal y al feed.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { BudgetBook, budgetConfig, budgetLimit, type BudgetEvent } from '../src/hub/budgets.ts';
+import { BudgetBook, budgetConfig, budgetLimit, fmtTokens, type BudgetEvent } from '../src/hub/budgets.ts';
 import { startHub } from '../src/hub/server.ts';
 import { createAuth } from '../src/hub/auth.ts';
 import { HubStore } from '../src/hub/persist.ts';
@@ -22,11 +36,13 @@ import { AnswerMemory } from '../src/hub/memory.ts';
 import { FleetStore } from '../src/hub/fleets.ts';
 import { hubContext } from '../src/agents/context.ts';
 import { runTool } from '../src/agents/tools.ts';
-import { emptyRollup, type Agent, type AgentMetrics, type Project } from '../src/shared/types.ts';
-import type { CapcomTask } from '../src/shared/tasks.ts';
+import { adviceFor, reachability } from '../src/hub/liveness.ts';
+import { emptyRollup, type Agent, type AgentMetrics, type Machine, type Project } from '../src/shared/types.ts';
+import type { CapcomMission } from '../src/shared/missions.ts';
 import { eq, ok, test, until, type TestModule, type TestResult } from './harness.ts';
 
 const T0 = 1_700_000_000_000;
+const M = 1_000_000;
 
 type Fixture = Omit<Partial<Agent>, 'metrics'> & { id: string; metrics?: Partial<AgentMetrics> };
 
@@ -53,33 +69,58 @@ function emptyMetrics(): Agent['metrics'] {
   };
 }
 
+/** Un techo, con los ejes que no se nombran a null. */
+function cap(over: { tokens?: number | null; usd?: number | null; min?: number | null }) {
+  return { tokens: over.tokens ?? null, usd: over.usd ?? null, min: over.min ?? null };
+}
+
 function book(env: Record<string, string> = {}, now: () => number): BudgetBook {
   return new BudgetBook(null, budgetConfig(env as NodeJS.ProcessEnv), { now });
 }
 
 function kinds(events: BudgetEvent[]): string[] { return events.map((e) => e.kind); }
 
-/* ── 1 · umbrales ─────────────────────────────────────────────────── */
+/**
+ * Correr el sweep como lo corre el hub: cada pocos segundos. El tiempo activo
+ * se acumula por observación y una sola pasada de ocho minutos no son ocho
+ * minutos de trabajo — son un hub que no estaba mirando.
+ */
+function advance(
+  b: BudgetBook, fleet: Record<string, Agent>, missions: Record<string, CapcomMission>,
+  from: number, ms: number, step = 30_000,
+): { now: number; events: BudgetEvent[] } {
+  let now = from;
+  const events: BudgetEvent[] = [];
+  const end = from + ms;
+  while (now < end) {
+    now = Math.min(end, now + step);
+    events.push(...b.tick(fleet, missions, now));
+  }
+  return { now, events };
+}
+
+/* ── 1 · umbrales, en tokens ──────────────────────────────────────── */
 
 const thresholds = test('80 % avisa una vez, 100 % avisa una vez, y en medio no repite', () => {
   let now = T0;
   const b = book({}, () => now);
-  b.set({ kind: 'agent', ref: 'k9' }, { usd: 10, min: null });
-  const fleet = { k9: agent({ id: 'k9', metrics: { costUSD: 5 } }) };
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: 10 * M }));
+  const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 5 * M } }) };
 
   const quiet = b.tick(fleet, {}, now);
-  fleet.k9.metrics.costUSD = 8.5;
+  fleet.k9.metrics.inputTokens = 8.5 * M;
   const warn = b.tick(fleet, {}, (now += 1000));
   const again = b.tick(fleet, {}, (now += 1000));
   fleet.k9.metrics.toolCalls = 3;          // progresa: al 100 % sólo avisa
-  fleet.k9.metrics.costUSD = 10.2;
+  fleet.k9.metrics.inputTokens = 10.2 * M;
   const over = b.tick(fleet, {}, (now += 1000));
   const overAgain = b.tick(fleet, {}, (now += 1000));
 
   const results = [
     eq('bajo el 80 %: nada', kinds(quiet), []),
     eq('al 80 %: un warn', kinds(warn), ['warn']),
-    ok('el warn lleva el prefijo y las cifras', /^\[BUDGET 80%\] K9 · \$8\.50 of \$10\.00 \(85%\)$/.test(warn[0]!.text), warn[0]?.text),
+    ok('el warn lleva el prefijo y las cifras EN TOKENS', /^\[BUDGET 80%\] K9 · 8\.5M of 10\.0M tokens \(85%\)$/.test(warn[0]!.text), warn[0]?.text),
+    ok('y no menciona dinero', !warn[0]!.text.includes('$'), warn[0]?.text),
     eq('el mismo tick después: silencio', kinds(again), []),
     eq('al 100 % con progreso: over, sin stop', kinds(over), ['over']),
     ok('el over dice que sigue avanzando y no se paró', over[0]!.text.startsWith('[BUDGET 100%] K9') && over[0]!.text.includes('not stopped'), over[0]?.text),
@@ -88,23 +129,31 @@ const thresholds = test('80 % avisa una vez, 100 % avisa una vez, y en medio no 
   return results.find((r) => !r.pass) ?? ok('umbrales', true, `${results.length} checks`);
 });
 
+const tokenUnit = test('la unidad suma entrada, salida y lectura de caché, y no cuenta el razonamiento dos veces', () => {
+  const b = book({}, () => T0);
+  const a = agent({ id: 'k9', metrics: { inputTokens: 1000, outputTokens: 400, cacheReadTokens: 9000, thinkingTokens: 300 } });
+  const r = eq('in + out + cache read', b.tokensOf(a), 10_400);
+  if (!r.pass) return r;
+  return eq('legible de un vistazo', [fmtTokens(12_400_000), fmtTokens(840_000), fmtTokens(912)], ['12.4M', '840k', '912']);
+});
+
 /* ── 2 · el progreso reciente evita la parada ─────────────────────── */
 
 const progressSpares = test('al 100 % sin progreso se para; con progreso reciente no', () => {
   let now = T0;
   const b = book({ ORCA_BUDGET_PROGRESS_MIN: '3' }, () => now);
-  b.set({ kind: 'agent', ref: 'k9' }, { usd: 1, min: null });
-  b.set({ kind: 'agent', ref: 'l2' }, { usd: 1, min: null });
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: M }));
+  b.set({ kind: 'agent', ref: 'l2' }, cap({ tokens: M }));
   const fleet = {
-    k9: agent({ id: 'k9', metrics: { costUSD: 0.5, toolCalls: 1 } }),
-    l2: agent({ id: 'l2', metrics: { costUSD: 0.5, toolCalls: 1 } }),
+    k9: agent({ id: 'k9', metrics: { inputTokens: 0.5 * M, toolCalls: 1 } }),
+    l2: agent({ id: 'l2', metrics: { inputTokens: 0.5 * M, toolCalls: 1 } }),
   };
   b.tick(fleet, {}, now);
   // Cuatro minutos después: k9 hizo llamadas, l2 no; ambos se pasan.
   now += 4 * 60_000;
   fleet.k9.metrics.toolCalls = 7;
-  fleet.k9.metrics.costUSD = 1.1;
-  fleet.l2.metrics.costUSD = 1.1;
+  fleet.k9.metrics.inputTokens = 1.1 * M;
+  fleet.l2.metrics.inputTokens = 1.1 * M;
   const ev = b.tick(fleet, {}, now);
   const stops = ev.filter((e) => e.kind === 'stop');
   const r1 = eq('un solo stop', stops.map((e) => e.kind === 'stop' ? e.agentId : ''), ['l2']);
@@ -123,12 +172,12 @@ const progressSpares = test('al 100 % sin progreso se para; con progreso recient
 const linesCountAsProgress = test('las líneas cambiadas cuentan como progreso, igual que las tool calls', () => {
   let now = T0;
   const b = book({ ORCA_BUDGET_PROGRESS_MIN: '1' }, () => now);
-  b.set({ kind: 'agent', ref: 'k9' }, { usd: 1, min: null });
-  const fleet = { k9: agent({ id: 'k9', metrics: { costUSD: 0.2 } }) };
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: M }));
+  const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 0.2 * M } }) };
   b.tick(fleet, {}, now);
   now += 5 * 60_000;
   fleet.k9.metrics.linesAdded = 12;
-  fleet.k9.metrics.costUSD = 2;
+  fleet.k9.metrics.inputTokens = 2 * M;
   return eq('over sin stop', kinds(b.tick(fleet, {}, now)), ['over']);
 });
 
@@ -137,151 +186,388 @@ const linesCountAsProgress = test('las líneas cambiadas cuentan como progreso, 
 const actionWarn = test('ORCA_BUDGET_ACTION=warn nunca para, sólo avisa', () => {
   let now = T0;
   const b = book({ ORCA_BUDGET_ACTION: 'warn', ORCA_BUDGET_PROGRESS_MIN: '1' }, () => now);
-  b.set({ kind: 'agent', ref: 'k9' }, { usd: 1, min: null });
-  const fleet = { k9: agent({ id: 'k9', metrics: { costUSD: 0.1 } }) };
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: M }));
+  const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 0.1 * M } }) };
   b.tick(fleet, {}, now);
   now += 10 * 60_000;
-  fleet.k9.metrics.costUSD = 5;
+  fleet.k9.metrics.inputTokens = 5 * M;
   const ev = b.tick(fleet, {}, now);
   const r = eq('sólo over', kinds(ev), ['over']);
   if (!r.pass) return r;
   return ok('y lo dice', ev[0]!.text.includes('ORCA_BUDGET_ACTION=warn'), ev[0]?.text);
 });
 
-/* ── 4 · tiempo ───────────────────────────────────────────────────── */
+/* ── 4 · el tiempo es tiempo TRABAJANDO ───────────────────────────── */
 
-const timeBudget = test('budget_min mide tiempo de pared desde el arranque', () => {
-  let now = T0;
+const activeTime = test('budget_min mide minutos trabajando, no reloj de pared desde el arranque', () => {
+  const now0 = T0;
+  let now = now0;
   const b = book({}, () => now);
-  b.set({ kind: 'agent', ref: 'k9' }, { usd: null, min: 10 });
-  const fleet = { k9: agent({ id: 'k9', metrics: { toolCalls: 1 } }) };
-  b.tick(fleet, {}, now);
-  now = T0 + 8 * 60_000 + 1000;
-  const warn = b.tick(fleet, {}, now);
-  const r = eq('al 80 % del tiempo avisa', kinds(warn), ['warn']);
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ min: 10 }));
+  const fleet = { k9: agent({ id: 'k9', state: 'working', metrics: { toolCalls: 1 } }) };
+
+  const run = advance(b, fleet, {}, now, 8 * 60_000 + 30_000);
+  now = run.now;
+  const warns = run.events.filter((e) => e.kind === 'warn');
+  const r = eq('al 80 % del tiempo trabajado avisa', warns.length, 1);
   if (!r.pass) return r;
-  return ok('con minutos en el texto', /8m of 10m \(80%\)/.test(warn[0]!.text), warn[0]?.text);
+  return ok('y lo llama activo, no transcurrido', /8m of 10m active \(8[0-9]%\)/.test(warns[0]!.text), warns[0]?.text);
 });
 
-/* ── 5 · defaults por entorno ─────────────────────────────────────── */
-
-const envDefaults = test('ORCA_DEFAULT_BUDGET_USD alcanza a quien no tiene techo propio, y no a CAPCOM', () => {
+const idleIsSilent = test('un agente en idle no consume y no genera un solo aviso, pase el reloj que pase', () => {
   let now = T0;
-  const b = book({ ORCA_DEFAULT_BUDGET_USD: '2' }, () => now);
-  b.set({ kind: 'agent', ref: 'own' }, { usd: 100, min: null });
+  const b = book({}, () => now);
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: M, min: 10 }));
+  // Entregó su trabajo y espera. Ocho horas.
+  const fleet = { k9: agent({ id: 'k9', state: 'idle', metrics: { inputTokens: 0.5 * M, toolCalls: 9 } }) };
+  const run = advance(b, fleet, {}, now, 8 * 60 * 60_000, 60_000);
+  now = run.now;
+  const r1 = eq('ni un aviso en ocho horas', kinds(run.events), []);
+  if (!r1.pass) return r1;
+  const st = b.agentStatus(fleet.k9, fleet, {}, now);
+  const r2 = eq('cero minutos activos', Math.round(st.active_min), 0);
+  if (!r2.pass) return r2;
+  return eq('y el nivel sigue en ok', st.level, 'ok');
+});
+
+/* ── 5 · quien ya fue detenido no vuelve a avisar ─────────────────── */
+
+const retiredStaysQuiet = test('parar a un agente le saca del ciclo: no vuelve a avisar aunque su estado nunca llegue', () => {
+  let now = T0;
+  const b = book({ ORCA_BUDGET_PROGRESS_MIN: '1' }, () => now);
+  b.set({ kind: 'squad', ref: 'rubric-01' }, cap({ tokens: 4 * M, min: 90 }));
   const fleet = {
-    k9: agent({ id: 'k9', metrics: { costUSD: 1.7 } }),
-    own: agent({ id: 'own', metrics: { costUSD: 1.7 } }),
-    cap: agent({ id: 'cap', role: 'capcom', metrics: { costUSD: 50 } }),
+    cg: agent({ id: 'cg', squad: 'rubric-01', state: 'working', metrics: { inputTokens: 3 * M, toolCalls: 4 } }),
+    c1: agent({ id: 'c1', squad: 'rubric-01', state: 'working', metrics: { inputTokens: 2 * M, toolCalls: 4 } }),
+  };
+  const first = b.tick(fleet, {}, (now += 1000));
+  const r1 = eq('mientras trabajan, el 100 % se dice una vez', kinds(first), ['over']);
+  if (!r1.pass) return r1;
+
+  // El operador los para con stop_squad. La sesión de tmux desaparece y el
+  // `dead` no llega nunca: el estado se queda en 'working' para siempre.
+  b.retire(['cg', 'c1']);
+  const after = advance(b, fleet, {}, now, 6 * 60 * 60_000, 60_000);
+  now = after.now;
+  const r2 = eq('seis horas después, silencio absoluto', kinds(after.events), []);
+  if (!r2.pass) return r2;
+  const r3 = ok('y se ve en el estado que están retirados', b.agentStatus(fleet.cg, fleet, {}, now).retired === true);
+  if (!r3.pass) return r3;
+  // Y tampoco un techo nuevo los resucita: no queda nadie vivo en el ámbito.
+  b.set({ kind: 'squad', ref: 'rubric-01' }, cap({ tokens: M }));
+  return eq('re-armar el aviso no despierta a un escuadrón muerto', kinds(b.tick(fleet, {}, (now += 1000))), []);
+});
+
+const ghostsAreSilent = test('un agente callado sigue vivo; sólo callan los avisos una parada o una máquina caída', () => {
+  let now = T0;
+  const machines: Record<string, Machine> = {
+    m1: { id: 'm1', hostname: 'mac', platform: 'darwin', version: '1', online: true, lastSeen: T0, connectedAt: T0, load: { sessions: 2, activeSessions: 2, cpuPct: null, memPct: null } },
+  };
+  const mk = () => new BudgetBook(null, budgetConfig({} as NodeJS.ProcessEnv), { now: () => now, liveness: () => ({ machines }) });
+  const fleet: Record<string, Agent> = {
+    b9: agent({ id: 'b9', squad: 'ideas-01', state: 'working', updatedAt: T0, metrics: { inputTokens: 9 * M, toolCalls: 7 } }),
+    live: agent({ id: 'live', state: 'working', updatedAt: T0, metrics: { inputTokens: 0.1 * M } }),
+  };
+  for (let i = 0; i < 25; i++) fleet[`k${i}`] = agent({ id: `k${i}`, subagent: true, parentId: 'b9', updatedAt: T0 });
+
+  // 1 · EL SILENCIO NO MATA. B9 lleva media hora sin escribir una línea en su
+  // transcript: puede estar razonando o redactando un fichero largo. Sigue
+  // contando como vivo y su presupuesto se evalúa como el de cualquiera.
+  now = T0 + 30 * 60_000;
+  const quiet = mk();
+  quiet.set({ kind: 'agent', ref: 'b9' }, cap({ tokens: M }));
+  const r1 = ok('media hora callado y en `working`: sigue vivo y se le evalúa',
+    quiet.tick(fleet, {}, now).some((e) => e.kind === 'over'), 'un agente callado no es un muerto');
+  if (!r1.pass) return r1;
+
+  // 2 · Lo que sí calla los avisos: que alguien lo pare. Es una afirmación,
+  // no una conjetura, y con ella se va también su cría.
+  fleet.live!.updatedAt = now;   // acaba de escribir: progresa, no se le para
+  const stopped = mk();
+  stopped.set({ kind: 'agent', ref: 'b9' }, cap({ tokens: M }));
+  stopped.set({ kind: 'agent', ref: 'live' }, cap({ tokens: 0.05 * M }));
+  stopped.retire('b9');
+  const ev = stopped.tick(fleet, {}, (now += 1000));
+  const r2 = eq('del parado, nada; del que sigue, lo suyo',
+    ev.map((e) => (e.kind === 'swarm' ? `swarm:${e.agentId}` : `${e.kind}:${e.scope.ref}`)).sort(),
+    ['over:live']);
+  if (!r2.pass) return r2;
+  const r3 = eq('y su cría deja de contarse como viva', stopped.agentStatus(fleet.b9!, fleet, {}, now).brood.live, 0);
+  if (!r3.pass) return r3;
+
+  // 3 · Un entierro equivocado se deshace solo: si el parado sigue haciendo
+  // llamadas de herramienta, la parada no surtió efecto y vuelve al ciclo.
+  fleet.b9!.metrics.toolCalls = 12;
+  stopped.tick(fleet, {}, (now += 1000));
+  const r4 = eq('quien sigue trabajando resucita sin que nadie intervenga',
+    stopped.agentStatus(fleet.b9!, fleet, {}, now).retired, false);
+  if (!r4.pass) return r4;
+
+  // 4 · Máquina no conectada: sus agentes no pueden tratarse como vivos.
+  machines.m1!.online = false;
+  machines.m1!.lastSeen = now;
+  fleet.live!.metrics.inputTokens = 90 * M;
+  const off = mk();
+  off.set({ kind: 'agent', ref: 'live' }, cap({ tokens: 0.05 * M }));
+  return eq('máquina caída: nadie de ella avisa', kinds(off.tick(fleet, {}, (now += 1000))), []);
+});
+
+const adviceIsExecutable = test('el consejo de un aviso sólo nombra acciones que de verdad alcanzan a ese agente', () => {
+  const hosted = agent({ id: 'h', pane: true });
+  const bg = agent({ id: 'b', background: true, shortId: 'abc123' });
+  // El limbo de B9: ni pane, ni sesión background direccionable.
+  const limbo = agent({ id: 'l', background: false, shortId: null, pane: false });
+
+  const r1 = eq('con pane: se le puede interrumpir y parar',
+    [reachability(hosted).interrupt, reachability(hosted).stop], [true, true]);
+  if (!r1.pass) return r1;
+  const r2 = eq('background sin pane: parar sí, interrumpir no',
+    [reachability(bg).interrupt, reachability(bg).stop], [false, true]);
+  if (!r2.pass) return r2;
+  const r3 = eq('en el limbo no alcanza ninguna de las dos',
+    [reachability(limbo).interrupt, reachability(limbo).stop, reachability(limbo).retire], [false, false, true]);
+  if (!r3.pass) return r3;
+  const r4 = ok('y el consejo no manda a un callejón',
+    !adviceFor(limbo).includes('interrupt_agent') && !adviceFor(limbo).includes('stop_agent') && adviceFor(limbo).includes('retire_agent'),
+    adviceFor(limbo));
+  if (!r4.pass) return r4;
+  return ok('mientras que al hospedado sí le ofrece las dos',
+    adviceFor(hosted).includes('interrupt_agent') && adviceFor(hosted).includes('stop_agent'), adviceFor(hosted));
+});
+
+const progressIsNotInvented = test('la marca de progreso sale de la última actividad real, no del tick que la mira', () => {
+  const now = T0 + 60 * 60_000;
+  const b = book({ ORCA_BUDGET_PROGRESS_MIN: '3' }, () => now);
+  // Un hub recién arrancado ve por primera vez a un agente cuya última señal
+  // es de hace media hora. Sembrar la marca en `now` era lo que producía
+  // "still making progress (CG 0s ago)" sobre agentes muertos.
+  const fleet = {
+    stale: agent({ id: 'stale', startedAt: T0, updatedAt: T0 + 30 * 60_000, metrics: { toolCalls: 4 } }),
+    fresh: agent({ id: 'fresh', startedAt: now - 5_000, updatedAt: now - 5_000 }),
+  };
+  b.tick(fleet, {}, now);
+  const r = eq('el viejo NO cuenta como progresando', b.recentProgress('stale', now), false);
+  if (!r.pass) return r;
+  return eq('el recién lanzado sí', b.recentProgress('fresh', now), true);
+});
+
+/* ── 6 · defaults por entorno ─────────────────────────────────────── */
+
+const envDefaults = test('ORCA_DEFAULT_BUDGET_TOKENS alcanza a quien no tiene techo propio, y no a CAPCOM', () => {
+  let now = T0;
+  const b = book({ ORCA_DEFAULT_BUDGET_TOKENS: '2000000' }, () => now);
+  b.set({ kind: 'agent', ref: 'own' }, cap({ tokens: 100 * M }));
+  const fleet = {
+    k9: agent({ id: 'k9', metrics: { inputTokens: 1.7 * M } }),
+    own: agent({ id: 'own', metrics: { inputTokens: 1.7 * M } }),
+    cap: agent({ id: 'cap', role: 'capcom', metrics: { inputTokens: 50 * M } }),
   };
   const ev = b.tick(fleet, {}, (now += 1000));
-  const r = eq('avisa sólo del que va por defecto', ev.map((e) => `${e.kind}:${e.scope.ref}`), ['warn:k9']);
+  const r = eq('avisa sólo del que va por defecto', ev.map((e) => `${e.kind}:${e.kind === 'swarm' ? e.agentId : e.scope.ref}`), ['warn:k9']);
   if (!r.pass) return r;
   const st = b.agentStatus(fleet.k9, fleet, {}, now);
   const r2 = eq('inspect lo ve como techo por defecto', st.lines.map((l) => l.scope), ['default']);
   if (!r2.pass) return r2;
-  return eq('vacío = sin límite', budgetConfig({ ORCA_DEFAULT_BUDGET_USD: '', ORCA_DEFAULT_BUDGET_MIN: ' ' } as NodeJS.ProcessEnv).defaultUsd, null);
+  return eq('vacío = sin límite', budgetConfig({ ORCA_DEFAULT_BUDGET_TOKENS: '', ORCA_DEFAULT_BUDGET_MIN: ' ' } as NodeJS.ProcessEnv).defaultTokens, null);
 });
 
-/* ── 6 · presupuesto de escuadrón compartido ──────────────────────── */
+/* ── 7 · presupuesto de escuadrón compartido ──────────────────────── */
 
 const squadShared = test('el techo de un escuadrón es la suma de sus miembros, y para sólo a los parados', () => {
   let now = T0;
   const b = book({ ORCA_BUDGET_PROGRESS_MIN: '2' }, () => now);
-  b.set({ kind: 'squad', ref: 'audit-01' }, { usd: 10, min: null });
+  b.set({ kind: 'squad', ref: 'audit-01' }, cap({ tokens: 10 * M }));
   const fleet = {
-    lead: agent({ id: 'lead', squad: 'audit-01', lead: true, metrics: { costUSD: 3, toolCalls: 1 } }),
-    m1: agent({ id: 'm1', squad: 'audit-01', metrics: { costUSD: 3, toolCalls: 1 } }),
-    m2: agent({ id: 'm2', squad: 'audit-01', metrics: { costUSD: 2, toolCalls: 1 } }),
-    other: agent({ id: 'other', squad: 'build-01', metrics: { costUSD: 50 } }),
+    lead: agent({ id: 'lead', squad: 'audit-01', lead: true, metrics: { inputTokens: 3 * M, toolCalls: 1 } }),
+    m1: agent({ id: 'm1', squad: 'audit-01', metrics: { inputTokens: 3 * M, toolCalls: 1 } }),
+    m2: agent({ id: 'm2', squad: 'audit-01', metrics: { inputTokens: 2 * M, toolCalls: 1 } }),
+    other: agent({ id: 'other', squad: 'build-01', metrics: { inputTokens: 50 * M } }),
   };
   const warn = b.tick(fleet, {}, now);
-  const r1 = eq('8 de 10 entre tres: warn del escuadrón', warn.map((e) => `${e.kind}:${e.scope.kind}:${e.scope.ref}`), ['warn:squad:audit-01']);
+  const r1 = eq('8 de 10 entre tres: warn del escuadrón', warn.map((e) => `${e.kind}:${e.kind === 'swarm' ? '' : e.scope.kind}:${e.kind === 'swarm' ? '' : e.scope.ref}`), ['warn:squad:audit-01']);
   if (!r1.pass) return r1;
   const r2 = ok('nombra a los tres', warn[0]!.text.includes('squad audit-01 (LEAD, M1, M2)'), warn[0]?.text);
   if (!r2.pass) return r2;
 
   now += 3 * 60_000;
-  fleet.m1.metrics.toolCalls = 9;  // sigue trabajando
-  fleet.m1.metrics.costUSD = 5;    // total 10
+  fleet.m1.metrics.toolCalls = 9;      // sigue trabajando
+  fleet.m1.metrics.inputTokens = 5 * M; // total 10M
   const ev = b.tick(fleet, {}, now);
   const stopped = ev.filter((e) => e.kind === 'stop').map((e) => (e as { agentId: string }).agentId).sort();
   const r3 = eq('para al líder y a m2, no a m1', stopped, ['lead', 'm2']);
   if (!r3.pass) return r3;
   const st = b.agentStatus(fleet.m1, fleet, {}, now);
-  return ok('inspect de un miembro enseña el gasto del escuadrón entero', st.lines.some((l) => l.scope === 'squad' && Math.abs(l.spent_usd - 10) < 1e-9), JSON.stringify(st.lines));
+  return ok('inspect de un miembro enseña el consumo del escuadrón entero', st.lines.some((l) => l.scope === 'squad' && l.tokens === 10 * M), JSON.stringify(st.lines));
 });
 
-/* ── 7 · presupuesto por tarea ────────────────────────────────────── */
+/* ── 8 · presupuesto por misión ───────────────────────────────────── */
 
-const taskBudget = test('el techo de una tarea suma a todos sus agentes asignados', () => {
+const missionBudget = test('el techo de una misión suma a todos sus agentes asignados', () => {
   let now = T0;
   const b = book({}, () => now);
-  b.set({ kind: 'task', ref: 'task_a' }, { usd: 4, min: null });
+  b.set({ kind: 'mission', ref: 'task_a' }, cap({ tokens: 4 * M }));
   const fleet = {
-    a: agent({ id: 'a', metrics: { costUSD: 2 } }),
-    b: agent({ id: 'b', metrics: { costUSD: 1.5 } }),
-    c: agent({ id: 'c', metrics: { costUSD: 9 } }),
+    a: agent({ id: 'a', metrics: { inputTokens: 2 * M } }),
+    b: agent({ id: 'b', metrics: { inputTokens: 1.5 * M } }),
+    c: agent({ id: 'c', metrics: { inputTokens: 9 * M } }),
   };
-  const tasks: Record<string, CapcomTask> = {
+  const missions: Record<string, CapcomMission> = {
     task_a: { id: 'task_a', title: 'A', status: 'active', createdAt: T0, updatedAt: T0, agentIds: ['a', 'b'], messages: [] },
   };
-  const ev = b.tick(fleet, tasks, (now += 1000));
-  const r = eq('warn de la tarea', ev.map((e) => `${e.kind}:${e.scope.kind}`), ['warn:task']);
+  const ev = b.tick(fleet, missions, (now += 1000));
+  const r = eq('warn de la misión', ev.map((e) => `${e.kind}:${e.kind === 'swarm' ? '' : e.scope.kind}`), ['warn:mission']);
   if (!r.pass) return r;
-  return ok('con la tarea en el texto', ev[0]!.text.includes('task task_a'), ev[0]?.text);
+  return ok('con la misión en el texto', ev[0]!.text.includes('mission task_a'), ev[0]?.text);
 });
 
-/* ── 8 · estimación por tokens ────────────────────────────────────── */
+/* ── 9 · la descendencia se cobra al ancestro, en la misma pasada ── */
 
-const estimate = test('con costUSD a 0, los tokens estiman el gasto y la línea lo marca con ~', () => {
+const broodIsCharged = test('lo que gastan los subagentes Task cuenta contra su ancestro en tiempo real', () => {
   let now = T0;
-  const b = book({ ORCA_BUDGET_USD_PER_MTOK: '10' }, () => now);
-  b.set({ kind: 'agent', ref: 'k9' }, { usd: 1, min: null });
-  const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 60_000, outputTokens: 30_000 } }) };
+  const b = book({}, () => now);
+  b.set({ kind: 'agent', ref: 'lead' }, cap({ tokens: 8 * M }));
+  const fleet = {
+    lead: agent({ id: 'lead', metrics: { inputTokens: M, toolCalls: 3 } }),
+    // Cuatro subagentes, y uno de ellos con nieto.
+    s1: agent({ id: 's1', subagent: true, parentId: 'lead', depth: 1, metrics: { inputTokens: 4 * M } }),
+    s2: agent({ id: 's2', subagent: true, parentId: 's1', depth: 2, metrics: { inputTokens: 5 * M } }),
+    // Una sesión completa que ORCA lanzó: tiene presupuesto propio y NO se
+    // le cobra a quien la lanzó.
+    peer: agent({ id: 'peer', parentId: 'lead', depth: 1, metrics: { inputTokens: 40 * M } }),
+  };
   const ev = b.tick(fleet, {}, (now += 1000));
-  const r = eq('90k tokens a $10/M = $0.90: warn', kinds(ev), ['warn']);
-  if (!r.pass) return r;
-  return ok('estimado', ev[0]!.text.includes('~$0.90 of $1.00'), ev[0]?.text);
+  const r1 = eq('el ancestro se pasa por lo que gastó su descendencia', kinds(ev), ['over']);
+  if (!r1.pass) return r1;
+  const r2 = ok('y el aviso dice cuántos lleva dentro', ev[0]!.text.includes('10.0M of 8.0M tokens') && ev[0]!.text.includes('includes 2 live Task subagents'), ev[0]?.text);
+  if (!r2.pass) return r2;
+  const st = b.agentStatus(fleet.lead, fleet, {}, now);
+  const r3 = eq('1M propios + 9M de la cría, y la sesión hermana fuera', [st.tokens, st.descendants], [10 * M, 2]);
+  if (!r3.pass) return r3;
+  return eq('un subagente no es sujeto de presupuesto propio', b.agentStatus(fleet.s1, fleet, {}, now).lines.length, 0);
 });
 
-/* ── 9 · set_budget vuelve a armar, y el disco recuerda ───────────── */
+const broodBrake = test('el freno corta por número de descendientes vivos y por profundidad', () => {
+  let now = T0;
+  const b = book({ ORCA_MAX_DESCENDANTS: '8', ORCA_MAX_AGENT_DEPTH: '2' }, () => now);
+  const fleet: Record<string, Agent> = { lead: agent({ id: 'lead', pane: true }) };
+  for (let i = 0; i < 9; i++) fleet[`s${i}`] = agent({ id: `s${i}`, subagent: true, parentId: 'lead', depth: 1 });
+  const ev = b.tick(fleet, {}, (now += 1000));
+  const swarm = ev.filter((e) => e.kind === 'swarm');
+  const r1 = eq('nueve vivos sobre un tope de ocho: un aviso', swarm.length, 1);
+  if (!r1.pass) return r1;
+  const s = swarm[0] as Extract<BudgetEvent, { kind: 'swarm' }>;
+  const r2 = ok('dice el número, el tope y qué hacer con ESTE agente',
+    s.text.startsWith('[SWARM CAP] LEAD')
+    && s.text.includes('9 live Task subagents (cap 8)')
+    && s.text.includes('their tokens already count against LEAD')
+    && s.text.includes('interrupt_agent'), s.text);
+  if (!r2.pass) return r2;
+  const r3 = eq('y no se repite en la pasada siguiente', kinds(b.tick(fleet, {}, (now += 1000))), []);
+  if (!r3.pass) return r3;
+  const r4 = eq('sin ORCA_SWARM_ACTION=stop no para a nadie', s.stopIds, []);
+  if (!r4.pass) return r4;
+
+  // La cría termina: el aviso se re-arma para la próxima tanda.
+  for (let i = 0; i < 9; i++) fleet[`s${i}`]!.state = 'done';
+  b.tick(fleet, {}, (now += 1000));
+  for (let i = 0; i < 9; i++) fleet[`s${i}`]!.state = 'working';
+  const r5 = eq('vuelve a avisar cuando vuelve a pasar', kinds(b.tick(fleet, {}, (now += 1000))), ['swarm']);
+  if (!r5.pass) return r5;
+
+  // Profundidad: una cadena de tres generaciones sobre un tope de dos.
+  const deep = book({ ORCA_MAX_DESCENDANTS: '100', ORCA_MAX_AGENT_DEPTH: '2', ORCA_SWARM_ACTION: 'stop' }, () => now);
+  const chain: Record<string, Agent> = {
+    root: agent({ id: 'root', pane: true }),
+    g1: agent({ id: 'g1', subagent: true, parentId: 'root' }),
+    g2: agent({ id: 'g2', subagent: true, parentId: 'g1' }),
+    g3: agent({ id: 'g3', subagent: true, parentId: 'g2' }),
+  };
+  const dev = deep.tick(chain, {}, (now += 1000)).filter((e) => e.kind === 'swarm') as Extract<BudgetEvent, { kind: 'swarm' }>[];
+  const r6 = eq('tres generaciones sobre un tope de dos', dev.map((e) => e.agentId), ['root']);
+  if (!r6.pass) return r6;
+  const r7 = ok('lo dice con la profundidad', dev[0]!.text.includes('nested 3 deep (cap 2)'), dev[0]!.text);
+  if (!r7.pass) return r7;
+  return eq('con ORCA_SWARM_ACTION=stop para al ancestro, que es lo único parable', dev[0]!.stopIds, ['root']);
+});
+
+/* ── 10 · el dinero, apagado por defecto ──────────────────────────── */
+
+const moneyIsOptional = test('el techo en dólares se guarda y se ignora; ORCA_BUDGET_MONEY=1 lo enciende y marca el suelo', () => {
+  let now = T0;
+  const off = book({}, () => now);
+  off.set({ kind: 'agent', ref: 'k9' }, cap({ usd: 1 }));
+  const fleet = { k9: agent({ id: 'k9', metrics: { costUSD: 5 } }) };
+  const r1 = eq('con el dinero apagado, un techo en dólares no dispara nada', kinds(off.tick(fleet, {}, (now += 1000))), []);
+  if (!r1.pass) return r1;
+  const r2 = eq('pero sigue en el libro, para cuando haga falta', off.get({ kind: 'agent', ref: 'k9' }), cap({ usd: 1 }));
+  if (!r2.pass) return r2;
+
+  const on = book({ ORCA_BUDGET_MONEY: '1' }, () => now);
+  on.set({ kind: 'agent', ref: 'k9' }, cap({ usd: 6 }));
+  const ev = on.tick(fleet, {}, (now += 1000));
+  const r3 = eq('encendido, el mismo techo avisa', kinds(ev), ['warn']);
+  if (!r3.pass) return r3;
+  return ok('coste reportado: sin marca de suelo', ev[0]!.text.includes('$5.00 of $6.00') && !ev[0]!.text.includes('≥'), ev[0]?.text);
+});
+
+const estimateIsAFloor = test('un coste estimado se marca como SUELO, nunca como total, y pondera la caché', () => {
+  let now = T0;
+  const b = book({ ORCA_BUDGET_MONEY: '1', ORCA_BUDGET_USD_PER_MTOK: '10' }, () => now);
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ usd: 1 }));
+  // 60k entrada + 30k salida + 100k de caché a 0.1 = 100k ponderados → $1.00
+  const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 60_000, outputTokens: 30_000, cacheReadTokens: 100_000 } }) };
+  const ev = b.tick(fleet, {}, (now += 1000));
+  const r = eq('se pasa', kinds(ev), ['over']);
+  if (!r.pass) return r;
+  return ok('y la cifra dice que es un suelo', ev[0]!.text.includes('≥$1.00 of $1.00'), ev[0]?.text);
+});
+
+/* ── 11 · disco y parsing ─────────────────────────────────────────── */
 
 const rearmAndPersist = test('subir el techo re-arma los avisos; los límites y lo ya avisado sobreviven al reinicio', () => {
   const dir = mkdtempSync(join(tmpdir(), 'orca-budget-'));
   try {
     let now = T0;
     const b = new BudgetBook(dir, budgetConfig({} as NodeJS.ProcessEnv), { now: () => now });
-    b.set({ kind: 'agent', ref: 'k9' }, { usd: 1, min: null });
-    const fleet = { k9: agent({ id: 'k9', metrics: { costUSD: 0.9 } }) };
+    b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: M }));
+    const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 0.9 * M } }) };
     const first = b.tick(fleet, {}, (now += 1000));
     const r1 = eq('warn', kinds(first), ['warn']);
     if (!r1.pass) return r1;
 
     const again = new BudgetBook(dir, budgetConfig({} as NodeJS.ProcessEnv), { now: () => now });
-    const r2 = eq('reiniciado: recuerda el límite', again.get({ kind: 'agent', ref: 'k9' }), { usd: 1, min: null });
+    const r2 = eq('reiniciado: recuerda el límite', again.get({ kind: 'agent', ref: 'k9' }), cap({ tokens: M }));
     if (!r2.pass) return r2;
     const r3 = eq('reiniciado: no repite el warn', kinds(again.tick(fleet, {}, (now += 1000))), []);
     if (!r3.pass) return r3;
 
-    again.set({ kind: 'agent', ref: 'k9' }, { usd: 1.05, min: null });
-    return eq('techo nuevo: vuelve a avisar', kinds(again.tick(fleet, {}, (now += 1000))), ['warn']);
+    again.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: 1.05 * M }));
+    const r4 = eq('techo nuevo: vuelve a avisar', kinds(again.tick(fleet, {}, (now += 1000))), ['warn']);
+    if (!r4.pass) return r4;
+
+    // El retiro también sobrevive: un muerto no resucita porque el hub reinicie.
+    again.retire('k9');
+    const third = new BudgetBook(dir, budgetConfig({} as NodeJS.ProcessEnv), { now: () => now });
+    third.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: 0.1 * M }));
+    return eq('reiniciado: el retirado sigue retirado', kinds(third.tick(fleet, {}, (now += 1000))), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 const limitParsing = test('budgetLimit acepta números, nulos y rechaza basura', () => {
-  const r1 = eq('ambos', budgetLimit(5, 30), { usd: 5, min: 30 });
+  const r1 = eq('los tres ejes', budgetLimit(1000, 5, 30), { tokens: 1000, usd: 5, min: 30 });
   if (!r1.pass) return r1;
-  const r2 = eq('nulos', budgetLimit(null, undefined), { usd: null, min: null });
+  const r2 = eq('nulos', budgetLimit(null, null, undefined), { tokens: null, usd: null, min: null });
   if (!r2.pass) return r2;
-  return ok('negativo rechazado', 'error' in budgetLimit(-1, null));
+  const r3 = ok('negativo rechazado', 'error' in budgetLimit(null, -1, null));
+  if (!r3.pass) return r3;
+  return ok('y dice qué campo', (budgetLimit(-1, null, null) as { error: string }).error.includes('budget_tokens'));
 });
 
-/* ── 10 · en el hub: set_budget, inspect_agent, el aviso a CAPCOM y el feed ── */
+/* ── 12 · en el hub: set_budget, inspect_agent, el aviso agrupado ── */
 
-const throughTheHub = test('set_budget pone el techo, inspect_agent lo enseña, y el 80 % llega por el canal de CAPCOM y al feed', async () => {
+const throughTheHub = test('set_budget pone el techo, inspect_agent enseña el árbol, y una ráfaga llega a CAPCOM como UN mensaje', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'orca-budget-hub-'));
   const unrouted: string[] = [];
   let now = Date.now();
@@ -301,46 +587,62 @@ const throughTheHub = test('set_budget pone el techo, inspect_agent lo enseña, 
       gitBranch: null, gitDirty: false, keyNames: [], sessionIds: ['a1'], rollup: emptyRollup(),
     };
     hub.world.applyCollector({ t: 'project:new', machineId: 'm1', project }, 'm1');
-    hub.world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a1', callsign: 'K9', startedAt: now, metrics: { costUSD: 1.7, toolCalls: 2 } }) }, 'm1');
+    hub.world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a1', callsign: 'K9', startedAt: now, updatedAt: now, metrics: { inputTokens: 1.7 * M, toolCalls: 2 } }) }, 'm1');
+    // Dos subagentes Task colgando de K9: nadie les puso techo y su consumo
+    // es de su ancestro.
+    hub.world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a1#s1', callsign: 'S1', subagent: true, parentId: 'a1', depth: 1, startedAt: now, updatedAt: now, metrics: { inputTokens: 0.2 * M } }) }, 'm1');
+    hub.world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a1#s2', callsign: 'S2', subagent: true, parentId: 'a1#s1', depth: 2, startedAt: now, updatedAt: now, metrics: { inputTokens: 0.1 * M } }) }, 'm1');
     const ctx = hubContext(hub);
 
-    const twice = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: 'x', task_id: null, budget_usd: 2, budget_min: null });
+    const twice = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: 'x', mission_id: null, budget_tokens: 2 * M, budget_usd: null, budget_min: null });
     checks.push(ok('dos objetivos: rechazado', twice.isError === true, twice.result));
-    const bad = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, task_id: null, budget_usd: -3, budget_min: null });
+    const bad = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, mission_id: null, budget_tokens: -3, budget_usd: null, budget_min: null });
     checks.push(ok('límite negativo: rechazado', bad.isError === true, bad.result));
 
-    const set = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, task_id: null, budget_usd: 2, budget_min: 30 });
-    checks.push(ok('set_budget por callsign', !set.isError && set.summary === 'budget on K9: $2 / 30 min', set.summary));
-    const parsed = JSON.parse(set.result) as { status: { spent_usd: number; pct: number; level: string } };
-    checks.push(eq('devuelve el gasto contra el techo nuevo', [parsed.status.spent_usd, parsed.status.pct, parsed.status.level], [1.7, 85, 'warn']));
+    const set = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, mission_id: null, budget_tokens: 2.5 * M, budget_usd: null, budget_min: 30 });
+    checks.push(ok('set_budget por callsign, en tokens', !set.isError && set.summary === 'budget on K9: 2.5M tokens / 30 min active', set.summary));
+    const parsed = JSON.parse(set.result) as { status: { tokens: number; pct: number; level: string }; policy: { unit: string; money_mode: boolean } };
+    checks.push(eq('devuelve el consumo del ancestro y su cría contra el techo nuevo', [parsed.status.tokens, parsed.status.pct, parsed.status.level], [2 * M, 80, 'warn']));
+    checks.push(eq('y dice que la unidad son tokens y el dinero está apagado', [parsed.policy.unit, parsed.policy.money_mode], ['tokens', false]));
 
     const insp = await runTool(ctx, 'inspect_agent', { agent_id: 'K9' });
-    const view = (JSON.parse(insp.result) as { budget: { level: string; limits: { scope: string; limit_usd: number }[] } }).budget;
-    checks.push(eq('inspect_agent enseña el presupuesto', [view.level, view.limits[0]?.scope, view.limits[0]?.limit_usd], ['warn', 'agent', 2]));
+    const seen = JSON.parse(insp.result) as {
+      budget: { level: string; tokens: number; live_subagents_charged: number; limits: { scope: string; limit_tokens: number }[] };
+      children: string[];
+      lineage: { live_descendants: number; live_subagents: number; max_generation: number; descendants: { callsign: string; generation: number }[] };
+    };
+    checks.push(eq('inspect_agent enseña el presupuesto en tokens', [seen.budget.level, seen.budget.limits[0]?.scope, seen.budget.limits[0]?.limit_tokens], ['warn', 'agent', 2.5 * M]));
+    checks.push(eq('y dice cuántos subagentes lleva cobrados', seen.budget.live_subagents_charged, 2));
+    // Lo que fallaba: children vacío con nietos vivos corriendo.
+    checks.push(eq('children ya no viene vacío', seen.children, ['a1#s1']));
+    checks.push(eq('y el árbol entero se ve donde se mira al agente',
+      [seen.lineage.live_descendants, seen.lineage.live_subagents, seen.lineage.max_generation,
+        seen.lineage.descendants.map((d) => `${d.callsign}:${d.generation}`).join(',')],
+      [2, 2, 2, 'S1:1,S2:2']));
 
     // El sweep del hub corre cada dos segundos: el 80 % ya estaba cruzado.
-    const arrived = await until(() => unrouted.some((t) => t.startsWith('[BUDGET 80%] K9')), 6000);
+    const arrived = await until(() => unrouted.some((t) => t.includes('[BUDGET 80%] K9')), 6000);
     checks.push(ok('el aviso sale por el canal de CAPCOM (sin CAPCOM, onUnrouted)', arrived, unrouted.join(' | ')));
     const feed = hub.world.state.feed.find((f) => f.source === 'BUDGET');
-    checks.push(ok('y entra en el feed con nivel warn y agente', feed?.level === 'warn' && feed.agentId === 'a1' && feed.text.includes('$1.70 of $2.00'), feed?.text));
-
-    const fleet = await runTool(ctx, 'list_fleet', { only_blocked: false });
-    const proj = (JSON.parse(fleet.result) as { projects: { budget: { agents: number; warn: number; limit_usd: number } | null }[] }).projects[0];
-    checks.push(eq('list_fleet agrega por proyecto', [proj?.budget?.agents, proj?.budget?.warn, proj?.budget?.limit_usd], [1, 1, 2]));
+    checks.push(ok('y entra en el feed con nivel warn y agente', feed?.level === 'warn' && feed.agentId === 'a1' && feed.text.includes('2.0M of 2.5M tokens'), feed?.text));
 
     // Se pasa y se calla: el hub pide el stop. Sin collector el stop no llega,
     // y eso también se cuenta, en el feed, en vez de perderse en un log.
     now += 2 * 60_000;
-    hub.world.applyCollector({ t: 'agent', machineId: 'm1', id: 'a1', patch: { metrics: { ...emptyMetrics(), costUSD: 2.5, toolCalls: 2 } } }, 'm1');
-    const over = await until(() => unrouted.some((t) => t.startsWith('[BUDGET 100%] K9')), 6000);
+    hub.world.applyCollector({ t: 'agent', machineId: 'm1', id: 'a1', patch: { metrics: { ...emptyMetrics(), inputTokens: 3 * M, toolCalls: 2 } } }, 'm1');
+    const over = await until(() => unrouted.some((t) => t.includes('[BUDGET 100%] K9')), 6000);
     checks.push(ok('el 100 % avisa', over, unrouted.join(' | ')));
-    const stop = await until(() => unrouted.some((t) => t.startsWith('[BUDGET STOP] K9')), 6000);
+    const stop = await until(() => unrouted.some((t) => t.includes('[BUDGET STOP] K9')), 6000);
     checks.push(ok('y sin progreso pide el stop', stop, unrouted.join(' | ')));
+    // El 100 % y el STOP salen en la misma pasada: son UN mensaje, no dos.
+    const burst = unrouted.find((t) => t.includes('[BUDGET STOP] K9'))!;
+    checks.push(ok('la ráfaga llega agrupada, con la cuenta y el peor caso',
+      burst.startsWith('[BUDGET] 2 budget notices in one sweep') && burst.includes('1 stopped') && burst.includes('[BUDGET 100%] K9'), burst));
     const failedStop = await until(() => hub.world.state.feed.some((f) => f.source === 'BUDGET' && f.text.includes('did not go through')), 6000);
     checks.push(ok('un stop que no llega queda en el feed', failedStop));
 
-    const removed = await runTool(ctx, 'set_budget', { agent_id: 'a1', squad: null, task_id: null, budget_usd: null, budget_min: null });
-    checks.push(ok('ambos nulos quitan el techo', !removed.isError && removed.summary === 'budget on K9: removed' && hub.budgets.get({ kind: 'agent', ref: 'a1' }) === null, removed.summary));
+    const removed = await runTool(ctx, 'set_budget', { agent_id: 'a1', squad: null, mission_id: null, budget_tokens: null, budget_usd: null, budget_min: null });
+    checks.push(ok('todos nulos quitan el techo', !removed.isError && removed.summary === 'budget on K9: removed' && hub.budgets.get({ kind: 'agent', ref: 'a1' }) === null, removed.summary));
 
     return checks.find((c) => !c.pass) ?? ok('a través del hub', true, `${checks.length} checks`);
   } finally {
@@ -352,8 +654,13 @@ const throughTheHub = test('set_budget pone el techo, inspect_agent lo enseña, 
 const mod: TestModule = {
   suite: 'Budgets',
   tests: [
-    thresholds, progressSpares, linesCountAsProgress, actionWarn, timeBudget,
-    envDefaults, squadShared, taskBudget, estimate, rearmAndPersist, limitParsing,
+    thresholds, tokenUnit, progressSpares, linesCountAsProgress, actionWarn,
+    activeTime, idleIsSilent, retiredStaysQuiet, progressIsNotInvented,
+    ghostsAreSilent, adviceIsExecutable,
+    envDefaults, squadShared, missionBudget,
+    broodIsCharged, broodBrake,
+    moneyIsOptional, estimateIsAFloor,
+    rearmAndPersist, limitParsing,
     throughTheHub,
   ],
 };

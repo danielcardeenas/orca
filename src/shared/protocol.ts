@@ -73,7 +73,17 @@ export type CollectorFrame =
    * (`HYGIENE_INTERVAL_MS`) and on demand. Sizes, counts and times only — no
    * file content, and every path already home-relative. See shared/hygiene.ts.
    */
-  | { t: 'hygiene'; machineId: string; report: import('./hygiene.ts').HygieneReport };
+  | { t: 'hygiene'; machineId: string; report: import('./hygiene.ts').HygieneReport }
+  /**
+   * Un agente revisor archivó sus propuestas de AUTOMEJORA.
+   *
+   * Llega por aquí y no por un ack porque no es la respuesta a nada que el hub
+   * le pidiera: es el agente hablando por su cuenta, como una escalación. Lo
+   * escribe con `orca-improve` en `<proyecto>/.orca/improve/` y el collector lo
+   * recoge — el mismo canal de fichero que usa todo lo que un agente dice,
+   * porque un agente no tiene socket ni token. Ver collector/improve-drop.ts.
+   */
+  | { t: 'improve:report'; machineId: string; agentId: string | null; reviewId: string | null; reportId: string; proposals: unknown[] };
 
 /* ── hub → collector ──────────────────────────────────────────────── */
 
@@ -96,6 +106,30 @@ export type CommandFrame =
    * reply is a report on the same channel rather than an ack.
    */
   | { t: 'hygiene:sample'; force?: boolean }
+  /**
+   * Pide a esta máquina que relance su collector, porque el operador acaba de
+   * pedir el relevo desde la consola.
+   *
+   * Un frame y no un `Command`, por lo mismo que `hygiene:sample`: `Command`
+   * es el conjunto cerrado de cosas que el hub puede hacer HACER a una
+   * máquina —lanzar, parar, escribir— y esto no es ninguna: es un proceso que
+   * se apaga para volver a arrancar con su propio código. Quien decide es el
+   * collector, no el hub: sin supervisor que lo relance, lo ignora, porque un
+   * collector que se apaga y no vuelve deja esa máquina fuera de la flota. Los
+   * agentes no se tocan — viven en tmux, no dentro del collector.
+   */
+  | { t: 'restart' }
+  /**
+   * Lo que el hub contestó a un informe de AUTOMEJORA, para que el collector
+   * se lo escriba al revisor donde lo está esperando.
+   *
+   * Un frame y no un `Command`, por el mismo motivo que `hygiene:sample`:
+   * `Command` es el conjunto cerrado de cosas que el hub puede hacer HACER a
+   * una máquina, y esto no hace nada — es el recibo de algo que el agente
+   * mandó. La ruta del fichero no viaja: la guarda el collector contra
+   * `reportId`, así que un hub comprometido no puede elegir dónde se escribe.
+   */
+  | { t: 'improve:ack'; reportId: string; ok: boolean; filed?: number; merged?: number; rejected?: string[]; error?: string }
   | TermFrame;
 
 /**
@@ -120,10 +154,27 @@ export type TermFrame =
 export type Command =
   | { k: 'recovery:settings'; automatic?: boolean }
   | { k: 'recovery:status'; agentId: string }
+  /**
+   * Que `/api/file` sirva la carpeta de `path` (o `path` si es una carpeta)
+   * desde ahora y tras reiniciar. Lo pide el visor cuando el hub dijo 403;
+   * el ack trae la raíz que quedó. Ver hub/file-roots.ts.
+   */
+  | { k: 'files:allow'; path: string }
   | { k: 'recovery:decide'; agentId: string; decision: import('./recovery.ts').RecoveryRequest }
   /** `model` opcional: sin él, el relevo nace con el modelo que ya corría. */
   | { k: 'capcom:new'; agentId: string; mode: 'continuity' | 'clean'; checkpoint?: string; model?: string }
   | { k: 'handoff:models'; agentId: string }
+  /**
+   * El catálogo de modelos de UNA MÁQUINA, sin pasar por un agente.
+   *
+   * `handoff:models` contesta lo mismo pero se enruta por `agentId`, porque
+   * nació para cambiarle el proveedor a una sesión que ya existe. AUTOMEJORA
+   * necesita elegir el modelo de un agente que TODAVÍA NO EXISTE, y la máquina
+   * donde va a nacer puede no tener ninguna sesión a la que preguntarle. Lo que
+   * se lee es el mismo `providerModels()`: los alias de Claude Code y el caché
+   * de Codex, cada uno diciendo si su CLI está instalado.
+   */
+  | { k: 'models:list'; machineId: string }
   | { k: 'handoff:prepare'; agentId: string; runtime: string; model: string; checkpoint?: string }
   | { k: 'handoff:commit'; agentId: string; planId: string }
   | { k: 'handoff:status'; agentId: string; planId: string }
@@ -169,6 +220,17 @@ export type Command =
        * so nothing changes for a fleet that did not ask.
        */
       worktree?: string | false;
+      /**
+       * Este spawn es un AGENTE REVISOR de AUTOMEJORA (ver shared/improve.ts).
+       *
+       * Cambia dos cosas en la máquina, y las dos son capacidades y no avisos:
+       * le pone `orca-improve` en el PATH —su único canal para archivar lo que
+       * proponga— y le QUITA las herramientas de edición. Un revisor propone;
+       * lo que implementa es una misión que el operador decide abrir. Pedirle
+       * por escrito que no edite sería instruir en vez de desactivar, y un
+       * modelo atascado usa la salida que ve.
+       */
+      review?: boolean;
     }
   /**
    * Integrate a worker's branch into the project's branch: rebase, run the
@@ -194,6 +256,24 @@ export type Command =
    * La lápida conserva de qué máquina eran, y es la única que lo sabe.
    */
   | { k: 'transcripts:purge'; machineId: string; agentIds: string[]; dryRun?: boolean }
+  /**
+   * Terminar lo que ORCA dejó atrás en esta máquina: un Vite de su propio
+   * repositorio sin dueño, un entrypoint reparentado, un pane vacío.
+   *
+   * Los ids los elige quien llama, y sólo pueden ser los que el propio informe
+   * de higiene ofreció como `orphan`: el collector vuelve a escanear, vuelve a
+   * comprobar la identidad de cada proceso (pid, hora de arranque, sigue
+   * huérfano) y se niega a lo que ya no encaja. `dryRun` hace todas las
+   * comprobaciones y no manda ninguna señal.
+   *
+   * Lleva su `machineId` como `transcripts:purge` y por lo mismo: un proceso
+   * sólo existe en una máquina, y el hub no puede adivinar cuál.
+   *
+   * NO es un `kill` genérico, y esa diferencia es toda la seguridad: sólo
+   * alcanza a procesos que el escáner reconoció como de ORCA y sin dueño. Ver
+   * shared/strays.ts.
+   */
+  | { k: 'strays:clean'; machineId: string; ids: string[]; dryRun?: boolean }
   /** Send text to a running session — a reply, a nudge, an answer. */
   | { k: 'say'; agentId: string; text: string }
   /**
@@ -223,6 +303,21 @@ export type Command =
   | { k: 'deliver'; agentId: string; message: AgentMessage }
   /** Answer an agent's `ask`, so whoever sent it stops waiting. */
   | { k: 'reply'; messageId: string; answer: string; fromAgentId: string | null }
+  /**
+   * Put a directory on the fleet's map, by absolute path.
+   *
+   * Projects are otherwise discovered from the slugs under `~/.claude/projects`
+   * (see `collector/projects.ts`), which means a folder no CLI has ever run in
+   * simply does not exist for ORCA: `spawn` answered "proyecto desconocido" and
+   * the only way out was seeding the folder with a throwaway `claude -p`.
+   * This is that seeding, done honestly: the collector validates the path the
+   * same way a spawn would, registers it, and answers with the project id the
+   * caller can launch on.
+   *
+   * The machine is named because a path only means something on one: the hub
+   * cannot tell whose `/Users/dan/projects/x` this is.
+   */
+  | { k: 'project:register'; machineId: string; path: string }
   /** Store a credential on the machine. The value never returns. */
   | { k: 'key:set'; projectId: string; name: string; value: string }
   | { k: 'key:remove'; projectId: string; name: string }
@@ -261,7 +356,7 @@ export type ServerFrame =
   | { t: 'patch'; rev: number; ops: PatchOp[] }
   | { t: 'ceo:message'; message: CeoMessage }
   /** `purged` marca la que ya no existe: la consola la quita en vez de pintarla. */
-  | { t: 'task'; task: import('./tasks.ts').CapcomTask; purged?: true }
+  | { t: 'mission'; mission: import('./missions.ts').CapcomMission; purged?: true }
   /** Token-by-token CEO output, appended to a streaming message. */
   | { t: 'ceo:delta'; id: string; text: string }
   | { t: 'ceo:done'; id: string }
@@ -280,7 +375,48 @@ export type ServerFrame =
    * Not a patch and not in `WorldState`: it is a few kilobytes per machine on
    * its own clock, and no tile depends on it.
    */
-  | { t: 'hygiene'; reports: import('./hygiene.ts').HygieneReport[] };
+  | { t: 'hygiene'; reports: import('./hygiene.ts').HygieneReport[] }
+  /**
+   * AUTOMEJORA: el tablero entero de la sección de auto-revisión (propuestas,
+   * revisiones, config y contadores). Se empuja cuando cambia.
+   *
+   * Entero y no por partes, como los informes de higiene y por la misma razón:
+   * son unos pocos kilobytes que cambian cada varias horas, y ningún tile del
+   * campo depende de ellos. Un `PatchOp` por propuesta añadiría una máquina de
+   * estados a cambio de nada. Ver shared/improve.ts.
+   */
+  | {
+      t: 'improve';
+      state: import('./improve.ts').ImproveState;
+      verdict: import('./improve.ts').DueVerdict;
+      /**
+       * Con qué nacería el próximo revisor y de dónde sale cada parte, ya
+       * resuelto por el hub: el panel enseña lo que VA a pasar en vez de una
+       * casilla vacía que el operador tenga que interpretar.
+       */
+      choice: ReturnType<typeof import('./improve.ts').effectiveChoice>;
+      /**
+       * La máquina donde nacería, o null si no hay proyecto que revisar. Es a
+       * quien la consola le pide el catálogo de modelos (`models:list`).
+       */
+      machineId: string | null;
+    }
+  /**
+   * Qué código corre este hub, y si sigue siendo el que hay en disco.
+   *
+   * Se manda al conectar y otra vez —una sola— cuando `stale` se vuelve
+   * cierto. Existe porque recargar la consola actualiza la consola y nada
+   * más: el hub carga su código al arrancar y no lo vuelve a mirar. Cuando
+   * alguien publica y el proceso sigue con el código de antes, esto es lo que
+   * lo dice; la acción no es recargar, es reiniciar ORCA. Ver hub/source-rev.ts.
+   *
+   * `restartable` es si este proceso puede darse el relevo a sí mismo — sólo
+   * cuando corre bajo `tools/supervise.mjs`, que es quien lo relanza (ver
+   * shared/restart.ts). Es lo que decide si el aviso de la consola es un botón
+   * o un cartel: ofrecer un botón que no puede funcionar es peor que no
+   * ofrecerlo, porque el operador cree que ya está hecho.
+   */
+  | { t: 'server'; rev: string; stale: boolean; restartable: boolean };
 
 /**
  * A patch operation. Intentionally coarse — whole records, not JSON pointers.
@@ -310,20 +446,52 @@ export type PatchOp =
 export type ClientFrame =
   | { t: 'hello'; v: number; token: string }
   /**
+   * Reinicia el hub y los collectors supervisados: el clic de la píldora
+   * `SERVER CODE CHANGED`.
+   *
+   * No lleva `id` porque no puede haber ack: lo que este frame provoca es que
+   * el proceso que tendría que contestarlo se muera. La confirmación es el
+   * enlace cayéndose y volviendo, que es además lo único que prueba que el
+   * relevo ocurrió de verdad. Un hub sin supervisor lo rechaza con un `error`,
+   * pero no debería llegarle: la consola sólo enseña el botón cuando el frame
+   * `server` dijo `restartable`.
+   */
+  | { t: 'restart' }
+  /**
    * Ask for the fleet's hygiene. The ack carries the reports. `refresh` asks
    * every collector for a fresh sample first — the button, not the refresh.
    */
   | { t: 'hygiene:get'; id: string; refresh?: boolean }
   /** The human said something to the CEO. */
-  | { t: 'ceo:say'; text: string; id?: string; taskId?: string }
-  | { t: 'task:create'; id: string; taskId: string; title: string }
+  | { t: 'ceo:say'; text: string; id?: string; missionId?: string }
   /**
-   * Retirar una tarea de la vista (`on: false` la devuelve), o borrarla.
-   * `task:purge` sólo acepta una que ya esté archivada: lo reversible se pide
-   * una vez, lo definitivo dos.
+   * El operador escribe EN una misión, desde su ventana. El hub decide a quién
+   * va: al LÍDER de la misión si tiene uno en pie (`missionLeadOf`), y si no a
+   * CAPCOM por el mismo camino que `ceo:say` con `missionId`. La consola
+   * enseña de antemano lo que el hub va a decidir, con la misma regla; el ack
+   * lleva `{ delivery, to: 'lead' | 'capcom', callsign? }` para que lo que se
+   * prometió y lo que pasó se puedan comparar. Una misión terminada vuelve a
+   * `active` al recibir una línea: pedir más trabajo es reabrirla.
    */
-  | { t: 'task:archive'; id: string; taskId: string; on?: boolean }
-  | { t: 'task:purge'; id: string; taskId: string }
+  | { t: 'mission:say'; id: string; missionId: string; text: string }
+  | { t: 'mission:create'; id: string; missionId: string; title: string }
+  /**
+   * Retirar una misión de la vista (`on: false` la devuelve), o borrarla.
+   * `mission:purge` sólo acepta una que ya esté archivada: lo reversible se
+   * pide una vez, lo definitivo dos.
+   */
+  | { t: 'mission:archive'; id: string; missionId: string; on?: boolean }
+  | { t: 'mission:purge'; id: string; missionId: string }
+  /**
+   * El parte de una misión: qué hizo la flota, no qué se dijo.
+   *
+   * Se pide y no se emite porque no cambia: sale del diario en disco, que sólo
+   * crece, y se lee cuando el operador abre una misión terminada — días
+   * después, casi siempre. Empujarlo con el mundo costaría un barrido del
+   * diario por cada consola conectada y por cada cambio, para un panel que
+   * nadie está mirando. El ack lleva un `MissionDebrief` (shared/debrief.ts).
+   */
+  | { t: 'mission:debrief'; id: string; missionId: string }
   /** The human answered an escalation directly, bypassing the CEO. */
   | { t: 'escalation:answer'; id: string; answer: string; rememberAs: string | null }
   /** The human acknowledged a file collision; stop showing it. */
@@ -337,6 +505,37 @@ export type ClientFrame =
    * `dryRun` answers what would go without touching anything.
    */
   | { t: 'agents:archive'; id: string; filter: import('./archive.ts').ArchiveFilter; dryRun?: boolean }
+  /** AUTOMEJORA: pide el tablero. El ack lo trae; los cambios llegan solos. */
+  | { t: 'improve:get'; id: string }
+  /**
+   * Lanza una revisión AHORA. Es la ejecución manual: se salta el reloj, la
+   * señal mínima y el tope diario —el operador ya decidió que vale la pena—
+   * pero no un CAPCOM vivo, que no es una preferencia sino un requisito.
+   */
+  | { t: 'improve:run'; id: string }
+  /** Para la revisión en vuelo: mata al revisor y deja el hueco libre. */
+  | { t: 'improve:cancel'; id: string }
+  /**
+   * Lo que el operador hace con una propuesta. `reply` le contesta (y despierta
+   * a CAPCOM con la respuesta), `snooze` la pospone hasta `untilMs`, `dismiss`
+   * la descarta, `reopen` la devuelve, `seen` apaga su aviso.
+   */
+  | { t: 'improve:act'; id: string; proposalId: string; act: 'reply' | 'snooze' | 'dismiss' | 'reopen' | 'seen'; text?: string; untilMs?: number }
+  /** Apaga el aviso de las novedades. Sin `proposalIds`, de todas. */
+  | { t: 'improve:seen'; id: string; proposalIds?: string[] }
+  /**
+   * IMPLEMENT: una propuesta se convierte en trabajo. Abre una misión con la
+   * propuesta entera dentro y LANZA UN AGENTE PROPIO sobre el repositorio de
+   * ORCA como líder de esa misión —no le pide el trabajo a CAPCOM, que sólo
+   * recibe el resultado cuando el líder termina. El id de la misión lo acuña
+   * la consola, como en `mission:create`; el hub se niega si la propuesta ya
+   * tiene una, que es lo que impide dos misiones para la misma idea. El ack
+   * lleva `{ missionId, delivery, callsign? }`: `launched` con quién, o
+   * `saved` con el motivo cuando no se pudo lanzar y la misión queda escrita.
+   */
+  | { t: 'improve:send'; id: string; proposalId: string; missionId: string }
+  /** Los límites visibles: pausa, cada cuánto, cuántas al día, señal mínima. */
+  | { t: 'improve:config'; id: string; patch: Partial<import('./improve.ts').ImproveConfig & { budgetTokens: number }> }
   | { t: 'resync' }
   | { t: 'beat' }
   /** A terminal attachment; routed to the machine that hosts the agent's pane. */
@@ -394,6 +593,27 @@ export function newId(prefix: string): string {
   const rand = Math.random().toString(36).slice(2, 10);
   return `${prefix}_${Date.now().toString(36)}${rand}`;
 }
+
+/*
+ * Por qué el hub cerró un socket.
+ *
+ * Viven aquí, y no en el hub, porque el que los lee está al otro lado del
+ * cable: la consola distingue «se cayó la red» de «no me quieres» sólo por
+ * este número, y son dos condiciones que se miran de forma distinta. Un
+ * código acordado en un solo sitio no puede derivar.
+ */
+/** Token ausente o inválido. */
+export const CLOSE_UNAUTHORIZED = 4001;
+/** Versión de protocolo incompatible. */
+export const CLOSE_BAD_VERSION = 4002;
+/** Hello ausente o malformado. */
+export const CLOSE_BAD_HELLO = 4003;
+/**
+ * Máquina sintética contra un hub que no es de pruebas. Ver
+ * `shared/synthetic.ts`: la marca la trae el `hello`, y sólo un hub que se
+ * declara arnés la admite.
+ */
+export const CLOSE_NOT_HARNESS = 4004;
 
 /** Ports. Kept here so collector, hub and UI cannot drift apart. */
 export const PORTS = {

@@ -28,7 +28,7 @@ export const HYGIENE_TOOLS: ToolSpec[] = [
   {
     name: 'hygiene_report',
     description:
-      'What ORCA costs the machines it runs on: disk by category (transcripts, logs, recovery, backups, scratch, artifacts), free space per volume, CPU and memory, and how fast ORCA\'s own files are growing. Call this when the operator asks about disk, memory, load or "what is ORCA using", and before you propose any cleanup. Every number carries a confidence, and the direction is part of it: `measured` was counted exactly; `atLeast` is a floor, the truth is that much OR MORE (a directory walk that hit its budget); `atMost` is a ceiling, the truth is that much OR LESS (memory in use on macOS, which counts reclaimable cache); `approximate` bounds nothing either way; `unavailable` means it could not be measured and the reason is attached. Repeat the direction when you report a number — saying "at least 40G" of a ceiling, or "40G" flat of a floor, tells the operator the opposite of the truth. Never round an `unavailable` down to zero. The growth figures are NET FILE GROWTH between two samples, not disk writes: a log that rotates writes megabytes and grows by nothing. Say "grew by" and never "wrote". Growth comes back `unavailable` whenever either sample was cut short, because the difference between two floors is bounded in neither direction; report that as "cannot be derived yet", not as no growth.',
+      'What ORCA costs the machines it runs on: disk by category (transcripts, logs, recovery, backups, scratch, artifacts), free space per volume, CPU and memory, and how fast ORCA\'s own files are growing. Call this when the operator asks about disk, memory, load or "what is ORCA using", and before you propose any cleanup. Every number carries a confidence, and the direction is part of it: `measured` was counted exactly; `atLeast` is a floor, the truth is that much OR MORE (a directory walk that hit its budget); `atMost` is a ceiling, the truth is that much OR LESS; `approximate` bounds nothing either way; `unavailable` means it could not be measured and the reason is attached. Repeat the direction when you report a number — saying "at least 40G" of a ceiling, or "40G" flat of a floor, tells the operator the opposite of the truth. Never round an `unavailable` down to zero. Memory in use is what is COMMITTED (wired + app + compressed on macOS); `memory_cached_returned_on_demand` is cache the system gives back the instant anything asks, so it is not part of memory_used and adding the two would call a comfortable machine full. `swap_used` is what says whether memory pressure is real. The growth figures are NET FILE GROWTH between two samples, not disk writes: a log that rotates writes megabytes and grows by nothing. Say "grew by" and never "wrote". Growth comes back `unavailable` whenever either sample was cut short, because the difference between two floors is bounded in neither direction; report that as "cannot be derived yet", not as no growth.',
     input_schema: {
       type: 'object',
       properties: {
@@ -181,6 +181,11 @@ export async function runHygieneTool(
     cpu_pct: wire(r.cpuPct, 'pct'),
     memory_used: wire(r.memUsedBytes),
     memory_total: wire(r.memTotalBytes),
+    // Cache is not part of memory_used and is available on demand: an agent
+    // that adds the two and calls the machine full has read it backwards.
+    ...(r.memCachedBytes ? { memory_cached_returned_on_demand: wire(r.memCachedBytes) } : {}),
+    ...(r.swapUsedBytes ? { swap_used: wire(r.swapUsedBytes) } : {}),
+    ...(r.swapTotalBytes ? { swap_total: wire(r.swapTotalBytes) } : {}),
     volumes: r.volumes.map((v) => ({
       path: v.path, total: wire(v.totalBytes), free: wire(v.freeBytes),
     })),

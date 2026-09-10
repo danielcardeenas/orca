@@ -17,7 +17,11 @@
   },
   "scripts": {
     "dev": "concurrently -n orca,collector,ui -c magenta,cyan,green \"npm:dev:orca\" \"npm:dev:collector\" \"npm:dev:ui\"",
-    "dev:ui": "vite",
+    "prod": "concurrently -n orca,collector -c magenta,cyan \"npm:prod:orca\" \"npm:prod:collector\"",
+    "prod:orca": "node tools/supervise.mjs --name orca -- tsx src/orca.ts",
+    "prod:collector": "node tools/supervise.mjs --name collector -- tsx src/collector/index.ts",
+    "publish": "node tools/publish.mjs",
+    "dev:ui": "node tools/lease.mjs --kind vite --port 4478 -- npx vite",
     "dev:hub": "tsx watch src/hub/server.ts",
     "dev:collector": "tsx watch src/collector/index.ts",
     "build": "tsc --noEmit && vite build",
@@ -41,11 +45,13 @@
     "markdown-it": "^15.0.1",
     "node-pty": "^1.1.0",
     "three": "^0.185.1",
+    "web-push": "^3.6.7",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.2.0",
     "@types/node": "^22.10.0",
+    "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.13",
     "concurrently": "^9.1.0",
     "playwright": "^1.62.1",

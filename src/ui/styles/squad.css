@@ -25,7 +25,7 @@
   display: flex; align-items: center; gap: 6px; white-space: nowrap;
   padding: 1px 5px;
   background: var(--bezel);
-  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--ink-dim);
   /*
    * The rótulo is the block's handle: `field.ts` switches its pointer-events

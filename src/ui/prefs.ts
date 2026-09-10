@@ -4,6 +4,8 @@
  * knob is one line to add and never a second storage key.
  */
 
+import type { FontDisplayId, FontMonoId } from './fonts.ts';
+
 const KEY = 'orca.prefs.v1';
 
 export interface Prefs {
@@ -26,26 +28,59 @@ export interface Prefs {
    */
   showAll: boolean;
   origin: 'orca' | 'external' | 'all';
-  /** The HUD's task panel folded to its head. A click on the head flips it. */
-  tasksFolded: boolean;
+  /** The HUD's mission panel folded to its head. A click on the head flips it. */
+  missionsFolded: boolean;
+  /** La sección AUTOMEJORA plegada a su cabecera. Igual que la de misiones. */
+  improveFolded: boolean;
   /*
    * CAPCOM's halo (field/command.ts). Four pieces, each its own switch, so
    * the command post can be read at whatever weight the fleet allows: with
    * fifty agents the links are noise, with five they are the picture.
    */
-  /** Segment the halo by open task: one arc per task the hub keeps, lit while it moves. */
-  capcomTasks: boolean;
+  /** Segment the halo by open mission: one arc per mission the hub keeps, lit while it moves. */
+  capcomMissions: boolean;
   /** Amber notches on the halo, one per question nobody has answered yet. */
   capcomNotches: boolean;
   /** The turn: a faster pulse and a solid outline while CAPCOM works, amber while it waits on you. */
   capcomPulse: boolean;
   /** Faint cyan ties from CAPCOM to every agent it launched. Off by default: fifty of them hum. */
   capcomLinks: boolean;
+  /**
+   * The two faces the console is drawn in (`fonts.ts` holds the catalogue and
+   * the stacks). Display is every label and caption; mono is what a machine
+   * wrote. An id no longer in the catalogue falls back to the first option,
+   * so a stale blob never leaves the console unreadable.
+   */
+  fontDisplay: FontDisplayId;
+  fontMono: FontMonoId;
+  /**
+   * Read CAPCOM's answer back when the line was spoken (`hud/voice.ts`).
+   * Only the conclusion, only its first sentences, only for a spoken line;
+   * off, ⌥V still talks and the reply stays in the window.
+   */
+  voiceReply: boolean;
+  /**
+   * The synthesiser voice, by the name the browser lists it under; a bare
+   * name takes its best take (`Mónica` → `Mónica (mejorada)`). Empty picks
+   * like `say` does: the system voice for the language (`voice.ts`). The
+   * default is Mónica, Spain's Spanish, by the operator's choice on
+   * 2026-09-09 — Siri's own voices are Siri's and no browser or `say` gets
+   * them — and a machine without her falls back to AUTO without a word.
+   */
+  voiceName: string;
+  /**
+   * Who turns speech into text. `auto` is whisper.cpp on the hub whenever the
+   * hub says it can (it hears the fleet's names), else the browser's own;
+   * the other two force one. See docs/VOICE.md.
+   */
+  voiceEngine: 'auto' | 'whisper' | 'browser';
 }
 
 const DEFAULTS: Prefs = {
-  panel: 0.5, panelColor: false, musicAutoplay: false, showAll: false, origin: 'orca', tasksFolded: false,
-  capcomTasks: true, capcomNotches: true, capcomPulse: true, capcomLinks: false,
+  panel: 0.5, panelColor: false, musicAutoplay: false, showAll: false, origin: 'orca', missionsFolded: false, improveFolded: false,
+  capcomMissions: true, capcomNotches: true, capcomPulse: true, capcomLinks: false,
+  fontDisplay: 'space-grotesk', fontMono: 'commit-mono',
+  voiceReply: true, voiceName: 'Mónica', voiceEngine: 'auto',
 };
 
 function load(): Prefs {

@@ -85,7 +85,7 @@ export interface JournalEntry {
   /** El código del proyecto (AX), que es como lo nombra una persona. */
   project: string | null;
   squad: string | null;
-  taskId: string | null;
+  missionId: string | null;
 
   /* launch */
   by?: LaunchedBy;
@@ -168,6 +168,22 @@ function isEntry(v: unknown): v is JournalEntry {
     && typeof o['kind'] === 'string' && (JOURNAL_KINDS as readonly string[]).includes(o['kind']);
 }
 
+/**
+ * Una entrada escrita antes del renombrado, leída con el vocabulario de hoy.
+ *
+ * El journal es un jsonl que se acumula durante meses y el campo se llamaba
+ * `taskId`. Sin esto, un filtro por `mission_id` no encontraría nada anterior
+ * al renombrado y `endLine` dejaría de nombrar la misión de las entradas
+ * viejas: el dato sigue ahí, sólo cambió de nombre. Se traduce al leer y se
+ * escribe siempre con el nombre nuevo, así que el fichero migra al rotar.
+ */
+function migrate(e: JournalEntry): JournalEntry {
+  const legacy = (e as { taskId?: string | null }).taskId;
+  if (e.missionId != null || legacy == null) return e;
+  const { taskId: _drop, ...rest } = e as JournalEntry & { taskId?: string | null };
+  return { ...rest, missionId: legacy } as JournalEntry;
+}
+
 function clip(s: string | null | undefined, n: number): string | null {
   if (typeof s !== 'string') return null;
   const t = s.replace(/\s+/g, ' ').trim();
@@ -187,7 +203,7 @@ export interface JournalQuery {
   /** Id o código del proyecto, sin distinguir mayúsculas. */
   project?: string | null;
   squad?: string | null;
-  taskId?: string | null;
+  missionId?: string | null;
   /** Id o callsign. */
   agent?: string | null;
   kind?: JournalKind | JournalKind[] | null;
@@ -227,7 +243,7 @@ export interface EscalatedBrief {
   callsign: string | null;
   project: string | null;
   squad: string | null;
-  taskId: string | null;
+  missionId: string | null;
   brief: string | null;
   question: string | null;
   answeredBy: AnsweredBy | null;
@@ -342,7 +358,7 @@ export class Journal {
         if (!line.trim()) continue;
         try {
           const v: unknown = JSON.parse(line);
-          if (isEntry(v)) out.push(v);
+          if (isEntry(v)) out.push(migrate(v));
         } catch { /* una línea partida por un corte no invalida el resto */ }
       }
     }
@@ -452,7 +468,7 @@ export class Journal {
       if (kinds && !kinds.has(e.kind)) continue;
       if (project && (e.projectId ?? '').toLowerCase() !== project && (e.project ?? '').toLowerCase() !== project) continue;
       if (squad && (e.squad ?? '').toLowerCase() !== squad) continue;
-      if (q.taskId && e.taskId !== q.taskId) continue;
+      if (q.missionId && e.missionId !== q.missionId) continue;
       if (agent && (e.agentId ?? '').toLowerCase() !== agent && (e.callsign ?? '').toLowerCase() !== agent) continue;
       if (q.state && (e.kind !== 'end' || e.state !== q.state)) continue;
       if (q.by && (e.kind !== 'launch' || e.by !== q.by)) continue;
@@ -545,7 +561,7 @@ export class Journal {
       const a = e.escalationId ? answered.get(e.escalationId) : undefined;
       escalatedBriefs.push({
         agentId: e.agentId, callsign: e.callsign ?? l?.callsign ?? null,
-        project: e.project ?? l?.project ?? null, squad: e.squad ?? l?.squad ?? null, taskId: e.taskId ?? l?.taskId ?? null,
+        project: e.project ?? l?.project ?? null, squad: e.squad ?? l?.squad ?? null, missionId: e.missionId ?? l?.missionId ?? null,
         brief: clip(l?.brief ?? null, 240), question: clip(e.question ?? null, 200),
         answeredBy: a?.answeredBy ?? null,
         state: finals.get(e.agentId) ?? null,
@@ -664,7 +680,7 @@ export function endLine(e: JournalEntry, now: number): string {
   if (typeof e.costUSD === 'number' && e.costUSD > 0) parts.push(`$${e.costUSD.toFixed(2)}`);
   if (typeof e.durationMs === 'number') parts.push(ago(e.durationMs));
   if (e.lines && (e.lines.added || e.lines.removed)) parts.push(`+${e.lines.added}/-${e.lines.removed}`);
-  if (e.taskId) parts.push(e.taskId);
+  if (e.missionId) parts.push(e.missionId);
   if (e.squad) parts.push(`squad ${e.squad}`);
   return `${e.callsign ?? e.agentId ?? '?'} [${e.project ?? e.projectId ?? '?'}] ${e.state ?? 'ended'} ${ago(now - e.at)} ago`
     + (parts.length ? ` · ${parts.join(' · ')}` : '')
@@ -689,9 +705,9 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
   const openById = new Map<string, JournalEntry>();
 
   const code = (projectId: string | null): string | null => (projectId ? deps.project(projectId)?.code ?? null : null);
-  const taskOf = (a: Pick<Agent, 'id' | 'squad'>): string | null => {
+  const missionOf = (a: Pick<Agent, 'id' | 'squad'>): string | null => {
     let fallback: string | null = null;
-    for (const t of Object.values(deps.tasks())) {
+    for (const t of Object.values(deps.missions())) {
       if (t.agentIds.includes(a.id)) { if (t.status === 'active') return t.id; fallback ??= t.id; }
       else if (a.squad && t.squads?.includes(a.squad) && t.status === 'active') fallback ??= t.id;
     }
@@ -701,7 +717,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
   const base = (a: Agent) => ({
     agentId: a.id, callsign: a.callsign, machineId: a.machineId,
     projectId: a.projectId, project: code(a.projectId),
-    squad: a.squad ?? null, taskId: taskOf(a),
+    squad: a.squad ?? null, missionId: missionOf(a),
   });
 
   function launchedBy(a: Agent, at: number): LaunchedBy {
@@ -751,7 +767,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       rotation = null;
       journal.append({
         kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
-        projectId: a.projectId, project: code(a.projectId), squad: null, taskId: null,
+        projectId: a.projectId, project: code(a.projectId), squad: null, missionId: null,
         fromId: input.fromId, toId: a.id, turns: input.turns ?? null,
         compactions: input.compactions ?? null, contextTokens: input.contextTokens ?? null,
       });
@@ -760,7 +776,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       // Sin gancho del hub: un CAPCOM nuevo cuando había otro ES una rotación.
       journal.append({
         kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
-        projectId: a.projectId, project: code(a.projectId), squad: null, taskId: null,
+        projectId: a.projectId, project: code(a.projectId), squad: null, missionId: null,
         fromId: capcomId, toId: a.id, note: 'inferred: a new CAPCOM appeared while another was known',
       });
       wrote = true;
@@ -791,7 +807,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         kind: 'escalation', at: e.at,
         agentId: e.agentId, callsign: a?.callsign ?? null, machineId: a?.machineId ?? e.machineId ?? null,
         projectId: e.projectId, project: code(e.projectId),
-        squad: a?.squad ?? null, taskId: a ? taskOf(a) : null,
+        squad: a?.squad ?? null, missionId: a ? missionOf(a) : null,
         escalationId: e.id, question: e.question, urgency: e.urgency ?? null, options: e.options ?? [],
         by: e.from === 'ceo' ? 'capcom' : undefined,
       });
@@ -807,7 +823,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         kind: 'answer', at: e.at,
         agentId: e.agentId, callsign: a?.callsign ?? asked?.callsign ?? null, machineId: a?.machineId ?? e.machineId ?? null,
         projectId: e.projectId ?? asked?.projectId ?? null, project: code(e.projectId ?? asked?.projectId ?? null),
-        squad: a?.squad ?? asked?.squad ?? null, taskId: a ? taskOf(a) : asked?.taskId ?? null,
+        squad: a?.squad ?? asked?.squad ?? null, missionId: a ? missionOf(a) : asked?.missionId ?? null,
         escalationId: e.id ?? asked?.escalationId ?? null, question: e.question ?? asked?.question ?? null,
         answer: e.answer, answeredBy: e.by === 'human' ? 'human' : 'capcom', rememberAs: e.rememberAs ?? null,
         waitedMs: asked ? Math.max(0, e.at - asked.at) : null,
@@ -860,7 +876,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         rotation = null;
         journal.append({
           kind: 'rotation', at: deps.now(), agentId: held.fromId, callsign: null, machineId: held.machineId ?? null,
-          projectId: null, project: null, squad: null, taskId: null,
+          projectId: null, project: null, squad: null, missionId: null,
           fromId: held.fromId, toId: null, turns: held.turns ?? null,
           compactions: held.compactions ?? null, contextTokens: held.contextTokens ?? null,
           note: 'the new CAPCOM never showed up',
@@ -879,7 +895,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       const projectId = input.projectId ?? a?.projectId ?? null;
       return journal.append({
         kind: 'landing', agentId: input.agentId, callsign: a?.callsign ?? null, machineId: a?.machineId ?? null,
-        projectId, project: code(projectId), squad: a?.squad ?? null, taskId: a ? taskOf(a) : null,
+        projectId, project: code(projectId), squad: a?.squad ?? null, missionId: a ? missionOf(a) : null,
         branch: input.branch ?? null, target: input.target ?? null, commit: input.commit ?? null,
         ok: input.ok, detail: input.detail ?? null,
       });

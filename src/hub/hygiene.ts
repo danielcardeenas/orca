@@ -21,6 +21,12 @@
  */
 
 import type { HygieneReport, Reading } from '../shared/hygiene.ts';
+import type { Stray } from '../shared/strays.ts';
+
+/** Lo que un collector puede declarar. Nada fuera de estas listas cruza. */
+const STRAY_KINDS: readonly string[] = ['vite', 'orca', 'pane', 'agent'];
+const STRAY_VERDICTS: readonly string[] = ['orphan', 'ambiguous', 'protected'];
+const STRAY_ACTIONS: readonly string[] = ['terminate', 'retire', 'none'];
 import { CATEGORIES, sumReadings, unavailable, type HygieneCategory } from '../shared/hygiene.ts';
 
 /** Past this, the console shows the report as stale rather than current. */
@@ -187,6 +193,44 @@ export function sanitizeReport(v: unknown): HygieneReport | null {
     }];
   });
 
+  /*
+   * Los restos, validados como todo lo demás que llega de un collector.
+   *
+   * Importa más que en las otras listas: cada fila de aquí acaba en un panel
+   * con un botón que termina un proceso, así que lo que no encaja no se
+   * recorta — se tira. Un `verdict` desconocido no puede convertirse en
+   * `orphan` por descuido, y una ruta absoluta no cruza porque lleva el nombre
+   * del operador. Ver shared/strays.ts.
+   */
+  const strays = (Array.isArray(r['strays']) ? r['strays'] : []).slice(0, 64).flatMap((v3) => {
+    if (typeof v3 !== 'object' || v3 === null) return [];
+    const x = v3 as Record<string, unknown>;
+    const kind = String(x['kind']);
+    const verdict = String(x['verdict']);
+    const action = String(x['action']);
+    if (!STRAY_KINDS.includes(kind) || !STRAY_VERDICTS.includes(verdict) || !STRAY_ACTIONS.includes(action)) return [];
+    const cwd = str(x['cwd'], 200);
+    if (cwd.startsWith('/')) return [];
+    const pid = Math.max(0, Math.round(num(x['pid'])));
+    return [{
+      id: str(x['id'], 120),
+      kind: kind as Stray['kind'], verdict: verdict as Stray['verdict'], action: action as Stray['action'],
+      label: str(x['label'], 120),
+      ...(pid > 0 ? { pid } : {}),
+      ...(typeof x['ppid'] === 'number' ? { ppid: Math.max(0, Math.round(x['ppid'])) } : {}),
+      ...(typeof x['startedAt'] === 'number' ? { startedAt: x['startedAt'] } : {}),
+      ...(Array.isArray(x['ports'])
+        ? { ports: x['ports'].filter((n): n is number => typeof n === 'number' && n > 0 && n < 65_536).slice(0, 8) }
+        : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(typeof x['agentId'] === 'string' ? { agentId: str(x['agentId'], 120) } : {}),
+      ...(typeof x['pane'] === 'string' ? { pane: str(x['pane'], 120) } : {}),
+      evidence: (Array.isArray(x['evidence']) ? x['evidence'] : [])
+        .filter((e): e is string => typeof e === 'string').slice(0, 8).map((e) => e.slice(0, 200)),
+      ...(typeof x['why'] === 'string' ? { why: str(x['why'], 200) } : {}),
+    }];
+  });
+
   const growthRaw = r['growth'];
   let growth: HygieneReport['growth'] = null;
   if (typeof growthRaw === 'object' && growthRaw !== null) {
@@ -211,10 +255,16 @@ export function sanitizeReport(v: unknown): HygieneReport | null {
     // The home path itself never travels: the console only needs to know that
     // paths are already `~`-relative.
     home: '~',
-    volumes, categories, processes, candidates, growth,
+    volumes, categories, processes, candidates, growth, strays,
     cpuPct: isReading(r['cpuPct']) ? r['cpuPct'] : unavailable('the collector sent no CPU reading'),
     memUsedBytes: isReading(r['memUsedBytes']) ? r['memUsedBytes'] : unavailable('the collector sent no memory reading'),
     memTotalBytes: isReading(r['memTotalBytes']) ? r['memTotalBytes'] : unavailable('the collector sent no memory reading'),
+    // Absent from an older collector, and absent is not zero: the field stays
+    // off the report entirely so the window can leave the row out rather than
+    // draw an empty cache.
+    ...(isReading(r['memCachedBytes']) ? { memCachedBytes: r['memCachedBytes'] } : {}),
+    ...(isReading(r['swapUsedBytes']) ? { swapUsedBytes: r['swapUsedBytes'] } : {}),
+    ...(isReading(r['swapTotalBytes']) ? { swapTotalBytes: r['swapTotalBytes'] } : {}),
     limits: (Array.isArray(r['limits']) ? r['limits'] : [])
       .filter((s): s is string => typeof s === 'string').slice(0, 12).map((s) => s.slice(0, 300)),
   };

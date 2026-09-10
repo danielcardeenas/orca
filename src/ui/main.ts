@@ -1,3 +1,4 @@
+import { syncPushSubscription } from './push.ts';
 /**
  * ORCA entry.
  *
@@ -13,11 +14,16 @@ import './styles/sigil.css';
 import './styles/squad.css';
 import './styles/window.css';
 import './styles/hud.css';
+import './styles/improve.css';
+import './styles/strays.css';
 
 import type { Artifact, Escalation, WorldState } from '../shared/types.ts';
 import type { InterruptOutcome } from '../shared/interrupt.ts';
 import { store } from './store.ts';
-import { hub } from './net/client.ts';
+import { hub, uploadFile } from './net/client.ts';
+import { guardStrayDrops, stage, uploadAll } from './windows/attach.ts';
+import { fieldKindOf, isPlacedFileId, placedFiles } from './placed-files.ts';
+import { draftKey } from './drafts.ts';
 import { runBoot } from './boot.ts';
 import { createField } from './field/field.ts';
 import { mountDirector } from './director.ts';
@@ -32,6 +38,7 @@ import { mountSpawn } from './windows/kinds/spawn.ts';
 import { mountArtifact } from './windows/kinds/artifact.ts';
 import { mountBreach, mountHelp, mountSettings } from './windows/kinds/misc.ts';
 import { mountHygiene } from './windows/kinds/hygiene.ts';
+import { mountMission } from './windows/kinds/mission.ts';
 import { getPref } from './prefs.ts';
 import { mountGallery } from './windows/kinds/gallery.ts';
 import { mountLaunch } from './windows/kinds/launch.ts';
@@ -48,20 +55,27 @@ import { mountUpdate } from './hud/update.ts';
 import { mountMinimap } from './hud/minimap.ts';
 import { mountBookmarks } from './hud/bookmarks.ts';
 import { mountSound, getSound, openSoundFor } from './hud/sound.ts';
+import { mountVoice } from './hud/voice.ts';
 import { mountSfx } from './windows/kinds/sfx.ts';
 import { activeMusic, mountMusic } from './windows/kinds/music.ts';
 import { mountCursor } from './hud/cursor.ts';
 import { showContext } from './hud/context.ts';
 import { mountAlarm } from './hud/alarm.ts';
-import { mountTasks } from './hud/tasks.ts';
+import { mountHandshake } from './handshake.ts';
+import { mountMissions } from './hud/missions.ts';
+import { mountImprove } from './hud/improve.ts';
+import { mountSections } from './hud/sections.ts';
 import type { Console } from './console.ts';
 import { esc } from './util.ts';
 import { keyHold, typing as typingIn } from './keys.ts';
 import { applyToRoot, gsapDefaults } from './motion.ts';
+import { applyFonts } from './fonts.ts';
 
 // One motion contract for CSS, GSAP and the shaders, before anything mounts.
 applyToRoot();
 gsapDefaults();
+// And the two faces, before the boot paints its first glyph.
+applyFonts();
 
 const app = document.getElementById('app')!;
 const params = new URL(location.href).searchParams;
@@ -92,6 +106,10 @@ const hudEl = app.querySelector<HTMLElement>('[data-hud]')!;
 const dockEl = document.createElement('div');
 dockEl.className = 'dock';
 dockEl.innerHTML = `<div class="hints px px--tiny" data-hints></div>`;
+// Push-to-talk (hud/voice.ts). Its strip lives in the dock, above every
+// window, like the command line the spoken word stands in for. A heard line
+// goes down the composer's own `say`, so CAPCOM never knows it was spoken.
+const voice = mountVoice(dockEl, { send: (t) => hub.say(t), note: (t, l) => c.note(t, l) });
 const statsEl = hudEl.querySelector<HTMLElement>('[data-stats]')!;
 const hintEl = hudEl.querySelector<HTMLElement>('[data-hint]')!;
 const selbar = hudEl.querySelector<HTMLElement>('[data-selbar]')!;
@@ -104,13 +122,26 @@ hub.connect();
 
 const wm = new WindowManager(app, {
   tileRect: (id) => field.screenOf(id),
+  plane: () => field.windowPlane(),
+  agentOrigin: (id) => field.windowOrigin(id),
+  onLocateWindow: (bounds) => { c.pushView(); field.frameWindow(bounds); },
+  project: (x, y) => field.windowProjection(x, y),
+  unproject: (x, y) => field.windowPoint(x, y),
+  onZoom: (e) => fieldEl.dispatchEvent(new WheelEvent('wheel', {
+    clientX: e.clientX, clientY: e.clientY, deltaY: e.deltaY, deltaMode: e.deltaMode,
+    ctrlKey: e.ctrlKey, metaKey: e.metaKey, bubbles: true, cancelable: true,
+  })),
   onTray: (list) => tray.render(list),
-  onStack: (list) => tray.render(list),
+  onStack: (list) => { tray.render(list); document.body.classList.toggle('has-tray', wm.trayRow().length > 0); },
   onReveal: (agentId) => { c.pushView(); field.frameAround(agentId); },
   onContext: (w, x, y) => c.menu({ kind: 'window', winId: w.id }, { x, y }),
   onFocus: (w) => {
     // With a window active, the window owns the keyboard; the mast's caps dim to say so.
     document.body.classList.toggle('has-window', !!w);
+    // «La misión abierta» es la ventana de misión que está delante: el panel
+    // del HUD marca su fila y el arco del campo la sigue. Con varias abiertas
+    // a la vez, la respuesta tiene que ser una sola, y es la que se mira.
+    if (w?.spec.kind === 'mission' && w.spec.params?.missionId) store.selectMission(w.spec.params.missionId);
     if (w && !w.el.dataset.heard) { w.el.dataset.heard = '1'; getSound()?.play(openSoundFor(w.spec.kind)); }
   },
 });
@@ -134,7 +165,9 @@ const field = createField(fieldEl, {
     if (ids.length === 1 && at) {
       getSound()?.play('select');
       // A single click opens the agent; nothing to configure, nothing to learn.
-      c.openAgent(ids[0]!, { x: at.sx, y: at.sy });
+      const id = ids[0]!;
+      const key = store.world.agents[id]?.role === 'capcom' ? 'ceo' : `agent:${id}`;
+      wm.toggleSource(key, () => c.openAgent(id, { x: at.sx, y: at.sy }));
     }
   },
   onOpen: (id, x, y) => c.openAgent(id, { x, y }),
@@ -144,12 +177,43 @@ const field = createField(fieldEl, {
   onContext: (target, x, y) => c.menu(target, { x, y }),
   onPlace: () => { /* persisted locally by the field; the hub has no placement channel yet */ },
   onPlaceArtifact(id, x, y, z) {
+    if (isPlacedFileId(id)) { placedFiles.move(id, { x, y, z }); field.setExtraMedia(placedFiles.artifacts()); return; }
     const a = store.world.artifacts?.[id];
     if (a) { a.placement = { x, y, z }; saveArtifactPlacements(); }
   },
   onUnplaceArtifact: (id) => c.unplaceArtifact(id),
   onHover: (id) => cursor.setTarget(!!id),
+  /*
+   * An image or a video dropped on the field stays on the field, where it
+   * was let go: a surface like a placed artifact (ui/placed-files.ts). Any
+   * other file goes to a conversation: dropped on a tile, to that agent;
+   * on open ground, to CAPCOM. Nothing is sent: the window opens and the
+   * file's path lands in its composer, for the operator to say what to do
+   * with it. The window opens first, so the gesture answers at once; the
+   * path follows the upload.
+   */
+  onDropFiles(files, agentId, sx, sy, at) {
+    const media = files.filter((f) => fieldKindOf(f.name));
+    const rest = files.filter((f) => !fieldKindOf(f.name));
+    if (media.length) {
+      void uploadAll(media, uploadFile, c.note).then((paths) => {
+        // Several at once fan out a little, so none hides the one before it.
+        paths.forEach((p, i) => placedFiles.add(p, { x: at.x + i * 0.5, y: at.y - i * 0.35, z: at.z }));
+        if (paths.length) { getSound()?.play('placed'); syncPlacedFiles(); }
+      });
+    }
+    if (!rest.length) return;
+    const a = agentId ? store.world.agents[agentId] : undefined;
+    const toAgent = !!a && a.role !== 'capcom';
+    if (toAgent) c.openAgent(a.id, { x: sx, y: sy }); else c.openCeo({ x: sx, y: sy });
+    void uploadAll(rest, uploadFile, c.note).then((paths) => stage(toAgent ? draftKey('agent', a.id) : draftKey('capcom'), paths));
+  },
 });
+/** The operator's placed files are drawn with the artifacts; this hands the field the current list. */
+function syncPlacedFiles() { field.setExtraMedia(placedFiles.artifacts()); field.feed(); }
+syncPlacedFiles();
+// A file dropped where nothing takes it must not become the page.
+guardStrayDrops();
 // The panel's brightness is the operator's; it comes back the way they left it.
 field.setGroundLevel(getPref('panel'));
 field.setGroundColor(getPref('panelColor'));
@@ -158,14 +222,25 @@ field.setGroundColor(getPref('panelColor'));
 
 const cursor = mountCursor();
 mountAlarm();
+// Antes que los atajos de teclado de más abajo: mientras el hub no acepte el
+// token, el handshake se come el evento y aquí no llega ninguno.
+mountHandshake();
 
 /* ── The console object: everything crosses here ──────────────────── */
 
 const c: Console = {
-  field, wm,
+  field, wm, voice,
   openAgent(agentId, at) {
     const a = store.world.agents[agentId];
     if (!a) return;
+    // CAPCOM no tiene ventana de agente: el mando se mira en la ventana del
+    // mando. La llave está aquí y no en cada llamador, así que la baldosa, el
+    // rótulo, el director, la lista de flota y cualquier [data-go] acaban en
+    // la misma ventana que abre ⌥C — misma `key`, luego enfoca, no duplica.
+    if (a.role === 'capcom') {
+      wm.open({ kind: 'ceo', key: 'ceo', callsign: 'CAPCOM', anchor: agentId, at });
+      return;
+    }
     const p = store.world.projects[a.projectId];
     wm.open({ kind: 'agent', key: `agent:${agentId}`, callsign: a.callsign, project: p?.code, title: a.title, anchor: agentId, at: at && { x: at.x, y: at.y }, params: { agentId }, ephemeral: true });
   },
@@ -182,6 +257,9 @@ const c: Console = {
     wm.open({ kind: 'interrupt', key: `int:${escalationId}`, callsign: a?.callsign ?? '??', project: store.world.projects[e.projectId]?.code, title: a?.title, anchor: e.agentId, at: at && { x: at.x, y: at.y }, params: { escalationId, agentId: e.agentId }, ephemeral: true });
   },
   openArtifact(artifactId, at) {
+    // A placed file has no artifact window; the file viewer is its window.
+    const placed = placedFiles.get(artifactId);
+    if (placed) { c.openFile({ path: placed.path }, { at }); return; }
     const x = store.world.artifacts?.[artifactId];
     if (!x) return;
     const a = store.world.agents[x.agentId];
@@ -214,8 +292,19 @@ const c: Console = {
     if (!ids.length) return;
     wm.open({ kind: 'fleet', key: `group:${ids.slice().sort().join(',')}`, callsign: `${ids.length} AGENTS`, at: at && { x: at.x, y: at.y }, params: { scope: 'group', ids: ids.join(',') }, ephemeral: true });
   },
-  openCeo: () => { wm.open({ kind: 'ceo', key: 'ceo', callsign: 'CAPCOM' }); },
-  openTask(taskId) { store.selectTask(taskId); wm.open({ kind: 'ceo', key: 'ceo', callsign: 'CAPCOM' }); },
+  openCeo: (at) => { wm.open({ kind: 'ceo', key: 'ceo', callsign: 'CAPCOM', at: at && { x: at.x, y: at.y } }); },
+  openMission(missionId, opts) {
+    // One window per mission: the key is the id, so a second click on the same
+    // row raises the one that is up instead of stacking another copy of it.
+    const win = wm.open({
+      kind: 'mission', key: `mission:${missionId}`, callsign: 'MISSION',
+      params: { missionId, ...(opts?.tab ? { tab: opts.tab } : {}) },
+      ...(opts?.at ? { at: opts.at } : {}),
+    });
+    // Ya estaba abierta y la piden por la otra mitad: se cambia de pestaña en
+    // vez de abrir una segunda ventana de lo mismo.
+    if (opts?.tab) (win.inst as { setTab?(t: string): void } | undefined)?.setTab?.(opts.tab);
+  },
   openQueue: () => { wm.open({ kind: 'queue', key: 'queue', callsign: 'QUEUE' }); },
   openFeed: () => { wm.open({ kind: 'feed', key: 'feed', callsign: 'FEED' }); },
   openFleet: () => { wm.open({ kind: 'fleet', key: 'fleet', callsign: 'FLEET', params: { scope: 'all' } }); },
@@ -225,6 +314,14 @@ const c: Console = {
   openHelp: () => { wm.open({ kind: 'help', key: 'help', callsign: 'HELP', ephemeral: true }); },
   openSettings: () => { wm.open({ kind: 'settings', key: 'settings', callsign: 'SETTINGS', ephemeral: true }); },
   openHygiene: () => { wm.open({ kind: 'hygiene', key: 'hygiene', callsign: 'HYGIENE' }); },
+  // No abre ventana: la sección vive en el campo, así que ⌥I la despliega y la
+  // trae a la vista en vez de duplicarla en una ventana que taparía el campo.
+  openImprove: () => {
+    // En estrecho la sección es una hoja: desplegarla sin abrirla la dejaría
+    // desplegada detrás de una media query que la esconde.
+    if (sections.sheetMode('improve')) sections.open('improve');
+    improvePanel.reveal();
+  },
   openGallery: () => { wm.open({ kind: 'gallery', key: 'gallery', callsign: 'GALLERY' }); },
   openTimeline: () => { wm.open({ kind: 'timeline', key: 'timeline', callsign: 'TIME' }); },
   openSfx: () => { wm.open({ kind: 'sfx', key: 'sfx', callsign: 'SFX' }); },
@@ -316,6 +413,7 @@ const c: Console = {
     if (s) field.flyToPoint((s.x + a.placement.x) / 2, (s.y + a.placement.y) / 2, 7.5);
   },
   unplaceArtifact(id) {
+    if (placedFiles.remove(id)) { syncPlacedFiles(); return; }
     const a = store.world.artifacts?.[id];
     if (!a) return;
     a.placement = null;
@@ -346,6 +444,7 @@ wm.register('breach', (ctx) => mountBreach(ctx));
 wm.register('help', (ctx) => mountHelp(ctx));
 wm.register('settings', (ctx) => mountSettings(ctx, c));
 wm.register('hygiene', (ctx) => mountHygiene(ctx, c));
+wm.register('mission', (ctx) => mountMission(ctx, c));
 wm.register('gallery', (ctx) => mountGallery(ctx, c));
 wm.register('launch', (ctx) => mountLaunch(ctx, c));
 wm.register('timeline', (ctx) => mountTimeline(ctx, c));
@@ -370,9 +469,32 @@ const minimap = mountMinimap(hudEl, c);
     ro.observe(mastEl);
   }
 }
-// What CAPCOM is on, under the mast's right corner; `hud/tasks.ts` says why there.
-const tasksPanel = mountTasks(hudEl, c);
-void tasksPanel;
+/*
+ * El carril de la izquierda: las dos secciones, una debajo de otra.
+ *
+ * Van en la misma columna y en flujo —no flotando cada una en su esquina— para
+ * que se EMPUJEN: plegar MISIONES sube AUTOMEJORA en el mismo gesto, y no deja
+ * un hueco de panel donde no hay panel. Es también lo que las ordena: primero
+ * la flota, debajo el instrumento. En táctil el carril se disuelve
+ * (`display: contents`) y cada una vuelve a abrirse como hoja.
+ */
+const railEl = document.createElement('div');
+railEl.className = 'hud__col';
+hudEl.appendChild(railEl);
+// What CAPCOM is on, under the mast's left corner; `hud/missions.ts` says why there.
+const missionsPanel = mountMissions(railEl, c);
+// AUTOMEJORA: ORCA mirándose a sí misma, debajo de las misiones. Sección
+// aparte del panel de misiones a propósito — una habla del instrumento, la
+// otra de la flota. Ver `hud/improve.ts`.
+const improvePanel = mountImprove(railEl, c);
+/*
+ * La puerta a las dos secciones cuando no caben flotando: una barra en el dock
+ * que abre cada una como hoja sobre el campo, una a la vez. En escritorio no
+ * se ve. Ver `hud/sections.ts`; el panel de misiones dice por qué a la
+ * izquierda y `hud/improve.ts` por qué a la derecha.
+ */
+const sections = mountSections(dockEl, { missions: missionsPanel.el, improve: improvePanel.el });
+void sections;
 const marks = mountBookmarks(hudEl, c);
 // CAPCOM's hand on the camera: `camera` frames from the hub land here.
 const director = mountDirector(c);
@@ -438,6 +560,15 @@ function autoOpenInterrupts() {
   for (const e of store.pending()) {
     if (seenEsc.has(e.id)) continue;
     seenEsc.add(e.id);
+    /*
+     * Una pregunta del arnés no se abre sola. Nadie la espera: la levantó una
+     * máquina de fixture y el hub ya la tiene en cuarentena para que no llegue
+     * al mando (`shared/synthetic.ts`). Abrirle una ventana encima de lo que
+     * estabas mirando es el resto de esa misma factura, y se paga a razón de
+     * tres por tanda cada vez que alguien corre las pruebas. Sigue en la cola,
+     * rotulada, y se abre si la abres tú.
+     */
+    if (store.fromHarness(e)) continue;
     if (room <= 0) continue;
     const r = field.screenOf(e.agentId);
     if (!r || !r.visible || r.w < 40) continue;
@@ -468,6 +599,9 @@ function autoOpenArtifacts(ids: string[]) {
     seenArt.add(id);
     const a = store.world.artifacts?.[id];
     if (!a || !a.open || room <= 0) continue;
+    // Lo del arnés no se abre solo, por lo mismo que una pregunta suya: nada
+    // de lo que enseña ocurrió, y la ventana la pagas tú con la pantalla.
+    if (store.fromHarness(a)) continue;
     const r = field.screenOf(a.agentId);
     if (!r || !r.visible) continue;
     room--;
@@ -485,7 +619,10 @@ function closeAnswered(ids: string[]) {
 }
 
 store.on((e) => {
-  if (e.k === 'world' || e.k === 'agents' || e.k === 'projects' || e.k === 'traffic' || e.k === 'artifacts' || e.k === 'escalations') field.feed();
+  // `improve` entra en la lista porque el campo lee del tablero quién es
+  // revisor: el agente y su tablero llegan por caminos distintos, y el que
+  // llegue segundo tiene que repintar el tile.
+  if (e.k === 'world' || e.k === 'agents' || e.k === 'projects' || e.k === 'traffic' || e.k === 'artifacts' || e.k === 'escalations' || e.k === 'improve') field.feed();
   if (e.k === 'world') { restoreArtifactPlacements(); field.feed(); }
   if (e.k === 'escalations') { closeAnswered(e.ids); autoOpenInterrupts(); }
   if (e.k === 'artifacts') autoOpenArtifacts(e.ids);
@@ -512,6 +649,7 @@ const ALT_OPEN: Record<string, () => void> = {
   KeyC: () => c.openCeo(), KeyQ: () => c.openQueue(), KeyF: () => c.openFeed(), KeyE: () => c.openFleet(),
   KeyN: () => c.openSpawn(), KeyL: () => c.openLaunch(), KeyG: () => c.openGallery(), KeyT: () => c.openTimeline(),
   KeyM: () => c.openMusic(), KeyS: () => c.openSfx(), KeyH: () => c.openHelp(), Comma: () => c.openSettings(),
+  KeyI: () => c.openImprove(),
 };
 /*
  * ⌥Tab is the switcher: hold ⌥, each Tab walks the stack (⇧ walks back)
@@ -529,7 +667,7 @@ function commitSwitch(cancel = false) {
   if (cancel || !id) return;
   const w = wm.all().find((x) => x.id === id);
   if (!w) return;
-  if (w.minimized) wm.restore(w); else wm.focus(w);
+  wm.activate(w);
 }
 window.addEventListener('keyup', (e) => { if (e.key === 'Alt' && switching) commitSwitch(); });
 window.addEventListener('blur', () => commitSwitch(true));
@@ -540,10 +678,25 @@ window.addEventListener('blur', () => commitSwitch(true));
  * this, `keyup` fired `focus.off` on every space bar in every text field.
  */
 const spaceHold = keyHold(' ');
+/*
+ * ⌥V is TALK for as long as it is held (hud/voice.ts). It engages inside a
+ * text field too — the CAPCOM composer focuses itself on open, and that is
+ * where the operator is when they want to speak — and it is read from the
+ * physical key, because ⌥V on a Mac keyboard reports `√`. Esc while holding
+ * throws the line away; letting go sends it.
+ */
+const talkHold = keyHold('KeyV', { whileTyping: true });
 
 window.addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement | null;
   const typing = typingIn(e);
+  if (e.altKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyV' && voice.supported) {
+    e.preventDefault();
+    if (e.repeat || talkHold.held()) return;
+    talkHold.down({ key: e.code, repeat: e.repeat, target: e.target }, () => voice.start());
+    return;
+  }
+  if (e.key === 'Escape' && talkHold.held()) { e.preventDefault(); talkHold.cancel(); voice.cancel(); return; }
   if (e.altKey && e.key === 'Tab') {
     e.preventDefault();
     if (!wm.all().length) return;
@@ -619,8 +772,12 @@ window.addEventListener('keydown', (e) => {
     }
   }
 });
-window.addEventListener('keyup', (e) => { if (spaceHold.up(e)) { field.setFocus(false); getSound()?.play('focus.off'); } });
-window.addEventListener('blur', () => { spaceHold.cancel(); field.setFocus(false); });
+window.addEventListener('keyup', (e) => {
+  if (spaceHold.up(e)) { field.setFocus(false); getSound()?.play('focus.off'); }
+  if (talkHold.up({ key: e.code })) voice.stop();
+});
+// Focus left mid-sentence: the line is dropped, not sent half-heard.
+window.addEventListener('blur', () => { spaceHold.cancel(); field.setFocus(false); if (talkHold.cancel()) voice.cancel(); });
 onFullscreen((on) => c.note(on ? 'fullscreen · Z or ESC to leave' : 'back in the window'));
 let tabIdx = -1;
 
@@ -651,7 +808,7 @@ function hintsFor(): [string, string][] {
     out.push([kbdLabel(key), label.toUpperCase().slice(0, 18)]);
     if (out.length >= 7) break;
   }
-  out.push(['ESC', 'CLOSE'], ['-', 'FOLD'], ['⌥TAB', 'SWITCH'], ['`', 'WINDOWS']);
+  out.push(['ESC', w.mode === 'front' ? 'CANVAS' : 'CLOSE'], ['-', 'FOLD'], ['⌥TAB', 'SWITCH'], ['`', 'WINDOWS']);
   if (w.spec.anchor) out.push(['V', 'REVEAL']);
   return out;
 }
@@ -692,6 +849,9 @@ async function start() {
   fieldEl.classList.add('is-live');
   document.body.classList.add('is-field');
   field.setActive(true);
+  // El mundo suele llegar mientras el boot ocupa la pantalla: las misiones se
+  // sientan enteras entonces y la alineación se juega aquí, ya con público.
+  missionsPanel.align();
   requestAnimationFrame(loop);
   wm.restoreSession((spec) => wm.open(spec));
   /*
@@ -723,6 +883,8 @@ void start();
 (window as unknown as { __orca: Record<string, unknown> }).__orca = {
   frame: () => field.frameAll(),
   open: (id: string) => c.openAgent(id),
+  /** El visor de un archivo, para el arnés visual: igual que pinchar una ruta en una conversación. */
+  openFile: (path: string, at?: { x: number; y: number }) => c.openFile({ path }, { at }),
   openKind: (k: string) => { ({ ceo: c.openCeo, queue: c.openQueue, feed: c.openFeed, fleet: c.openFleet, help: c.openHelp } as Record<string, () => void>)[k]?.(); },
   tilt: (on: boolean) => field.setTilt(on),
   stats: () => field.stats(),
@@ -735,7 +897,36 @@ void start();
   screenOf: (id: string) => field.screenOf(id),
   music: () => wm.all().find((w) => w.spec.key === 'music')?.inst?.state?.() ?? null,
   spotOf: (id: string) => field.spotOf(id),
-  // The task panel, for the visual harness: a task the hub never saw, agents it did.
-  task: (t: import('../shared/tasks.ts').CapcomTask) => store.upsertTask(t),
+  // The mission panel, for the visual harness: a mission the hub never saw, agents it did.
+  mission: (m: import('../shared/missions.ts').CapcomMission) => store.upsertMission(m),
+  /** Las misiones que el hub sirvió, para comprobar de fuera qué llegó. Sólo lectura. */
+  missionsSeen: () => Object.values(store.world.missions ?? {}).map((m) => ({ id: m.id, title: m.title, status: m.status, messages: m.messages.length })),
   agentIds: () => Object.values(store.world.agents).filter((a) => a.role !== 'capcom' && a.state !== 'done' && a.state !== 'dead').map((a) => a.id),
+  // AUTOMEJORA, para el arnés visual: un tablero que el hub nunca vio. Una
+  // foto de ocho propuestas no puede dejar ocho propuestas en el disco del
+  // operador, igual que con las misiones de arriba.
+  improve: (
+    state: import('../shared/improve.ts').ImproveState,
+    verdict: import('../shared/improve.ts').DueVerdict | null,
+    extra?: { choice?: ReturnType<typeof import('../shared/improve.ts').effectiveChoice>; machineId?: string | null },
+  ) => store.putImprove(state, verdict, extra),
+  improveReveal: () => c.openImprove(),
+  callsignOf: (id: string) => store.knownAgent(id)?.callsign ?? null,
+  machineOf: (id: string) => store.knownAgent(id)?.machineId ?? null,
+  // Un informe de higiene que el hub nunca vio, para el arnés visual: una foto
+  // de restos no puede depender de que la máquina tenga restos de verdad.
+  hygiene: (reports: import('../shared/hygiene.ts').HygieneReport[]) => store.putHygiene(reports),
+  openHygiene: () => c.openHygiene(),
+  // El aviso de que el hub corre código viejo, sin tener que envejecer un hub:
+  // lo manda el proceso de verdad (hub/source-rev.ts) y sólo cuando alguien
+  // publica, que no es algo que una foto pueda esperar.
+  server: (rev: string, stale: boolean, restartable = false) => store.putServer(rev, stale, restartable),
 };
+
+// A notification opens the live queue; it never replays an action from its payload.
+if (new URL(location.href).searchParams.has('queue')) {
+  c.openQueue();
+  const u = new URL(location.href); u.searchParams.delete('queue'); history.replaceState(null, '', u);
+}
+navigator.serviceWorker?.addEventListener('message', ev => { if (ev.data?.t === 'orca:queue') c.openQueue(); });
+store.on(e => { if (e.k === 'link' && e.up) void syncPushSubscription().catch(() => {}); });

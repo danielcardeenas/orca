@@ -14,6 +14,7 @@ import { emptyWorld, emptyRollup } from '../shared/types.ts';
 import { mergeTalk } from '../shared/talk.ts';
 import type { PatchOp } from '../shared/protocol.ts';
 import { agentOrigin } from '../shared/origin.ts';
+import { isSynthetic } from '../shared/synthetic.ts';
 import type { CameraDirective } from '../shared/camera.ts';
 import { getPref } from './prefs.ts';
 
@@ -63,10 +64,15 @@ export type StoreEvent =
   | { k: 'talk'; ids: string[] }
   | { k: 'ceo' }
   | { k: 'delivery' }
-  | { k: 'tasks' }
+  | { k: 'missions' }
   /** A machine filed what ORCA costs it. See shared/hygiene.ts. */
   | { k: 'hygiene' }
+  /** El tablero de AUTOMEJORA cambió. Ver shared/improve.ts. */
+  | { k: 'improve' }
+  /** El hub dijo qué código corre, y si sigue siendo el que hay en disco. */
+  | { k: 'server' }
   | { k: 'link'; up: boolean }                      // hub connection state
+  | { k: 'auth'; ok: boolean }                      // el hub aceptó, o no, este token
   /** An agent crossed into or out of `blocked`. The alarm listens for this. */
   | { k: 'alarm'; agentId: string; on: boolean }
   /** CAPCOM, or a launch, pointing the camera at something. The director listens. */
@@ -74,8 +80,19 @@ export type StoreEvent =
 
 type Listener = (e: StoreEvent) => void;
 
+/**
+ * Dónde se recuerda la conversación abierta entre recargas.
+ *
+ * La clave vieja se lee cuando la nueva no está: el operador que tenía una
+ * misión abierta antes del renombrado la encuentra abierta después, en vez de
+ * volver a la general sin saber por qué. Se escribe siempre la nueva, y la
+ * vieja se retira al cerrar la conversación.
+ */
+const MISSION_KEY = 'orca.capcom.mission';
+const LEGACY_MISSION_KEY = 'orca.capcom.task';
+
 export interface OutgoingMessage {
-  taskId?: string;
+  missionId?: string;
   id: string;
   agentId: string | null;
   text: string;
@@ -86,7 +103,7 @@ export interface OutgoingMessage {
 }
 
 export class Store {
-  activeTaskId: string | null = null;
+  activeMissionId: string | null = null;
   outgoing: OutgoingMessage[] = [];
   /**
    * The newest hygiene report per machine. Held here and not in `world`: it is
@@ -98,26 +115,69 @@ export class Store {
     this.emit({ k: 'hygiene' });
   }
 
-  upsertTask(task: import('../shared/tasks.ts').CapcomTask, purged = false) {
+  /**
+   * AUTOMEJORA: el tablero de la auto-revisión, tal cual lo tiene el hub.
+   *
+   * Fuera de `world` por la misma razón que la higiene: son unos kilobytes en
+   * un reloj de horas y ningún tile depende de ellos. `null` hasta que llega el
+   * primero, que es lo que distingue «no hay propuestas» de «todavía no se ha
+   * preguntado» — y son dos pantallas distintas.
+   */
+  improve: import('../shared/improve.ts').ImproveState | null = null;
+  improveVerdict: import('../shared/improve.ts').DueVerdict | null = null;
+  /** Con qué nacería el próximo revisor, y dónde. Lo resuelve el hub. */
+  improveChoice: ReturnType<typeof import('../shared/improve.ts').effectiveChoice> | null = null;
+  improveMachine: string | null = null;
+  putImprove(
+    state: import('../shared/improve.ts').ImproveState,
+    verdict?: import('../shared/improve.ts').DueVerdict | null,
+    extra?: { choice?: ReturnType<typeof import('../shared/improve.ts').effectiveChoice>; machineId?: string | null },
+  ) {
+    this.improve = state;
+    if (verdict !== undefined) this.improveVerdict = verdict;
+    if (extra?.choice) this.improveChoice = extra.choice;
+    if (extra && 'machineId' in extra) this.improveMachine = extra.machineId ?? null;
+    this.emit({ k: 'improve' });
+  }
+
+  /**
+   * Qué código corre el hub del otro lado del cable.
+   *
+   * `stale` es que el proceso arrancó con un código que ya no es el que hay
+   * escrito: alguien publicó y el hub sigue con el de antes. `null` mientras
+   * no lo haya dicho — que no es lo mismo que «está al día», y por eso no se
+   * pinta nada hasta entonces. `restartable` es si ese proceso puede darse el
+   * relevo a sí mismo, que es lo que decide si el aviso es un botón o un
+   * cartel (shared/restart.ts).
+   */
+  server: { rev: string; stale: boolean; restartable: boolean } | null = null;
+  putServer(rev: string, stale: boolean, restartable = false) {
+    const now = this.server;
+    if (now && now.rev === rev && now.stale === stale && now.restartable === restartable) return;
+    this.server = { rev, stale, restartable };
+    this.emit({ k: 'server' });
+  }
+
+  upsertMission(mission: import('../shared/missions.ts').CapcomMission, purged = false) {
     if (purged) {
-      if (this.world.tasks) delete this.world.tasks[task.id];
+      if (this.world.missions) delete this.world.missions[mission.id];
       // La que estaba abierta ya no existe: volver a la general, no a un id muerto.
-      if (this.activeTaskId === task.id) this.selectTask(null);
-    } else (this.world.tasks ??= {})[task.id] = task;
+      if (this.activeMissionId === mission.id) this.selectMission(null);
+    } else (this.world.missions ??= {})[mission.id] = mission;
     // Archivar la abierta la saca del selector; seguir "dentro" de ella dejaría
     // la consola escribiendo a una conversación que ya no se ve.
-    if (!purged && task.archivedAt && this.activeTaskId === task.id) return this.selectTask(null);
-    this.emit({ k: 'tasks' });
+    if (!purged && mission.archivedAt && this.activeMissionId === mission.id) return this.selectMission(null);
+    this.emit({ k: 'missions' });
   }
   /**
-   * Which task conversation the console is in: the CAPCOM window's picker
-   * and the HUD's task panel both set it, and both follow it. Remembered
-   * across reloads under the same key the window has always used.
+   * Which mission conversation the console is in: the CAPCOM window's picker
+   * and the HUD's mission panel both set it, and both follow it. Remembered
+   * across reloads.
    */
-  selectTask(id: string | null) {
-    this.activeTaskId = id;
-    try { if (id) localStorage.setItem('orca.capcom.task', id); else localStorage.removeItem('orca.capcom.task'); } catch { /* private mode */ }
-    this.emit({ k: 'tasks' });
+  selectMission(id: string | null) {
+    this.activeMissionId = id;
+    try { if (id) localStorage.setItem(MISSION_KEY, id); else { localStorage.removeItem(MISSION_KEY); localStorage.removeItem(LEGACY_MISSION_KEY); } } catch { /* private mode */ }
+    this.emit({ k: 'missions' });
   }
 
   /** Not state: nothing to keep, only someone to tell. */
@@ -139,6 +199,7 @@ export class Store {
   booting = true;
 
   private listeners = new Set<Listener>();
+  private authOk = true;
   /** Previous state per agent, so we can detect alarm transitions. */
   private lastState = new Map<string, AgentState>();
   /**
@@ -150,7 +211,15 @@ export class Store {
   private dismissed = new Set<string>(loadDismissed());
 
   constructor() {
-    try { this.activeTaskId = localStorage.getItem('orca.capcom.task'); } catch {}
+    try {
+      const stored = localStorage.getItem(MISSION_KEY);
+      const legacy = stored === null ? localStorage.getItem(LEGACY_MISSION_KEY) : null;
+      this.activeMissionId = stored ?? legacy;
+      // Consolidar la migración en la primera carga: si sólo estaba la vieja,
+      // se copia a la nueva y se retira. Sin esto la consola seguiría leyendo
+      // la clave del vocabulario anterior en cada recarga, para siempre.
+      if (legacy !== null) { localStorage.setItem(MISSION_KEY, legacy); localStorage.removeItem(LEGACY_MISSION_KEY); }
+    } catch {}
     // Time alone changes who is on the field (an idle stranger going stale):
     // sweep once a minute, in the browser only — node imports this for tests.
     if (typeof window !== 'undefined') window.setInterval(() => this.sweep(), 60_000);
@@ -173,6 +242,24 @@ export class Store {
     this.linkUp = up;
     this.emit({ k: 'link', up });
   }
+
+  /**
+   * ¿Aceptó el hub este token?
+   *
+   * Aparte del enlace a propósito: un enlace caído es una condición pasajera
+   * —la red vuelve, el hub se reinicia— y la consola sigue mostrando lo
+   * último que sabía. Un token rechazado no vuelve solo; no hay nada que
+   * mirar y no hay nada que mandar, así que la consola se retira detrás del
+   * handshake hasta que alguien cambie el token. Ver `ui/handshake.ts`.
+   */
+  setAuth(ok: boolean) {
+    if (this.authOk === ok) return;
+    this.authOk = ok;
+    this.emit({ k: 'auth', ok });
+  }
+
+  /** Lo último que dijo el hub sobre este token. Optimista hasta que diga que no. */
+  authed(): boolean { return this.authOk; }
 
   replaceWorld(w: WorldState) {
     this.world = w;
@@ -235,7 +322,13 @@ export class Store {
   dismiss(ids: string[]): number {
     let n = 0;
     for (const id of ids) {
-      if (!this.all.has(id) || this.dismissed.has(id)) continue;
+      const a = this.all.get(id);
+      if (!a || this.dismissed.has(id)) continue;
+      // El CAPCOM vivo no se oculta. `onField` lo pone en el campo siempre —
+      // el mando está a la vista — y `visible` mira el descarte antes que a
+      // `onField`, así que dejarlo pasar aquí sacaría al mando de la consola
+      // por delante de esa regla, recuperable sólo desde SETTINGS.
+      if (a.role === 'capcom' && alive(a)) continue;
       this.dismissed.add(id);
       this.place(id);
       n++;
@@ -473,6 +566,20 @@ export class Store {
         if (rank[a.urgency] !== rank[b.urgency]) return rank[a.urgency] - rank[b.urgency];
         return a.askedAt - b.askedAt;
       });
+  }
+
+  /**
+   * ¿Salió esto del arnés? Vale para cualquier cosa que traiga máquina —una
+   * escalación, un agente, un proyecto—, porque la marca vive en la máquina y
+   * no en el registro. Ver `shared/synthetic.ts`.
+   *
+   * La consola lo pregunta para no tratar una pregunta inventada como una que
+   * espera a una persona: sigue en la cola y se puede abrir, pero no se abre
+   * sola encima de lo que estabas mirando.
+   */
+  fromHarness(m: { machineId: string } | string | undefined | null): boolean {
+    const id = typeof m === 'string' ? m : m?.machineId;
+    return !!id && isSynthetic(this.world.machines[id]);
   }
 
   blockedAgents(): Agent[] {

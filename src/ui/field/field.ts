@@ -40,8 +40,10 @@ import * as THREE from 'three';
 import gsap from 'gsap';
 import type { Agent, AgentMessage, AgentState, Artifact, Placement, Project, WorldState } from '../../shared/types.ts';
 import { squadsOf, type Squad } from '../../shared/squads.ts';
+import { HARNESS_LABEL, harnessHome, harnessIsland } from '../../shared/synthetic.ts';
 import { OFF_FLEET_LABEL, islandOf } from '../../shared/workspaces.ts';
 import { store } from '../store.ts';
+import { reviewerIds } from '../../shared/improve.ts';
 import { esc, STATE_HEX, STATE_VAR } from '../util.ts';
 import { CAPCOM_BITS, sigilBits, sigilHTML } from '../gfx/sigil.ts';
 import { FieldCamera } from './camera.ts';
@@ -56,7 +58,8 @@ import { getPref } from '../prefs.ts';
 import { beats, dur, EASE, REDUCE, T } from '../motion.ts';
 import * as anim from './anim.ts';
 import { getSound } from '../hud/sound.ts';
-import { emptyLayout, isLead, layoutFleet, squadKey, squadOf, TILE_H, TILE_W, type Layout, type LayoutMode, type Region, type RegionPlacement, type SquadBlock, type SquadPlacement, type Spot, BLOCK_PAD, CAPCOM_SCALE } from './layout.ts';
+import { longPress } from '../hud/longpress.ts';
+import { emptyLayout, isLead, islandIn, layoutFleet, squadKey, squadOf, TILE_H, TILE_W, type Layout, type LayoutMode, type Region, type RegionPlacement, type SquadBlock, type SquadPlacement, type Spot, BLOCK_PAD, CAPCOM_SCALE } from './layout.ts';
 
 /**
  * What the pointer is over when the operator asks for a menu. The field
@@ -81,9 +84,18 @@ export interface FieldEvents {
   onPlaceArtifact(artifactId: string, x: number, y: number, z: number): void;
   onUnplaceArtifact(artifactId: string): void;
   onHover(id: string | null): void;
+  /**
+   * Files from the operator's desktop, dropped on the stage: on a tile, with
+   * that agent's id; anywhere else, with null. `at` is the point on the
+   * media plane, so an image can be placed exactly where it was let go. The
+   * field names the target and where; what to do with the bytes is the
+   * console's (main.ts).
+   */
+  onDropFiles?(files: File[], agentId: string | null, sx: number, sy: number, at: { x: number; y: number; z: number }): void;
 }
 
-export interface ScreenRect { x: number; y: number; w: number; h: number; visible: boolean }
+/** `visible`: on screen or near it. `ahead`: in front of the camera, so the rect is a real place on the glass however far off it. */
+export interface ScreenRect { x: number; y: number; w: number; h: number; visible: boolean; ahead: boolean }
 
 export interface FieldHandle {
   setActive(on: boolean): void;
@@ -118,6 +130,11 @@ export interface FieldHandle {
   select(ids: string[]): void;
   selection(): string[];
   screenOf(agentId: string): ScreenRect | null;
+  windowOrigin(id: string): { x: number; y: number } | null;
+  frameWindow(bounds: { minX: number; minY: number; maxX: number; maxY: number }): void;
+  windowPlane(): { origin: { x: number; y: number }; ppu: number };
+  windowProjection(x: number, y: number): { x: number; y: number };
+  windowPoint(x: number, y: number): { x: number; y: number };
   screenToWorld(sx: number, sy: number): { x: number; y: number };
   spotOf(agentId: string): Spot | undefined;
   /** Frame one squad's block. False when there is no such block on the field. */
@@ -138,6 +155,11 @@ export interface FieldHandle {
   resetArrangement(): void;
   /** Where to put an artifact pulled from this agent. */
   placeNear(agentId: string, index: number): { x: number; y: number; z: number };
+  /**
+   * Surfaces that are not the hub's: the operator's own files, placed on the
+   * field (ui/placed-files.ts). Drawn with the artifacts, next feed.
+   */
+  setExtraMedia(list: Artifact[]): void;
   stats(): { agents: number; drawn: number; segments: number; fps: number };
   /** The current layout, for the minimap. Read-only by convention. */
   layout(): Layout;
@@ -202,6 +224,21 @@ const C_LINE = new THREE.Color(0x3a4150);
 const C_RGN = new THREE.Color(0x22252d);
 /** A squad's outline: one step brighter than a region's, `--line`. */
 const C_SQUAD = new THREE.Color(0x2a2e38);
+/**
+ * The harness enclosure: a region's own line, dimmed. It is drawn TWICE —
+ * one outline inside the other, `HARNESS_WALL` apart — because the field has
+ * exactly one thin box per region and a second concentric line is read
+ * instantly as a different kind of thing: a fence, not a plot. Colour alone
+ * would only say "far away".
+ */
+const C_HARNESS = new THREE.Color(0x22252d).multiplyScalar(0.85);
+/**
+ * The gap between the enclosure's two walls: a little under a gutter. Half of
+ * that read as one thick line at the zoom where the whole region fits on
+ * screen, which is the zoom the fence has to work at; wider than a gutter and
+ * the inner wall starts to look like a second region inside the first.
+ */
+const HARNESS_WALL = 0.22;
 const C_AMBER = new THREE.Color(0xf5a524);
 /** A command tie: CAPCOM's cyan at 60 %, so the post stays the brightest cyan thing. */
 const C_CYAN_DIM = new THREE.Color(0x4fe3ff).multiplyScalar(0.6);
@@ -316,6 +353,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   const byId = new Map<string, Agent>();
   let projects = new Map<string, Project>();
   let artifacts: Artifact[] = [];
+  /** The operator's placed files; see `setExtraMedia`. */
+  let extraMedia: Artifact[] = [];
   const selected = new Set<string>();
   let hover: string | null = null;
   let active = false;
@@ -369,12 +408,12 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   /** CAPCOM's id this feed, or null: the one tile the halo and the links hang off. */
   let capcomId: string | null = null;
   /** The four preferences, read once a frame: four property reads off a cached object. */
-  const cmdFlags: CommandFlags = { tasks: true, notches: true, pulse: true, links: false };
+  const cmdFlags: CommandFlags = { missions: true, notches: true, pulse: true, links: false };
   let cmdState: CommandState = COMMAND_REST;
-  /** Clock instant of the last `commandState`. A task cools by the clock alone, so it is redone once a second. */
+  /** Clock instant of the last `commandState`. A mission cools by the clock alone, so it is redone once a second. */
   let cmdAt = -1e9;
   function readCommandFlags() {
-    cmdFlags.tasks = getPref('capcomTasks');
+    cmdFlags.missions = getPref('capcomMissions');
     cmdFlags.notches = getPref('capcomNotches');
     cmdFlags.pulse = getPref('capcomPulse');
     cmdFlags.links = getPref('capcomLinks');
@@ -382,8 +421,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   function refreshCommand() {
     cmdAt = clock;
     const cap = capcomId ? byId.get(capcomId) ?? null : null;
-    // The open task is the live console's; a replayed world has none.
-    const next = commandState(world(), cap, (id) => byId.get(id), Date.now(), replay ? null : store.activeTaskId, cmdFlags);
+    // The open mission is the live console's; a replayed world has none.
+    const next = commandState(world(), cap, (id) => byId.get(id), Date.now(), replay ? null : store.activeMissionId, cmdFlags);
     if (!sameState(next, cmdState)) cmdState = next;
   }
 
@@ -406,6 +445,12 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
    * patch, and nobody hashes a thousand strings a frame.
    */
   const sigils = new Map<string, { seed: string; bits: number }>();
+  /**
+   * Los agentes que han sido revisores de AUTOMEJORA, del tablero de la
+   * sección. Se recalcula cuando el tablero cambia —cada varias horas— y no
+   * por fotograma: `runtimeOf` lo consulta una vez por tile y por paint.
+   */
+  let reviewers = reviewerIds(store.improve);
   /** Block keys we have already drawn, so a new squadron traces itself once. */
   const seenSquads = new Set<string>();
   /**
@@ -429,9 +474,23 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     return bits;
   }
 
-  /** 0 claude · 1 codex · 2 grok · 3 anything else · 9 CAPCOM. */
+  /**
+   * 0 claude · 1 codex · 2 grok · 3 anything else · 8 AUTOMEJORA reviewer · 9 CAPCOM.
+   *
+   * The reviewer's mark comes off the self-improvement board rather than off a
+   * field on the agent: the board already travels whole, already knows which
+   * review each agent ran, and keeps the last `MAX_REVIEWS` of them, so a
+   * reviewer stays recognisable long after it finished. A new `role` would
+   * have to be threaded through the collector, the hub and the protocol to say
+   * nothing this does not already say.
+   *
+   * It sits at 8 and not above CAPCOM because it is not a runtime: the shader
+   * reads 8 as solid, which is what a Claude session should draw anyway. What
+   * marks it is the violet outline, not the stripe — its state keeps the edge.
+   */
   function runtimeOf(a: Agent): number {
     if (a.role === 'capcom') return 9;
+    if (reviewers.has(a.id)) return 8;
     return RUNTIME_ID[a.runtime] ?? 3;
   }
   /**
@@ -517,6 +576,14 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   }
 
   /** Replay: a world that is not the store's. See `setReplay`. */
+  /**
+   * Las máquinas del arnés → el slug del directorio del que salieron. Vacío
+   * mientras no corran pruebas, que es casi siempre. Ver `shared/synthetic.ts`.
+   */
+  let harness = new Map<string, string>();
+  /** La isla de un agente, con el recinto del arnés ya contado. */
+  const island = (a: Agent) => islandIn(harness, a);
+
   let replay: WorldState | null = null;
   const world = () => replay ?? store.world;
   /** Set across a world swap so the next feed animates nothing. */
@@ -550,6 +617,21 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       rememberProjectCode(id, OFF_FLEET_LABEL.code);
       rememberProjectName(id, OFF_FLEET_LABEL.name);
     }
+    /*
+     * Las máquinas del arnés y de dónde salieron, una vez por feed: es lo que
+     * decide en qué recinto cae cada tesela de fixture, y lo consultan tanto
+     * el layout como el reparto de escalaciones y de nodos YOU de aquí abajo.
+     * El recinto tampoco llega en `projects`, así que lleva su propio rótulo.
+     */
+    harness = new Map();
+    for (const m of Object.values(w.machines ?? {})) {
+      const home = harnessHome(m);
+      if (home === null) continue;
+      harness.set(m.id, home);
+      const id = harnessIsland(home);
+      rememberProjectCode(id, HARNESS_LABEL.code);
+      rememberProjectName(id, HARNESS_LABEL.name);
+    }
     for (const m of Object.values(w.machines ?? {})) rememberMachine(m.id, m.hostname);
     agents = Object.values(w.agents);
     byId.clear();
@@ -565,11 +647,14 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       if (e.status !== 'pending' && e.status !== 'with_ceo') continue;
       pendingAgents.add(e.agentId);
       const a = byId.get(e.agentId);
-      const pid = a ? islandOf(a) : e.projectId;
+      const pid = a ? island(a) : e.projectId;
       pendingByProject.set(pid, (pendingByProject.get(pid) ?? 0) + 1);
     }
     readCommandFlags();
     refreshCommand();
+    // Quién es revisor sale del tablero de AUTOMEJORA, que cambia cada varias
+    // horas: se relee con el mundo y no por fotograma.
+    reviewers = reviewerIds(store.improve);
 
     const placements = new Map<string, Placement>();
     for (const [id, p] of Object.entries(w.placements ?? {})) placements.set(id, p);
@@ -581,7 +666,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
      * The deck lists everyone — order is its whole point — so it folds nobody.
      */
     absorbed = lmode.kind === 'field' ? absorbedChildren(agents, Object.values(w.messages ?? {})) : new Map();
-    layout = layoutFleet(agents, projects, placements, layout, lmode, squadPlaced, regionPlaced, absorbed);
+    layout = layoutFleet(agents, projects, placements, layout, lmode, squadPlaced, regionPlaced, absorbed, harness);
     // The router reads the gutters off the layout: the deck's are wider.
     gaps.x = layout.gapX; gaps.y = layout.gapY;
     regionById.clear();
@@ -712,7 +797,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       for (const id of drop) { seenMsgs.delete(id); openAsks.delete(id); }
     }
 
-    artifacts = Object.values(w.artifacts ?? {});
+    artifacts = [...Object.values(w.artifacts ?? {}), ...extraMedia];
     media.update(artifacts);
     syncRegions();
     if (!userMoved && agents.length !== lastFramedCount) { lastFramedCount = agents.length; camera.frame(layout.bounds); }
@@ -793,7 +878,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   /** Every agent standing in a block: same project, same squad. */
   function membersOf(q: SquadBlock): string[] {
     const out: string[] = [];
-    for (const a of agents) if (islandOf(a) === q.projectId && squadOf(a) === q.name) out.push(a.id);
+    for (const a of agents) if (island(a) === q.projectId && squadOf(a) === q.name) out.push(a.id);
     return out;
   }
 
@@ -877,7 +962,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     const sig = sigilHTML(sigilBits(q.name));
     let html = `<span class="squad__sigil sigil--lg">${sig}</span><span class="squad__roster">${roster}</span>`;
     if (tier >= 2) {
-      html += `<span class="squad__k">${esc(q.name)} · ${groupOrigin(agents.filter((a) => islandOf(a) === q.projectId && squadOf(a) === q.name))}</span><span class="squad__n">${q.count}</span>`;
+      html += `<span class="squad__k">${esc(q.name)} · ${groupOrigin(agents.filter((a) => island(a) === q.projectId && squadOf(a) === q.name))}</span><span class="squad__n">${q.count}</span>`;
     }
     if (tier >= 3) {
       if (lead) html += `<span class="squad__lead">LEAD ${esc(lead.callsign)}</span>`;
@@ -998,12 +1083,15 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       // Ciudadanos de segunda: la isla de fuera de la flota lleva su propia
       // clase y se dibuja apagada, para que no se lea como un proyecto más.
       el.classList.toggle('rgn--off', r.offFleet);
+      // Y el recinto del arnés lleva la suya: nada de lo que hay ahí dentro
+      // ocurrió, y el rótulo es lo que lo dice con una palabra.
+      el.classList.toggle('rgn--harness', r.harness);
       const sig = `${r.code}|${r.name}|${r.count}|${r.blocked}`;
       if (el.dataset.sig !== sig) {
         el.dataset.sig = sig;
         el.innerHTML = `<span class="rgn__code">${esc(r.code)}</span><span class="rgn__name">${esc(r.name)}</span>`
           + `<span class="rgn__n">${r.blocked ? `${r.blocked} NEED YOU · ` : ''}${r.count}</span>`
-          + `<span class="rgn__open" title="${r.offFleet ? 'Open what is off the fleet' : 'Open this project'}">▸</span>`;
+          + `<span class="rgn__open" title="${r.harness ? 'Open what the tests brought up' : r.offFleet ? 'Open what is off the fleet' : 'Open this project'}">▸</span>`;
         el.classList.toggle('has-blocked', r.blocked > 0);
       }
     }
@@ -1393,10 +1481,19 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   function buildPipes(now: number) {
     pipes.begin();
     const w = world();
-    // Region outlines: the comp's thin panel border.
+    // Region outlines: the comp's thin panel border. The harness's is the
+    // same border twice, one wall inside the other: what is in there is
+    // fenced off, and that has to read from the zoom where a region is a
+    // block — before any label can say the word.
     for (const r of layout.regions) {
       const x0 = r.cx - r.hw, x1 = r.cx + r.hw, y0 = r.cy - r.hh, y1 = r.cy + r.hh;
-      pipes.add([{ x: x0, y: y1 }, { x: x1, y: y1 }, { x: x1, y: y0 }, { x: x0, y: y0 }, { x: x0, y: y1 }], -0.4, C_RGN, 'frame', 0, 0.4);
+      const box = (a: number, b: number, c: number, d: number) =>
+        [{ x: a, y: d }, { x: c, y: d }, { x: c, y: b }, { x: a, y: b }, { x: a, y: d }];
+      pipes.add(box(x0, y0, x1, y1), -0.4, r.harness ? C_HARNESS : C_RGN, 'frame', 0, 0.4);
+      if (r.harness) {
+        const w = HARNESS_WALL;
+        pipes.add(box(x0 + w, y0 + w, x1 - w, y1 - w), -0.4, C_HARNESS, 'frame', 0, 0.4);
+      }
     }
     /*
      * Squad outlines: a tile made of tiles (§3.1). Same silhouette, same step
@@ -1553,7 +1650,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       for (const id of selected) {
         if (!pendingAgents.has(id)) continue;
         const ka = byId.get(id);
-        if (key === DECK_YOU || (ka && islandOf(ka) === key)) { mine = 1; break; }
+        if (key === DECK_YOU || (ka && island(ka) === key)) { mine = 1; break; }
       }
       pipes.port(you.x, you.y, 0.03, C_AMBER, 1.7, mine);
     }
@@ -1571,7 +1668,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         const touch = selected.has(a.id) || selected.has(other);
         pipes.add(messageRoute(s, b, a.id), Math.min(s.z, b.z) - 0.02, touch ? C_LIME : C_BLUE, kind, 0, 1, touch ? 1 : 0);
       } else if (pendingAgents.has(a.id)) {
-        const you = youOf(lmode.kind === 'deck' ? DECK_YOU : islandOf(a));
+        const you = youOf(lmode.kind === 'deck' ? DECK_YOU : island(a));
         if (!you || drawn.has(`${a.id}>you`)) continue;
         drawn.add(`${a.id}>you`);
         pipes.add(landOn(messageRoute(s, you, a.id), you), Math.min(s.z, 0.05) - 0.02, C_AMBER, kind, 0, 1, selected.has(a.id) ? 1 : 0);
@@ -1778,7 +1875,13 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       const m = media.rects().find((r) => r.id === dragId);
       if (!m) return;
       const per = camera.worldPerPixel(m.z);
-      media.nudge(dragId, m.x + dx * per, m.y - dy * per);
+      const nx = m.x + dx * per, ny = m.y - dy * per;
+      media.nudge(dragId, nx, ny);
+      // Live, like a tile's: a feed that lands mid-drag rebuilds the media from
+      // the artifacts, and without this the surface would snap back under the
+      // hand to where the grab began. Only the save waits for the release.
+      const a = artifacts.find((x) => x.id === dragId);
+      if (a?.placement) { a.placement.x = nx; a.placement.y = ny; }
     } else if (mode === 'squad' && dragId) {
       if (lmode.kind !== 'field') return;
       const q = squadBlocks.get(dragId);
@@ -1924,8 +2027,9 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     if (keeps(e.target) || (e.target as HTMLElement).closest?.('.rgn')) return;
     const rotulo = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('.squad')?.dataset.key ?? null;
     const hit = rotulo && squadBlocks.has(rotulo) ? { kind: 'squad' as const, id: rotulo } : pickAt(e.clientX, e.clientY);
-    if (hit?.kind === 'agent') ev.onOpen(hit.id, e.clientX, e.clientY);
-    else if (hit?.kind === 'media') ev.onOpenArtifact(hit.id, e.clientX, e.clientY);
+    // Agent pointer-up already toggled once per click. A native dblclick
+    // must not open it a third time after the second click closed it.
+    if (hit?.kind === 'media') ev.onOpenArtifact(hit.id, e.clientX, e.clientY);
     else if (hit?.kind === 'squad') { const q = squadBlocks.get(hit.id); if (q) ev.onOpenSquad(q.name, q.projectId, e.clientX, e.clientY); }
   });
 
@@ -1935,15 +2039,46 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
    * `at`, so nothing opens — and one inside it asks on behalf of all of them.
    * A surface's own content keeps the browser's menu.
    */
+  // Con el dedo no hay botón derecho: mantener pulsado dispara este mismo
+  // `contextmenu` sobre lo que haya debajo. Ver `hud/longpress.ts`.
+  longPress(root, { skip: '.srf iframe, .srf pre, .srf__x' });
   root.addEventListener('contextmenu', (e) => {
     if (keeps(e.target)) return;
     e.preventDefault();
-    if (mode !== 'none') return;
+    /*
+     * La guarda es el MOVIMIENTO, no el modo.
+     *
+     * `mode` se fija en el `pointerdown` —`agent` sobre una baldosa, `pan`
+     * sobre el vacío— antes de que nada se haya movido, así que «modo distinto
+     * de none» también es cierto con el dedo quieto encima. Con el ratón daba
+     * igual: el botón derecho llega con el izquierdo levantado. Con una
+     * pulsación larga el dedo sigue abajo cuando el menú tiene que salir, y
+     * esta guarda se lo comía. Lo que se quería evitar era un menú a mitad de
+     * un arrastre, y eso es `dragMoved`.
+     */
+    if (mode !== 'none' && dragMoved) return;
+    // El dedo todavía está abajo: al levantarlo habría un clic que
+    // seleccionaría o abriría lo que hay debajo del menú.
+    swallowClick = true;
     const t = e.target as HTMLElement | null;
     const rgn = t?.closest?.<HTMLElement>('.rgn')?.dataset.project;
     if (rgn) { ev.onContext({ kind: 'project', id: rgn, moved: regionById.get(rgn)?.moved ?? false }, e.clientX, e.clientY); return; }
     const rotulo = t?.closest?.<HTMLElement>('.squad')?.dataset.key ?? null;
-    const hit = rotulo && squadBlocks.has(rotulo) ? { kind: 'squad' as const, id: rotulo } : pickAt(e.clientX, e.clientY);
+    /*
+     * Con el dedo quieto, el sujeto es el que se picó AL BAJAR, no el que haya
+     * bajo el punto medio segundo después. El campo se recoloca solo —una
+     * baldosa nueva, un squad que crece— y volver a picar por coordenadas
+     * abriría el menú de otro, o el del campo vacío, sobre el mismo dedo que
+     * no se ha movido. `clickId` y `dragId` son lo que ya se guarda al bajar
+     * justo para esto.
+     */
+    const held = !dragMoved
+      ? mode === 'agent' && clickId ? { kind: 'agent' as const, id: clickId }
+        : mode === 'squad' && dragId ? { kind: 'squad' as const, id: dragId }
+        : mode === 'media' && dragId ? { kind: 'media' as const, id: dragId }
+        : null
+      : null;
+    const hit = held ?? (rotulo && squadBlocks.has(rotulo) ? { kind: 'squad' as const, id: rotulo } : pickAt(e.clientX, e.clientY));
     if (hit?.kind === 'agent') {
       if (!selected.has(hit.id)) { selected.clear(); selected.add(hit.id); selRev++; ev.onSelect([hit.id], null); }
       ev.onContext({ kind: 'agent', id: hit.id, selection: [...selected] }, e.clientX, e.clientY);
@@ -2036,7 +2171,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     pipes.setFocus(focusV);
     halo.setFocus(focusV);
     // The command post: the flags every frame (a toggle takes on the next
-    // frame), the state once a second — a task cools by the clock alone.
+    // frame), the state once a second — a mission cools by the clock alone.
     readCommandFlags();
     if (clock - cmdAt > 1) refreshCommand();
     swarm.setCommand(cmdState.turn, cmdState.waiting, cmdFlags.pulse ? 1 : 0);
@@ -2170,17 +2305,42 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   }
 
   // A drag out of the gallery must be droppable anywhere on the stage, and
-  // the browser only offers the drop if the dragover is claimed.
+  // the browser only offers the drop if the dragover is claimed. A file from
+  // the desktop is claimed the same way; the tile under it is the target.
+  const carriesFiles = (dt: DataTransfer | null) => !!dt && [...dt.types].includes('Files');
   root.addEventListener('dragover', (e) => {
-    if (!e.dataTransfer?.types.includes(ART_MIME)) return;
+    if (e.dataTransfer?.types.includes(ART_MIME)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      return;
+    }
+    if (!carriesFiles(e.dataTransfer) || !ev.onDropFiles) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
+    e.dataTransfer!.dropEffect = 'copy';
+    // No pointermove arrives during a native drag; the hover follows from here.
+    const hit = pickAt(e.clientX, e.clientY);
+    const id = hit?.kind === 'agent' ? hit.id : null;
+    if (id !== hover) { hover = id; ev.onHover(id); }
+  });
+  root.addEventListener('dragleave', (e) => {
+    if (!carriesFiles(e.dataTransfer) || !hover) return;
+    if (root.contains(e.relatedTarget as Node | null)) return;
+    hover = null; ev.onHover(null);
   });
   root.addEventListener('drop', (e) => {
     const id = e.dataTransfer?.getData(ART_MIME);
-    if (!id) return;
+    if (id) {
+      e.preventDefault();
+      dropArtifactAt(id, e.clientX, e.clientY);
+      return;
+    }
+    if (!carriesFiles(e.dataTransfer) || !ev.onDropFiles) return;
     e.preventDefault();
-    dropArtifactAt(id, e.clientX, e.clientY);
+    if (hover) { hover = null; ev.onHover(null); }
+    const hit = pickAt(e.clientX, e.clientY);
+    const cpt = toCanvas(e);
+    const p = camera.screenToWorld(cpt.x, cpt.y, ART_Z);
+    ev.onDropFiles([...e.dataTransfer!.files], hit?.kind === 'agent' ? hit.id : null, e.clientX, e.clientY, { x: p.x, y: p.y, z: ART_Z });
   });
 
   /**
@@ -2246,12 +2406,28 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     layoutMode: () => lmode,
     select(ids) { selected.clear(); for (const id of ids) selected.add(id); selRev++; },
     selection: () => [...selected],
+    windowOrigin(id) {
+      const s = layout.spots.get(id);
+      return s ? { x: s.x + TILE_W / 2, y: s.y + TILE_H / 2 } : null;
+    },
+    frameWindow(bounds) {
+      userMoved = true;
+      camera.setTilt(false);
+      // Fit the window between the mast and dock, not the fleet around it.
+      const ppu = Math.min(Math.max(1, camera.width - 160) / Math.max(0.01, bounds.maxX - bounds.minX),
+        Math.max(1, camera.height - 260) / Math.max(0.01, bounds.maxY - bounds.minY));
+      const distance = camera.height / (2 * Math.tan(camera.three.fov * Math.PI / 360) * ppu);
+      camera.flyTo((bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2 + 6 / ppu, distance);
+    },
+    windowPlane() { return { origin: camera.project(0, 0, 0), ppu: camera.pxPerUnit(0) }; },
+    windowProjection(x, y) { return camera.project(x, y, 0); },
+    windowPoint(x, y) { return camera.screenToWorld(x, y); },
     screenOf(id) {
       const s = layout.spots.get(id);
       if (!s) return null;
       const a = camera.project(s.x - TILE_W / 2, s.y + TILE_H / 2, s.z);
       const b = camera.project(s.x + TILE_W / 2, s.y - TILE_H / 2, s.z);
-      return { x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y, visible: a.visible || b.visible };
+      return { x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y, visible: a.visible || b.visible, ahead: a.ahead && b.ahead };
     },
     screenToWorld(sx, sy) { const c = toCanvas({ clientX: sx, clientY: sy }); return camera.screenToWorld(c.x, c.y); },
     spotOf: (id) => layout.spots.get(id),
@@ -2294,6 +2470,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       saveRegionPlacements();
       dirty = true;
     },
+    setExtraMedia(list) { extraMedia = list; dirty = true; },
     placeNear(agentId, index) {
       const s = layout.spots.get(agentId);
       if (!s) return { x: camera.cam.x, y: camera.cam.y, z: 0.1 };

@@ -10,7 +10,7 @@
  * What the rollout says, measured on codex-cli 0.153.4:
  *
  *   session_meta          id, cwd, cli_version, model_provider — first line
- *   turn_context          cwd, approval_policy, sandbox_policy — per turn
+ *   turn_context          cwd, approval_policy, sandbox_policy, model — per turn
  *   event_msg.task_started / task_complete / turn_aborted — the turn's edges
  *   event_msg.item_completed {item.type: UserMessage|AgentMessage|…} — what happened
  *   event_msg.token_count  {info.total_token_usage} — running totals
@@ -18,7 +18,9 @@
  *   response_item.message  role user|assistant|developer, content[].text
  *   response_item.custom_tool_call / function_call (+ _output) — tools, by call_id
  *   response_item.reasoning — thinking, contents encrypted
- *   thread_settings_applied {thread_settings.model} — the model
+ *   thread_settings_applied {thread_settings.model} — the model, but only when
+ *                         the interactive TUI applies them: a session prepared
+ *                         with `codex exec` writes it turns later, if at all.
  *
  * What it does NOT say: approvals. A pending exec approval lives in the TUI
  * only, so the same suspicion Claude gets applies — a tool open for
@@ -187,6 +189,19 @@ export class CodexDeriver {
         const cwd = str(p['cwd']);
         if (cwd && !this.cwd) this.cwd = cwd;
         this.approvalPolicy = str(p['approval_policy']) ?? this.approvalPolicy;
+        /*
+         * El modelo, desde el PRIMER turno.
+         *
+         * `thread_settings_applied` también lo dice, pero lo escribe la TUI
+         * cuando aplica sus ajustes: una sesión preparada por un traspaso nace
+         * de un `codex exec` y no lo tiene hasta que alguien le escribe. Medido
+         * el 2026-09-08 en un relevo opus → gpt-6-astra: turn_context lo decía
+         * a los tres segundos y el ajuste llegó 79 después, y en ese hueco la
+         * consola anunciaba «model unknown» sobre un CAPCOM que sí sabía con
+         * qué corría. Las dos fuentes coinciden; se queda la que llega antes.
+         */
+        const model = str(p['model']);
+        if (model) this.model = model;
         return;
       }
       case 'event_msg': return this.event(p, at, bootstrap);

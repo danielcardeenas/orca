@@ -11,11 +11,19 @@
  * `Reading` is `measured`, a lower bound (`atLeast`, `≥`), an upper bound
  * (`atMost`, `≤`), an `approximate` that bounds nothing (`~`), or
  * `unavailable` with the reason. The direction is not decoration: a truncated
- * walk is a floor and macOS memory-in-use is a ceiling, and showing both with
- * the same mark tells the reader the opposite of the truth about one of them.
- * A dash is a fact about the sampler, not a zero — conflating those is how a
- * hygiene panel starts lying, and the lie is always in the reassuring
+ * walk is a floor and `total - free` memory is a ceiling, and showing both
+ * with the same mark tells the reader the opposite of the truth about one of
+ * them. A dash is a fact about the sampler, not a zero — conflating those is
+ * how a hygiene panel starts lying, and the lie is always in the reassuring
  * direction.
+ *
+ * **A bound is the second-best answer.** Marking a number honestly is not the
+ * same as measuring it, and a correctly-marked ceiling can still be the figure
+ * that misleads: `≤47G of 48G` was true of this machine while nine gigabytes
+ * sat free, because the only source anyone had asked was `os.freemem()`. The
+ * fix was to ask a better source (`collector/memory.ts`), not to re-mark the
+ * bad one. Reach for `atMost` when the platform will not say — not instead of
+ * asking it.
  *
  * **Growth is not writes.** The one number an operator will misread is
  * "writes". We cannot see the block writes a process makes without privileges
@@ -61,9 +69,12 @@
  *  - `measured` — counted. The number is the number.
  *  - `atLeast` — a lower bound (`≥`). The truth is this or more. A walk that
  *    ran out of budget produced this: everything it did not reach can only add.
- *  - `atMost` — an upper bound (`≤`). The truth is this or less. macOS
- *    "memory used" is this: it counts cache and purgeable pages, which are
- *    handed back the moment anything asks.
+ *  - `atMost` — an upper bound (`≤`). The truth is this or less. `total -
+ *    free` memory is this: it counts cache and purgeable pages, which are
+ *    handed back the moment anything asks. It is now only the fallback for a
+ *    machine whose `vm_stat` or `/proc/meminfo` could not be read — the
+ *    measurement replaced it — and the grade stayed because the fallback is
+ *    still reachable and still a ceiling.
  *  - `approximate` — a real estimate with no valid bound in either direction
  *    (`~`). Rare on purpose, and never a resting place for laziness.
  *  - `unavailable` — could not be measured, and the reason travels (`—`).
@@ -94,7 +105,7 @@ export function measured(value: number, note?: string): Reading {
 export function atLeast(value: number, note: string): Reading {
   return { value, confidence: 'atLeast', note };
 }
-/** The truth is `value` or less. Memory-in-use on darwin makes these. */
+/** The truth is `value` or less. `total - free` memory makes these. */
 export function atMost(value: number, note: string): Reading {
   return { value, confidence: 'atMost', note };
 }
@@ -365,7 +376,9 @@ export const PROTECTED: string[] = [
   '~/.orca/worker-recovery',
   '~/.orca/token',
   '~/.orca/machine-id',
+  '~/.orca/hub/missions.json',
   '~/.orca/hub/tasks.json',
+  '~/.orca/hub/file-roots.json',
   '~/.orca/hub/memory.json',
   '~/.claude/history.jsonl',
 ];
@@ -393,11 +406,42 @@ export interface HygieneReport {
   processes: ProcessSample[];
   /** Whole machine, not ORCA's share: the same numbers the machine strip shows. */
   cpuPct: Reading;
+  /**
+   * Memory actually committed — `wired + app + compressed` on darwin,
+   * `MemTotal - MemAvailable` on linux. Not `total - free`: see
+   * `collector/memory.ts`, which exists because that subtraction called a
+   * machine with nine gigabytes to spare full.
+   */
   memUsedBytes: Reading;
   memTotalBytes: Reading;
+  /**
+   * Memory in use as cache — file-backed and purgeable pages — which the
+   * system hands back on demand. It is *not* part of `memUsedBytes`, and it is
+   * its own field rather than a term in either total because it is genuinely
+   * both: in use, and available. Absent in a report from an older collector.
+   */
+  memCachedBytes?: Reading;
+  /**
+   * Swap in use, and how much there is. The figure that says whether pressure
+   * is real: 80% committed with no swap out is a comfortable machine, and the
+   * same 80% with gigabytes swapped is not. Absent from an older collector.
+   */
+  swapUsedBytes?: Reading;
+  swapTotalBytes?: Reading;
   /** Null on the very first sample: growth needs two. */
   growth: GrowthSample | null;
   candidates: Candidate[];
+  /**
+   * Lo que ORCA dejó atrás en PROCESOS y puertos, no en disco: un Vite de este
+   * repositorio sin dueño, un entrypoint reparentado a init, un pane cuyo
+   * programa salió, un agente que sigue en el registro sin nada detrás.
+   *
+   * Viaja con la higiene y no por su cuenta porque es la misma pregunta —qué
+   * está costando ORCA en esta máquina— medida en la otra unidad, y porque el
+   * informe ya tiene su reloj lento y su panel. Ausente en un informe de una
+   * versión anterior. Ver shared/strays.ts.
+   */
+  strays?: import('./strays.ts').Stray[];
   /** What the sampler could not do here, one line each. Shown, not swallowed. */
   limits: string[];
 }

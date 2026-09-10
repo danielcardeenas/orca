@@ -34,7 +34,9 @@ import path from 'node:path';
 import { WebSocket } from 'ws';
 
 import type { CollectorFrame, Command, CommandFrame, TermFrame } from '../shared/protocol.ts';
-import { BEAT_INTERVAL_MS, HYGIENE_INTERVAL_MS, PATHS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
+import { BEAT_INTERVAL_MS, HYGIENE_INTERVAL_MS, PATHS, PORTS, PROTOCOL_VERSION, newId } from '../shared/protocol.ts';
+import { exitForRestart, isSupervised } from '../shared/restart.ts';
+import { sharedToken } from '../shared/token.ts';
 import type {
   Agent, AgentMessage, AgentState, Artifact, Escalation, FeedItem, FeedLevel, Machine, Project,
   SessionRollup, TalkItem,
@@ -52,7 +54,10 @@ import { CodexDeriver } from './codex.ts';
 import type { CollisionAgent } from './collisions.ts';
 import { CollisionIndex } from './collisions.ts';
 import { EscalationWatcher } from './escalate.ts';
+import { ImproveDropWatcher, type ImproveAck } from './improve-drop.ts';
+import { StrayWatch, type AgentView } from './strays.ts';
 import { HygieneSampler } from './hygiene.ts';
+import { memoryPct } from './memory.ts';
 import { liveText, promptOn, permissionClosed, screenSignature } from './screen.ts';
 import { answerPermission, type PermissionRequest } from './permissions.ts';
 import { KeyVault } from './keys.ts';
@@ -167,6 +172,12 @@ class Collector {
   private readonly keys = new KeyVault();
   private readonly callsigns = new CallsignBook();
   private readonly escalations: EscalationWatcher;
+  /** El buzón por el que un agente revisor archiva. Ver improve-drop.ts. */
+  private readonly improveDrops: ImproveDropWatcher;
+  /** Lo que ORCA dejó atrás en esta máquina: procesos, puertos, panes. */
+  private readonly strays: StrayWatch;
+  /** `reportId` → dónde espera su respuesta el revisor. La ruta no sale de aquí. */
+  private readonly improveAcks = new Map<string, string>();
   private readonly messages: MessageWatcher;
   private readonly spawns: SpawnWatcher;
   private readonly collisions = new CollisionIndex();
@@ -216,6 +227,11 @@ class Collector {
   /** Última huella de cada pantalla y desde cuándo no cambia. Ver STALL_MS. */
   private screenStill = new Map<string, { sig: string; since: number }>();
   /**
+   * Diálogo ya anunciado en un pane sin sesión, por nombre de pane. Ver
+   * `readOrphanScreens`: sin esto el feed repetiría la línea en cada poll.
+   */
+  private paneDialogs = new Map<string, string>();
+  /**
    * Agentes esperando algo que ORCA no sabe leer: el CLI lo declara en su
    * título, o su pantalla lleva parada. Sólo un bloqueo, nunca una respuesta.
    */
@@ -257,10 +273,27 @@ class Collector {
     this.wantsCapcom = opts.capcom === true;
     this.machineId = ident.id;
     this.machineName = ident.name;
-    this.projects = new ProjectRegistry(this.machineId, capcomDir());
+    // Las altas por ruta se recuerdan en disco: un proyecto sin transcripts
+    // todavía no se redescubre solo y desaparecería en el próximo reinicio.
+    this.projects = new ProjectRegistry(this.machineId, capcomDir(), path.join(orcaDir(), 'projects.json'));
+    this.projects.adopt();
     this.escalations = new EscalationWatcher({
       machineId: this.machineId,
       resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
+    });
+    this.improveDrops = new ImproveDropWatcher({
+      resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
+    });
+    this.strays = new StrayWatch({
+      tmux: this.tmux,
+      home: os.homedir(),
+      // El puerto en el que este ORCA sirve su consola, para no ofrecerlo
+      // jamás como resto: es el que el operador está mirando.
+      uiPort: Number(process.env['ORCA_UI_PORT']) || PORTS.ui,
+      agents: () => this.strayAgents(),
+      // Recién arrancado el collector no ha mirado la liveness de nadie: su
+      // mapa está vacío y toda la flota parecería muerta. Ver `livenessReady`.
+      livenessReady: () => this.liveness.size > 0 || this.derivers.size === 0,
     });
     this.messages = new MessageWatcher({
       resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
@@ -287,6 +320,7 @@ class Collector {
       tmux: this.tmux,
       lineage: this.lineage,
       escalations: this.escalations,
+      strays: () => this.strays,
       messages: this.messages,
       artifacts: this.artifacts,
       agent: (id) => this.agentHandle(id),
@@ -351,6 +385,23 @@ class Collector {
     this.escalations.onOpen((e) => this.onEscalation(e));
     this.escalations.onWithdraw((id, reason) => this.onWithdraw(id, reason));
     this.escalations.start();
+    /*
+     * Un informe de AUTOMEJORA sube tal cual: quién lo escribió, qué revisión
+     * dice contestar y las propuestas. Quien decide si vale es el hub, que es
+     * el único que sabe qué revisión está en vuelo y de quién es; el collector
+     * sólo valida forma y tamaño, y devuelve al agente lo que el hub conteste.
+     */
+    this.improveDrops.onDrop((d) => {
+      // La ruta del ack se queda AQUÍ, indexada por un id que sí viaja: el hub
+      // contesta con el id y nunca elige dónde se escribe un fichero.
+      const reportId = `rep_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      this.improveAcks.set(reportId, d.ackFile);
+      this.send({
+        t: 'improve:report', machineId: this.machineId, reportId,
+        agentId: d.agentId, reviewId: d.reviewId, proposals: d.proposals,
+      });
+    });
+    this.improveDrops.start();
 
     this.messages.onMessage((m) => this.onMessage(m));
     this.messages.start();
@@ -373,7 +424,7 @@ class Collector {
       this.capcom = new CapcomSession({
         bin: resolveClaudeBin(),
         hubUrl: this.hubUrl(),
-        token: process.env['ORCA_TOKEN'] ?? '',
+        token: sharedToken(),
         lineage: this.lineage,
         alive: (id) => this.shortIdAlive(id),
         note: (level, text) => this.note(level, text),
@@ -421,6 +472,7 @@ class Collector {
     this.watcher.stop();
     this.codexWatcher?.stop();
     this.escalations.stop();
+    this.improveDrops.stop();
     this.messages.stop();
     this.artifacts.stop();
     this.spawns.stop();
@@ -443,6 +495,7 @@ class Collector {
         this.unhide(d.id);
         d.setProject(p.id);
         this.escalations.track(p.id, p.path);
+        this.improveDrops.track(p.id, p.path);
         this.messages.track(p.id, p.path);
         this.artifacts.track(p.id, p.path);
         this.spawns.track(p.id, p.path);
@@ -484,6 +537,7 @@ class Collector {
         this.unhide(d.id);
         d.setProject(p.id);
         this.escalations.track(p.id, p.path);
+        this.improveDrops.track(p.id, p.path);
         this.messages.track(p.id, p.path);
         this.artifacts.track(p.id, p.path);
         this.spawns.track(p.id, p.path);
@@ -560,6 +614,7 @@ class Collector {
     this.derivers.set(ref.key, d);
     if (project) {
       this.escalations.track(project.id, project.path);
+      this.improveDrops.track(project.id, project.path);
       this.messages.track(project.id, project.path);
       this.artifacts.track(project.id, project.path);
       this.spawns.track(project.id, project.path);
@@ -683,10 +738,25 @@ class Collector {
         continue;
       }
       // Reconocido el diálogo, el parón no aporta: la escalación dice más.
+      const priorWait = this.waiting.get(d.id);
       this.waiting.delete(d.id);
       if (open && open.request.identity === shot.identity && open.request.fingerprint === prompt.fingerprint) continue;
       if (open) this.withdrawPrompt(d.id, 'Permission dialog changed; previous outcome unconfirmed');
-      if (prompt.kind === 'trust') continue; // trust has no once scope
+      /*
+       * La confianza de carpeta no tiene alcance "una vez": no hay tecla que
+       * ORCA pueda mandar en nombre de nadie, así que no hay escalación que
+       * ofrecer. Lo que sí hay es lo que faltó el 2026-09-08: decir QUÉ se
+       * pregunta y DÓNDE se contesta, en vez de dejarlo al parón genérico.
+       */
+      if (prompt.kind === 'trust') {
+        const block = nativeDialogSignal(
+          prompt.question, this.tmux.attachHint(pane),
+          priorWait?.summary?.startsWith(NATIVE_DIALOG_MARK) ? priorWait.since : now,
+        );
+        this.waiting.set(d.id, block);
+        if (priorWait?.summary !== block.summary) this.note('alert', `${d.callsign} está parado en un diálogo nativo: ${prompt.question}`, d.id);
+        continue;
+      }
 
       const question = `${d.callsign} requests ${prompt.runtime} permission`;
       const e: Escalation = {
@@ -706,6 +776,40 @@ class Collector {
       this.escalationBySession.set(d.id, e);
       this.send({ t: 'escalation', machineId: this.machineId, escalation: e });
       this.note('alert', question, d.id);
+    }
+    await this.readOrphanScreens(seen);
+  }
+
+  /**
+   * Panes de ORCA que ningún agente reclama todavía.
+   *
+   * Es el agujero por el que se colaron los cinco workers del 2026-09-08:
+   * mientras el diálogo de confianza está en pantalla, Claude Code NO crea su
+   * directorio en `~/.claude/projects` —comprobado con 2.1.263, con y sin
+   * `--session-id`—, así que no hay transcript, no hay deriver, y el bucle de
+   * arriba, que recorre derivers, nunca mira ese pane. El agente no existe
+   * para ORCA y su pane está congelado: la única forma de contarlo es por el
+   * pane, que sí existe.
+   *
+   * No hay agente al que colgarle un bloqueo, así que sale por el feed —la
+   * misma línea que el operador ya lee— y una sola vez por diálogo: el poll
+   * pasa cada pocos segundos y esto puede durar horas.
+   */
+  private async readOrphanScreens(claimed: Set<string>): Promise<void> {
+    for (const name of this.paneDialogs.keys()) {
+      if (!this.panes.has(name) || claimed.has(name)) this.paneDialogs.delete(name);
+    }
+    for (const [name, info] of this.panes) {
+      if (claimed.has(name) || info.dead) continue;
+      const shot = await this.tmux.permissionView(name);
+      if (!shot) continue;
+      const prompt = promptOn(shot.screen);
+      if (!prompt) { this.paneDialogs.delete(name); continue; }
+      if (this.paneDialogs.get(name) === prompt.fingerprint) continue;
+      this.paneDialogs.set(name, prompt.fingerprint);
+      this.note('alert',
+        `${name} no ha llegado a existir como sesión: está parado en un diálogo del CLI. `
+        + nativeDialogSignal(prompt.question, this.tmux.attachHint(name), Date.now()).summary);
     }
   }
 
@@ -1214,6 +1318,7 @@ class Collector {
         this.send({ t: 'project', machineId: this.machineId, id: project.id, patch: fresh });
       }
       this.escalations.track(project.id, project.path);
+      this.improveDrops.track(project.id, project.path);
       this.messages.track(project.id, project.path);
       this.artifacts.track(project.id, project.path);
     this.spawns.track(project.id, project.path);
@@ -1503,7 +1608,7 @@ class Collector {
   private sendHello(): void {
     const frame: CollectorFrame = {
       t: 'hello', v: PROTOCOL_VERSION, machine: this.machine(),
-      token: process.env['ORCA_TOKEN'] ?? '',
+      token: sharedToken(),
     };
     try {
       this.ws?.send(JSON.stringify(frame));
@@ -1575,6 +1680,40 @@ class Collector {
       void this.sampleHygiene({ force: frame.force === true });
       return;
     }
+    if (frame && frame.t === 'restart') {
+      /*
+       * El operador pidió el relevo desde la consola.
+       *
+       * Decide este proceso, no el hub: sin un supervisor que lo relance, un
+       * collector que se apaga deja esta máquina fuera de la flota y sin nadie
+       * que la devuelva. Con supervisor, salir ES el reinicio. Los agentes no
+       * se tocan: viven en tmux, no dentro de este proceso, y siguen
+       * trabajando mientras el collector vuelve. Ver shared/restart.ts.
+       */
+      if (!isSupervised()) {
+        log('warn', SCOPE, 'el hub pidió relevo, pero aquí no hay supervisor que relance: se ignora');
+        return;
+      }
+      log('info', SCOPE, 'relevo pedido desde la consola: cerrando para volver con el código nuevo');
+      this.stop();
+      // `exitForRestart` y no un exit a secas: hay que dejar que salga lo
+      // último por el cable SIN que el proceso se escape con un 0 mientras
+      // tanto, que es lo que el supervisor lee como «no lo relances».
+      exitForRestart();
+      return;
+    }
+    if (frame && frame.t === 'improve:ack') {
+      // El recibo de un informe de AUTOMEJORA. La ruta la teníamos aquí; el
+      // hub sólo dijo a cuál. Un id que no conocemos se ignora en silencio: o
+      // es de otro collector, o de antes de este reinicio.
+      const file = this.improveAcks.get(frame.reportId);
+      if (file) {
+        this.improveAcks.delete(frame.reportId);
+        const { reportId: _ignored, t: _t, ...body } = frame;
+        void this.improveDrops.ack(file, body as ImproveAck);
+      }
+      return;
+    }
     if (frame && typeof frame.t === 'string' && frame.t.startsWith('term:')) {
       // Una terminal no es un comando: no hay ack, hay un flujo mientras dure.
       this.terms.handle(frame as TermFrame);
@@ -1635,6 +1774,14 @@ class Collector {
         processes: () => this.hygieneProcesses(),
       });
       const report = await this.hygieneSampler.sample(opts);
+      /*
+       * Los restos viajan con la higiene: es la misma pregunta —qué está
+       * costando ORCA aquí— medida en procesos en vez de en bytes, y así
+       * comparten reloj lento, frame y panel. Un fallo del escáner no puede
+       * tumbar la muestra de disco: se anota como límite y se sigue.
+       */
+      try { report.strays = await this.strays.scan(); }
+      catch (err) { report.limits.push(`stray scan failed: ${errText(err)}`); }
       this.send({ t: 'hygiene', machineId: this.machineId, report });
     } catch (err) {
       log('warn', SCOPE, `higiene: ${errText(err)}`);
@@ -1646,6 +1793,35 @@ class Collector {
    * liveness already knows. No new discovery — if we had to go looking for
    * processes, the measurement would cost more than the thing it measures.
    */
+  /**
+   * Lo que el escáner de restos necesita saber de cada sesión.
+   *
+   * Se le da TODO lo que el collector observa, no sólo lo sospechoso: la
+   * decisión de qué es un fantasma vive en `strays.ts`, donde está escrita y
+   * probada, y no repartida entre dos ficheros que un día discrepan. Y los
+   * pids de los que están vivos son justo lo que impide que el escáner ofrezca
+   * matar a un agente de la flota.
+   */
+  private strayAgents(): AgentView[] {
+    const out: AgentView[] = [];
+    for (const d of this.derivers.values()) {
+      const snap = d.snapshot();
+      const l = this.liveness.get(d.ref.sessionId);
+      out.push({
+        sessionId: d.ref.sessionId,
+        callsign: snap.callsign,
+        state: d.state(),
+        alive: l?.alive ?? false,
+        pid: l?.pid ?? null,
+        // El NOMBRE del pane, no un booleano: es lo que se puede ir a buscar
+        // al servidor de tmux, y sin poder buscarlo no hay prueba de nada.
+        pane: l?.pane === true ? paneName(d.ref.sessionId) : null,
+        updatedAt: snap.updatedAt,
+      });
+    }
+    return out;
+  }
+
   private hygieneProcesses(): { pid: number; role: 'hub' | 'collector' | 'console' | 'agent' | 'other'; name: string }[] {
     const out: { pid: number; role: 'hub' | 'collector' | 'console' | 'agent' | 'other'; name: string }[] = [
       { pid: process.pid, role: 'collector', name: 'orca-collector' },
@@ -1669,7 +1845,10 @@ class Collector {
       sessions: this.derivers.size,
       activeSessions: active,
       cpuPct: this.cpuPct(),
-      memPct: Math.round((1 - os.freemem() / os.totalmem()) * 1000) / 10,
+      // Committed memory, not `1 - free/total`: on darwin that fraction is
+      // ~97% on an idle machine because everything spare is file cache. Null
+      // on the first beat, like cpuPct — see collector/memory.ts.
+      memPct: memoryPct(),
     };
   }
 
@@ -1820,6 +1999,30 @@ export function titleSignal(title: string, now: number): BlockSignal | null {
     kind: 'permission',
     summary: 'the CLI reports it is waiting for an answer; open its terminal to see what it asks',
     since: now,
+  };
+}
+
+/** Con qué empieza el resumen de un diálogo nativo. Lo lee el propio poll. */
+export const NATIVE_DIALOG_MARK = 'native dialog waiting';
+
+/**
+ * Un diálogo del CLI que ORCA reconoce pero no puede contestar.
+ *
+ * Es lo contrario de `stallSignal`, y por eso son dos funciones: allí no se
+ * sabe nada y se dice que no se sabe; aquí se ha LEÍDO la pregunta y hay que
+ * decirla, con el comando exacto para ir a contestarla. Un bloqueo que dice
+ * «nada se ha pintado en 20 s» manda al operador a adivinar; éste le da las
+ * dos cosas que necesita y ninguna más.
+ *
+ * El comando lleva su socket porque las sesiones de ORCA no viven en el de
+ * por defecto: `tmux ls` a secas contesta «no server running» (ver
+ * `attachHint`). Ese detalle costó parte de los 25 minutos del 2026-09-08.
+ */
+export function nativeDialogSignal(question: string, attach: string, since: number): BlockSignal {
+  return {
+    kind: 'input',
+    summary: `${NATIVE_DIALOG_MARK}: "${oneLine(question, 140)}" — nobody can answer it from ORCA; answer it in its terminal: ${attach}`,
+    since,
   };
 }
 

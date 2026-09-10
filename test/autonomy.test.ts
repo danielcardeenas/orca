@@ -33,7 +33,7 @@ function fakeDeps(over: Partial<AutonomyDeps> = {}): AutonomyDeps {
   const timer = { cancel() { /* noop */ } };
   return {
     agents: () => [], agent: () => undefined, projects: () => [], project: () => undefined,
-    tasks: () => ({}), capcom: () => null,
+    missions: () => ({}), capcom: () => null,
     sayToCapcom: () => false, dispatch: async () => ({}), stopAgent: async () => ({}),
     dir: '/nonexistent', env: {}, now: () => 0,
     setTimer: () => timer, setInterval: () => timer,

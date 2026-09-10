@@ -22,7 +22,7 @@
  */
 
 import { store } from '../../store.ts';
-import { authedUrl } from '../../net/client.ts';
+import { authedUrl, hub } from '../../net/client.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { esc } from '../../util.ts';
@@ -45,7 +45,7 @@ function bytes(n: number): string {
 function refusal(status: number, body: string): string {
   switch (status) {
     case 401: return 'NOT AUTHORISED · the console has no token for this hub';
-    case 403: return 'OUTSIDE THE PROJECT ROOTS · the hub only serves files under known projects and the agents\' scratchpad';
+    case 403: return 'OUTSIDE THE PROJECT ROOTS · the hub serves known projects, the agents\' scratchpad and folders you allow';
     case 404: return 'NOT FOUND · not on the hub\'s machine, or not a file';
     case 413: return `TOO BIG · ${body || 'above the hub\'s limit'}`;
     default: return `HTTP ${status}${body ? ` · ${body}` : ''}`;
@@ -90,39 +90,80 @@ export function mountFile(ctx: WinCtx, _c: Console) {
   const fail = (status: number, text: string) => {
     view.innerHTML = `<p class="px px--tiny file__msg is-warn">${esc(refusal(status, text))}</p>`;
     meta.textContent = `HTTP ${status}`;
+    if (status !== 403 || !store.linkUp) return;
+    // A 403 is a folder the hub does not know, not a file it will never
+    // show. One press names the folder; the hub remembers it (file-roots.ts).
+    const allow = document.createElement('button');
+    allow.className = 'slab-btn slab-btn--sm slab-btn--fit';
+    allow.type = 'button';
+    allow.textContent = `ALLOW ${dirName(path)}`;
+    allow.title = 'Let the hub serve this folder, now and after a restart';
+    view.appendChild(allow);
+    allow.addEventListener('click', async () => {
+      slabFlash(allow);
+      allow.disabled = true;
+      try {
+        const out = await hub.cmd({ k: 'files:allow', path }) as { root: string; added: boolean } | undefined;
+        _c.note(out?.added === false ? `${out.root} was already allowed` : `the hub now serves ${out?.root ?? dirName(path)}`);
+        if (!disposed) void load();
+      } catch (err) {
+        _c.note(`not allowed · ${(err as Error).message}`, 'warn');
+        allow.disabled = false;
+      }
+    });
   };
 
   function setMeta(size: number | null, extra = '') {
     meta.textContent = [kind.toUpperCase(), size !== null ? bytes(size) : '', extra].filter(Boolean).join(' · ');
   }
 
-  /* ── image: fit, 1:1, zoom ─────────────────────────────────────── */
+  /* ── image: width, fit, 1:1, zoom ──────────────────────────────── */
+  /**
+   * WIDTH is the default: the image takes the window's width and the rest
+   * scrolls, the way a page does. A tall screenshot or a long comparison is
+   * readable as it arrives, without zooming in or pulling the window taller.
+   * FIT letterboxes the whole thing into view; 1:1 and the zoom steps scroll.
+   * Click toggles between WIDTH and 1:1.
+   */
   function showImage(size: number | null) {
-    view.innerHTML = `<div class="file__img is-fit" data-pan><img src="${esc(url)}" alt="${esc(baseName(path))}" draggable="false" /></div>`;
+    view.innerHTML = `<div class="file__img is-width" data-pan><img src="${esc(url)}" alt="${esc(baseName(path))}" draggable="false" /></div>`;
     const pan = view.querySelector<HTMLElement>('[data-pan]')!;
     const img = pan.querySelector('img')!;
-    let scale = 0; // 0 = fit
+    let scale: number | 'width' | 'fit' = 'width';
     const apply = () => {
-      pan.classList.toggle('is-fit', scale === 0);
-      img.style.width = scale ? `${img.naturalWidth * scale}px` : '';
-      img.style.height = scale ? `${img.naturalHeight * scale}px` : '';
-      tools.querySelector('[data-zoom-fit]')?.classList.toggle('is-on', scale === 0);
+      pan.classList.toggle('is-width', scale === 'width');
+      pan.classList.toggle('is-fit', scale === 'fit');
+      img.style.width = typeof scale === 'number' ? `${img.naturalWidth * scale}px` : '';
+      img.style.height = typeof scale === 'number' ? `${img.naturalHeight * scale}px` : '';
+      tools.querySelector('[data-zoom-width]')?.classList.toggle('is-on', scale === 'width');
+      tools.querySelector('[data-zoom-fit]')?.classList.toggle('is-on', scale === 'fit');
       tools.querySelector('[data-zoom-1]')?.classList.toggle('is-on', scale === 1);
-      setMeta(size, `${img.naturalWidth}×${img.naturalHeight}${scale ? ` · ${Math.round(scale * 100)}%` : ' · FIT'}`);
+      setMeta(size, `${img.naturalWidth}×${img.naturalHeight} · ${typeof scale === 'number' ? `${Math.round(scale * 100)}%` : scale.toUpperCase()}`);
     };
     tools.hidden = false;
     tools.innerHTML = `
-      <button class="chip is-on" type="button" data-zoom-fit data-key="f">FIT</button>
+      <button class="chip is-on" type="button" data-zoom-width data-key="w">WIDTH</button>
+      <button class="chip" type="button" data-zoom-fit data-key="f">FIT</button>
       <button class="chip" type="button" data-zoom-1 data-key="1">1:1</button>
       <button class="chip" type="button" data-zoom-out data-key="-">−</button>
       <button class="chip" type="button" data-zoom-in data-key="=">+</button>`;
-    const zoomBy = (k: number) => { scale = Math.min(16, Math.max(0.05, (scale || pan.clientWidth / Math.max(1, img.naturalWidth)) * k)); apply(); };
-    tools.querySelector('[data-zoom-fit]')!.addEventListener('click', () => { scale = 0; apply(); });
+    // A zoom step starts from what is on screen: the rendered scale, whatever mode set it.
+    const shown = () => typeof scale === 'number' ? scale : img.clientWidth / Math.max(1, img.naturalWidth);
+    const zoomBy = (k: number) => { scale = Math.min(16, Math.max(0.05, shown() * k)); apply(); };
+    tools.querySelector('[data-zoom-width]')!.addEventListener('click', () => { scale = 'width'; apply(); });
+    tools.querySelector('[data-zoom-fit]')!.addEventListener('click', () => { scale = 'fit'; apply(); });
     tools.querySelector('[data-zoom-1]')!.addEventListener('click', () => { scale = 1; apply(); });
     tools.querySelector('[data-zoom-in]')!.addEventListener('click', () => zoomBy(1.25));
     tools.querySelector('[data-zoom-out]')!.addEventListener('click', () => zoomBy(0.8));
-    img.addEventListener('click', () => { scale = scale ? 0 : 1; apply(); });
-    pan.addEventListener('wheel', (e) => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); zoomBy(e.deltaY < 0 ? 1.1 : 0.9); }, { passive: false });
+    img.addEventListener('click', () => { scale = scale === 1 ? 'width' : 1; apply(); });
+    // A pinch over the image is the image's. The window forwards a pinch on
+    // its housing to the field (wm.ts), so without stopping it here one
+    // gesture would zoom both the picture and the canvas under it.
+    pan.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault(); e.stopPropagation();
+      zoomBy(e.deltaY < 0 ? 1.1 : 0.9);
+    }, { passive: false });
     img.addEventListener('load', apply);
     img.addEventListener('error', () => fail(0, 'the image did not load'));
   }

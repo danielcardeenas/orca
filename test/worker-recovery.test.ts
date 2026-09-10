@@ -10,7 +10,7 @@ import { WorkerHandoffs } from '../src/collector/worker-handoff.ts';
 import { ModelController, resumedPromptReady } from '../src/collector/model-control.ts';
 import { LineageIndex } from '../src/collector/lineage.ts';
 import type { AgentHandle, CommandDeps } from '../src/collector/commands.ts';
-import { TaskStore } from '../src/hub/tasks.ts';
+import { MissionStore } from '../src/hub/missions.ts';
 import { BudgetBook, budgetConfig } from '../src/hub/budgets.ts';
 import { CodexDeriver } from '../src/collector/codex.ts';
 import { test, ok } from './harness.ts';
@@ -70,11 +70,11 @@ export default { suite: 'Worker recovery', tests: [
   test('handoff does not reset per-agent spend or time budgets', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-recovery-budget-'));
     try {
-      const budgets = new BudgetBook(dir, budgetConfig({})); budgets.set({ kind: 'agent', ref: sourceId }, { usd: 10, min: 60 });
-      const original = agent({ startedAt: 1000, uptimeMs: 60000, metrics: { costUSD: 8 } as any });
-      const next = agent({ id: targetId, startedAt: 61000, uptimeMs: 0, metrics: { costUSD: 3 } as any, continuation: { fromId: sourceId, at: 61000, archive: '/backup', historyPath: '/history', checkpointPath: '/checkpoint' } });
+      const budgets = new BudgetBook(dir, budgetConfig({})); budgets.set({ kind: 'agent', ref: sourceId }, { tokens: 10_000, usd: null, min: null });
+      const original = agent({ startedAt: 1000, uptimeMs: 60000, metrics: { costUSD: 8, inputTokens: 8000 } as any });
+      const next = agent({ id: targetId, startedAt: 61000, uptimeMs: 0, metrics: { costUSD: 3, inputTokens: 3000 } as any, continuation: { fromId: sourceId, at: 61000, archive: '/backup', historyPath: '/history', checkpointPath: '/checkpoint' } });
       const status = budgets.agentStatus(next, { [sourceId]: original, [targetId]: next }, {}, 121000);
-      assert.equal(status.spent_usd, 11); assert.equal(status.elapsed_min, 2); assert.equal(status.level, 'over');
+      assert.equal(status.tokens, 11_000); assert.equal(status.level, 'over');
       return ok('budget follows both session segments', true);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }),
@@ -153,9 +153,9 @@ export default { suite: 'Worker recovery', tests: [
       assert.deepEqual(r.kills, [`orca-${sourceId}`]); assert.equal(r.workers.continuation(targetId)?.fromId, sourceId);
       const tree = r.lineage.resolve([sourceId, targetId, 'child'].map(id => ({ key: id, sessionId: id, agentId: null, metaPath: null, shortId: id })));
       assert.equal(tree.get(targetId)?.lead, true); assert.equal(tree.get(sourceId)?.lead, false); assert.equal(tree.get('child')?.parentId, targetId); assert.equal(tree.get(targetId)?.worktree, r.dir);
-      const tasks = new TaskStore(path.join(r.dir, 'hub')); tasks.create('task_a', 'Pending'); tasks.assign('task_a', [sourceId]);
+      const missions = new MissionStore(path.join(r.dir, 'hub')); missions.create('mission_a', 'Pending'); missions.assign('mission_a', [sourceId]);
       const destination = agent({ id: targetId, state: 'idle', block: null, continuation: r.workers.continuation(targetId) });
-      tasks.observe({ [targetId]: destination }); assert.ok(tasks.get('task_a').agentIds.includes(targetId));
+      missions.observe({ [targetId]: destination }); assert.ok(missions.get('mission_a').agentIds.includes(targetId));
       assert.equal(fs.readFileSync(path.join(p.archive, 'source.jsonl'), 'utf8'), r.raw);
       return ok('worker cutover and work ownership', true);
     } finally { r.dispose(); }

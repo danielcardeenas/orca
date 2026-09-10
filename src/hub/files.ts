@@ -11,9 +11,10 @@
  *  1. **Sólo bajo raíces conocidas.** Las raíces son los `path` de los
  *     proyectos que el mundo conoce (los collectors los declaran), el
  *     scratchpad de los agentes (`/tmp/claude-<uid>`, donde Claude Code deja
- *     capturas y archivos intermedios) y lo que el operador añada en
- *     `ORCA_FILE_ROOTS`. Nada más: ni `~`, ni `/etc`, ni el propio `~/.orca`
- *     donde vive el token.
+ *     capturas y archivos intermedios), lo que el operador añada en
+ *     `ORCA_FILE_ROOTS` y las carpetas que autorice desde el visor cuando
+ *     éste dijo 403 (file-roots.ts; persisten en `~/.orca/hub`). Nada más:
+ *     ni `~`, ni `/etc`, ni el propio `~/.orca` donde vive el token.
  *
  *  2. **Contención por ruta real.** La ruta pedida se resuelve, se pasa por
  *     `realpath` (que sigue symlinks) y se compara con el `realpath` de cada

@@ -26,6 +26,7 @@ import type { WinCtx } from '../wm.ts';
 import { stateVar, stateWord } from '../../util.ts';
 import { getSound } from '../../hud/sound.ts';
 import { findPaths } from '../paths.ts';
+import { monoFont, onFontsChange } from '../../fonts.ts';
 
 /** The comp's palette on the CLI's sixteen colours: lime for live, amber for waiting, red for breach. */
 const THEME = {
@@ -62,7 +63,9 @@ export function mountTerminal(ctx: WinCtx, c: Console) {
 
   const term = new Terminal({
     theme: THEME,
-    fontFamily: '"Geist Mono", ui-monospace, Menlo, monospace',
+    // Not a custom property: xterm measures a cell itself, so it needs the
+    // resolved stack and a call whenever SETTINGS changes it.
+    fontFamily: monoFont().stack,
     fontSize: 12,
     lineHeight: 1.15,
     letterSpacing: 0,
@@ -155,6 +158,13 @@ export function mountTerminal(ctx: WinCtx, c: Console) {
     handle.resize(cols, rows);
   });
 
+  /* A new mono face is a new cell size: re-measure, then re-fit, and the pane
+     is told the new geometry by `onResize` like any other resize. */
+  const offFonts = onFontsChange(() => {
+    term.options.fontFamily = monoFont().stack;
+    window.setTimeout(() => { try { fit.fit(); } catch { /* not laid out yet */ } }, 0);
+  });
+
   const ro = new ResizeObserver(() => {
     window.clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(() => { try { fit.fit(); } catch { /* not laid out yet */ } }, 60);
@@ -188,6 +198,7 @@ export function mountTerminal(ctx: WinCtx, c: Console) {
     dispose() {
       gone = true;
       off();
+      offFonts();
       ro.disconnect();
       window.clearTimeout(resizeTimer);
       if (handle) { handle.close(); handle = null; }

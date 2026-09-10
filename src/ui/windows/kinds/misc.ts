@@ -1,3 +1,5 @@
+import { mountPushSettings } from '../../push.ts';
+import { deviceWake } from '../../pwa.ts';
 import { mountRecoverySetting } from '../recovery-setting.ts';
 import { hub } from '../../net/client.ts';
 /**
@@ -8,9 +10,11 @@ import gsap from 'gsap';
 import type { WinCtx } from '../wm.ts';
 import { EASE, REDUCE } from '../../motion.ts';
 import type { Console } from '../../console.ts';
-import { level, toggle } from '../../controls.ts';
+import { level, pick, toggle } from '../../controls.ts';
+import { DISPLAY_FONTS, MONO_FONTS, setDisplayFont, setMonoFont } from '../../fonts.ts';
 import { getPref, setPref } from '../../prefs.ts';
 import { store } from '../../store.ts';
+import { voiceUnavailable } from '../../hud/voice.ts';
 
 /** SYS BREACH: the link to the hub is down. The comp's red marquee. */
 export function mountBreach(ctx: WinCtx) {
@@ -43,13 +47,14 @@ drag a project's label · move the whole region
 drag a squad by its label · move the whole block
 click a squad's label · select its members
 right-click anything · what can be done to it
-double-click a tile · open the agent
+click an agent · open its window; click again · close
 double-click a squad · open it
 double-click a project · frame it</div></div>
     <div class="sec"><div class="sec__k px">KEYS · THE FIELD</div><div class="mono sec__v" style="line-height:1.7">⌘K · command line
 F · frame everything      O · tilt
 D · deck                  M · minimap
 Space · focus (hold)      Tab · next agent that needs you
+⌥V (hold) · talk to CAPCOM, let go to send, Esc to drop
 Backspace · back          \` · walk the window stack
 ⌥Tab (hold ⌥) · switch windows, release to land</div></div>
     <div class="sec"><div class="sec__k px">KEYS · WINDOWS</div><div class="mono sec__v" style="line-height:1.7">⌥C capcom   ⌥Q queue   ⌥F feed   ⌥E fleet
@@ -57,8 +62,11 @@ Backspace · back          \` · walk the window stack
 ⌥M music    ⌥S sound   ⌥H help   ⌥, settings
 ⌥1…9 · fly to a bookmark   ⌥⇧1…9 · set one
 in a window: the letter on each button
-Esc · close   - · fold   V · reveal an off-screen tile
-in the tray (\`): ← → · Enter · Backspace closes · 1…9 jump</div></div>
+FRONT · bring to front   CANVAS · return to its place
+PIN · fix the foreground window to the screen
+Esc · return from front, otherwise close   - · fold   V · reveal the source
+tray click / Enter · open or minimize; fly to distant windows
+in the tray (\`): ← → · Backspace closes · 1…9 jump</div></div>
     <div class="sec"><div class="sec__k px">THE COMMAND LINE</div><div class="mono sec__v" style="line-height:1.7">anything · talk to CAPCOM
 @K9 fix the tests · talk to an agent
 @LZ stop and report · talk to a project
@@ -74,9 +82,10 @@ a session started from your own shell has no pane and cannot be attached</div></
 }
 
 /**
- * Settings: the console's own knobs. One today — how bright the subpixel
- * panel under the fleet glows — laid out the way the sound board lays out its
- * master, so a second knob is one more row. Every knob lands live and is
+ * Settings: the console's own knobs — the two faces the world is set in, how
+ * bright the subpixel panel under the fleet glows, who is on the field, what
+ * CAPCOM's halo carries — laid out the way the sound board lays out its
+ * master, so another knob is one more row. Every knob lands live and is
  * remembered (`prefs.ts`).
  */
 export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
@@ -84,7 +93,20 @@ export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
   const body = ctx.body;
   body.innerHTML = `
     <div class="win__scroll scroll" data-settings-scroll>
+    <div class="sec" data-device-settings></div>
     <div class="sec" data-recovery-setting></div>
+    <div class="sec">
+      <div class="sec__k px">TYPE</div>
+      <div class="set__row">
+        <label class="px px--tiny set__lab">DISPLAY FONT</label>
+        <div data-c="fontDisplay"></div>
+      </div>
+      <div class="set__row">
+        <label class="px px--tiny set__lab">MONO FONT</label>
+        <div data-c="fontMono"></div>
+      </div>
+      <p class="px px--tiny set__hint">THE FACE EVERY LABEL IS SET IN, AND THE ONE A MACHINE WROTE IN · TINY5 IS THE PIXEL TYPE THE WORLD WAS DRAWN FOR, AND THE ONLY ONE THAT TURNS THE SMOOTHING OFF · LANDS LIVE, ON EVERY WINDOW AT ONCE</p>
+    </div>
     <div class="sec">
       <div class="sec__k px">PANEL</div>
       <div class="set__row">
@@ -112,8 +134,8 @@ export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
     <div class="sec">
       <div class="sec__k px">CAPCOM</div>
       <div class="set__row">
-        <label class="px px--tiny set__lab">TASKS</label>
-        <div data-c="capTasks"></div>
+        <label class="px px--tiny set__lab">MISSIONS</label>
+        <div data-c="capMissions"></div>
       </div>
       <div class="set__row">
         <label class="px px--tiny set__lab">ASKS</label>
@@ -127,7 +149,24 @@ export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
         <label class="px px--tiny set__lab">LINKS</label>
         <div data-c="capLinks"></div>
       </div>
-      <p class="px px--tiny set__hint">WHAT THE COMMAND POST CARRIES · TASKS: ONE ARC OF THE RING PER OPEN TASK, LIT WHILE IT MOVES · ASKS: AN AMBER NOTCH PER QUESTION NOBODY HAS ANSWERED · TURN: A FASTER PULSE WHILE CAPCOM WORKS, AMBER WHILE IT WAITS ON YOU · LINKS: A FAINT TIE TO EVERY AGENT IT LAUNCHED, WHICH WITH FIFTY OF THEM IS NOISE</p>
+      <p class="px px--tiny set__hint">WHAT THE COMMAND POST CARRIES · MISSIONS: ONE ARC OF THE RING PER OPEN MISSION, LIT WHILE IT MOVES · ASKS: AN AMBER NOTCH PER QUESTION NOBODY HAS ANSWERED · TURN: A FASTER PULSE WHILE CAPCOM WORKS, AMBER WHILE IT WAITS ON YOU · LINKS: A FAINT TIE TO EVERY AGENT IT LAUNCHED, WHICH WITH FIFTY OF THEM IS NOISE</p>
+    </div>
+    <div class="sec">
+      <div class="sec__k px">VOICE</div>
+      <div class="set__row">
+        <label class="px px--tiny set__lab">READ BACK</label>
+        <div data-c="voiceReply"></div>
+      </div>
+      <div class="set__row">
+        <label class="px px--tiny set__lab">VOICE</label>
+        <div class="row" data-c="voiceName"></div>
+      </div>
+      <div class="set__row">
+        <label class="px px--tiny set__lab">EARS</label>
+        <div class="row" data-c="voiceEngine"></div>
+      </div>
+      <p class="px px--tiny set__hint" data-engine-hint></p>
+      <p class="px px--tiny set__hint" data-voice-hint>HOLD ⌥V OR THE MAST'S TALK AND SPEAK; LET GO AND THE LINE GOES TO CAPCOM AS IF TYPED · READ BACK: THE FIRST SENTENCES OF ITS CONCLUSION, ONLY FOR A LINE YOU SPOKE, ONLY ONCE IT IS DONE · THE WHOLE REPLY STAYS IN THE WINDOW · VOICE: AUTO IS WHAT <code>say</code> WOULD USE, THE SYSTEM VOICE FOR YOUR LANGUAGE; THE LIST IS THE BROWSER'S</p>
     </div>
     <div class="sec">
       <div class="sec__k px">MUSIC</div>
@@ -139,7 +178,28 @@ export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
     </div>
     </div>
   `;
+  const disposePush = mountPushSettings(body.querySelector<HTMLElement>('[data-device-settings]')!, deviceWake());
   const recovery = mountRecoverySetting(body.querySelector<HTMLElement>('[data-recovery-setting]')!, cmd => hub.cmd(cmd), () => store.linkUp);
+  /*
+   * The two faces. Both land on the whole console the moment they are picked —
+   * `fonts.ts` writes the custom properties onto <html> — so there is nothing
+   * here to repaint and nothing to reload.
+   */
+  const fontDisplay = pick({
+    name: 'fontDisplay',
+    options: DISPLAY_FONTS.map((f) => ({ value: f.id, label: f.label, hint: f.hint })),
+    value: getPref('fontDisplay'),
+    onChange(v) { setDisplayFont(v); },
+  });
+  body.querySelector('[data-c="fontDisplay"]')!.appendChild(fontDisplay.el);
+  const fontMono = pick({
+    name: 'fontMono',
+    options: MONO_FONTS.map((f) => ({ value: f.id, label: f.label, hint: f.hint })),
+    value: getPref('fontMono'),
+    onChange(v) { setMonoFont(v); },
+  });
+  body.querySelector('[data-c="fontMono"]')!.appendChild(fontMono.el);
+
   const panel = level({
     value: getPref('panel'),
     label: 'panel glow',
@@ -171,7 +231,7 @@ export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
    * next frame.
    */
   const capcom = ([
-    ['capTasks', 'capcomTasks', 'RING'],
+    ['capMissions', 'capcomMissions', 'RING'],
     ['capNotches', 'capcomNotches', 'NOTCHES'],
     ['capPulse', 'capcomPulse', 'PULSE'],
     ['capLinks', 'capcomLinks', 'TIES'],
@@ -181,10 +241,78 @@ export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
     return t;
   });
 
+  // Read back is a switch; whether TALK exists at all is the browser's call,
+  // and when it said no the hint says why instead of a switch that does nothing.
+  const voiceReply = toggle({ name: 'voiceReply', label: 'SPEAK', checked: getPref('voiceReply'), onChange(on) { setPref('voiceReply', on); if (!on) c.voice.hush(); } });
+  body.querySelector('[data-c="voiceReply"]')!.appendChild(voiceReply.el);
+  if (!c.voice.supported) {
+    const why = voiceUnavailable();
+    body.querySelector<HTMLElement>('[data-voice-hint]')!.textContent = `TALK IS OFF THE MAST · ${why.toUpperCase()}`;
+  }
+  /*
+   * The voice, from the browser's own list. Chrome hands the list over empty
+   * and fills it a beat later (`voiceschanged`), so the picker is rebuilt
+   * when it lands — never while it is open under the pointer. AUTO is what
+   * `say` would use (voice.ts), which is the answer to "that voice is awful":
+   * the first match for es-MX in the raw list is Apple's Eddy.
+   */
+  const voiceHost = body.querySelector<HTMLElement>('[data-c="voiceName"]')!;
+  let voicePick: ReturnType<typeof pick> | null = null;
+  const buildVoices = () => {
+    if (voicePick?.isOpen()) return;
+    voicePick?.dispose();
+    voiceHost.innerHTML = '';
+    const list = c.voice.voices();
+    voicePick = pick({
+      name: 'voiceName',
+      search: list.length > 12,
+      options: [{ value: '', label: 'AUTO', hint: 'like say' }, ...list.map((v) => ({ value: v.name, label: v.name, hint: v.lang }))],
+      value: list.some((v) => v.name === getPref('voiceName')) ? getPref('voiceName') : '',
+      onChange(v) { setPref('voiceName', v); c.voice.preview(); },
+    });
+    voiceHost.appendChild(voicePick.el);
+    const preview = document.createElement('button');
+    preview.type = 'button'; preview.className = 'chip'; preview.textContent = 'PREVIEW';
+    preview.addEventListener('click', () => c.voice.preview());
+    voiceHost.appendChild(preview);
+  };
+  buildVoices();
+  const onVoices = () => buildVoices();
+  if ('speechSynthesis' in window) window.speechSynthesis.addEventListener('voiceschanged', onVoices);
+
+  /*
+   * The ears. AUTO is whisper.cpp on the hub when the hub can, else the
+   * browser; the line under it says which one the next word will use and,
+   * when the hub cannot, why — the same words the hub gave.
+   */
+  const engineHint = body.querySelector<HTMLElement>('[data-engine-hint]')!;
+  const paintEngine = () => {
+    const { engine, hub } = c.voice.engine();
+    const hubLine = hub.ready ? `HUB: WHISPER.CPP READY · ${(hub.model ?? '').toUpperCase()}` : `HUB: CANNOT TRANSCRIBE · ${hub.reason.toUpperCase()}`;
+    engineHint.textContent = `NEXT LINE: ${engine === 'whisper' ? 'WHISPER ON THE HUB, WITH THE FLEET\'S NAMES IN ITS PROMPT; NOTHING LEAVES THE MACHINE' : 'THE BROWSER, WORDS AS YOU SPEAK, AUDIO TO GOOGLE OR APPLE'} · ${hubLine}`;
+  };
+  const voiceEngine = pick({
+    name: 'voiceEngine',
+    options: [
+      { value: 'auto', label: 'AUTO', hint: 'hub if it can' },
+      { value: 'whisper', label: 'WHISPER', hint: 'hub, whisper.cpp' },
+      { value: 'browser', label: 'BROWSER', hint: 'web speech' },
+    ],
+    value: getPref('voiceEngine'),
+    onChange(v) { setPref('voiceEngine', v as 'auto' | 'whisper' | 'browser'); paintEngine(); },
+  });
+  body.querySelector('[data-c="voiceEngine"]')!.appendChild(voiceEngine.el);
+  const recheck = document.createElement('button');
+  recheck.type = 'button'; recheck.className = 'chip'; recheck.textContent = 'RECHECK HUB';
+  recheck.addEventListener('click', () => { void c.voice.refresh().then(paintEngine); });
+  body.querySelector('[data-c="voiceEngine"]')!.appendChild(recheck);
+  paintEngine();
+  void c.voice.refresh().then(paintEngine);
+
   const hint = body.querySelector<HTMLElement>('[data-hidden-hint]')!;
   const paintHint = () => {
     const n = store.hiddenCount();
-    hint.textContent = `OFF: THE FLEET — AGENTS ORCA LAUNCHED (A FINISHED ONE STAYS A DAY), PLUS ANY OTHER SESSION WHILE IT WORKS OR NEEDS YOU; IDLE AN HOUR, IT LEAVES · ON: EVERY SESSION THE COLLECTORS REPORT, DISMISSED ONES INCLUDED · ${n} HIDDEN NOW`;
+    hint.textContent = `OFF: THE FLEET — AGENTS ORCA LAUNCHED (A FINISHED ONE STAYS TEN MINUTES), PLUS ANY OTHER SESSION WHILE IT WORKS OR NEEDS YOU; IDLE AN HOUR, IT LEAVES · ON: EVERY SESSION THE COLLECTORS REPORT, DISMISSED ONES INCLUDED · ${n} HIDDEN NOW`;
   };
   const showAll = toggle({
     name: 'showAll',
@@ -200,5 +328,5 @@ export function mountSettings(ctx: WinCtx, c: Console): { dispose(): void } {
   });
   paintHint();
   const off = store.on((e) => { if (e.k === 'link') void recovery.refresh(); if (e.k === 'agents' || e.k === 'world') paintHint(); });
-  return { dispose() { recovery.dispose(); off(); color.dispose(); music.dispose(); showAll.dispose(); for (const t of capcom) t.dispose(); } };
+  return { dispose() { disposePush(); recovery.dispose(); off(); fontDisplay.dispose(); fontMono.dispose(); color.dispose(); music.dispose(); showAll.dispose(); voiceReply.dispose(); voicePick?.dispose(); voiceEngine.dispose(); if ('speechSynthesis' in window) window.speechSynthesis.removeEventListener('voiceschanged', onVoices); for (const t of capcom) t.dispose(); } };
 }

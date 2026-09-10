@@ -211,7 +211,7 @@ const neverLive = test('world: un vivo no se archiva ni nombrándolo por id', ()
   return eq('cero archivados, cero efectos', [out.archived.length, Object.keys(world.state.agents).length], [0, 8]);
 });
 
-const snapshotCannotResurrect = test('world: el siguiente snapshot no devuelve lo archivado; un vivo reanudado sí entra', () => {
+const snapshotCannotResurrect = test('world: una lápida sólo se levanta con actividad POSTERIOR al archivado', () => {
   const clock = Date.now();
   const { world, unarchived, events } = worldWith(() => clock);
   world.archiveAgents({ squad: 's1' }, { by: 'test' });
@@ -221,15 +221,26 @@ const snapshotCannotResurrect = test('world: el siguiente snapshot no devuelve l
   // agent:new terminado: tampoco.
   world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a7', state: 'done' }, clock) } as never, 'm1');
   const afterNewDone = world.state.agents['a7'] === undefined;
-  // Alguien reanuda a2: vuelve como un agente cualquiera y su lápida se levanta.
-  world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a2', state: 'working', squad: 's1', lead: true }, clock) } as never, 'm1');
-  // a7 cambia a vivo pero llega como patch: la lápida se levanta y se pide resync.
-  world.applyCollector({ t: 'agent', machineId: 'm1', id: 'a7', patch: { state: 'thinking' } } as never, 'm1');
+
+  // El caso B9: el deriver relee un transcript terminado y lo vuelve a dar de
+  // alta como `idle` — que es el estado «fin de turno» del CLI, no una
+  // resurrección. Su última actividad es anterior al archivado, así que la
+  // lápida aguanta. Antes esto lo devolvía a la flota para siempre.
+  world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: { ...agent({ id: 'a2', state: 'idle', squad: 's1', lead: true }, clock), updatedAt: clock - 1000 } } as never, 'm1');
+  const ghostStayedOut = world.state.agents['a2'] === undefined && world.isArchived('a2');
+  // Y un patch a un estado vivo, sin actividad nueva, tampoco lo levanta.
+  world.applyCollector({ t: 'agent', machineId: 'm1', id: 'a2', patch: { state: 'idle', updatedAt: clock - 500 } } as never, 'm1');
+  const patchStayedOut = world.state.agents['a2'] === undefined && world.isArchived('a2');
+
+  // Reanudación de verdad: el transcript se movió DESPUÉS de archivarlo.
+  world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: { ...agent({ id: 'a2', state: 'working', squad: 's1', lead: true }, clock), updatedAt: clock + 60_000 } } as never, 'm1');
+  // a7 igual, pero llega como patch: la lápida se levanta y se pide resync.
+  world.applyCollector({ t: 'agent', machineId: 'm1', id: 'a7', patch: { state: 'thinking', updatedAt: clock + 60_000 } } as never, 'm1');
   const resync = events.find((e) => e.kind === 'agent:unarchived' && e.agentId === 'a7');
-  world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a7', state: 'thinking', squad: 's1' }, clock) } as never, 'm1');
-  return eq('la lápida vale para terminados y se levanta para vivos',
+  world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: { ...agent({ id: 'a7', state: 'thinking', squad: 's1' }, clock), updatedAt: clock + 60_000 } } as never, 'm1');
+  return eq('el fantasma releído se queda fuera; el que vuelve a escribir entra',
     {
-      afterSnapshot, afterNewDone,
+      afterSnapshot, afterNewDone, ghostStayedOut, patchStayedOut,
       a2Back: world.state.agents['a2']?.state, a2Tomb: world.isArchived('a2'),
       resync: (resync?.data as { resync?: boolean } | undefined)?.resync,
       a7Back: world.state.agents['a7']?.state,
@@ -237,6 +248,7 @@ const snapshotCannotResurrect = test('world: el siguiente snapshot no devuelve l
     },
     {
       afterSnapshot: ['a1', 'a3', 'a4', 'a5', 'a6', 'a8'], afterNewDone: true,
+      ghostStayedOut: true, patchStayedOut: true,
       a2Back: 'working', a2Tomb: false, resync: true, a7Back: 'thinking', unarchived: ['a2', 'a7'],
     });
 });
@@ -370,7 +382,34 @@ const tombstoneOutlivesSilence = test('world: callar sobre un archivado no retir
     `${archivedIds.length} lápidas sobreviven al silencio; ${target.slice(0, 4)} se retira al borrarse`);
 });
 
+const retireGhost = test('world: retirar un fantasma se lleva su cría Task, y la lápida impide que vuelva', () => {
+  const clock = Date.now();
+  const { world } = worldWith(() => clock);
+  // Un lead con dos subagentes Task y un nieto, todos «vivos» según el mundo
+  // pero sin sesión detrás: el caso exacto de B9.
+  world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'g0', state: 'idle', squad: 'ideas-01' }, clock) } as never, 'm1');
+  for (const [id, parent] of [['g1', 'g0'], ['g2', 'g0'], ['g3', 'g1']] as const) {
+    world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: { ...agent({ id, state: 'working' }, clock), parentId: parent, subagent: true } } as never, 'm1');
+  }
+  const before = Object.keys(world.state.agents).filter((id) => id.startsWith('g')).length;
+
+  const r = world.retireAgent('g0', 'tmux -L orca ls no lista su sesión y pgrep no encuentra proceso', 'capcom');
+  const allDead = ['g0', 'g1', 'g2', 'g3'].every((id) => world.state.agents[id]?.state === 'dead');
+  const out = world.archiveAgents({ ids: r.ids }, { by: 'capcom' });
+  const gone = ['g0', 'g1', 'g2', 'g3'].every((id) => world.state.agents[id] === undefined && world.isArchived(id));
+
+  // El deriver relee los transcripts y los vuelve a anunciar tal cual: no vuelven.
+  for (const id of ['g0', 'g1', 'g2', 'g3']) {
+    world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: { ...agent({ id, state: 'idle' }, clock), updatedAt: clock } } as never, 'm1');
+  }
+  const stillGone = ['g0', 'g1', 'g2', 'g3'].every((id) => world.state.agents[id] === undefined);
+
+  return eq('el padre y su cría se van juntos y no vuelven',
+    { before, ok: r.ok, retired: r.ids.length, allDead, archived: out.archived.length, kept: out.kept.length, gone, stillGone },
+    { before: 4, ok: true, retired: 4, allDead: true, archived: 4, kept: 0, gone: true, stillGone: true });
+});
+
 export default {
   suite: 'Archivar agentes terminados',
-  tests: [decides, filters, ages, dryRunTouchesNothing, leavesTheWorld, neverLive, snapshotCannotResurrect, survivesRestart, tombstoneOutlivesSilence, endToEnd],
+  tests: [decides, filters, ages, dryRunTouchesNothing, leavesTheWorld, neverLive, snapshotCannotResurrect, survivesRestart, tombstoneOutlivesSilence, retireGhost, endToEnd],
 } satisfies TestModule;

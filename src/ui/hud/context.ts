@@ -18,6 +18,7 @@ import { squadsOf } from '../../shared/squads.ts';
 import type { Agent } from '../../shared/types.ts';
 import type { At, Console } from '../console.ts';
 import { store } from '../store.ts';
+import { placedFiles } from '../placed-files.ts';
 import { stateWord } from '../util.ts';
 import type { Win } from '../windows/wm.ts';
 import { openMenu, type MenuItem } from './menu.ts';
@@ -117,11 +118,13 @@ function agentMenu(d: CtxDeps, id: string, selection: string[], at: At) {
   if (p) items.push({ label: 'PROJECT', hint: p.code, key: 'p', run: () => c.openProject(p.id, at) });
   if (pinned) items.push({ sep: true }, { label: 'RETURN TO FORMATION', hint: 'UNPIN', run: () => c.field.unplace(id) });
   if (!group) {
-    items.push(
-      { sep: true },
-      { label: 'DISMISS', hint: 'HIDE FROM THE FIELD', key: 'h', run: () => { store.dismiss([id]); c.note(`dismissed ${a.callsign} · SETTINGS shows it again`); } },
-      { label: 'STOP', tone: 'red', key: 'x', off: !alive(a), hint: alive(a) ? undefined : stateWord(a), run: () => void c.stop(id) },
-    );
+    items.push({ sep: true });
+    // Al CAPCOM vivo no se le ofrece DISMISS: el campo lo dibuja siempre y el
+    // store no lo esconde, así que el item sería una tecla que no hace nada.
+    if (!(a.role === 'capcom' && alive(a))) {
+      items.push({ label: 'DISMISS', hint: 'HIDE FROM THE FIELD', key: 'h', run: () => { store.dismiss([id]); c.note(`dismissed ${a.callsign} · SETTINGS shows it again`); } });
+    }
+    items.push({ label: 'STOP', tone: 'red', key: 'x', off: !alive(a), hint: alive(a) ? undefined : stateWord(a), run: () => void c.stop(id) });
   }
   return { title: group ? `${group.length} AGENTS` : a.callsign, sub: group ? undefined : `${p?.code ?? ''} · ${stateWord(a)}`, items };
 }
@@ -187,6 +190,15 @@ function machineMenu(d: CtxDeps, id: string, at: At) {
 
 function artifactMenu(d: CtxDeps, id: string, at: At) {
   const { c } = d;
+  // The operator's own file on the field: no agent to open or fly to.
+  const placed = placedFiles.get(id);
+  if (placed) {
+    const items: MenuItem[] = [
+      { label: 'OPEN', key: 'o', run: () => c.openArtifact(id, at) },
+      { label: 'REMOVE FROM FIELD', key: 'r', run: () => c.unplaceArtifact(id) },
+    ];
+    return { title: placed.path.split('/').pop() ?? placed.path, sub: `${placed.kind} · YOU`, items };
+  }
   const x = store.world.artifacts?.[id];
   if (!x) return null;
   const a = store.world.agents[x.agentId];
@@ -212,7 +224,8 @@ function windowMenu(d: CtxDeps, winId: string, at: At) {
   const pin = win.el.querySelector<HTMLButtonElement>('[data-w-pin]');
   const others = wm.all().filter((w) => w !== win);
   const items: MenuItem[] = [];
-  if (pin) items.push({ label: win.spec.anchor ? 'UNPIN' : 'PIN TO TILE', hint: win.spec.anchor ? undefined : 'FOLLOW', key: 'p', run: () => pin.click() });
+  items.push({ label: win.mode === 'canvas' ? 'BRING TO FRONT' : 'RETURN TO CANVAS', run: () => win.mode === 'canvas' ? wm.bringForward(win) : wm.returnToCanvas(win) });
+  if (pin && win.mode !== 'canvas') items.push({ label: win.mode === 'pinned' ? 'UNFIX FROM SCREEN' : 'FIX TO SCREEN', key: 'p', run: () => pin.click() });
   items.push(
     win.minimized
       ? { label: 'UNFOLD', key: 'u', run: () => wm.restore(win) }

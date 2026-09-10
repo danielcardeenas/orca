@@ -22,7 +22,7 @@ function agent(id: string, role: Agent['role'] = 'capcom'): Agent {
     metrics: { costUSD: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, thinkingTokens: 0, tokensPerSec: 0, linesAdded: 0, linesRemoved: 0, toolCalls: 0, toolDurationMs: 0, apiDurationMs: 0, turns: 0 },
   };
 }
-export default { suite: 'Fresh CAPCOM isolated hub routing', tests: (['clean', 'continuity'] as const).map(mode => test(`${mode}: command, held TALK/direct mail, task context, activation notice and persistent mode`, async () => {
+export default { suite: 'Fresh CAPCOM isolated hub routing', tests: (['clean', 'continuity'] as const).map(mode => test(`${mode}: command, held TALK/direct mail, mission context, activation notice and persistent mode`, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-new-hub-'));
   const hub = await startHub({ port: 0, host: '127.0.0.1', quiet: true, auth: createAuth({ ORCA_TOKEN: 'fixture-token' }),
     store: new HubStore({ dir }), memory: new AnswerMemory(path.join(dir, 'memory.jsonl')), fleets: new FleetStore(path.join(dir, 'fleets')) });
@@ -40,18 +40,18 @@ export default { suite: 'Fresh CAPCOM isolated hub routing', tests: (['clean', '
     send({ t: 'snapshot', machineId: 'm', projects: [project], agents: [agent(OLD)], keys: [] });
     consoleSend({ t: 'hello', v: PROTOCOL_VERSION, token: 'fixture-token' });
     await until(() => !!hub.world.state.agents[OLD]);
-    hub.tasks.create('task_fixture', 'Pending fixture'); hub.tasks.message('task_fixture', 'human', 'OLD_TASK_CONVERSATION_SENTINEL');
+    hub.missions.create('task_fixture', 'Pending fixture'); hub.missions.message('task_fixture', 'human', 'OLD_TASK_CONVERSATION_SENTINEL');
     consoleSend({ t: 'cmd', id: 'start-new', cmd: { k: 'capcom:new', agentId: OLD, mode, checkpoint: 'UNTRUSTED_CLIENT_CHECKPOINT' } });
     await until(() => commands.some(f => f.cmd.k === 'capcom:new'));
     const start = commands.find(f => f.cmd.k === 'capcom:new').cmd;
     assert.equal(start.mode, mode); assert.ok(!start.checkpoint.includes('UNTRUSTED_CLIENT_CHECKPOINT'));
     assert.equal(start.checkpoint.includes('task_fixture'), mode === 'continuity');
-    hub.tasks.assign('task_fixture', ['worker']);
+    hub.missions.assign('task_fixture', ['worker']);
     const cutoffAt = Date.now();
     send({ t: 'capcom:transfer', machineId: 'm', fromId: OLD, hold: true, contextMode: mode, cutoffAt });
     await delay(40);
     const count = commands.filter(f => f.cmd.k === 'say').length;
-    consoleSend({ t: 'ceo:say', id: 'new-task-message', taskId: 'task_fixture', text: 'NEW_OPERATOR_MESSAGE' });
+    consoleSend({ t: 'ceo:say', id: 'new-task-message', missionId: 'task_fixture', text: 'NEW_OPERATOR_MESSAGE' });
     consoleSend({ t: 'cmd', id: 'direct-message', cmd: { k: 'say', agentId: OLD, text: 'DIRECT_MESSAGE' } });
     await until(() => uiFrames.some(f => f.cmdId === 'direct-message' || f.id === 'direct-message'));
     assert.equal(commands.filter(f => f.cmd.k === 'say').length, count);
@@ -71,8 +71,8 @@ export default { suite: 'Fresh CAPCOM isolated hub routing', tests: (['clean', '
     assert.equal(commands.filter(f => f.cmd.k === 'deliver' && f.cmd.message.subject === 'HISTORICAL_MAIL').length, mode === 'clean' ? 0 : 1);
     assert.ok(hub.world.state.messages.msg_historical);
     assert.equal(sayings.filter(c => c.text === 'DIRECT_MESSAGE').length, 1);
-    const taskText = sayings.find(c => c.text.includes('NEW_OPERATOR_MESSAGE')).text;
-    assert.equal(taskText.includes('OLD_TASK_CONVERSATION_SENTINEL'), mode === 'continuity');
+    const missionText = sayings.find(c => c.text.includes('NEW_OPERATOR_MESSAGE')).text;
+    assert.equal(missionText.includes('OLD_TASK_CONVERSATION_SENTINEL'), mode === 'continuity');
     assert.equal(sayings.some(c => c.text.includes('Call briefing first')), mode === 'continuity');
     assert.equal(sayings.some(c => c.text.includes('OLD_WORKER_RESULT_SENTINEL')), mode === 'continuity');
     send({ t: 'capcom:handoff', machineId: 'm', event: handoff });
@@ -81,7 +81,7 @@ export default { suite: 'Fresh CAPCOM isolated hub routing', tests: (['clean', '
     await until(() => commands.some(f => f.cmd.k === 'say' && f.cmd.text.includes('NEW_WORKER_RESULT')));
     const workerText = commands.find(f => f.cmd.k === 'say' && f.cmd.text.includes('NEW_WORKER_RESULT')).cmd.text;
     assert.equal(workerText.includes('OLD_TASK_CONVERSATION_SENTINEL'), mode === 'continuity');
-    assert.ok(hub.tasks.get('task_fixture').messages.some(m => m.text === 'OLD_TASK_CONVERSATION_SENTINEL'));
+    assert.ok(hub.missions.get('task_fixture').messages.some(m => m.text === 'OLD_TASK_CONVERSATION_SENTINEL'));
     assert.match(fs.readFileSync(path.join(dir, 'capcom-handoffs.jsonl'), 'utf8'), new RegExp(`"contextMode":"${mode}"`));
     return ok(`${mode}: isolated websocket hub preserves mail, routes new UUID once, honors context and persists mode`, true);
   } finally { collector.terminate(); ui.terminate(); await hub.close(); fs.rmSync(dir, { recursive: true, force: true }); }

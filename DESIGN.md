@@ -37,6 +37,7 @@ Colour is meaning. A colour without its meaning is a bug.
 | `--amber` | `#f5a524` | **a human is required.** Nothing else, ever. |
 | `--st-thinking` | `#8fb8ff` | stalled, but not on you |
 | `--red` | `#ff2a12` | **dead, or breach.** Never decoration. |
+| `--auto` | `#b47cff` | **ORCA looking at itself.** The AUTOMEJORA section only. Never an agent state. |
 | `--red-deep` | `#2a0504` | the field under a breach |
 | `--xhair-gold` | `#c4a06a` | left-hand crosshairs |
 | `--xhair-blue` | `#6a8cff` | right-hand crosshairs |
@@ -70,8 +71,11 @@ a **tilt** (key `O`) unlocks a pitch for looking at the fleet's shape, and
 locks back for working. Facing the plane is the rule because text, images and
 video are read head-on; an orbiting camera turns all three into mush.
 
-Depth is attention. Blocked agents ride forward, dead ones sink back. The
-tilt makes this literal; the flat view reads it as size.
+Every tile stands on the plane. Depth once carried attention — blocked agents
+rode forward, dead ones sank back — but under a perspective camera that is
+parallax, and a fleet that slides over its islands while you pan reads as
+loose, not as ranked. State lives on the tile itself: its edge, its colour,
+its halo. The tilt still shows the fleet's shape, flat.
 
 **Tiles.** An agent is the comp's notched tile — a rectangle with a bite out of
 its right edge — drawn by one instanced shader. Its state rides the left edge;
@@ -82,7 +86,8 @@ the top-right corner clear of the bite, says *who*: fifteen bits hashed from
 the agent's id, or from its squad's name so a squad wears one patch and its
 lead wears it inverted; CAPCOM wears the C of the wordmark and a permanent
 lime line. The **stripe texture** says which runtime: solid Claude, dashed
-Codex, dotted Grok. Text is DOM, laid over the tile as three bands that avoid
+Codex, dotted Grok. An AUTOMEJORA reviewer keeps its runtime's stripe and its
+state's edge, and adds a permanent violet outline and a violet sigil. Text is DOM, laid over the tile as three bands that avoid
 the stripe, the bite and the band, and climbs a ladder with the tile's width:
 callsign and project at 44px, mission at 112, what it is doing now at 190,
 the numbers at 320, runtime · model · machine and the status pill at 520.
@@ -131,19 +136,61 @@ and the motion cue when the camera pans. Nothing on it moves by itself.
 A window is a small instrument in the comp's HUD shell: shell housing, glass
 body, gold crosshair top-left, blue crosshair bottom-right, a tele line of
 scrambled hex top-right, a stamp bottom-left. Header: callsign or kind in
-Tiny5, then `PIN` `—` `×`. Radius `--r-panel 10px` on the housing, `2px` on
+Tiny5, then `FRONT` (or `CANVAS`), `PIN` when in front, `—` and `×`. Radius `--r-panel 10px` on the housing, `2px` on
 everything inside.
 
-A window is either **anchored** (pinned to an agent, it follows the tile as
-the camera moves, and its pipe to the tile is drawn) or **docked** (fixed to
-the screen). Drag the header to move, the corner to resize, `—` to fold it
-into the **tray**: a row of notched tiles bottom-left, lit by state, that
-reopen on click.
+Windows **open in front**: beside their source, screen-fixed and at reading
+size, whatever zoom the camera is at. A window that arrived at the camera's
+scale arrived unreadable — from any ordinary zoom the housing was a stamp, and
+the operator had to fly in to read what they had just asked for. Every window
+still knows its place on the **canvas** from the moment it opens, at remembered
+world coordinates, so `CANVAS` drops it beside its tile rather than wherever
+the glass happened to hold it. A canvas window moves and scales with the
+camera and uses a fixed world scale (320 layout pixels per world unit),
+independent of the opening zoom. An agent's window keeps its pipe to the tile
+in every mode — the line says whose window this is, and that does not stop
+being true because the housing is on the glass. It is drawn whenever the tile
+is in front of the camera, on screen or not: a pipe running off the edge is
+what says where a canvas window came from once a zoom or a pan has lost its
+tile. Clicking an agent opens its window; the next click closes it. A
+native double-click does not add a third opening after those two activations.
+Drag the header to arrange the workspace,
+the corner to resize. A canvas window has no far rendering: no compact card,
+no fade, no threshold at which it changes. From afar it is the housing, small,
+at the camera's scale, and zooming in makes it bigger — nothing else happens.
+It scales with the canvas, without inverse zoom compensation or a minimum
+screen size. Below reading scale (camera scale under 0.55) the window is a
+stamp: too small to work in, only to move, so a press-and-drag anywhere on it,
+body included, drags it, and the body takes no pointer. A still press on a
+stamp does nothing; the tray or the zoom brings it up to reading size. The
+tray remains the persistent way to find open windows.
 
-Kinds: `agent` · `interrupt` · `queue` · `capcom` · `feed` · `fleet` (a project,
-a machine, or a lasso selection) · `spawn` · `launch` · `artifact` · `gallery`
-· `timeline` · `breach` · `help`. `capcom` is the transcript of the command
-session; the human talks to it, it talks to the fleet.
+`FRONT` brings a window to a readable, screen-fixed size. `CANVAS` returns it
+to its saved world position; `Esc` also returns a foreground window. `PIN`
+keeps a foreground window fixed to the screen. The global HUD and pending
+interrupt count stay above the canvas windows. Mobile retains full-size sheets.
+
+The existing **tray** remains the control for every open window. It identifies
+`canvas`, `front`, `fixed` and `folded` windows. Clicking retrieves a window
+from anywhere; clicking the visible active window minimizes it. Retrieval
+preserves canvas/front/fixed mode. For a distant canvas window the camera flies
+to the window bounds at reading size, keeping space for the mast and dock. Closing is explicit (`×` or the tray's
+close command); `—` folds into the tray. Persistent window sessions remember
+world position and mode. Ephemeral agent/interrupt sessions are not reopened
+automatically after reload.
+
+Kinds: `agent` · `interrupt` · `queue` · `capcom` · `mission` · `feed` · `fleet`
+(a project, a machine, or a lasso selection) · `spawn` · `launch` · `artifact` ·
+`gallery` · `timeline` · `breach` · `help`. `capcom` is the transcript of the
+command session; the human talks to it, it talks to the fleet.
+
+**No window draws a second field.** A `mission` answers who is on it with a
+list — project, squad, members, the lead's mark inverted, every row wearing the
+same sigil its tile does — and answers *where* by acting on the real field:
+select the crew, frame it, focus, `Backspace` to come back. A map inside a
+window would be a second truth about where an agent stands, and the small one
+would always be the worse of the two. Lists and glyphs in windows; the field
+is the field.
 
 An `interrupt` window opens itself, anchored to the agent, when an escalation
 lands; it carries the question, what CAPCOM tried, one-tap options, free
@@ -151,6 +198,69 @@ text, `REMEMBER`, and `UNBLOCKS n`. Answering wipes it lime and closes it.
 Only what arrives while you are looking opens itself, three at a time and
 only if its tile is on screen; a backlog never floods the field, it waits in
 the queue with a count on the mast.
+
+## AUTOMEJORA
+
+Everything else on the field reports the **fleet**. One section reports the
+**instrument**: how ORCA and CAPCOM are actually being used, what gets in the
+way, and what could be better. It is a section of its own, top right under the
+mast, and it looks like one — because a proposal about the console read in the
+mission panel's dress would pass for an agent's work.
+
+**Its own colour.** `--auto`, a violet that exists nowhere else in ORCA. Every
+other colour here means an agent: lime live, amber *a person is required*, red
+breach, cyan CAPCOM, blue waiting on a peer. None of them could be borrowed
+without lying — least of all amber, which means a stopped agent needs an answer
+now, and a proposal stops nobody. A new hue used in exactly one place is what
+keeps that discipline intact.
+
+**Its own shape.** Missions are the boot's ALGN rows. These are cards with the
+tile's bite taken out of the *opposite* corner — top-left — and a bar down the
+left edge. The bar is **solid** when the proposal rests on measurements and
+**dashed** when it is a hypothesis: the texture says what the idea is made of
+before the label does, the way a tile's stripe says which runtime is inside.
+
+**What a card says, in the order a decision gets made.** Folded: area, whether
+it is measured or a hypothesis, the title, two lines of summary, and impact and
+effort as two three-cell meters — shown *only* when the review had grounds to
+estimate them, because an invented estimate is worse than none. Open: the
+evidence (figures, quoted), the hypothesis when the idea did not come from a
+measurement, the long detail, the question it asks the operator, and the whole
+conversation.
+
+**Its own notification, once.** A new proposal shows a count on the head, a
+violet dot on its corner, one sideways step of the section and one sound. None
+of it repeats for that proposal, ever — re-raising the same idea bumps a
+counter and stays quiet. It is off once the card is opened, which is when it
+was actually read. Nothing here opens itself: the only thing in ORCA allowed to
+demand a human is a stopped agent.
+
+**Its cost, on the face of it.** The status line says why no review is due yet —
+`NEXT IN 3H`, `WAITING FOR SIGNAL · 12/40`, `CAPCOM IS MID-TURN` — never a
+generic. Beside it, `REVIEW NOW`, `PAUSE`, and `SETUP` for the three limits
+(how often, how many a day, how much new signal is worth a turn). A periodic
+review the operator cannot see, stop or space out is a bill they do not control.
+
+**A review is an agent, not a turn.** Each pass is a temporary **reviewer**
+that ORCA launches down the ordinary spawn path: it stands on the field with a
+callsign, a state and a spend like anything else, it reads, it files what it
+proposes, and it ends. It wears a **permanent violet outline** and a violet
+sigil — the same move as CAPCOM's cyan line, and for the same reason: there is
+a kind of session here that is not doing the fleet's work, and it says so at
+any zoom. The violet is an **identity, never a state**: the body colour and the
+left edge keep saying what the agent is actually doing, so a reviewer that is
+blocked is amber inside a violet frame and one that died is red. The section's
+status row carries it live — callsign, real state, minutes in, tokens spent of
+the ceiling it was given — with one button that flies to it and one that stops
+it. An open proposal names the reviewer that wrote it, and that name is a way
+back to the work.
+
+**It proposes; the operator decides.** The reviewer has no edit tools —
+removed at launch, not asked for in prose — so the only thing that turns a
+proposal into work is `SEND TO CAPCOM`, which opens an ordinary mission with
+the proposal inside and links the two. A proposal that is already a mission
+cannot become a second one. `⌥I` and `/improve` bring the section forward; on a
+phone the section bar does (`docs/MISSIONS.md`). See `docs/AUTOMEJORA.md`.
 
 ## The command line
 
@@ -207,7 +317,12 @@ history; hand panning never does.
 modal: rows in flush, into the staircase, one zipper per agent as its spawn
 is acknowledged, back to flush, collapse. A failed spawn turns its row red and
 the window stays. `G` opens the gallery of everything the fleet has made;
-drag a thumbnail onto the field to place it. `T` opens the last 24 hours:
+drag a thumbnail onto the field to place it. An image or a video from the
+desktop dropped on the field stays there, where it was let go, as a surface
+like a placed artifact. Any other file dropped on a tile, on the ground, or
+into a message box lands on the hub's disk and its path lands in the
+composer, as it would in a terminal; nothing is sent until the operator says
+what to do with it. `T` opens the last 24 hours:
 scrub, and the field draws that instant while the mast says `REPLAY · hh:mm`;
 below, what happened while you were away.
 
@@ -285,6 +400,7 @@ pack answers is silence, never a throw: a caller may ring the future.
 | `wipe` / `check` | `wm.ts` — `closeWith()` | the two confirmations, before the sweep starts |
 | `launch` | `command.ts` — `/launch <preset>` | already wired |
 | `placed` | `main.ts` — `placeArtifact()` | after `field.placeNear` |
+| `capcom.thinking` | `sound.ts` — the store's `agents` patch | CAPCOM going live within 30 s of a line the console sent it (`turnStarted` in `shared/capcom.ts`); a turn it starts on its own is silent. The command line shows the same turn (`.cmd__turn`). |
 | `bookmark.save` / `bookmark.go` / `back` | `bookmarks.ts` — `save()` / `go()` / `back()` | rung on the branch that succeeded |
 | `frame` | `main.ts` — the `F` key and the selbar's FRAME | before `field.frameAll()` |
 | `tilt.on` / `tilt.off` | `main.ts` — the `O` key | on the value it sets |

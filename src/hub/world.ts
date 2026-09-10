@@ -38,8 +38,10 @@ import {
   type ArchiveFilter, type ArchiveOutcome, type ArchivedAgent,
 } from '../shared/archive.ts';
 import { mergeTalk } from '../shared/talk.ts';
+import { isSynthetic } from '../shared/synthetic.ts';
 import type { CollectorFrame, PatchOp } from '../shared/protocol.ts';
 import { BEAT_TIMEOUT_MS } from '../shared/protocol.ts';
+import { ghostReason } from './liveness.ts';
 
 /* ── límites del frame ────────────────────────────────────────────── */
 
@@ -528,6 +530,12 @@ export function sanitizeMachine(raw: unknown): Machine | null {
     // se acepta tal cual del cable; lo que no se acepta es un valor raro que
     // luego se lea como cierto en otro sitio.
     ...(o['synthetic'] === true ? { synthetic: true } : {}),
+    // De dónde salió el arnés, y sólo si ya se declaró arnés: es un dato de
+    // dibujo —dice junto a qué isla se planta su recinto— y una máquina de
+    // verdad no tiene por qué poder colgarse de la isla de un proyecto ajeno.
+    ...(o['synthetic'] === true && typeof o['harnessOf'] === 'string' && o['harnessOf']
+      ? { harnessOf: s(o['harnessOf'], 300, '') }
+      : {}),
     load: {
       sessions: n(load['sessions']),
       activeSessions: n(load['activeSessions']),
@@ -771,6 +779,17 @@ export function sanitizeArtifact(raw: unknown, machineId: string): Artifact | nu
 interface Bucket {
   ids: Set<string>;
   roll: SessionRollup;
+  /**
+   * Cuánto de `roll.costUSD` es dinero que no se gastó: el de los agentes que
+   * viven en una máquina del arnés.
+   *
+   * Va aparte y no restado porque las dos cifras tienen lector. El rollup del
+   * proyecto lo lee la consola, y el recinto del arnés tiene que poder dibujar
+   * su propio gasto —es parte de lo que se está desarrollando ahí—. El total
+   * de la flota lo lee el operador y lo lee CAPCOM, y ésos son dólares: ahí
+   * esto se resta. Ver shared/synthetic.ts.
+   */
+  synthCostUSD: number;
   dirty: boolean;
 }
 
@@ -801,6 +820,13 @@ export class World {
    * salvo que llegue en un estado vivo — una sesión reanudada es un agente.
    */
   private archived = new Map<string, ArchivedAgent>();
+  /**
+   * Agentes que el hub declaró terminados por su cuenta, con el `updatedAt`
+   * que tenían al declararlo. Un collector que reconecta vuelve a anunciar
+   * cada transcript del disco, fantasmas incluidos; mientras su `updatedAt` no
+   * avance, ese anuncio no los resucita.
+   */
+  private ghosts = new Map<string, number>();
 
   constructor(hooks: WorldHooks = {}) {
     this.hooks = hooks;
@@ -835,7 +861,7 @@ export class World {
   private bucket(key: string): Bucket {
     let bkt = this.buckets.get(key);
     if (!bkt) {
-      bkt = { ids: new Set(), roll: emptyRollup(), dirty: true };
+      bkt = { ids: new Set(), roll: emptyRollup(), synthCostUSD: 0, dirty: true };
       this.buckets.set(key, bkt);
     }
     return bkt;
@@ -880,6 +906,7 @@ export class World {
       if (!bkt.dirty) continue;
       bkt.dirty = false;
       const roll = emptyRollup();
+      let synth = 0;
       for (const id of bkt.ids) {
         const a = this.state.agents[id];
         // Lo que no está en la flota tampoco cuenta en ella: las sesiones que
@@ -891,9 +918,14 @@ export class World {
         roll.costUSD += a.metrics.costUSD;
         roll.tokensPerSec += a.metrics.tokensPerSec;
         if (a.state === 'blocked') roll.blocked += 1;
+        // Se decide por la máquina del agente, no por la del proyecto: es lo
+        // que la marca cubre y lo único que sigue en pie cuando un fixture se
+        // llama igual que un proyecto de verdad.
+        if (isSynthetic(this.state.machines[a.machineId])) synth += a.metrics.costUSD;
       }
-      if (rollupEq(bkt.roll, roll)) continue;
+      if (rollupEq(bkt.roll, roll) && Math.abs(bkt.synthCostUSD - synth) <= 1e-9) continue;
       bkt.roll = roll;
+      bkt.synthCostUSD = synth;
       fleetDirty = true;
       const project = key ? this.state.projects[key] : undefined;
       if (project) {
@@ -906,7 +938,15 @@ export class World {
     const fleet = emptyRollup();
     for (const bkt of this.buckets.values()) {
       fleet.total += bkt.roll.total;
-      fleet.costUSD += bkt.roll.costUSD;
+      /*
+       * El total de la flota es dinero, y el del arnés no lo es.
+       *
+       * En el incidente del 2026-09-07 los siete proyectos inventados metieron
+       * más de mil dólares en este contador — el que el HUD enseña y el que
+       * `/api/health` publica. Los agentes sintéticos siguen contándose (la
+       * consola los dibuja, para eso están); su gasto no.
+       */
+      fleet.costUSD += bkt.roll.costUSD - bkt.synthCostUSD;
       fleet.tokensPerSec += bkt.roll.tokensPerSec;
       fleet.blocked += bkt.roll.blocked;
       for (const st of AGENT_STATES) fleet.byState[st] += bkt.roll.byState[st];
@@ -992,6 +1032,9 @@ export class World {
       // Fixture una vez, fixture siempre: nadie sale de la cuarentena porque un
       // `hello` posterior —una reconexión, un mock más viejo— llegue sin marca.
       ...(prev?.synthetic || m.synthetic ? { synthetic: true as const } : {}),
+      // El origen se conserva igual que la marca: una reconexión sin él no
+      // vacía el recinto en el que la consola ya había plantado sus teselas.
+      ...(m.harnessOf ?? prev?.harnessOf ? { harnessOf: m.harnessOf ?? prev?.harnessOf } : {}),
     };
     this.state.machines[m.id] = next;
     this.emit({ o: 'machine', id: m.id, v: next });
@@ -1070,9 +1113,120 @@ export class World {
         this.emit({ o: 'escalation', id: e.id, v: e });
       }
     }
+    this.reviveGhosts(now);
     this.evictTerminal(now);
     this.enforceMachineCap();
     this.flushOut();
+  }
+
+  /**
+   * Deshacer un entierro equivocado.
+   *
+   * Este barrido SÓLO resucita. Hubo una versión que también mataba —daba por
+   * ido a quien decía estar `working` y llevaba veinte minutos sin escribir— y
+   * marcó muertos a siete agentes vivos en mitad de su turno: razonar, o
+   * escribir un fichero de quinientas líneas, no deja rastro en el transcript
+   * durante un buen rato. Ese error cuesta trabajo duplicado y consumo tirado;
+   * el error contrario cuesta un aviso molesto. Los dos no valen lo mismo, así
+   * que el hub ya no concluye una muerte a partir de un silencio.
+   *
+   * Lo que queda es la mitad barata y segura: si un agente que alguien dio por
+   * ido vuelve a producir —su transcript se movió después del entierro—, se le
+   * levanta la losa en la pasada siguiente sin que nadie tenga que intervenir.
+   */
+  private reviveGhosts(now: number): void {
+    void now;
+    for (const [id, ghostedAt] of this.ghosts) {
+      const a = this.state.agents[id];
+      if (!a) { this.ghosts.delete(id); continue; }
+      if (a.updatedAt <= ghostedAt) continue;
+      this.ghosts.delete(id);
+      this.event({
+        at: this.now(), kind: 'agent:new', machineId: a.machineId, agentId: a.id, projectId: a.projectId,
+        text: `${a.callsign} sigue produciendo: se deshace el entierro`,
+      });
+    }
+  }
+
+  /**
+   * Dar por terminado a un agente que el hub ya no puede creer vivo.
+   *
+   * `by` es quién lo decidió: el barrido, o una persona a través de
+   * `retire_agent`. La lápida dice el motivo porque el operador va a
+   * preguntarse por qué desapareció de la flota.
+   */
+  private declareGone(a: Agent, why: string, now: number, by: string): void {
+    this.ghosts.set(a.id, a.updatedAt);
+    a.state = 'dead';
+    a.block = null;
+    a.tool = null;
+    a.toolDetail = null;
+    a.metrics.tokensPerSec = 0;
+    a.updatedAt = now;
+    this.touchAgentBucket(a.id);
+    this.emit({ o: 'agent', id: a.id, v: a });
+    this.event({ at: now, kind: 'agent:gone', machineId: a.machineId, agentId: a.id, projectId: a.projectId, text: why });
+    this.pushFeed(a.machineId, [{
+      id: `f_ghost_${a.id}_${now}`,
+      at: now, level: 'warn', source: 'ORCA',
+      text: `${a.callsign} dado por terminado por ${by}: ${why}. Ya se puede archivar.`,
+      agentId: a.id, projectId: a.projectId,
+    }]);
+  }
+
+  /**
+   * La salida manual. Un agente fantasma —sin pane, sin proceso, sin
+   * transcript creciendo— no lo alcanzaba ninguna herramienta: no se podía
+   * archivar porque el hub lo tenía por vivo, ni parar porque no era
+   * background. Esto lo declara terminado sin preguntarle a la máquina, que es
+   * justo lo que hace falta cuando la máquina ya no tiene nada que decir.
+   */
+  retireAgent(id: string, reason: string, by = 'capcom'): { ok: boolean; detail: string; ids: string[] } {
+    const a = this.state.agents[id];
+    if (!a) return { ok: false, detail: `no hay ningún agente ${id} en la flota`, ids: [] };
+    if (TERMINAL_STATES.has(a.state)) return { ok: false, detail: `${a.callsign} ya está en ${a.state}: archívalo con archive_agents`, ids: [] };
+    const now = this.now();
+    const why = reason.trim() || 'retirado a mano: la sesión ya no existe';
+    this.declareGone(a, why, now, by);
+    // La cría `Task` se va con él. Un subagente no tiene sesión propia: existe
+    // dentro del turno de su padre, así que dejarlo «vivo» deja veinticinco
+    // fantasmas sueltos y, de paso, impide archivar al padre — `archiveCandidates`
+    // conserva a quien tiene hijos vivos para no romper el linaje.
+    const brood = this.nativeBrood(a.id);
+    for (const kid of brood) this.declareGone(kid, `su padre ${a.callsign} fue retirado: ${why}`, now, by);
+    this.flushOut();
+    const extra = brood.length ? `, con ${brood.length} subagente(s) Task suyo(s)` : '';
+    return {
+      ok: true,
+      detail: `${a.callsign} dado por terminado (dead)${extra}`,
+      ids: [a.id, ...brood.map((k) => k.id)],
+    };
+  }
+
+  /** Los subagentes `Task` vivos que cuelgan de esta sesión, a cualquier profundidad. */
+  private nativeBrood(rootId: string): Agent[] {
+    const byParent = new Map<string, Agent[]>();
+    for (const x of Object.values(this.state.agents)) {
+      if (x.subagent !== true || !x.parentId) continue;
+      const list = byParent.get(x.parentId);
+      if (list) list.push(x); else byParent.set(x.parentId, [x]);
+    }
+    const out: Agent[] = [];
+    const seen = new Set<string>([rootId]);
+    let frontier = [rootId];
+    for (let depth = 0; depth < 64 && frontier.length; depth++) {
+      const next: string[] = [];
+      for (const parent of frontier) {
+        for (const kid of byParent.get(parent) ?? []) {
+          if (seen.has(kid.id)) continue;
+          seen.add(kid.id);
+          next.push(kid.id);
+          if (LIVE_STATES.has(kid.state)) out.push(kid);
+        }
+      }
+      frontier = next;
+    }
+    return out;
   }
 
   /**
@@ -1335,6 +1489,110 @@ export class World {
     }
   }
 
+  /* ── purga del arnés ─────────────────────────────────────────────── */
+
+  /**
+   * Sacar del mundo TODO lo que salió del arnés, y nada más.
+   *
+   * La contención, por si algo se cuela de todas formas. La frontera del
+   * `hello` (server.ts, shared/synthetic.ts) es lo que impide que entre; esto
+   * es lo que se hace cuando ya entró — un hub que estuvo sin la puerta, un
+   * mock que se coló por otra vía, un mundo persistido de antes. En el
+   * incidente del 2026-09-07 la única salida fue matar el proceso a mano y
+   * archivar agente por agente: 1.330 fixtures, siete proyectos y mil dólares
+   * de gasto ficticio, uno a uno.
+   *
+   * El criterio es la marca y sólo la marca: máquinas `synthetic`, los agentes
+   * que viven en ellas, los proyectos que declararon esa máquina y las
+   * preguntas nacidas ahí. Un agente real en una máquina real no se toca ni
+   * aunque su proyecto se llame igual que uno de fixture — la máquina es el
+   * ancla, el nombre no. Y por eso mismo esto no borra el feed: sus líneas no
+   * llevan máquina, así que no hay forma de distinguirlas, y la tira es
+   * acotada y se vacía sola.
+   */
+  purgeSynthetic(): { machines: number; agents: number; projects: number; escalations: number; costUSD: number } {
+    const machineIds = new Set(
+      Object.values(this.state.machines).filter(isSynthetic).map((m) => m.id),
+    );
+    const summary = { machines: 0, agents: 0, projects: 0, escalations: 0, costUSD: 0 };
+    if (machineIds.size === 0) return summary;
+
+    // Las preguntas primero: `dropAgent` retiraría las de sus agentes, pero una
+    // escalación puede sobrevivir al agente que la hizo, y la queremos fuera
+    // igual — es lo que se le ofrece al humano en cada barrido.
+    for (const e of Object.values(this.state.escalations)) {
+      if (!machineIds.has(e.machineId)) continue;
+      delete this.state.escalations[e.id];
+      this.emit({ o: 'escalation', id: e.id, v: null });
+      summary.escalations += 1;
+    }
+
+    const projects = new Set<string>();
+    for (const a of Object.values(this.state.agents)) {
+      if (!machineIds.has(a.machineId)) continue;
+      summary.costUSD += a.metrics.costUSD;
+      projects.add(a.projectId);
+      if (this.state.talk) delete this.state.talk[a.id];
+      if (this.state.talkLive) delete this.state.talkLive[a.id];
+      if (this.state.placements) delete this.state.placements[a.id];
+      this.dropAgent(a.id);
+      summary.agents += 1;
+    }
+
+    for (const art of Object.values(this.state.artifacts)) {
+      if (!machineIds.has(art.machineId)) continue;
+      delete this.state.artifacts[art.id];
+      this.emit({ o: 'artifact', id: art.id, v: null });
+    }
+    for (const c of Object.values(this.state.collisions)) {
+      if (!machineIds.has(c.machineId)) continue;
+      delete this.state.collisions[c.id];
+      this.emit({ o: 'collision', id: c.id, v: null });
+    }
+
+    for (const p of Object.values(this.state.projects)) {
+      if (!machineIds.has(p.machineId)) continue;
+      projects.add(p.id);
+      delete this.state.projects[p.id];
+      this.emit({ o: 'project', id: p.id, v: null });
+      summary.projects += 1;
+    }
+    for (const id of machineIds) {
+      // Las lápidas del arnés también se van: si no, el archivo de la consola
+      // sigue enseñando fixtures que ya no existen en ninguna parte.
+      for (const t of this.archived.values()) {
+        if (t.machineId === id) this.archived.delete(t.id);
+      }
+      delete this.state.machines[id];
+      this.emit({ o: 'machine', id, v: null });
+      summary.machines += 1;
+    }
+
+    /*
+     * Recalcular ANTES de tirar los buckets vacíos, no después.
+     *
+     * El total de la flota se rehace recorriendo los buckets sucios; uno
+     * borrado no se recorre, así que quitarlo primero deja su rollup viejo
+     * sumado para siempre — el contador fantasma que esto viene justamente a
+     * limpiar. Se deja que `settle` los ponga a cero, y sólo entonces se van.
+     */
+    this.settle();
+    for (const pid of projects) {
+      const bkt = this.buckets.get(pid);
+      if (bkt && bkt.ids.size === 0) this.buckets.delete(pid);
+    }
+    // Queda en el log del hub y no en el registro de eventos: los eventos van
+    // colgados de una máquina, y aquí la máquina es justamente lo que ya no
+    // está. Quien pidió la purga recibe el mismo resumen de vuelta.
+    this.log(
+      `purga del arnés: ${summary.machines} máquinas, ${summary.agents} agentes, `
+      + `${summary.projects} proyectos, ${summary.escalations} preguntas, `
+      + `$${summary.costUSD.toFixed(2)} de gasto ficticio fuera`,
+    );
+    this.flushOut();
+    return summary;
+  }
+
   /* ── archivo ─────────────────────────────────────────────────────── */
 
   /** Lápidas leídas del disco al arrancar. Van antes del primer snapshot. */
@@ -1403,10 +1661,34 @@ export class World {
    * Vivo: alguien reanudó la sesión, la lápida se levanta y el agente entra
    * como cualquier otro. Devuelve true cuando hay que ignorarlo.
    */
+  /**
+   * Una lápida sólo se levanta con actividad NUEVA.
+   *
+   * Antes bastaba con que el agente llegara en un estado vivo: se entendía que
+   * alguien había reanudado la sesión. No es prueba de nada. El collector
+   * redescubre las sesiones releyendo los transcripts de
+   * `~/.claude/projects`, y un transcript terminado se vuelve a derivar como
+   * `idle` — que es literalmente el estado «fin de turno» del CLI. Así volvió
+   * B9 el 2026-09-08: archivado con nueve agentes de su escuadrón, y minutos
+   * después de vuelta en `idle`, con sus veinticinco subagentes fantasma y un
+   * `[SWARM CAP]` nuevo que nadie podía acallar. Archivar limpiaba la foto y
+   * no el mundo.
+   *
+   * La prueba de que alguien reanudó de verdad es que el transcript se MOVIÓ
+   * después de archivarlo: `updatedAt` del collector es la última actividad
+   * real del archivo, no la hora de la pasada. Si no se movió, es la misma
+   * sesión de siempre releída, y la lápida aguanta.
+   *
+   * El error que queda es el barato y reversible: si ORCA se equivoca y
+   * rechaza a alguien que sí volvió, el operador lo desarchiva desde la
+   * consola. El error contrario es un fantasma inmortal.
+   */
   private refuseArchived(a: Agent, machineId: string): boolean {
-    if (!this.archived.has(a.id)) return false;
+    const tomb = this.archived.get(a.id);
+    if (!tomb) return false;
     if (TERMINAL_STATES.has(a.state)) return true;
-    this.unarchive(a.id, machineId, 'resumed', false);
+    if (a.updatedAt <= tomb.archivedAt) return true;
+    this.unarchive(a.id, machineId, `resumed: su transcript se movió ${Math.round((a.updatedAt - tomb.archivedAt) / 1000)}s después de archivarlo`, false);
     return false;
   }
 
@@ -1508,6 +1790,14 @@ export class World {
     if (!a) throw new Error('agent:new inválido');
     if (this.refuseArchived(a, machineId)) return;
     a.machineId = machineId;
+    const ghostedAt = this.ghosts.get(a.id);
+    if (ghostedAt !== undefined) {
+      // Reanunciado por un collector que reconecta. Sólo vuelve si su
+      // transcript se movió DESPUÉS de que lo diéramos por ido; si no, es la
+      // misma foto congelada de siempre.
+      if (a.updatedAt > ghostedAt) this.ghosts.delete(a.id);
+      else if (LIVE_STATES.has(a.state)) { a.state = 'dead'; a.block = null; a.tool = null; a.toolDetail = null; }
+    }
     this.state.agents[a.id] = a;
     this.indexAgent(a);
     this.linkParent(a);
@@ -1536,11 +1826,15 @@ export class World {
     const a = this.state.agents[id];
     if (!a) {
       if (this.archived.has(id)) {
-        // Un archivado que cambia: si vuelve a un estado vivo es que alguien
-        // reanudó la sesión. Un patch no trae el registro entero, así que se
-        // levanta la lápida y se pide el snapshot que sí lo trae.
+        // Un archivado que cambia. La misma regla que en `refuseArchived`, y
+        // por el mismo motivo: un estado vivo no prueba nada, porque el
+        // deriver produce `idle` cada vez que relee un transcript terminado.
+        // Sólo con actividad posterior al archivado se levanta la lápida, y
+        // entonces se pide el snapshot completo, que un patch no trae.
         const patch = sanitizeAgentPatch(rawPatch);
-        if (patch.state && !TERMINAL_STATES.has(patch.state)) this.unarchive(id, machineId, 'resumed', true);
+        const tomb = this.archived.get(id);
+        const moved = tomb !== undefined && patch.updatedAt !== undefined && patch.updatedAt > tomb.archivedAt;
+        if (patch.state && !TERMINAL_STATES.has(patch.state) && moved) this.unarchive(id, machineId, 'resumed: actividad posterior al archivado', true);
         return;
       }
       // Llegó un patch de un agente que no conocemos. En vez de inventarlo,

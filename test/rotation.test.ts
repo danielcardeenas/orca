@@ -478,9 +478,9 @@ const tests = [
         const held = await until(() => receipts.some((r) => r.cmdId === 'r1'), 2000);
         const receipt = receipts.find((r) => r.cmdId === 'r1');
         // And so is a task prompt.
-        console1.send(JSON.stringify({ t: 'task:create', id: 'c1', taskId: 'task_rot', title: 'New task' }));
+        console1.send(JSON.stringify({ t: 'mission:create', id: 'c1', missionId: 'task_rot', title: 'New task' }));
         await until(() => receipts.some((r) => r.cmdId === 'c1'), 2000);
-        console1.send(JSON.stringify({ t: 'ceo:say', id: 'r2', taskId: 'task_rot', text: 'task line during rotation' }));
+        console1.send(JSON.stringify({ t: 'ceo:say', id: 'r2', missionId: 'task_rot', text: 'task line during rotation' }));
         await until(() => receipts.some((r) => r.cmdId === 'r2'), 2000);
         const taskReceipt = receipts.find((r) => r.cmdId === 'r2');
         const nothingSaid = says.length === 1;

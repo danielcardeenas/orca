@@ -31,6 +31,7 @@ import {
   type InterruptOutcome,
 } from '../shared/interrupt.ts';
 import type { AgentMessage } from '../shared/types.ts';
+import { excludedWorkspace, refusalFor } from '../shared/workspaces.ts';
 import { squadBrief, withBrief } from './briefs.ts';
 import type { ArtifactIndex } from './artifacts.ts';
 import type { EscalationWatcher } from './escalate.ts';
@@ -39,6 +40,8 @@ import type { LineageIndex } from './lineage.ts';
 import type { MessageWatcher } from './messages.ts';
 import type { ProjectRegistry } from './projects.ts';
 import { paneName, type TmuxHost } from './tmux.ts';
+import { pathWithShims, shimsFor } from './shims.ts';
+import { claudeConfigPath, grantTrust, trustGrantingEnabled, trustOf } from './trust.ts';
 import { errText, home, isInside, launchable, log, oneLine, orcaDir, sleep } from './util.ts';
 import {
   NAME_RE as WORKTREE_NAME_RE, createWorktree, discard as discardWorktree, land as landWorktree,
@@ -51,6 +54,21 @@ import { ProviderHandoffs, providerModels } from './provider-handoff.ts';
 import { CapcomResets } from './capcom-reset.ts';
 
 const SCOPE = 'commands';
+
+/**
+ * Lo que un agente revisor de AUTOMEJORA no puede tocar.
+ *
+ * Las cuatro herramientas con las que Claude Code escribe. Leer, buscar y
+ * ejecutar siguen ahí: un revisor tiene que poder mirar el repositorio y
+ * llamar a `orca-improve`, y sin `Bash` no podría archivar nada.
+ *
+ * No es una jaula y no se vende como tal: quedan `Bash` y por tanto queda un
+ * `echo > fichero` para quien se empeñe. Es la diferencia entre la salida
+ * evidente y la rebuscada, que en la práctica es la que importa — y lo que se
+ * puede quitar sin dejar al revisor ciego. Sólo aplica a Claude Code; ver
+ * `codexArgv`, que no tiene una opción equivalente.
+ */
+export const REVIEWER_DENIED = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit'] as const;
 
 /** Modos que `claude --permission-mode` acepta de verdad (CLI 2.1.260). */
 const PERMISSION_MODES = new Set([
@@ -103,6 +121,16 @@ export interface SpawnLookup {
 }
 
 export interface CommandDeps {
+  /**
+   * Dónde vive el estado de confianza de Claude Code, o `false` para no
+   * tocarlo. Sin valor: el fichero real (`~/.claude.json`).
+   *
+   * Existe por la misma razón que `CapcomDeps.trust`: una prueba NUNCA debe
+   * escribir el `~/.claude.json` del operador. Bajo `ORCA_HARNESS` no hacer
+   * nada es además el default, para que una suite nueva que se olvide de
+   * ponerlo no pueda hacerlo por descuido.
+   */
+  trustFile?: string | false;
   transfer?: { context(): string; hold(id: string, on: boolean, plan?: import('../shared/provider-handoff.ts').ProviderHandoffPlan): void; activate(plan: import('../shared/provider-handoff.ts').ProviderHandoffPlan, sessionId: string): Promise<void> };
   projects: ProjectRegistry;
   keys: KeyVault;
@@ -110,6 +138,13 @@ export interface CommandDeps {
   tmux: TmuxHost;
   lineage: LineageIndex;
   escalations: EscalationWatcher;
+  /**
+   * El escáner de restos, si esta máquina lo tiene montado. Inyectado y
+   * opcional para que un arnés pueda construir `CommandDeps` sin él, y para
+   * que la decisión de qué es un huérfano viva en un módulo que se puede
+   * probar sin matar nada. Ver collector/strays.ts.
+   */
+  strays?(): import('./strays.ts').StrayWatch | null;
   messages: MessageWatcher;
   artifacts: ArtifactIndex;
   /** Sólo devuelve agentes que ORCA está observando ahora mismo. */
@@ -239,8 +274,10 @@ export class CommandRunner {
     try {
       switch (cmd.k) {
         case 'recovery:settings': case 'recovery:status': case 'recovery:decide': throw new Error('Recovery decisions must run through the hub');
+        case 'files:allow': throw new Error('File roots live in the hub, which serves the files');
         case 'capcom:new': return { ok: true, data: await this.freshCapcom(cmd) };
         case 'handoff:models': return { ok: true, data: providerModels() };
+        case 'models:list': return { ok: true, data: providerModels() };
         case 'handoff:prepare': return { ok: true, data: service.review(cmd.agentId, cmd.runtime, cmd.model, typeof cmd.checkpoint === 'string' ? cmd.checkpoint : '') };
         case 'handoff:commit': return { ok: true, data: service.commit(cmd.agentId, cmd.planId) };
         case 'handoff:status': return { ok: true, data: (this.handoffs.has(cmd.planId) ? this.handoffs : this.workers.handoffs).status(cmd.planId) };
@@ -254,6 +291,7 @@ export class CommandRunner {
         case 'land': return await this.land(cmd);
         case 'discard': return await this.discard(cmd);
         case 'transcripts:purge': return this.purgeTranscripts(cmd);
+        case 'strays:clean': return await this.cleanStrays(cmd);
         case 'say': return await this.say(cmd);
         case 'interrupt': return await this.interrupt(cmd);
         case 'permit': return await this.permit(cmd);
@@ -263,6 +301,7 @@ export class CommandRunner {
         case 'answer': return await this.answer(cmd);
         case 'deliver': return await this.deliver(cmd);
         case 'reply': return await this.reply(cmd);
+        case 'project:register': return this.registerProject(cmd);
         case 'key:set': return this.keySet(cmd);
         case 'key:remove': return this.keyRemove(cmd);
         case 'artifact:read': return await this.artifactRead(cmd);
@@ -286,7 +325,68 @@ export class CommandRunner {
     }
   }
 
+  /**
+   * Terminar lo que ORCA dejó atrás, y sólo eso.
+   *
+   * No decide nada: la decisión la tomó el escáner (`collector/strays.ts`), que
+   * vuelve a correr aquí dentro y vuelve a comprobar la identidad de cada
+   * proceso antes de mandarle una señal. Un id que ya no está, o que ya no
+   * cumple, vuelve como `refused`/`gone` con el motivo — nunca se finge haber
+   * matado algo.
+   */
+  private async cleanStrays(cmd: Extract<Command, { k: 'strays:clean' }>): Promise<CommandResult> {
+    const watch = this.deps.strays?.();
+    if (!watch) return { ok: false, detail: 'este collector no tiene el escáner de restos montado' };
+    const ids = (Array.isArray(cmd.ids) ? cmd.ids : []).filter((x) => typeof x === 'string').slice(0, 64);
+    if (ids.length === 0) return { ok: false, detail: 'no se pidió limpiar nada' };
+    const outcomes = await watch.clean(ids, { dryRun: cmd.dryRun === true });
+    const stopped = outcomes.filter((o) => o.result === 'stopped').length;
+    const detail = `${cmd.dryRun ? 'dry run: ' : ''}${stopped}/${outcomes.length} terminado(s)`;
+    log('info', SCOPE, `strays:clean ${detail}`);
+    return { ok: true, detail, data: outcomes };
+  }
+
   /* ── spawn ────────────────────────────────────────────────────── */
+
+  /**
+   * La carpeta tiene que estar confiada ANTES de arrancar a Claude Code.
+   *
+   * Si no lo está, el CLI pinta un diálogo nativo y no hace nada hasta que
+   * alguien pulsa una tecla — y `--permission-mode bypassPermissions` no lo
+   * salta, porque la confianza es anterior a los permisos. En una flota
+   * autónoma no hay nadie delante de esa pantalla: el 2026-09-08 costó cinco
+   * workers congelados 25 minutos.
+   *
+   * Se llama con el cwd FINAL, después del worktree, porque la confianza no se
+   * hereda del directorio padre: un worktree bajo un proyecto confiado sigue
+   * siendo una carpeta nueva para el CLI.
+   *
+   * Sólo para Claude Code: Codex no tiene esta puerta. Y sólo después de que
+   * la ruta haya pasado `launchable` y las exclusiones — el porqué de ese
+   * orden, y de escribir en `~/.claude.json`, está en `trust.ts`.
+   */
+  private ensureTrusted(cwd: string): { ok: true; note: string | null } | { ok: false; detail: string } {
+    const configured = this.deps.trustFile;
+    if (configured === false) return { ok: true, note: null };
+    if (configured === undefined && process.env['ORCA_HARNESS']) {
+      log('debug', SCOPE, 'arnés: no se comprueba ni se concede la confianza de carpeta');
+      return { ok: true, note: null };
+    }
+    const file = configured ?? claudeConfigPath();
+    const verdict = trustOf(cwd, file);
+    if (verdict === 'trusted') return { ok: true, note: null };
+    const stuck = `${cwd} no está confiada para Claude Code: el worker arrancaría en «Is this a project you created or one you trust?» y esperaría ahí a una tecla que nadie va a pulsar.`;
+    const byHand = `Acéptalo una vez a mano (\`cd ${cwd} && claude\`) o deja que ORCA lo conceda al lanzar.`;
+    if (verdict === 'unreadable') {
+      return { ok: false, detail: `${stuck} Además no puedo leer ${file} para comprobarlo, y un fichero que no entiendo no lo reescribo. ${byHand}` };
+    }
+    if (!trustGrantingEnabled()) {
+      return { ok: false, detail: `${stuck} ORCA_TRUST_SPAWNS=0 me prohíbe concederla. ${byHand}` };
+    }
+    const granted = grantTrust(cwd, file);
+    if (!granted.ok) return { ok: false, detail: `${stuck} Y no pude concederla: ${granted.detail}. ${byHand}` };
+    return { ok: true, note: granted.changed ? `carpeta confiada para Claude Code antes de lanzar: ${cwd}` : null };
+  }
 
   private async spawn(cmd: Extract<Command, { k: 'spawn' }>): Promise<CommandResult> {
     // Un runtime que este collector no sabe conducir se rechaza con el porqué,
@@ -340,6 +440,20 @@ export class CommandRunner {
 
     // argv como ARRAY. El prompt es un elemento, nunca texto de shell.
     const opts: string[] = [];
+    /*
+     * Un revisor de AUTOMEJORA no puede editar. No es un aviso en el brief: se
+     * le quitan las herramientas, que es lo único que aguanta a un modelo
+     * atascado buscando la salida que ve (misma razón por la que un miembro de
+     * escuadrón no lleva `orca-ask`).
+     *
+     * VA PRIMERO, y eso no es estilo: `--disallowedTools` es variádica y se
+     * come todo lo que venga detrás hasta el siguiente `-`. Delante de
+     * `--model` / `--permission-mode` / `--name` siempre hay otra opción
+     * detrás; delante del prompt posicional se lo tragaría entero y el
+     * revisor arrancaría sin instrucciones. Ver la nota de `launchArgs` en
+     * capcom.ts, donde ya costó un CAPCOM mudo.
+     */
+    if (cmd.review) opts.push('--disallowedTools', ...REVIEWER_DENIED);
     if (cmd.model) {
       if (!/^[A-Za-z0-9._-]{1,64}$/.test(cmd.model)) {
         return { ok: false, detail: `modelo inválido: ${cmd.model}` };
@@ -390,6 +504,8 @@ export class CommandRunner {
 
     const env = {
       ...process.env,
+      // Los comandos del brief, también para un `--bg`: promete lo mismo.
+      PATH: pathWithShims(process.env['PATH'], shimsFor(squad, lead, cmd.review === true)),
       ...this.deps.keys.materialize(cmd.projectId, cmd.parentId ?? 'orca'),
       ORCA_SPAWNED: '1',
       ORCA_PARENT_ID: cmd.parentId ?? '',
@@ -401,6 +517,12 @@ export class CommandRunner {
     const wt = await this.worktreeFor(cmd, projectRoot, randomUUID().replace(/-/g, '').slice(0, 8));
     if (!wt.ok) return { ok: false, detail: wt.detail };
     if (wt.worktree) cwd = wt.worktree.path;
+
+    // El cwd definitivo ya está: la confianza se comprueba sobre él, no sobre
+    // la raíz del proyecto. Ver `ensureTrusted`.
+    const trusted = this.ensureTrusted(cwd);
+    if (!trusted.ok) { await this.dropFreshWorktree(projectRoot, wt); return { ok: false, detail: trusted.detail }; }
+    if (trusted.note) log('info', SCOPE, trusted.note);
 
     const since = Date.now();
     const res = await run(this.bin, args, { cwd, env, timeoutMs: 60_000, detach: true });
@@ -468,15 +590,15 @@ export class CommandRunner {
     if (!wt.ok) return { ok: false, detail: wt.detail };
     if (wt.worktree) cwd = wt.worktree.path;
 
-    const env: Record<string, string> = {};
-    for (const k of ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'TERM_PROGRAM']) {
-      const v = process.env[k];
-      if (v) env[k] = v;
-    }
-    Object.assign(env, this.deps.keys.materialize(cmd.projectId, cmd.parentId ?? 'orca'));
-    env['ORCA_SPAWNED'] = '1';
+    const env = paneEnv(this.deps.keys.materialize(cmd.projectId, cmd.parentId ?? 'orca'), shimsFor(squad, lead, cmd.review === true));
     env['ORCA_PARENT_ID'] = cmd.parentId ?? '';
     env['ORCA_PANE'] = name;
+
+    // Antes de tocar tmux: un pane sin confianza es un pane congelado, y hasta
+    // que alguien conteste no hay ni transcript ni agente. Ver `ensureTrusted`.
+    const trusted = this.ensureTrusted(cwd);
+    if (!trusted.ok) { await this.dropFreshWorktree(projectRoot, wt); return { ok: false, detail: trusted.detail }; }
+    if (trusted.note) log('info', SCOPE, trusted.note);
 
     const since = Date.now();
     // Se anota ANTES de lanzar: el pane puede aparecer antes de que vuelva tmux.
@@ -538,7 +660,7 @@ export class CommandRunner {
     const argv = codexArgv(bin, cwd, { model: cmd.model, permissionMode: cmd.permissionMode, prompt });
     if (!argv.ok) return { ok: false, detail: argv.detail };
 
-    const env = paneEnv(this.deps.keys.materialize(cmd.projectId, cmd.parentId ?? 'orca'));
+    const env = paneEnv(this.deps.keys.materialize(cmd.projectId, cmd.parentId ?? 'orca'), shimsFor(squad, lead, cmd.review === true));
     env['ORCA_PARENT_ID'] = cmd.parentId ?? '';
     env['ORCA_PANE'] = temp;
 
@@ -1188,6 +1310,50 @@ export class CommandRunner {
     return await this.deps.artifacts.read(cmd.artifactId);
   }
 
+  /* ── alta de proyectos ────────────────────────────────────────── */
+
+  /**
+   * Una carpeta pasa a existir para la flota, por ruta absoluta.
+   *
+   * Los proyectos se descubren de los slugs de `~/.claude/projects`, así que
+   * una carpeta en la que ningún CLI ha corrido nunca no existe para ORCA y
+   * `spawn` la rechaza con «proyecto desconocido». La salida que se usó el
+   * 2026-09-08 fue sembrarla a mano con dos `claude -p`: un truco, y uno que
+   * deja una sesión basura en el disco. Esto es esa siembra hecha en serio.
+   *
+   * Valida lo mismo que validaría el spawn —existe, es un directorio, no es
+   * una ruta de sistema, no es el workspace de CAPCOM ni un scratchpad— porque
+   * dar de alta lo que no se puede lanzar sólo mueve el fallo un paso más
+   * tarde. Es idempotente: registrar dos veces la misma ruta devuelve el mismo
+   * id.
+   */
+  private registerProject(cmd: Extract<Command, { k: 'project:register' }>): CommandResult {
+    if (typeof cmd.path !== 'string' || !path.isAbsolute(cmd.path)) {
+      return { ok: false, detail: 'hace falta una ruta absoluta' };
+    }
+    const dir = path.resolve(cmd.path);
+    const allowed = launchable(dir);
+    if (!allowed.ok) return { ok: false, detail: allowed.why };
+    if (!isDir(dir)) return { ok: false, detail: `no existe o no es un directorio: ${dir}` };
+    // La ruta REAL: es la que produce el slug con el que el CLI escribirá su
+    // transcript, y por tanto la que casará con lo que el watcher descubra.
+    let real = dir;
+    try { real = fs.realpathSync(dir); } catch { /* nos quedamos con la resuelta */ }
+    const why = excludedWorkspace(real);
+    if (why) return { ok: false, detail: refusalFor(why) };
+    const project = this.deps.projects.register(real);
+    /*
+     * El snapshot va ANTES de contestar. El hub sólo puede lanzar sobre un
+     * proyecto que tiene en su mundo, y quien pide el alta lo siguiente que
+     * hace es lanzar: sin esto la respuesta llegaría antes que el proyecto y
+     * el spawn fallaría por «proyecto desconocido» justo después de darlo de
+     * alta. El websocket conserva el orden, así que basta con emitirlo aquí.
+     */
+    this.deps.onResync();
+    log('info', SCOPE, `proyecto dado de alta: ${project.code} ${real}`);
+    return { ok: true, detail: `${project.code} · ${real}`, data: { projectId: project.id, code: project.code, name: project.name, path: project.path } };
+  }
+
   /* ── keys ─────────────────────────────────────────────────────── */
 
   private keySet(cmd: Extract<Command, { k: 'key:set' }>): CommandResult {
@@ -1245,12 +1411,20 @@ export class CommandRunner {
 /* ── argv por runtime ─────────────────────────────────────────────── */
 
 /** Lo que un pane hereda del collector, más las keys del proyecto. */
-export function paneEnv(keys: Record<string, string>): Record<string, string> {
+export function paneEnv(keys: Record<string, string>, shims?: { human: boolean }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const k of ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'TERM_PROGRAM']) {
     const v = process.env[k];
     if (v) env[k] = v;
   }
+  /*
+   * Los comandos que el brief promete, en el PATH de la sesión.
+   *
+   * Sin esto `orca-tell` no existe para el agente al que ORCA acaba de decir
+   * que lo use. Ver `shims.ts`: es la diferencia entre un miembro que avisa a
+   * su líder y uno que gasta un turno buscando el comando y se disculpa.
+   */
+  if (shims) env['PATH'] = pathWithShims(env['PATH'], shims);
   Object.assign(env, keys);
   env['ORCA_SPAWNED'] = '1';
   return env;

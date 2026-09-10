@@ -147,6 +147,12 @@ export interface McpDeps {
   /** Shown in the CLI's `/mcp` listing. */
   version?: string;
   log?(message: string): void;
+  /**
+   * Una herramienta se llamó. Sólo el NOMBRE y si salió bien: es la mitad de
+   * la telemetría de AUTOMEJORA («qué usa CAPCOM de verdad»), y con los
+   * argumentos no se vería mejor — se verían las conversaciones de otros.
+   */
+  onTool?(name: string, ok: boolean): void;
 }
 
 /**
@@ -204,6 +210,7 @@ export async function mcpDispatch(
       try {
         const out = await mcpCall(deps.context(), name, args);
         deps.log?.(`tool ${name}${out.isError ? ' (error)' : ''}`);
+        deps.onTool?.(name, !out.isError);
         return result(id, out);
       } catch (err) {
         // runTool catches its own throws; reaching here means the hub itself
@@ -271,8 +278,21 @@ export async function serveMcp(
 ): Promise<void> {
   const denied = deps.authorize(req);
   if (denied !== null) {
+    /*
+     * El caso que más veces aparece aquí no es un token equivocado: es una
+     * sesión de CAPCOM que leyó su `.mcp.json` cuando el hub todavía aceptaba
+     * loopback sin credencial, y siguió viva después de que dejara de
+     * aceptarlo. El archivo en disco ya está bien y el CLI no lo relee, así
+     * que mirarlo no explica nada. Decirlo aquí ahorra el diagnóstico entero.
+     */
+    const stale = denied.includes('falta token');
     json(res, 401, failure(null, INVALID_REQUEST,
-      `unauthorized (${denied}). Put the hub token in Authorization: Bearer, X-Orca-Token, or ?token=`));
+      `unauthorized (${denied}). Put the hub token in Authorization: Bearer, X-Orca-Token, or ?token=`
+      + (stale
+        ? '. Si esto es una sesión de CAPCOM que antes funcionaba: su .mcp.json se lee al arrancar '
+          + 'y el de disco ya lleva el token, así que hay que relanzarla — /capcom-new continuity, '
+          + 'o CHANGE MODEL para conservar el hilo. Ver docs/REMOTE-ACCESS.md.'
+        : '')));
     return;
   }
 

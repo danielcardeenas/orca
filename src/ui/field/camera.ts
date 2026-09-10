@@ -19,7 +19,14 @@ export const TILT_MAX = 0.62;
 export interface CamState { x: number; y: number; z: number; pitch: number }
 
 export class FieldCamera {
-  readonly three = new THREE.PerspectiveCamera(FOV, 1, 0.05, 2000);
+  /**
+   * The near plane is as far out as the scene allows: the eye never comes
+   * closer than Z_MIN to the plane, and nothing stands higher than ~0.5 off
+   * it, so 0.5 costs no pixel — and depth precision scales with it. Media
+   * quads a few hundredths apart from the tiles under them used to fight for
+   * pixels from far out; at 0.5 the buffer tells them apart at Z_MAX.
+   */
+  readonly three = new THREE.PerspectiveCamera(FOV, 1, 0.5, 2000);
   /** Where the camera is now. */
   readonly cam: CamState = { x: 0, y: 0, z: 24, pitch: 0 };
   /** Where it is going. */
@@ -83,12 +90,19 @@ export class FieldCamera {
   }
 
   /** Canvas pixel of a world point, plus whether it is in front of the eye. */
-  project(x: number, y: number, z: number): { x: number; y: number; visible: boolean } {
+  /**
+   * `visible` is on screen or near it; `ahead` only says the point is in
+   * front of the camera, so its `x`/`y` are a real place on the glass however
+   * far off it — a line can be drawn to it. Behind the camera the projection
+   * mirrors, and the numbers mean nothing.
+   */
+  project(x: number, y: number, z: number): { x: number; y: number; visible: boolean; ahead: boolean } {
     const v = this.tmp.set(x, y, z).project(this.three);
     return {
       x: ((v.x + 1) / 2) * this.w,
       y: ((-v.y + 1) / 2) * this.h,
       visible: v.z < 1 && Math.abs(v.x) < 1.6 && Math.abs(v.y) < 1.6,
+      ahead: v.z < 1,
     };
   }
 

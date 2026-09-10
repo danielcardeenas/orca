@@ -22,6 +22,7 @@ import gsap from 'gsap';
 import { dur, REDUCE, T } from '../motion.ts';
 import { esc } from '../util.ts';
 import { getSound } from './sound.ts';
+import { touchDialog } from '../controls.ts';
 
 export type MenuItem =
   | {
@@ -50,6 +51,8 @@ const OFFSET = 4;
 const MARGIN = 8;
 
 let current: HTMLElement | null = null;
+/** El fondo del menú cuando se presenta como diálogo. Ver `openMenu`. */
+let scrim: HTMLElement | null = null;
 let closing: gsap.core.Tween | null = null;
 let teardown: (() => void) | null = null;
 
@@ -66,6 +69,8 @@ export function closeMenu(): void {
   teardown = null;
   current.remove();
   current = null;
+  scrim?.remove();
+  scrim = null;
 }
 
 /**
@@ -99,16 +104,32 @@ export function openMenu(at: { x: number; y: number }, items: MenuItem[], opts: 
   el.innerHTML = html;
   el.querySelectorAll<HTMLElement>('[data-i]').forEach((b) => { takeable[Number(b.dataset.i)]!.el = b; });
 
+  /*
+   * Con el dedo, el menú se presenta como el selector (`controls.ts`, `pick`):
+   * centrado, con la lista scrollable dentro y un fondo que se come el gesto.
+   * Anclarlo al punto no vale en un teléfono —el punto está debajo del dedo, y
+   * lo que se abre ahí queda tapado por la mano— y además el gesto que lo abre
+   * es una pulsación larga, no un clic con un cursor que apuntar.
+   */
+  const dialog = touchDialog();
+  if (dialog) {
+    el.classList.add('is-dialog');
+    scrim = document.createElement('div');
+    scrim.className = 'ctx__scrim';
+    document.body.appendChild(scrim);
+  }
   document.body.appendChild(el);
   current = el;
 
   /* Keep it on the glass: flip left of or above the pointer at the edges. */
-  const w = el.offsetWidth, h = el.offsetHeight;
-  let x = at.x + OFFSET, y = at.y + OFFSET;
-  if (x + w + MARGIN > innerWidth) x = Math.max(MARGIN, at.x - OFFSET - w);
-  if (y + h + MARGIN > innerHeight) y = Math.max(MARGIN, Math.min(at.y - OFFSET - h, innerHeight - h - MARGIN));
-  el.style.left = `${Math.round(x)}px`;
-  el.style.top = `${Math.round(y)}px`;
+  if (!dialog) {
+    const w = el.offsetWidth, h = el.offsetHeight;
+    let x = at.x + OFFSET, y = at.y + OFFSET;
+    if (x + w + MARGIN > innerWidth) x = Math.max(MARGIN, at.x - OFFSET - w);
+    if (y + h + MARGIN > innerHeight) y = Math.max(MARGIN, Math.min(at.y - OFFSET - h, innerHeight - h - MARGIN));
+    el.style.left = `${Math.round(x)}px`;
+    el.style.top = `${Math.round(y)}px`;
+  }
   if (!REDUCE.value) el.classList.add('is-cascade');
 
   getSound()?.play('select');

@@ -42,6 +42,7 @@ import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { ago, esc } from '../../util.ts';
 import { slabFlash } from '../fx.ts';
+import { longPress } from '../../hud/longpress.ts';
 
 /** The drag payload type. The field reads this exact string. */
 export const ARTIFACT_DND = 'text/orca-artifact';
@@ -59,6 +60,8 @@ export function mountGallery(ctx: WinCtx, c: Console) {
   `;
   const bar = body.querySelector<HTMLElement>('[data-bar]')!;
   const grid = body.querySelector<HTMLElement>('[data-grid]')!;
+  // Mantener pulsada una miniatura es su clic derecho.
+  longPress(grid, { allow: (t) => !!t.closest('.thumb') });
 
   function all(): Artifact[] {
     return Object.values(store.world.artifacts ?? {});

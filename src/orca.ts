@@ -22,6 +22,7 @@
  */
 
 import { startHub } from './hub/server.ts';
+import { cli, ensure } from './hub/tailscale.ts';
 
 const argv = process.argv.slice(2);
 const value = (name: string): string | undefined => {
@@ -33,6 +34,29 @@ async function main() {
   const port = Number(value('port') ?? process.env['ORCA_PORT'] ?? 4479);
 
   const hub = await startHub({ port });
+
+  /*
+   * La consola por https en la tailnet, sin teclear nada.
+   *
+   * Es lo que hace que ORCA se pueda INSTALAR en el teléfono: fuera de
+   * contexto seguro no hay service worker y no hay app, sólo una pestaña
+   * (docs/PWA.md). Va aquí y no en `startHub()` a propósito — startHub lo
+   * levantan decenas de suites y el arnés visual, y ninguna tiene por qué
+   * tocar la tailnet de nadie. Aquí sólo pasa cuando alguien levanta ORCA de
+   * verdad. No pisa una config ajena, no tumba el arranque si falla, y se
+   * apaga con ORCA_TAILSCALE=0. Ver src/hub/tailscale.ts.
+   */
+  const ts = await ensure({ port: hub.port, exec: cli() });
+  // La nota puede traer un segundo renglón con el siguiente paso.
+  for (const line of ts.note.split('\n')) console.log(`[orca] ${line}`);
+  if (ts.url) {
+    // La url que hay que abrir en el móvil, con el token, una sola vez: el
+    // resto de veces ya vive en el localStorage de ese origen. Sin `?k=` la
+    // consola se queda en el handshake que no termina, y ahí no hay casilla
+    // donde escribirlo (ui/handshake.ts, y es deliberado).
+    console.log(`[orca]   móvil → ${ts.url}/?k=${hub.auth.token}`);
+    console.log('[orca]   ábrela una vez así, deja que enlace, y entonces instálala (Instalar app / Añadir a inicio)');
+  }
 
   /*
    * Quién manda, dicho en voz alta al arrancar.
@@ -55,8 +79,25 @@ async function main() {
     console.log('[orca] console → http://127.0.0.1:4478/');
     console.log('[orca] the collector for this machine is already running alongside.');
     console.log('[orca] on any OTHER machine: npx tsx src/collector/index.ts');
+  } else if (hub.dist) {
+    /*
+     * Producción: la consola la sirve este mismo hub desde dist/, así que no
+     * hay un segundo puerto ni un segundo proceso que mantener.
+     *
+     * Se decide por lo que el hub sirve de verdad y no por cómo se arrancó,
+     * porque es lo que el operador va a encontrar al abrir el navegador. Las
+     * dos líneas de después son la asimetría que hay que decir en voz alta:
+     * publicar cambia la consola y no toca este proceso; reiniciar este
+     * proceso es lo único que aplica lo demás.
+     */
+    console.log(`[orca] console → ${hub.url}/   (build de producción, servido desde dist/)`);
+    console.log('[orca]   publicar la consola:  npm run publish   — no recarga a nadie: enciende UPDATE AVAILABLE');
+    console.log('[orca]   el hub y el collector corren el código que cargaron al arrancar; para cambiarlo, reinicia');
+    console.log('[orca] collector: npx tsx src/collector/index.ts   (here: brings CAPCOM up too)');
+    console.log('[orca] los dos a la vez:  npm run prod');
   } else {
     console.log('[orca] console:   npx vite   → http://127.0.0.1:4478/');
+    console.log('[orca]   no hay dist/: `npm run publish` la construye y este mismo hub la sirve (npm run prod)');
     console.log('[orca] collector: npx tsx src/collector/index.ts   (here: brings CAPCOM up too)');
     console.log('[orca] elsewhere: the same, plus --capcom on ONE machine if not this one');
     console.log('[orca] or all three at once:  npm run dev');

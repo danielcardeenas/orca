@@ -18,6 +18,7 @@ w.talk = { cap: [ { id: 'p', agentId: 'cap', at: event.at + 100, kind: 'prompt',
   { id: 'a', agentId: 'cap', at: event.at + 200, kind: 'say', text: 'Conservé las referencias al historial y a los pendientes. El módulo de higiene y la revisión de autonomy-01 siguen pendientes.' } ] };
 store.replaceWorld(w);
 store.linkUp = true;
+localStorage.removeItem('orca.capcom.mission');
 localStorage.removeItem('orca.capcom.task');
 localStorage.removeItem('orca.capcom.tab');
 export const openedFiles: string[] = [];

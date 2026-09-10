@@ -28,6 +28,13 @@
  * the two samples was cut short, growth comes back `unavailable` with the
  * reason rather than a plausible number wearing a `≥` it did not earn.
  *
+ * **Memory is asked, not derived.** `total - free` is not memory in use on
+ * either platform ORCA runs on — it counts the file cache the system hands
+ * back on demand, and it called a machine with nine gigabytes free full. The
+ * sampler reads `vm_stat` or `/proc/meminfo` instead (`collector/memory.ts`),
+ * reports cache and swap as their own figures, and falls back to the old
+ * ceiling — marked `≤`, with the reason — only when the tool will not answer.
+ *
  * **Nothing leaves that isn't a size, a count or a time.** Paths are made
  * home-relative before they go on the wire, process arguments are dropped and
  * only the command name survives, and no file is ever opened — the whole
@@ -45,6 +52,7 @@ import {
   type Candidate, type CategorySample, type Coverage, type GrowthSample, type HygieneCategory,
   type HygieneReport, type ProcessSample, type Reading, type VolumeSample,
 } from '../shared/hygiene.ts';
+import { readMemory } from './memory.ts';
 import {
   claudeDir, claudeProjectsDir, codexSessionsDir, home, log, orcaDir,
 } from './util.ts';
@@ -105,6 +113,8 @@ export function roots(): Root[] {
 
     { category: 'backups', path: path.join(claude, 'backups') },
 
+    // Lo que el operador soltó en una conversación; su ruta ya está en el transcript.
+    { category: 'scratch', path: path.join(orca, 'uploads') },
     { category: 'scratch', path: path.join(claude, 'cache') },
     { category: 'scratch', path: path.join(claude, 'paste-cache') },
     { category: 'scratch', path: path.join(claude, 'file-history') },
@@ -476,18 +486,42 @@ export class HygieneSampler {
     /* Machine load. Same shape as the deck's machine strip, same source. */
     const cpu = cpuFrom(this.cpuPrev);
     this.cpuPrev = cpu.now;
-    const total = os.totalmem(), free = os.freemem();
     /*
-     * `os.freemem()` on darwin counts only pages that are free *right now*.
-     * macOS deliberately keeps almost none: everything spare is file cache or
-     * purgeable, reclaimed the instant something asks. So `total - free` reads
-     * as "48G of 48G used" on an idle machine, which is true of the page table
-     * and useless to a person. It is reported as a ceiling, with the reason
-     * attached, rather than as a measurement that would read as an emergency.
+     * Memory, asked of the platform rather than derived from `os.freemem()`.
+     *
+     * The subtraction `total - free` is the obvious formula and it is a lie on
+     * both platforms: macOS keeps almost no page free because everything spare
+     * is cache it hands back on demand, and linux's `MemFree` is not
+     * `MemAvailable`. It read as "≤47G of 48G" on a machine with nine
+     * gigabytes to spare — a ceiling honestly marked, and still the number a
+     * person saw first and read as an emergency.
+     *
+     * `readMemory()` asks `vm_stat` or `/proc/meminfo` what is actually
+     * committed, which is a measurement and is marked as one. Cache is a
+     * figure of its own instead of being folded into either side, and swap
+     * comes along because it is what says whether the pressure is real.
+     *
+     * When the tool is missing or its output does not parse, the ceiling comes
+     * back — with the reason, and never dressed up as a measurement.
      */
-    const memUsed = process.platform === 'darwin'
-      ? atMost(total - free, 'macOS counts cache and purgeable pages as used, and hands them back on demand: the memory really committed is this or less')
-      : measured(total - free);
+    const mem = await readMemory();
+    const total = mem?.totalBytes ?? os.totalmem();
+    const memUsed = mem
+      ? measured(mem.usedBytes, mem.how === 'vm_stat'
+        ? 'wired + app + compressed, as vm_stat reports them — what Activity Monitor calls memory used. File cache and purgeable pages are the CACHED row, not this one'
+        : 'MemTotal − MemAvailable from /proc/meminfo: what the kernel says a new process could not have without swapping')
+      : atMost(total - os.freemem(), process.platform === 'darwin'
+        ? 'vm_stat could not be read, so this falls back to os.freemem(), which counts cache and purgeable pages as used: the memory really committed is this or less'
+        : '/proc/meminfo could not be read, so this falls back to os.freemem(), which counts page cache as used: the memory really committed is this or less');
+    const memCached = mem?.cachedBytes !== null && mem?.cachedBytes !== undefined
+      ? measured(mem.cachedBytes, 'in use as cache and available at the same time: the system hands these back the moment anything asks')
+      : unavailable(`cache is not separable from memory in use on ${process.platform}`);
+    const swapUsed = mem?.swapUsedBytes !== null && mem?.swapUsedBytes !== undefined
+      ? measured(mem.swapUsedBytes)
+      : unavailable(`swap usage is not readable on ${process.platform}`);
+    const swapTotal = mem?.swapTotalBytes !== null && mem?.swapTotalBytes !== undefined
+      ? measured(mem.swapTotalBytes)
+      : unavailable(`swap size is not readable on ${process.platform}`);
 
     /* Processes. */
     const wanted = this.o.processes?.() ?? [];
@@ -567,6 +601,9 @@ export class HygieneSampler {
       cpuPct: cpu.reading,
       memUsedBytes: memUsed,
       memTotalBytes: measured(total),
+      memCachedBytes: memCached,
+      swapUsedBytes: swapUsed,
+      swapTotalBytes: swapTotal,
       growth,
       candidates: candidates.sort((a, b) => (b.bytes.value ?? 0) - (a.bytes.value ?? 0)).slice(0, 40),
       limits,

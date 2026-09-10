@@ -127,7 +127,7 @@ async function nextSquadName(presetName: string): Promise<string> {
 
 /* ── The window ─────────────────────────────────────────────────────── */
 
-/** The comp's zipper, shared with the boot and the HUD's task panel. */
+/** The comp's zipper, shared with the boot and the HUD's mission panel. */
 
 const wait = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
 

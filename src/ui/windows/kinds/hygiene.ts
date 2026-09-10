@@ -32,6 +32,7 @@
  */
 
 import { hub } from '../../net/client.ts';
+import type { Stray, StrayOutcome } from '../../../shared/strays.ts';
 import { store } from '../../store.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
@@ -163,6 +164,45 @@ function candidateRows(r: HygieneReport): string {
   </div>`;
 }
 
+/**
+ * Memory: what is committed, what is cache, and whether anything is swapping.
+ *
+ * Three rows because they are three facts, and the version of this panel that
+ * had one row told the operator his machine was full. It showed `≤47G of 48G`
+ * — an honest ceiling, correctly marked, and still wrong in the only sense
+ * that matters: nine gigabytes were free, and the figure that dominated the
+ * window was the one counting file cache as memory in use.
+ *
+ * So MEMORY is what the platform says is actually committed, and the cache it
+ * hands back on demand gets its own line rather than being hidden inside that
+ * number or silently dropped from it. SWAP is under them because it is the row
+ * that decides how to read the first: committed memory near the total is
+ * comfortable until something is swapping, and then it is not.
+ *
+ * The sub-rows are absent, not zero, when an older collector sent no such
+ * reading — a cache row showing nothing would say the machine has no cache.
+ */
+function memoryRows(r: HygieneReport): string {
+  const swapTotal = r.swapTotalBytes;
+  const swap = !r.swapUsedBytes ? ''
+    : `<div class="hyg__row hyg__row--sub hyg__row--pair">
+        <span class="hyg__k">SWAP</span>
+        <span class="hyg__v">${swapTotal?.value === 0
+          ? `<span class="hyg__n">none in use</span>`
+          : `${cell(r.swapUsedBytes)}${swapTotal ? ` of ${cell(swapTotal)}` : ''}`}</span>
+      </div>`;
+  return `<div class="hyg__row">
+      <span class="hyg__k">MEMORY</span>
+      ${bar(r.memUsedBytes.value ?? 0, r.memTotalBytes.value ?? 1)}
+      <span class="hyg__v">${cell(r.memUsedBytes)} of ${cell(r.memTotalBytes)}</span>
+    </div>
+    ${r.memCachedBytes ? `<div class="hyg__row hyg__row--sub hyg__row--pair">
+      <span class="hyg__k">CACHED <small>RETURNED ON DEMAND</small></span>
+      <span class="hyg__v">${cell(r.memCachedBytes)}</span>
+    </div>` : ''}
+    ${swap}`;
+}
+
 function machineBlock(r: HygieneReport): string {
   const now = Date.now();
   const stale = now - r.at > STALE_MS;
@@ -192,11 +232,7 @@ function machineBlock(r: HygieneReport): string {
         <span class="hyg__k">CPU</span>${bar(r.cpuPct.value ?? 0, 100)}
         <span class="hyg__v">${cell(r.cpuPct, 'pct')}</span>
       </div>
-      <div class="hyg__row">
-        <span class="hyg__k">MEMORY</span>
-        ${bar(r.memUsedBytes.value ?? 0, r.memTotalBytes.value ?? 1)}
-        <span class="hyg__v">${cell(r.memUsedBytes)} of ${cell(r.memTotalBytes)}</span>
-      </div>
+      ${memoryRows(r)}
       ${growthBlock(r)}
     </div>
 
@@ -227,9 +263,11 @@ export function mountHygiene(ctx: WinCtx, c: Console) {
       <span class="hyg__n is-approx">~</span> BOUNDS NEITHER WAY ·
       <span class="hyg__n is-none">—</span> NOT MEASURABLE HERE, HOVER FOR WHY
     </p>
+    <section class="hyg__strays" data-strays hidden></section>
     <div class="win__scroll scroll" data-list></div>
   `;
   const list = body.querySelector<HTMLElement>('[data-list]')!;
+  const straysEl = body.querySelector<HTMLElement>('[data-strays]')!;
   const sum = body.querySelector<HTMLElement>('[data-sum]')!;
   const sampleBtn = body.querySelector<HTMLButtonElement>('[data-sample]')!;
 
@@ -269,11 +307,131 @@ export function mountHygiene(ctx: WinCtx, c: Console) {
       .finally(() => { sampleBtn.disabled = false; sampleBtn.textContent = 'SAMPLE NOW'; });
   });
 
+  /* ── Strays: what ORCA left behind, in processes ────────────────── */
+
+  /*
+   * Above the disk report on purpose: this is the half with an action, and a
+   * panel puts what can be decided before what can only be read. It keeps the
+   * window's own language — marks, not colours — because the amber in this
+   * console means "a person is required by a stopped agent", and a leftover
+   * vite is not that. `!` is offered, `?` is shown and not offered, `·` is
+   * recognised and deliberately left alone.
+   */
+  const MARK_OF: Record<Stray['verdict'], string> = { orphan: '!', ambiguous: '?', protected: '·' };
+  /** Rows the operator unfolded, by id. Forgotten on reload, like a scroll position. */
+  const open = new Set<string>();
+  let busy = false;
+
+  function strayRow(s: Stray): string {
+    const where = [s.pid ? `pid ${s.pid}` : '', s.cwd ?? '', s.pane ?? ''].filter(Boolean).join(' · ');
+    return `<div class="hyg__stray is-${s.verdict}" data-stray="${esc(s.id)}">
+      <button class="hyg__stray-head" type="button" data-open aria-expanded="${open.has(s.id)}">
+        <span class="hyg__stray-mark" aria-hidden="true">${MARK_OF[s.verdict]}</span>
+        <span class="hyg__stray-name">${esc(s.label)}</span>
+        <span class="hyg__stray-where">${esc(where)}</span>
+        <span class="hyg__stray-chev" aria-hidden="true">▸</span>
+      </button>
+      ${s.action === 'none' ? '' : `<button class="hyg__stray-act" type="button" data-clean>${s.action === 'retire' ? 'RETIRE' : 'STOP IT'}</button>`}
+      ${open.has(s.id) ? `<div class="hyg__stray-why">
+        <ul>${s.evidence.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>
+        ${s.why ? `<p class="hyg__stray-kept">${esc(s.why)}</p>` : ''}
+      </div>` : ''}
+    </div>`;
+  }
+
+  function paintStrays(): void {
+    const all = [...store.hygiene.values()].flatMap((r) => (r.strays ?? []).map((s) => ({ ...s, machineId: r.machineId })));
+    straysEl.hidden = all.length === 0;
+    if (!all.length) return;
+    const orphans = all.filter((s) => s.verdict === 'orphan');
+    straysEl.innerHTML = `
+      <header class="hyg__strays-head">
+        <span class="px px--tiny">LEFT BEHIND <b>${orphans.length}</b> OF ${all.length}</span>
+        ${orphans.length ? `<button class="chip hyg__stray-all" type="button" data-clean-all${busy ? ' disabled' : ''}>CLEAN ${orphans.length}</button>` : ''}
+      </header>
+      <p class="px px--tiny hyg__legend">
+        <span class="hyg__stray-mark">!</span> NOBODY OWNS IT · ORCA CAN STOP IT ·
+        <span class="hyg__stray-mark">?</span> ORCA'S, BUT SOMETHING DOES NOT ADD UP · SHOWN, NEVER TOUCHED ·
+        <span class="hyg__stray-mark">·</span> RECOGNISED AND LEFT ALONE, HOVER FOR WHY
+      </p>
+      <div class="hyg__stray-list scroll">${all.map(strayRow).join('')}</div>`;
+  }
+
+  /**
+   * Limpiar.
+   *
+   * Dos caminos, y ninguno es nuevo: un proceso va por `strays:clean`, que el
+   * collector revalida antes de mandar una señal; un registro fantasma va por
+   * el archivo de agentes que ya existe, que ignora a los vivos por su cuenta.
+   * Fingir que se mata un agente que no tiene proceso sería la única forma de
+   * hacer esto mal.
+   */
+  function clean(ids: string[]): void {
+    if (busy || !ids.length) return;
+    const all = [...store.hygiene.values()].flatMap((r) => (r.strays ?? []).map((s) => ({ s, machineId: r.machineId })));
+    const picked = all.filter((x) => ids.includes(x.s.id) && x.s.verdict === 'orphan');
+    if (!picked.length) return;
+    busy = true;
+    paintStrays();
+
+    const ghosts = picked.filter((x) => x.s.action === 'retire').map((x) => x.s.agentId!).filter(Boolean);
+    const procs = new Map<string, string[]>();
+    for (const x of picked) {
+      if (x.s.action !== 'terminate') continue;
+      procs.set(x.machineId, [...(procs.get(x.machineId) ?? []), x.s.id]);
+    }
+
+    const jobs: Promise<string>[] = [];
+    if (ghosts.length) {
+      jobs.push(hub.archive({ ids: ghosts }).then((o) => `${o.archived.length} retired`));
+    }
+    for (const [machineId, list2] of procs) {
+      jobs.push(hub.cmd({ k: 'strays:clean', machineId, ids: list2 }).then((data) => {
+        const outcomes = (data ?? []) as StrayOutcome[];
+        for (const o of outcomes) {
+          if (o.result === 'stopped') continue;
+          c.note(`${o.label}: ${o.detail}`, o.result === 'failed' ? 'warn' : 'info');
+        }
+        return `${outcomes.filter((o) => o.result === 'stopped').length} stopped`;
+      }));
+    }
+    void Promise.allSettled(jobs)
+      .then((res) => {
+        const said = res.map((r) => (r.status === 'fulfilled' ? r.value : `failed: ${String(r.reason)}`));
+        c.note(`hygiene: ${said.join(', ')}`);
+      })
+      .finally(() => {
+        busy = false;
+        // Se vuelve a medir: lo que se acaba de terminar tiene que dejar de
+        // salir, y si algo no murió el panel lo enseña otra vez.
+        void hub.hygiene(true).then((res) => store.putHygiene(res.reports)).catch(() => { /* el push lo hará */ });
+        paintStrays();
+      });
+  }
+
+  straysEl.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-clean-all]')) {
+      const all = [...store.hygiene.values()].flatMap((r) => r.strays ?? []);
+      clean(all.filter((s) => s.verdict === 'orphan').map((s) => s.id));
+      return;
+    }
+    const row = t.closest<HTMLElement>('[data-stray]');
+    if (!row) return;
+    const id = row.dataset.stray!;
+    if (t.closest('[data-clean]')) { clean([id]); return; }
+    if (t.closest('[data-open]')) {
+      if (open.has(id)) open.delete(id); else open.add(id);
+      paintStrays();
+    }
+  });
+
   // What is already known paints at once; the request fills in the rest.
   paint();
+  paintStrays();
   void hub.hygiene(false).then((res) => store.putHygiene(res.reports)).catch(() => { /* offline: the push will do it */ });
 
-  const off = store.on((e) => { if (e.k === 'hygiene') paint(); });
+  const off = store.on((e) => { if (e.k === 'hygiene') { paint(); paintStrays(); } });
   // The clock alone turns a report stale, so the header is repainted on a slow tick.
   const tick = window.setInterval(paint, 30_000);
   return { dispose() { off(); window.clearInterval(tick); } };

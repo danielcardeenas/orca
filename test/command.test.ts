@@ -3,8 +3,8 @@
  *
  * The drawing is a shader and a test cannot see it; what a test can hold is
  * the arithmetic that decides what is drawn, which is where the bugs live.
- * Four claims: the ring counts the tasks the hub keeps open and nothing else;
- * an arc is lit while its task moves and dim while it waits; the notches
+ * Four claims: the ring counts the missions the hub keeps open and nothing else;
+ * an arc is lit while its mission moves and dim while it waits; the notches
  * count the questions a person still owes; and a link reaches exactly what
  * CAPCOM launched — never a subagent, never a stranger's session.
  *
@@ -13,14 +13,14 @@
  */
 
 import {
-  commandLinked, commandState, MAX_NOTCHES, MAX_SEGMENTS, openTasks, sameState, TASK_HOT_MS,
+  commandLinked, commandState, MAX_NOTCHES, MAX_SEGMENTS, openMissions, sameState, MISSION_HOT_MS,
 } from '../src/ui/field/command.ts';
 import type { Agent, Escalation, WorldState } from '../src/shared/types.ts';
-import type { CapcomTask } from '../src/shared/tasks.ts';
+import type { CapcomMission } from '../src/shared/missions.ts';
 import { ok, test, type TestModule } from './harness.ts';
 
 const NOW = 1_700_000_000_000;
-const ALL = { tasks: true, notches: true, pulse: true };
+const ALL = { missions: true, notches: true, pulse: true };
 
 function agent(id: string, extra: Partial<Agent> = {}): Agent {
   return {
@@ -34,7 +34,7 @@ function agent(id: string, extra: Partial<Agent> = {}): Agent {
 
 const CAPCOM = agent('cap', { role: 'capcom', state: 'idle' });
 
-function task(id: string, extra: Partial<CapcomTask> = {}): CapcomTask {
+function mission(id: string, extra: Partial<CapcomMission> = {}): CapcomMission {
   return {
     id, title: id, status: 'active', createdAt: NOW - 60_000, updatedAt: NOW - 60_000,
     agentIds: [], messages: [], ...extra,
@@ -45,9 +45,9 @@ function esc(id: string, status: Escalation['status']): Escalation {
   return { id, agentId: 'a1', projectId: 'p1', machineId: 'm1', question: '?', status } as unknown as Escalation;
 }
 
-function world(tasks: CapcomTask[], escs: Escalation[] = []): Pick<WorldState, 'tasks' | 'escalations'> {
+function world(missions: CapcomMission[], escs: Escalation[] = []): Pick<WorldState, 'missions' | 'escalations'> {
   return {
-    tasks: Object.fromEntries(tasks.map((t) => [t.id, t])),
+    missions: Object.fromEntries(missions.map((m) => [m.id, m])),
     escalations: Object.fromEntries(escs.map((e) => [e.id, e])),
   };
 }
@@ -58,7 +58,7 @@ export default {
   suite: 'command',
   tests: [
     test('with no CAPCOM there is no halo at all', () => {
-      const w = world([task('task_1'), task('task_2')], [esc('esc_1', 'pending')]);
+      const w = world([mission('task_1'), mission('task_2')], [esc('esc_1', 'pending')]);
       const s = commandState(w, null, none, NOW, null, ALL);
       return ok('no CAPCOM, no halo', s.segments === 0 && s.notches === 0 && s.turn === 0,
         `segments=${s.segments} notches=${s.notches}`);
@@ -66,25 +66,25 @@ export default {
 
     test('the ring is one arc per open task, and completed tasks leave it', () => {
       const w = world([
-        task('task_1'),
-        task('task_2', { status: 'completed' }),
-        task('task_3'),
-        task('task_4', { status: 'failed' }),
+        mission('task_1'),
+        mission('task_2', { status: 'completed' }),
+        mission('task_3'),
+        mission('task_4', { status: 'failed' }),
         // Retirada por el operador aunque siguiera activa: sin arco.
-        task('task_5', { archivedAt: NOW - 1000 }),
+        mission('task_5', { archivedAt: NOW - 1000 }),
       ]);
       const s = commandState(w, CAPCOM, none, NOW, null, ALL);
-      const open = openTasks(w.tasks).map((t) => t.id);
+      const open = openMissions(w.missions).map((t) => t.id);
       return ok('two arcs for two open tasks; finished and archived leave the ring',
         s.segments === 2 && open.join() === 'task_1,task_3',
         `segments=${s.segments} open=${open.join()}`);
     }),
 
     test('an arc is lit while its task moves and dim while it waits', () => {
-      const fresh = task('task_1', { updatedAt: NOW - TASK_HOT_MS / 2 });
-      const cold = task('task_2', { updatedAt: NOW - TASK_HOT_MS * 3 });
-      const working = task('task_3', { updatedAt: NOW - TASK_HOT_MS * 3, agentIds: ['w1'] });
-      const idle = task('task_4', { updatedAt: NOW - TASK_HOT_MS * 3, agentIds: ['i1'] });
+      const fresh = mission('task_1', { updatedAt: NOW - MISSION_HOT_MS / 2 });
+      const cold = mission('task_2', { updatedAt: NOW - MISSION_HOT_MS * 3 });
+      const working = mission('task_3', { updatedAt: NOW - MISSION_HOT_MS * 3, agentIds: ['w1'] });
+      const idle = mission('task_4', { updatedAt: NOW - MISSION_HOT_MS * 3, agentIds: ['i1'] });
       const fleet = new Map([['w1', agent('w1', { state: 'working' })], ['i1', agent('i1', { state: 'idle' })]]);
       const s = commandState(world([fresh, cold, working, idle]), CAPCOM, (id) => fleet.get(id), NOW, null, ALL);
       // Bit i is segment i, in creation order: 1 and 3 lit, 2 and 4 dim.
@@ -93,7 +93,7 @@ export default {
     }),
 
     test('the operator’s open task is the heavy arc, and only while it is open', () => {
-      const w = world([task('task_1'), task('task_2'), task('task_3')]);
+      const w = world([mission('task_1'), mission('task_2'), mission('task_3')]);
       const on = commandState(w, CAPCOM, none, NOW, 'task_2', ALL);
       const gone = commandState(w, CAPCOM, none, NOW, 'task_9', ALL);
       return ok('the open task marks its own arc', on.active === 1 && gone.active === -1,
@@ -110,9 +110,9 @@ export default {
     }),
 
     test('the ring and the notches are bounded', () => {
-      const tasks = Array.from({ length: MAX_SEGMENTS + 9 }, (_, i) => task(`task_${i}`, { createdAt: NOW - i }));
+      const missions = Array.from({ length: MAX_SEGMENTS + 9 }, (_, i) => mission(`task_${i}`, { createdAt: NOW - i }));
       const escs = Array.from({ length: MAX_NOTCHES + 5 }, (_, i) => esc(`esc_${i}`, 'pending'));
-      const s = commandState(world(tasks, escs), CAPCOM, none, NOW, null, ALL);
+      const s = commandState(world(missions, escs), CAPCOM, none, NOW, null, ALL);
       return ok('bounded', s.segments === MAX_SEGMENTS && s.notches === MAX_NOTCHES,
         `segments=${s.segments} notches=${s.notches}`);
     }),
@@ -133,10 +133,10 @@ export default {
     }),
 
     test('every piece can be switched off on its own', () => {
-      const w = world([task('task_1')], [esc('esc_1', 'pending')]);
+      const w = world([mission('task_1')], [esc('esc_1', 'pending')]);
       const cap = agent('cap', { role: 'capcom', state: 'working' });
-      const off = commandState(w, cap, none, NOW, null, { tasks: false, notches: false, pulse: false });
-      const only = commandState(w, cap, none, NOW, null, { tasks: true, notches: false, pulse: false });
+      const off = commandState(w, cap, none, NOW, null, { missions: false, notches: false, pulse: false });
+      const only = commandState(w, cap, none, NOW, null, { missions: true, notches: false, pulse: false });
       return ok('the flags are independent',
         off.segments === 0 && off.notches === 0 && off.turn === 0 && only.segments === 1 && only.notches === 0,
         `off=${JSON.stringify(off)} tasksOnly=${JSON.stringify(only)}`);
@@ -157,10 +157,10 @@ export default {
     }),
 
     test('the halo only rewrites its uniforms when the picture changed', () => {
-      const w = world([task('task_1')], [esc('esc_1', 'pending')]);
+      const w = world([mission('task_1')], [esc('esc_1', 'pending')]);
       const a = commandState(w, CAPCOM, none, NOW, null, ALL);
       const b = commandState(w, CAPCOM, none, NOW + 1000, null, ALL);
-      const c = commandState(world([task('task_1'), task('task_2')]), CAPCOM, none, NOW, null, ALL);
+      const c = commandState(world([mission('task_1'), mission('task_2')]), CAPCOM, none, NOW, null, ALL);
       return ok('same world, same state', sameState(a, b) && !sameState(a, c),
         `stable=${sameState(a, b)} changed=${!sameState(a, c)}`);
     }),

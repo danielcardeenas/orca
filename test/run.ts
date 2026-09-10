@@ -18,6 +18,18 @@
 // se están comprobando. Se puede recuperar con ORCA_LOG=info.
 process.env['ORCA_LOG'] ??= 'warn';
 
+/*
+ * Esta corrida ES el arnés, y lo dice en voz alta.
+ *
+ * Los hubs que las suites levantan —en proceso o como hijos— son de pruebas, y
+ * sólo un hub que se declara de pruebas admite máquinas sintéticas: la puerta
+ * está en `src/hub/server.ts`, no en el mock. Sin esto, la mitad de las suites
+ * que usan `test/fake-collector.ts` se quedarían sin flota. Ver
+ * `src/shared/synthetic.ts`; la prueba de la frontera pide explícitamente un
+ * hub sin la marca (`startHub({ harness: false })`) para comprobar que rechaza.
+ */
+process.env['ORCA_HARNESS'] ??= '1';
+
 import { execFileSync } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';

@@ -14,6 +14,7 @@
 import type { Escalation } from '../../../shared/types.ts';
 import { store } from '../../store.ts';
 import { hub } from '../../net/client.ts';
+import { bindComposer, composerHint } from '../composer.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { ago, esc } from '../../util.ts';
@@ -62,19 +63,26 @@ export function mountInterrupt(ctx: WinCtx, c: Console) {
     ctx.setTitle(a?.title ?? '');
     const now = Date.now();
     const unblocks = 1 + store.dammedBehind(e.agentId).length;
-    const s = [e.status, e.permission?.phase, e.ceoAttempt?.answer, Math.floor(now / 10000), unblocks].join('|');
+    /*
+     * Del arnés: la pregunta la inventó una máquina de fixture y la respuesta
+     * no le llega a nadie —el hub la tiene en cuarentena (`shared/synthetic.ts`)—.
+     * La ventana se abre igual si la abres tú, y lo dice en la primera línea,
+     * antes de la pregunta, porque una fixture bien escrita se lee como real.
+     */
+    const fake = store.fromHarness(e);
+    const s = [e.status, e.permission?.phase, e.ceoAttempt?.answer, Math.floor(now / 10000), unblocks, fake].join('|');
     if (s === sig) return;
     sig = s;
 
     body.innerHTML = `
       <div class="win__scroll scroll">
-        <div class="block" style="margin:10px 10px 6px">
-          <div class="block__k"><span>${e.permission?.phase === 'pending' ? 'RESPONSE PENDING · ' : ''}${e.urgency === 'blocking' ? 'BLOCKING' : e.urgency.toUpperCase()} · ${ago(e.askedAt, now)}${e.status === 'with_ceo' ? ' · CAPCOM LOOKING' : ''}</span><span>UNBLOCKS ${unblocks}</span></div>
+        <div class="block${fake ? ' block--harness' : ''}" style="margin:10px 10px 6px">
+          <div class="block__k"><span>${fake ? 'HARNESS · ' : ''}${e.permission?.phase === 'pending' ? 'RESPONSE PENDING · ' : ''}${e.urgency === 'blocking' ? 'BLOCKING' : e.urgency.toUpperCase()} · ${ago(e.askedAt, now)}${e.status === 'with_ceo' ? ' · CAPCOM LOOKING' : ''}</span><span>UNBLOCKS ${unblocks}</span></div>
           <div class="block__q mono">${esc(e.question)}</div>
           ${e.context ? `<div data-context style="margin-top:6px"></div>` : ''}
           ${e.ceoAttempt ? `<div class="block__tried mono"><b>CAPCOM TRIED · ${Math.round(e.ceoAttempt.confidence * 100)}%</b>${esc(e.ceoAttempt.answer)}<br/><span style="color:var(--ink-dimmer)">punted: ${esc(e.ceoAttempt.reason)}</span></div>` : ''}
           <div class="block__opts">${e.options.slice(0, 9).map((o, i) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" data-opt="${esc(o)}" data-key="${i + 1}">${esc(o)}</button>`).join('')}${e.options.slice(9).map((o) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" data-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
-          ${e.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><input class="input" data-ans placeholder="type an answer" /><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-send data-key="enter">SEND</button></div>`}
+          ${e.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><textarea class="input" rows="2" data-ans aria-label="Answer" placeholder="${esc(composerHint('type an answer'))}"></textarea><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-send>SEND</button></div>`}
           <div data-remember style="margin-top:8px"></div>
         </div>
         <div class="row row--split" style="padding:4px 10px 10px">
@@ -97,11 +105,12 @@ export function mountInterrupt(ctx: WinCtx, c: Console) {
     if (e.permission) { remembering.el.hidden = true; if (e.permission.phase === 'pending') body.querySelectorAll<HTMLButtonElement>('[data-opt]').forEach(b => { b.disabled = true; }); }
     const remember = () => (remembering?.checked() ? e.question : null);
     body.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) => b.addEventListener('click', () => answerAndSweep(e.id, b.dataset.opt!, remember(), b)));
-    const ans = body.querySelector<HTMLInputElement>('[data-ans]');
+    const ans = body.querySelector<HTMLTextAreaElement>('[data-ans]');
     const sendBtn = body.querySelector<HTMLElement>('[data-send]');
     const send = () => { const v = ans?.value.trim(); if (v) { answerAndSweep(e.id, v, remember(), sendBtn); } };
     sendBtn?.addEventListener('click', send);
-    ans?.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); send(); } });
+    // Una respuesta puede ser de varias líneas: Enter salta, ⌘/⌃Enter manda.
+    if (ans) bindComposer(ans, send);
     body.querySelector('[data-open]')!.addEventListener('click', () => c.openAgent(e.agentId));
     body.querySelector('[data-dismiss]')!.addEventListener('click', () => { hub.dismiss(e.id); ctx.close(); });
     if (ans && !ctx.win.spec.params?.quiet) setTimeout(() => ans.focus(), 60);

@@ -8,13 +8,24 @@
  */
 
 import type { ClientFrame, Command, ServerFrame } from '../../shared/protocol.ts';
-import { PROTOCOL_VERSION, newId } from '../../shared/protocol.ts';
+import { CLOSE_UNAUTHORIZED, PROTOCOL_VERSION, newId } from '../../shared/protocol.ts';
 import type { ArchiveFilter, ArchiveOutcome } from '../../shared/archive.ts';
+import { MISSION_ID_PREFIX } from '../../shared/missions.ts';
 import { store, type OutgoingMessage } from '../store.ts';
 
 type AckResolver = { ok: (data: unknown) => void; fail: (why: string) => void; timer: number };
 /** A window looking into a pane: bytes in, and the one reason the stream ended. */
 export interface TermSink { data(chunk: string): void; exit(reason: string): void }
+
+/** Lo que contesta cualquier petición de AUTOMEJORA: el tablero y el porqué del reloj. */
+export interface ImproveWire {
+  state: import('../../shared/improve.ts').ImproveState;
+  verdict: import('../../shared/improve.ts').DueVerdict;
+  /** Con qué nacería el próximo revisor, ya resuelto por el hub. */
+  choice: ReturnType<typeof import('../../shared/improve.ts').effectiveChoice>;
+  /** La máquina a la que pedirle el catálogo de modelos. */
+  machineId: string | null;
+}
 
 class HubLink {
   private ws: WebSocket | null = null;
@@ -40,7 +51,16 @@ class HubLink {
 
     ws.onopen = () => {
       this.backoff = 500;
-      store.setLink(true);
+      /*
+       * El enlace NO está arriba porque el socket haya abierto.
+       *
+       * Abre siempre —cualquiera puede abrir un socket contra el hub— y sólo
+       * después el hello dice quién eres. Con un token inválido el hub cierra
+       * acto seguido, y dar el enlace por bueno aquí producía un ciclo entero
+       * de «LINK UP» por intento: el destello lima de reconexión y su sonido,
+       * cada pocos segundos, para siempre. El enlace se declara cuando el hub
+       * CONTESTA (`markUp`, en `handle`), que es cuando de verdad lo hay.
+       */
       this.send({ t: 'hello', v: PROTOCOL_VERSION, token: token() });
       this.beat = window.setInterval(() => this.send({ t: 'beat' }), 10_000);
     };
@@ -55,9 +75,16 @@ class HubLink {
       this.handle(frame);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       window.clearInterval(this.beat);
       store.setLink(false);
+      /*
+       * Un cierre por credenciales no es una caída: reintentar no lo arregla
+       * y la consola no puede pedirle nada al hub hasta que alguien cambie el
+       * token. Se dice una vez y se queda dicho —la pantalla de handshake— en
+       * lugar de parpadear una reconexión cada pocos segundos.
+       */
+      if (ev.code === CLOSE_UNAUTHORIZED) store.setAuth(false);
       this.failAllAcks('link dropped');
       // A terminal cannot survive the link: its pty is gone on the far side.
       for (const [id, sink] of this.terms) { this.terms.delete(id); sink.exit('link dropped'); }
@@ -76,6 +103,10 @@ class HubLink {
   }
 
   private handle(f: ServerFrame) {
+    // El hub ha contestado: hay enlace, y el token valía. Las dos cosas se
+    // saben por lo mismo —una trama que llega— y no por el socket abierto.
+    store.setLink(true);
+    store.setAuth(true);
     switch (f.t) {
       case 'world':
         store.replaceWorld(f.state);
@@ -89,8 +120,10 @@ class HubLink {
         }
         store.applyPatch(f.rev, f.ops);
         break;
-      case 'task': store.upsertTask(f.task, f.purged === true); break;
+      case 'mission': store.upsertMission(f.mission, f.purged === true); break;
       case 'hygiene': store.putHygiene(f.reports); break;
+      case 'improve': store.putImprove(f.state, f.verdict, { choice: f.choice, machineId: f.machineId }); break;
+      case 'server': store.putServer(f.rev, f.stale, f.restartable); break;
       case 'ceo:message': store.pushCeo(f.message); break;
       case 'ceo:delta':   store.appendCeoDelta(f.id, f.text); break;
       case 'ceo:done':    store.finishCeo(f.id); break;
@@ -150,7 +183,8 @@ class HubLink {
   }
 
   private async message(id: string, agentId: string | null, text: string, frame: ClientFrame): Promise<unknown> {
-    const message: OutgoingMessage = { id, agentId, text, at: Date.now(), status: 'sending', ...(frame.t === 'ceo:say' && frame.taskId ? { taskId: frame.taskId } : {}) };
+    const missionId = (frame.t === 'ceo:say' || frame.t === 'mission:say') && frame.missionId ? frame.missionId : null;
+    const message: OutgoingMessage = { id, agentId, text, at: Date.now(), status: 'sending', ...(missionId ? { missionId } : {}) };
     store.recordOutgoing(message);
     try {
       const data = await this.request(id, frame);
@@ -190,26 +224,106 @@ class HubLink {
       Promise<{ reports: import('../../shared/hygiene.ts').HygieneReport[]; asked: number }>;
   }
 
-  createTask(title = 'New task'): Promise<import('../../shared/tasks.ts').CapcomTask> {
+  /* ── AUTOMEJORA ─────────────────────────────────────────────────── */
+
+  /**
+   * El tablero de auto-revisión. Se pide al montar el panel; a partir de ahí
+   * los cambios llegan solos como `t:'improve'`, igual que la higiene.
+   */
+  improve(): Promise<ImproveWire> {
     const id = newId('cmd');
-    return this.request(id, { t: 'task:create', id, taskId: newId('task'), title }) as Promise<import('../../shared/tasks.ts').CapcomTask>;
+    return this.request(id, { t: 'improve:get', id }) as Promise<ImproveWire>;
   }
 
-  archiveTask(taskId: string, on = true): Promise<import('../../shared/tasks.ts').CapcomTask> {
+  /** Lanza una revisión ahora. El rechazo trae el motivo, y se enseña. */
+  improveRun(): Promise<ImproveWire & { ok: boolean; reason: string }> {
     const id = newId('cmd');
-    return this.request(id, { t: 'task:archive', id, taskId, on }) as Promise<import('../../shared/tasks.ts').CapcomTask>;
+    return this.request(id, { t: 'improve:run', id }) as Promise<ImproveWire & { ok: boolean; reason: string }>;
   }
 
-  purgeTask(taskId: string): Promise<{ purged: string }> {
+  /** Para la revisión en vuelo: mata al revisor y deja el hueco libre. */
+  improveCancel(): Promise<ImproveWire & { ok: boolean; reason: string }> {
     const id = newId('cmd');
-    return this.request(id, { t: 'task:purge', id, taskId }) as Promise<{ purged: string }>;
+    return this.request(id, { t: 'improve:cancel', id }) as Promise<ImproveWire & { ok: boolean; reason: string }>;
   }
 
-  say(text: string, taskId: string | undefined = store.activeTaskId ?? undefined) {
+  improveAct(proposalId: string, act: 'reply' | 'snooze' | 'dismiss' | 'reopen' | 'seen', opts: { text?: string; untilMs?: number } = {}): Promise<ImproveWire> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'improve:act', id, proposalId, act, ...opts }) as Promise<ImproveWire>;
+  }
+
+  /** Apaga el aviso. Sin ids, el de todas las novedades. */
+  improveSeen(proposalIds?: string[]): Promise<ImproveWire> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'improve:seen', id, ...(proposalIds ? { proposalIds } : {}) }) as Promise<ImproveWire>;
+  }
+
+  /**
+   * Manda una propuesta a CAPCOM. El id de misión se acuña aquí, como en
+   * `createMission`: el hub se niega si la propuesta ya tiene una, así que un
+   * segundo clic no abre una segunda misión.
+   */
+  /**
+   * IMPLEMENT: abre la misión y lanza al implementador. `launched` trae su
+   * callsign; `saved` dice por qué no se pudo lanzar, con la misión escrita.
+   */
+  improveSend(proposalId: string): Promise<ImproveWire & { missionId: string; delivery: 'launched' | 'saved'; callsign?: string }> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'improve:send', id, proposalId, missionId: newId(MISSION_ID_PREFIX) }) as
+      Promise<ImproveWire & { missionId: string; delivery: 'launched' | 'saved'; callsign?: string }>;
+  }
+
+  improveConfig(patch: Partial<import('../../shared/improve.ts').ImproveConfig & { budgetTokens: number; runtime: string | null; model: string | null }>): Promise<ImproveWire> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'improve:config', id, patch }) as Promise<ImproveWire>;
+  }
+
+  /** El catálogo de modelos de una máquina: los alias de Claude y el caché de Codex. */
+  models(machineId: string): Promise<import('../../shared/provider-handoff.ts').ProviderModel[]> {
+    return this.cmd({ k: 'models:list', machineId }) as Promise<import('../../shared/provider-handoff.ts').ProviderModel[]>;
+  }
+
+  createMission(title = 'New mission'): Promise<import('../../shared/missions.ts').CapcomMission> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'mission:create', id, missionId: newId(MISSION_ID_PREFIX), title }) as Promise<import('../../shared/missions.ts').CapcomMission>;
+  }
+
+  archiveMission(missionId: string, on = true): Promise<import('../../shared/missions.ts').CapcomMission> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'mission:archive', id, missionId, on }) as Promise<import('../../shared/missions.ts').CapcomMission>;
+  }
+
+  /**
+   * El parte de una misión. Se pide al abrirlo, no llega solo: ver
+   * `mission:debrief` en shared/protocol.ts.
+   */
+  missionDebrief(missionId: string): Promise<import('../../shared/debrief.ts').MissionDebrief> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'mission:debrief', id, missionId }) as Promise<import('../../shared/debrief.ts').MissionDebrief>;
+  }
+
+  purgeMission(missionId: string): Promise<{ purged: string }> {
+    const id = newId('cmd');
+    return this.request(id, { t: 'mission:purge', id, missionId }) as Promise<{ purged: string }>;
+  }
+
+  say(text: string, missionId: string | undefined = store.activeMissionId ?? undefined) {
     const id = newId('cmd');
     // Every entry point shares the same visible delivery history. Failures are
     // recorded there, including sends from the global command line.
-    void this.message(id, null, text, { t: 'ceo:say', id, text, ...(taskId ? { taskId } : {}) }).catch(() => {});
+    void this.message(id, null, text, { t: 'ceo:say', id, text, ...(missionId ? { missionId } : {}) }).catch(() => {});
+  }
+
+  /**
+   * Una línea EN una misión, desde su ventana. El hub elige el destinatario
+   * —el líder si está en pie, CAPCOM si no— con la misma regla que la ventana
+   * enseña (`missionLeadOf`), y el ack dice a quién fue. El eco se registra
+   * con `missionId` para que la ventana lo pinte en su sitio mientras vuela.
+   */
+  missionSay(missionId: string, text: string): Promise<{ to: 'lead' | 'capcom'; callsign?: string; delivery?: string }> {
+    const id = newId('cmd');
+    return this.message(id, null, text, { t: 'mission:say', id, missionId, text }) as
+      Promise<{ to: 'lead' | 'capcom'; callsign?: string; delivery?: string }>;
   }
 
   /* ── Terminals ──────────────────────────────────────────────────── */
@@ -244,6 +358,14 @@ class HubLink {
   dismiss(id: string) { this.send({ t: 'escalation:dismiss', id }); }
 
   resync() { this.send({ t: 'resync' }); }
+
+  /**
+   * Pide el relevo del hub y de los collectors supervisados.
+   *
+   * Sin ack y sin promesa: lo que contestaría se está muriendo. Quien confirma
+   * es el enlace, cayéndose y volviendo. Ver hud/update.ts.
+   */
+  restart() { this.send({ t: 'restart' }); }
 
   close() { this.closed = true; this.ws?.close(); }
 }
@@ -281,6 +403,48 @@ export function authedUrl(url: string | null): string | null {
   const t = token();
   if (!t || url.includes('token=')) return url;
   return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(t)}`;
+}
+
+/**
+ * Sube un archivo del operador al disco del hub y devuelve dónde quedó.
+ *
+ * Es HTTP y no el socket porque un archivo son bytes, no un frame; misma
+ * puerta que `/api/artifact`: el token va en la URL. El nombre viaja en una
+ * cabecera percent-encoded (una cabecera no lleva UTF-8) y el hub lo sanea.
+ * Ver hub/uploads.ts y windows/attach.ts.
+ */
+export async function uploadFile(file: File): Promise<{ path: string; bytes: number }> {
+  const res = await fetch(authedUrl('/api/uploads')!, {
+    method: 'POST',
+    headers: { 'content-type': file.type || 'application/octet-stream', 'x-orca-name': encodeURIComponent(file.name) },
+    body: file,
+  });
+  const body = await res.json().catch(() => ({})) as { path?: string; bytes?: number; error?: string };
+  if (!res.ok || !body.path) throw new Error(body.error ?? `HTTP ${res.status}`);
+  return { path: body.path, bytes: body.bytes ?? file.size };
+}
+
+/** Can this hub transcribe, and with what. `ready: false` carries the reason in the operator's terms. */
+export async function transcribeStatus(): Promise<{ ready: boolean; reason: string; model: string | null }> {
+  try {
+    const res = await fetch(authedUrl('/api/transcribe')!, { cache: 'no-store' });
+    const body = await res.json() as { ready?: boolean; reason?: string; model?: string | null; error?: string };
+    if (!res.ok) return { ready: false, reason: body.error ?? `HTTP ${res.status}`, model: null };
+    return { ready: !!body.ready, reason: body.reason ?? '', model: body.model ?? null };
+  } catch { return { ready: false, reason: 'hub unreachable', model: null }; }
+}
+
+/**
+ * What the operator said, as 16 kHz mono WAV (`ui/audio.ts`), to whisper.cpp
+ * on the hub, which hears it with the fleet's names in its prompt.
+ */
+export async function transcribeAudio(wav: ArrayBuffer, lang: string): Promise<{ text: string; ms: number }> {
+  const res = await fetch(authedUrl(`/api/transcribe?lang=${encodeURIComponent(lang)}`)!, {
+    method: 'POST', headers: { 'content-type': 'audio/wav' }, body: wav,
+  });
+  const body = await res.json().catch(() => ({})) as { text?: string; ms?: number; error?: string };
+  if (!res.ok || typeof body.text !== 'string') throw new Error(body.error ?? `HTTP ${res.status}`);
+  return { text: body.text, ms: body.ms ?? 0 };
 }
 
 export const hub = new HubLink();

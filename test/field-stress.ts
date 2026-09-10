@@ -49,7 +49,10 @@ interface Row {
 
 async function main() {
   await mkdir(SHOTS, { recursive: true });
-  const { hubWasUp } = await ensureServers({ fleet: false });
+  // `fixtures: true`: no standard fleet —each measurement spawns its own,
+  // sized— but this run does put synthetic machines on the hub, and only a
+  // test hub takes those. See sharing() in visual.ts.
+  const { hubWasUp } = await ensureServers({ fleet: false, fixtures: true });
   if (hubWasUp) {
     console.log('[stress] the hub was already up: its existing agents count toward every row');
   }

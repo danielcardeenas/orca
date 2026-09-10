@@ -49,7 +49,10 @@ import { capcomBrief, cleanCapcomBrief } from './briefs.ts';
 import { extractShortId, paneEnv } from './commands.ts';
 import type { LineageIndex } from './lineage.ts';
 import { paneName, type TmuxHost } from './tmux.ts';
+import { claudeConfigPath, grantTrust } from './trust.ts';
 import { errText, log, oneLine, orcaDir } from './util.ts';
+
+export { claudeConfigPath };
 
 const SCOPE = 'capcom';
 
@@ -90,14 +93,14 @@ export const CAPCOM_FIRST_PROMPT =
  * What a session that replaces a recycled one is told.
  *
  * It has the same brief and none of the memory, and that is the point: the
- * record is on the hub. `briefing` reads it in one call, `list_tasks` says
+ * record is on the hub. `briefing` reads it in one call, `list_missions` says
  * what is owed, and the fleet never notices the hand-over.
  */
 export const CAPCOM_ROTATED_PROMPT =
   'You are a fresh CAPCOM session replacing one that was recycled after too many context compactions.'
   + ' Nothing it remembered is in your head, and nothing needs to be: the hub is the record.'
-  + ' Call `briefing` on the `orca` MCP server first, then `list_tasks` with only_pending, and pick up'
-  + ' whatever is owed — answer the blocked, report_task what finished. Then say in one line what you found.';
+  + ' Call `briefing` on the `orca` MCP server first, then `list_missions` with only_pending, and pick up'
+  + ' whatever is owed — answer the blocked, report_mission what finished. Then say in one line what you found.';
 
 /** The name of the hub's MCP server, as CAPCOM's tools are prefixed with it. */
 export const MCP_SERVER = 'orca';
@@ -120,11 +123,6 @@ export const MCP_SERVER = 'orca';
  */
 export function isHostedId(id: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-}
-
-/** Where Claude Code keeps per-folder trust. `CLAUDE_CONFIG_DIR` moves it. */
-export function claudeConfigPath(env: Record<string, string | undefined> = process.env): string {
-  return path.join(env['CLAUDE_CONFIG_DIR'] ?? os.homedir(), '.claude.json');
 }
 
 /** Where Codex keeps per-folder trust. `CODEX_HOME` moves it. */
@@ -174,38 +172,17 @@ export function preTrustCodex(dir: string, file: string = codexConfigPath()): 'a
  * looking at, that is a CAPCOM that never boots, and the console shows nothing
  * because there is no transcript yet — observed on the first hosted launch.
  * The folder is ORCA's own, created and written by this collector, so the
- * answer is known: it is written where the CLI records it, the way accepting
- * the dialog would.
+ * answer is known.
  *
- * Read-modify-write through a temp file and a rename, so a CLI reading at the
- * same moment sees the old file or the new one, never half. Anything odd
- * — no file, not JSON, not an object — is left alone: the dialog then appears
- * in the TERMINAL and the operator accepts it once.
+ * The writing itself lives in `trust.ts`, which is also what every worker
+ * spawn goes through now: one implementation, one place where the reasoning
+ * for touching the operator's config file is written down. This keeps the
+ * three-way answer CAPCOM's callers already read.
  */
 export function preTrust(dir: string, file: string = claudeConfigPath()): 'already' | 'written' | 'skipped' {
-  let raw: unknown;
-  try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return 'skipped'; }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'skipped';
-  const root = raw as Record<string, unknown>;
-  const projects = isRecord(root['projects']) ? root['projects'] : (root['projects'] = {});
-  const key = path.resolve(dir);
-  const entry = isRecord(projects[key]) ? projects[key] : (projects[key] = {});
-  if (entry['hasTrustDialogAccepted'] === true) return 'already';
-  entry['hasTrustDialogAccepted'] = true;
-  const tmp = `${file}.orca-${process.pid}`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(root, null, 2) + '\n', { mode: 0o644 });
-    fs.renameSync(tmp, file);
-    return 'written';
-  } catch (err) {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* ya no está */ }
-    log('warn', SCOPE, `no pude marcar ${key} como de confianza: ${errText(err)}`);
-    return 'skipped';
-  }
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === 'object' && !Array.isArray(v);
+  const granted = grantTrust(dir, file);
+  if (!granted.ok) return 'skipped';
+  return granted.changed ? 'written' : 'already';
 }
 
 /** Where CAPCOM lives. `ORCA_CAPCOM_DIR` moves it; `ORCA_HOME` moves it too. */

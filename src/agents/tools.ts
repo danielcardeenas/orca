@@ -1,6 +1,7 @@
-import type { TaskStore } from '../hub/tasks.ts';
-import type { CapcomTask, TaskMessage } from '../shared/tasks.ts';
-import { budgetLimit, hasLimit, type AgentBudget, type BudgetConfig, type BudgetLimit, type BudgetScope, type ScopeBudget } from '../hub/budgets.ts';
+import type { MissionStore } from '../hub/missions.ts';
+import { isOwnRepo } from '../hub/publisher.ts';
+import { MISSION_ID_PREFIX, MISSION_STALL_GRACE_MS, missionDebt, missionOwed, missionStall, type CapcomMission, type MissionMessage, type MissionStall } from '../shared/missions.ts';
+import { budgetLimit, fmtTokens, hasLimit, type AgentBudget, type BudgetConfig, type BudgetLimit, type BudgetScope, type ScopeBudget } from '../hub/budgets.ts';
 /**
  * CAPCOM's tool surface — what the hub's MCP server offers the command session.
  *
@@ -25,8 +26,10 @@ import { budgetLimit, hasLimit, type AgentBudget, type BudgetConfig, type Budget
  */
 
 import type {
-  Agent, AgentMessage, Collision, Escalation, MessageKind, Project,
+  Agent, AgentMessage, Collision, Escalation, Machine, MessageKind, Project,
 } from '../shared/types.ts';
+import { isSynthetic } from '../shared/synthetic.ts';
+import type { StoppedProc } from '../hub/harness.ts';
 import type { Command, SpawnAck } from '../shared/protocol.ts';
 import { MAX_SQUAD_NAME, squadName, squadsOf, type Squad } from '../shared/squads.ts';
 import { findPreset, squadStem, type Preset } from '../shared/fleets.ts';
@@ -40,6 +43,7 @@ import { newId } from '../shared/protocol.ts';
 import type { DiscardResult, LandResult } from '../collector/worktrees.ts';
 import { EXTENSION_TOOLS, runExtension } from './extensions.ts';
 import { HYGIENE_TOOLS, runHygieneTool } from './tools-hygiene.ts';
+import { IMPROVE_TOOLS, runImproveTool } from './tools-improve.ts';
 import { briefingLines as journalBriefingLines } from './tools-journal.ts';
 import type { AutonomyApi } from '../hub/autonomy.ts';
 import { handoffText } from '../shared/handoff.ts';
@@ -49,10 +53,26 @@ export interface CeoContext {
   handoffs?(): import('../shared/handoff.ts').CapcomHandoff[];
   /** Las piezas del squad autonomy montadas en el hub (wake, verify, land, budget, journal). */
   autonomy?: AutonomyApi;
-  tasks?: Pick<TaskStore, 'get' | 'assign' | 'message' | 'bindSquad' | 'all'>;
+  missions?: Pick<MissionStore, 'get' | 'create' | 'assign' | 'message' | 'dispatched' | 'bindSquad' | 'all'>;
+  /**
+   * La sección AUTOMEJORA (ver shared/improve.ts). Opcional: un contexto de
+   * pruebas no la monta, y las tres herramientas contestan «no disponible» en
+   * vez de reventar.
+   */
+  improve?: {
+    state(): import('../shared/improve.ts').ImproveState;
+    file(reviewId: string | null, drafts: import('../shared/improve.ts').ProposalDraft[]): import('../hub/improve.ts').FileOutcome;
+    note(id: string, role: 'capcom' | 'system', text: string): import('../shared/improve.ts').ImproveProposal;
+  };
   /** Read-only view of the fleet. */
   agents(): Agent[];
   projects(): Project[];
+  /**
+   * The machines reporting to this hub. Needed for one thing only: telling the
+   * fleet apart from the harness, so a survey never counts a fixture's money as
+   * the operator's. Optional because a context in a box has none.
+   */
+  machines?(): Machine[];
   agent(id: string): Agent | undefined;
   project(id: string): Project | undefined;
   escalation(id: string): Escalation | undefined;
@@ -120,6 +140,8 @@ export interface CeoContext {
    * Never touches a live agent, whatever the filter says.
    */
   archiveAgents(filter: ArchiveFilter, opts: { dryRun?: boolean; by?: string }): ArchiveOutcome;
+  /** Dar por terminado a un agente cuya sesión ya no existe. Ver world.retireAgent. */
+  retireAgent?(id: string, reason: string, by?: string): { ok: boolean; detail: string; ids: string[] };
   /** Las lápidas vigentes: lo archivado, que es lo único purgable. */
   archivedAgents?(): import('../shared/archive.ts').ArchivedAgent[];
   /** Retirar una lápida cuyo transcript ya no existe. */
@@ -146,11 +168,26 @@ export interface CeoContext {
   };
 
   /**
-   * Budgets: ceilings in dollars and minutes on an agent, a squad or a task.
+   * Budgets: ceilings in dollars and minutes on an agent, a squad or a mission.
    * The hub's book keeps them and watches the fleet; the tools only set and
    * read. Optional because a fleet is commandable with no book at all.
    */
   budgets?: BudgetContext;
+
+  /**
+   * Get the test harness out of this hub: stop the processes pushing fixtures
+   * into it, then remove everything they already put in.
+   *
+   * Optional because it needs a live hub — a context in a box has no processes
+   * to stop and no port to match them against.
+   */
+  purgeHarness?(): Promise<HarnessPurge>;
+}
+
+/** What a harness purge did: what it stopped, and what it removed. */
+export interface HarnessPurge {
+  stopped: StoppedProc[];
+  removed: { machines: number; agents: number; projects: number; escalations: number; costUSD: number };
 }
 
 /** The book of budgets, with the fleet already bound to it. */
@@ -199,7 +236,7 @@ export const CEO_TOOLS: ToolSpec[] = [
   {
     name: 'list_fleet',
     description:
-      'Survey the fleet. Returns every project with its agent counts by state, spend, and which agents are blocked. Call this first when you need situational awareness — it is cheap and always current.',
+      'Survey the fleet. Returns the machines reporting to this hub with their load, every project with its agent counts by state, spend and the machine it lives on, and which agents are blocked. Call this first when you need situational awareness — it is cheap and always current. The same repository cloned on two machines shows up as two projects with the same code: spawn_agent and launch_squad pick the least busy one unless you pass `machine`.',
     input_schema: {
       type: 'object',
       properties: {
@@ -267,24 +304,41 @@ export const CEO_TOOLS: ToolSpec[] = [
     strict: true,
   },
   {
-    name: 'report_task',
-    description: 'Publish a reply or final result to the exact ORCA task conversation. Required for every ORCA TASK message: prose in the CLI alone does not reach the task. Assign existing workers by full ID if reusing them.',
-    input_schema: { type: 'object', properties: {
-      task_id: { type: 'string' }, text: { type: 'string' },
-      status: { type: 'string', enum: ['active', 'completed', 'failed'] },
-      agent_ids: { type: 'array', items: { type: 'string' }, description: 'Existing worker IDs to associate, or empty. Spawned agents are associated automatically by task_id.' },
-    }, required: ['task_id', 'text', 'status', 'agent_ids'], additionalProperties: false },
-    strict: true,
-  },
-  {
-    name: 'list_tasks',
+    name: 'open_mission',
     description:
-      'The ORCA task conversations — the ones the operator opens with NEW TASK and that reach you as [ORCA TASK <id>] messages — newest activity first. Each comes with its status, its assigned agents (callsign and state), when it last moved, and whether it is waiting on you: a human message with no report_task reply after it, or worker results nobody has reported. This is how you find out what you owe without remembering it: after a restart or a compaction, call briefing first and then this with only_pending.',
+      'Open a new ORCA mission — a conversation with its own thread, its own agents and its own record on the hub — and get back its mission_id. Indistinguishable from one the operator opens with NEW MISSION: same row in the panel, same window, same archiving. Pass the id you get straight to spawn_agent / launch_squad and publish everything you find with report_mission. Open one for: real work in a repository, anything that takes more than one step or more than one agent, and anything whose result the operator will want to look up later. Leave a bare spawn_agent for the trivial and disposable: a smoke test, a two-minute check, something that fits in one line and nobody reads twice. If the operator says "as a mission" or "no mission", they decide.',
     input_schema: {
       type: 'object',
       properties: {
-        status: { type: ['string', 'null'], enum: ['active', 'completed', 'failed', null], description: 'Only tasks in this status. Null for all.' },
-        only_pending: { type: 'boolean', description: 'Only tasks that are waiting on you: an unanswered human message or unreported worker results.' },
+        title: { type: 'string', description: 'What the mission is, in a few words. It is the row the operator reads in the panel.' },
+        first_message: { type: ['string', 'null'], description: 'The message that opens the thread, so it reads from the top: the operator\'s own words when you are acting on something they said, otherwise your own framing of the work. Null leaves the mission empty.' },
+        project_id: { type: ['string', 'null'], description: 'The project this is about, when there is one. Recorded in the opening message; agents still take their own project_id.' },
+        agent_ids: { type: ['array', 'null'], items: { type: 'string' }, description: 'Agents ALREADY running to adopt into the new mission, by full id — for "that thing you just launched, put it in a thread". Null when the mission starts empty.' },
+      },
+      required: ['title', 'first_message', 'project_id', 'agent_ids'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: 'report_mission',
+    description: 'Publish a reply or final result to the exact ORCA mission conversation. Required for every ORCA MISSION message: prose in the CLI alone does not reach the mission. Assign existing workers by full ID if reusing them.',
+    input_schema: { type: 'object', properties: {
+      mission_id: { type: 'string' }, text: { type: 'string' },
+      status: { type: 'string', enum: ['active', 'completed', 'failed'] },
+      agent_ids: { type: 'array', items: { type: 'string' }, description: 'Existing worker IDs to associate, or empty. Spawned agents are associated automatically by mission_id.' },
+    }, required: ['mission_id', 'text', 'status', 'agent_ids'], additionalProperties: false },
+    strict: true,
+  },
+  {
+    name: 'list_missions',
+    description:
+      'The ORCA mission conversations — the ones the operator opens with NEW MISSION, the ones you open with open_mission, and that reach you as [ORCA MISSION <id>] messages — newest activity first. Each comes with its status, its assigned agents (callsign and state), when it last moved, and whether it is waiting on you: a human message with no report_mission reply after it, or worker results nobody has reported. This is how you find out what you owe without remembering it: after a restart or a compaction, call briefing first and then this with only_pending.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        status: { type: ['string', 'null'], enum: ['active', 'completed', 'failed', null], description: 'Only missions in this status. Null for all.' },
+        only_pending: { type: 'boolean', description: 'Only missions that are waiting on you: an unanswered human message or unreported worker results.' },
         limit: { type: 'integer', description: 'At most this many, newest activity first. Default 20, max 100.' },
       },
       required: ['status', 'only_pending', 'limit'],
@@ -293,15 +347,15 @@ export const CEO_TOOLS: ToolSpec[] = [
     strict: true,
   },
   {
-    name: 'inspect_task',
+    name: 'inspect_mission',
     description:
-      'One ORCA task in full: the whole conversation, every assigned agent with its current state and last result, and exactly what is still owed — the human messages with no reply after them and the worker results not yet reported. Read it before you report_task on a task you do not remember: the conversation on the hub is the record, not your context.',
+      'One ORCA mission in full: the whole conversation, every assigned agent with its current state and last result, and exactly what is still owed — the human messages with no reply after them and the worker results not yet reported. Read it before you report_mission on a mission you do not remember: the conversation on the hub is the record, not your context.',
     input_schema: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'The task id, e.g. "task_ab12".' },
+        mission_id: { type: 'string', description: 'The mission id, e.g. "mission_ab12".' },
       },
-      required: ['task_id'],
+      required: ['mission_id'],
       additionalProperties: false,
     },
     strict: true,
@@ -309,7 +363,7 @@ export const CEO_TOOLS: ToolSpec[] = [
   {
     name: 'briefing',
     description:
-      'A situation report in one call, written for a CAPCOM that remembers nothing: agents blocked and what they are asking, tasks waiting on a reply, workers that finished recently with results nobody reported, squads with no live member left, projects with activity, and the latest rules the operator stored. Short and dense, capped per section. Call it FIRST in a new session and again right after every context compaction, before you act on anything; then inspect_task, inspect_agent or list_agents for whatever needs detail.',
+      'A situation report in one call, written for a CAPCOM that remembers nothing: agents blocked and what they are asking, missions waiting on a reply, workers that finished recently with results nobody reported, squads with no live member left, projects with activity, and the latest rules the operator stored. Short and dense, capped per section. Call it FIRST in a new session and again right after every context compaction, before you act on anything; then inspect_mission, inspect_agent or list_agents for whatever needs detail.',
     input_schema: {
       type: 'object',
       properties: {
@@ -321,14 +375,39 @@ export const CEO_TOOLS: ToolSpec[] = [
     strict: true,
   },
   {
-    name: 'spawn_agent',
+    name: 'register_project',
     description:
-      'Launch a new coding agent (Claude Code by default, or Codex) on a project with a mission. The mission is the whole brief the agent wakes up with, so write it as you would write a task for a capable engineer who has not seen the conversation: what to do, what done looks like, what not to touch. Prefer one well-briefed agent over three vague ones.',
+      'Put a folder on the fleet\'s map by absolute path, and get back its project id and code. ORCA discovers projects from the folders a Claude Code session has already run in, so a directory created five minutes ago does not exist for the fleet yet — this is how it starts existing, instead of seeding it with a throwaway session. You rarely need to call it: spawn_agent and launch_squad take an absolute path directly and register it themselves. Call it when the operator asks you to add or set up a project, or when you want its code before deciding anything. Idempotent: a folder already on the map comes back unchanged.',
     input_schema: {
       type: 'object',
       properties: {
-        project_id: { type: 'string' },
-        task_id: { type: ['string', 'null'], description: 'The ORCA TASK id from the current conversation; null for legacy commands.' },
+        path: { type: 'string', description: 'Absolute path to an existing directory. Not a system path, not inside CAPCOM\'s own workspace.' },
+        machine: {
+          type: ['string', 'null'],
+          description: 'Which machine has the folder: a hostname or machine id from list_fleet. Null: every connected machine that has the folder registers it, and you get back the least busy one.',
+        },
+      },
+      required: ['path', 'machine'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: 'spawn_agent',
+    description:
+      'Launch a new coding agent (Claude Code by default, or Codex) on a project with a mission. The mission is the whole brief the agent wakes up with, so write it as you would brief a capable engineer who has not seen the conversation: what to do, what done looks like, what not to touch. Prefer one well-briefed agent over three vague ones.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        project_id: {
+          type: 'string',
+          description: 'The project id or code from list_fleet — or an ABSOLUTE PATH to a folder. A path ORCA has never seen is registered on the spot, so a brand-new directory needs no ritual: pass /Users/you/projects/thing and launch.',
+        },
+        machine: {
+          type: ['string', 'null'],
+          description: 'Which machine runs it: a hostname or machine id from list_fleet. Null (the usual): when the same project is cloned on several machines, the one with the fewest live agents gets it. Name a machine only when the work has to happen on that disk — the operator said so, or a previous worker left files there.',
+        },
+        mission_id: { type: ['string', 'null'], description: 'The ORCA MISSION id: the one from the current conversation, or one you just opened with open_mission. Null only for a trivial, disposable spawn nobody will look up later.' },
         mission: {
           type: 'string',
           description: 'The complete brief. Include acceptance criteria and any constraint the agent could not infer from the repo.',
@@ -359,16 +438,20 @@ export const CEO_TOOLS: ToolSpec[] = [
           enum: ['auto', 'acceptEdits', 'plan', 'bypassPermissions', null],
           description: 'How much the worker may do without asking. Null or "auto" (the default): it never leaves a prompt waiting on a screen nobody watches — Claude decides for itself, and Codex runs with approvals and sandbox off, because its sandbox blocks the network and a worker that browses cannot work inside it. "plan": read-only reconnaissance, it cannot change anything. "acceptEdits": edits go through but shell commands ask — only when the operator will be sitting at its terminal. "bypassPermissions": never asks, no sandbox; on Codex it is what "auto" already does.',
         },
+        budget_tokens: {
+          type: ['number', 'null'],
+          description: 'Consumption ceiling for this agent in TOKENS — input + output + cache read, its own and every Task subagent it launches. This is the default unit, because the operator pays in subscription quota and not in dollars. At 80% you get a [BUDGET 80%] line; at 100% the hub stops it if it has made no progress lately, and only warns you if it is still working. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or no limit.',
+        },
         budget_usd: {
           type: ['number', 'null'],
-          description: 'Spend ceiling for this agent in dollars. At 80% you get a [BUDGET 80%] line; at 100% the hub stops it if it has made no progress lately, and only warns you if it is still working. Null: the ORCA_DEFAULT_BUDGET_USD default, or no limit.',
+          description: 'Spend ceiling in dollars. IGNORED unless the hub runs with ORCA_BUDGET_MONEY=1: on a subscription those dollars are not real money. It is stored either way, so turning money mode on later brings it back. Null: the ORCA_DEFAULT_BUDGET_USD default, or no limit.',
         },
         budget_min: {
           type: ['number', 'null'],
-          description: 'Time ceiling for this agent in minutes of wall clock since launch, same rules. Null: the ORCA_DEFAULT_BUDGET_MIN default, or no limit.',
+          description: 'Time ceiling in minutes the agent is seen WORKING — thinking, running a tool, booting. Not wall clock: an idle or finished agent accrues nothing and never trips this. Null: the ORCA_DEFAULT_BUDGET_MIN default, or no limit.',
         },
       },
-      required: ['project_id', 'mission', 'parent_agent_id', 'background', 'squad', 'lead', 'runtime', 'model', 'task_id', 'permission_mode', 'budget_usd', 'budget_min'],
+      required: ['project_id', 'machine', 'mission', 'parent_agent_id', 'background', 'squad', 'lead', 'runtime', 'model', 'mission_id', 'permission_mode', 'budget_tokens', 'budget_usd', 'budget_min'],
       additionalProperties: false,
     },
     strict: true,
@@ -380,10 +463,14 @@ export const CEO_TOOLS: ToolSpec[] = [
     input_schema: {
       type: 'object',
       properties: {
-        task_id: { type: ['string', 'null'], description: 'ORCA TASK id for these agents; null for legacy commands.' },
+        mission_id: { type: ['string', 'null'], description: 'ORCA MISSION id for these agents; null only for a trivial, disposable launch.' },
         project_id: {
           type: ['string', 'null'],
           description: 'Where it launches. Null only with a preset that names a project.',
+        },
+        machine: {
+          type: ['string', 'null'],
+          description: 'Which machine runs the whole squad: a hostname or machine id from list_fleet. Null (the usual): with the project cloned on several machines, the least busy one takes it. A squad never straddles machines — its members share a disk.',
         },
         preset: {
           type: ['string', 'null'],
@@ -426,16 +513,18 @@ export const CEO_TOOLS: ToolSpec[] = [
           enum: ['auto', 'acceptEdits', 'plan', 'bypassPermissions', null],
           description: 'How much every agent of the squad may do without asking. Null or "auto" (the default): it never leaves a prompt waiting — Claude decides for itself, Codex runs with approvals and sandbox off. "plan": read-only. "acceptEdits": shell commands ask — only with the operator at the terminal. "bypassPermissions": never asks, no sandbox; on Codex it is what "auto" already does.',
         },
-        budget_usd: { type: ['number', 'null'], description: 'Spend ceiling in dollars for EACH agent of the squad, lead included. Null: the ORCA_DEFAULT_BUDGET_USD default, or none.' },
-        budget_min: { type: ['number', 'null'], description: 'Time ceiling in minutes for EACH agent. Null: the default, or none.' },
-        squad_budget_usd: { type: ['number', 'null'], description: 'Spend ceiling in dollars for the WHOLE squad, summed over every member. At 100% the members that have gone quiet are stopped; the ones still working are reported. Null: none.' },
-        squad_budget_min: { type: ['number', 'null'], description: 'Time ceiling in minutes for the whole squad, wall clock since the lead went up. Null: none.' },
+        budget_tokens: { type: ['number', 'null'], description: 'Token ceiling for EACH agent of the squad, lead included — input + output + cache read, its own and its Task subagents\'. The default unit. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or none.' },
+        budget_usd: { type: ['number', 'null'], description: 'Dollar ceiling for EACH agent. Stored always, evaluated only with ORCA_BUDGET_MONEY=1. Null: the ORCA_DEFAULT_BUDGET_USD default, or none.' },
+        budget_min: { type: ['number', 'null'], description: 'Ceiling in minutes seen WORKING for EACH agent, not wall clock. Null: the default, or none.' },
+        squad_budget_tokens: { type: ['number', 'null'], description: 'Token ceiling for the WHOLE squad, summed over every member and their Task subagents. At 100% the members that have gone quiet are stopped; the ones still working are reported. Null: none.' },
+        squad_budget_usd: { type: ['number', 'null'], description: 'Dollar ceiling for the whole squad. Evaluated only with ORCA_BUDGET_MONEY=1. Null: none.' },
+        squad_budget_min: { type: ['number', 'null'], description: 'Ceiling in minutes seen working for the whole squad, summed over its members. Null: none.' },
         shared_worktree: {
           type: 'boolean',
           description: 'Only matters when the collector runs workers in git worktrees (ORCA_WORKTREES=1). True: the whole squad shares one worktree and one branch, named after the squad, so members see each other\'s files and `land` integrates them together. False (the default): one worktree per member, landed one by one. Share it when the members edit the same files on purpose; keep them apart when they should not.',
         },
       },
-      required: ['project_id', 'preset', 'squad', 'lead_mission', 'members', 'lead_model', 'background', 'runtime', 'task_id', 'permission_mode', 'budget_usd', 'budget_min', 'squad_budget_usd', 'squad_budget_min', 'shared_worktree'],
+      required: ['project_id', 'machine', 'preset', 'squad', 'lead_mission', 'members', 'lead_model', 'background', 'runtime', 'mission_id', 'permission_mode', 'budget_tokens', 'budget_usd', 'budget_min', 'squad_budget_tokens', 'squad_budget_usd', 'squad_budget_min', 'shared_worktree'],
       additionalProperties: false,
     },
     strict: true,
@@ -523,17 +612,18 @@ export const CEO_TOOLS: ToolSpec[] = [
   {
     name: 'set_budget',
     description:
-      'Put a spend or time ceiling on one agent, one squad (shared by every member) or one ORCA task (shared by every agent assigned to it), or change one already set. Name exactly one of agent_id, squad, task_id. Both limits null removes the budget. The hub warns you at 80% with a [BUDGET 80%] line; at 100% it stops agents that have made no progress in the last few minutes (ORCA_BUDGET_ACTION=stop, the default) and only reports the ones still working. Raising a budget re-arms its warnings, so this is also how you let an over-budget agent go on. Returns the current spend against the new ceiling.',
+      'Put a consumption ceiling on one agent (its own tokens plus every Task subagent it launches), one squad (shared by every member) or one ORCA mission (shared by every agent assigned to it), or change one already set. Name exactly one of agent_id, squad, mission_id. All limits null removes the budget. The unit is TOKENS: the operator runs on subscriptions, so quota is what runs out, not dollars — budget_usd is stored but only evaluated when the hub runs with ORCA_BUDGET_MONEY=1. The hub warns you at 80% with a [BUDGET 80%] line; at 100% it stops agents that have made no progress in the last few minutes (ORCA_BUDGET_ACTION=stop, the default) and only reports the ones still working. An idle, finished or already-stopped agent consumes nothing and never generates a line. Raising a budget re-arms its warnings, so this is also how you let an over-budget agent go on. Returns the current consumption against the new ceiling.',
     input_schema: {
       type: 'object',
       properties: {
         agent_id: { type: ['string', 'null'], description: 'Agent id or callsign. Null unless this is an agent budget.' },
         squad: { type: ['string', 'null'], description: 'Squad label, e.g. "audit-01". Null unless this is a squad budget.' },
-        task_id: { type: ['string', 'null'], description: 'ORCA task id, e.g. "task_ab12". Null unless this is a task budget.' },
-        budget_usd: { type: ['number', 'null'], description: 'Dollars, or null for no dollar limit.' },
-        budget_min: { type: ['number', 'null'], description: 'Minutes of wall clock, or null for no time limit.' },
+        mission_id: { type: ['string', 'null'], description: 'ORCA mission id, e.g. "mission_ab12". Null unless this is a mission budget.' },
+        budget_tokens: { type: ['number', 'null'], description: 'Tokens (input + output + cache read), or null for no token limit. The default unit.' },
+        budget_usd: { type: ['number', 'null'], description: 'Dollars, or null. Stored always; evaluated only with ORCA_BUDGET_MONEY=1.' },
+        budget_min: { type: ['number', 'null'], description: 'Minutes seen WORKING, or null for no time limit. Never wall clock since launch.' },
       },
-      required: ['agent_id', 'squad', 'task_id', 'budget_usd', 'budget_min'],
+      required: ['agent_id', 'squad', 'mission_id', 'budget_tokens', 'budget_usd', 'budget_min'],
       additionalProperties: false,
     },
     strict: true,
@@ -568,6 +658,33 @@ export const CEO_TOOLS: ToolSpec[] = [
     strict: true,
   },
   {
+    name: 'purge_harness',
+    description:
+      'Get the test harness out of this hub. Two things in one call, in the only order that works: stop the harness processes that are pushing fixtures at this hub (test/fake-collector.ts, test/visual.ts, test/field-stress.ts, only the ones pointing HERE and never an --isolated run), then remove every synthetic machine from the world along with its agents, projects, questions and its fictitious spend. Reach for this when the console fills with agents nobody launched, when list_fleet suddenly lists projects that are not repositories, or when the operator says the harness got into the real hub. It is scoped by the synthetic mark the machines put on themselves, so it can never touch a real agent, a real project or a real dollar — and it refuses to kill anything that is not one of those three harness programs. A hub that never let the harness in reports zero and changes nothing, which is the normal answer.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: 'retire_agent',
+    description:
+      'Declare an agent gone when its session no longer exists but the hub still believes it is alive. This is the manual way out of a ghost: a session whose tmux pane is closed and whose process is dead leaves its transcript on disk, so the collector never retires it and the hub keeps the last state it saw — often "working", with subagents that finished hours ago. From there it generates notices nobody can silence: archive_agents will not touch it because it is not finished, stop_agent refuses because it has no pane and is not a background session, and interrupt_agent refuses for the same reason. This marks it dead with your reason, which stops every periodic check from ever mentioning it again and makes it archivable. Use it only when you have checked the session is really gone (no pane, no process); the hub also reconciles this on its own after 20 minutes of a supposedly working agent writing nothing. It does not kill anything on the machine — there is nothing left to kill — and it does not delete the transcript.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        agent_id: { type: 'string', description: 'Agent id or callsign.' },
+        reason: { type: 'string', description: 'How you know it is gone, in one line, e.g. "stop_squad hours ago; tmux -L orca ls does not list it and pgrep finds nothing". It goes in the feed and in the tombstone.' },
+      },
+      required: ['agent_id', 'reason'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
     name: 'archive_agents',
     description:
       'Archive finished agents — state done or dead — so they stop cluttering list_fleet, list_agents and the console. Filters combine: a project, a squad, how long ago they finished (older_than_hours), one of the two states, or nothing for every finished agent. Live agents (booting, thinking, working, blocked, idle) are never archived, whatever you pass; a finished parent whose children are still alive is kept and reported. A squad whose last member is archived disappears with it. Nothing on disk is deleted: the transcript stays and a resumed session comes back on its own. Call with dry_run true first — it answers exactly what would go — then again with dry_run false.',
@@ -589,7 +706,7 @@ export const CEO_TOOLS: ToolSpec[] = [
   {
     name: 'land',
     description:
-      'Integrate a worker\'s branch into the project\'s branch. Only for agents the collector launched in a worktree of their own (it runs with ORCA_WORKTREES=1; inspect_agent shows `worktree` and `branch`). What happens, in order: whatever the worker left uncommitted is committed on its branch; the branch is rebased onto the project\'s current branch inside the worktree; the project\'s test suite runs there (package.json scripts.test, a Makefile `test` target, Cargo, Go, pytest, or `test` in <project>/.orca/land.json); and if it passes, ONE commit lands on the project branch naming the callsign and the task. A conflict or a failing suite lands NOTHING: the result says why, with the conflicting files or the suite\'s output, and the project branch is untouched — then decide: send the files back to the worker with send_to_agent, resolve it yourself, or discard. With a squad, every worktree its members have is landed (a shared one, once).',
+      'Integrate a worker\'s branch into the project\'s branch. Only for agents the collector launched in a worktree of their own (it runs with ORCA_WORKTREES=1; inspect_agent shows `worktree` and `branch`). What happens, in order: whatever the worker left uncommitted is committed on its branch; the branch is rebased onto the project\'s current branch inside the worktree; the project\'s test suite runs there (package.json scripts.test, a Makefile `test` target, Cargo, Go, pytest, or `test` in <project>/.orca/land.json); and if it passes, ONE commit lands on the project branch naming the callsign and the mission. A conflict or a failing suite lands NOTHING: the result says why, with the conflicting files or the suite\'s output, and the project branch is untouched — then decide: send the files back to the worker with send_to_agent, resolve it yourself, or discard. With a squad, every worktree its members have is landed (a shared one, once).',
     input_schema: {
       type: 'object',
       properties: {
@@ -809,6 +926,8 @@ export const CEO_TOOLS: ToolSpec[] = [
   ...EXTENSION_TOOLS,
   // What ORCA costs the machine it runs on. Ver tools-hygiene.ts.
   ...HYGIENE_TOOLS,
+  // ORCA mirándose a sí misma. Ver tools-improve.ts.
+  ...IMPROVE_TOOLS,
 ];
 
 /* ── Execution ────────────────────────────────────────────────────── */
@@ -834,21 +953,23 @@ export async function runTool(
       case 'inspect_agent': return await inspectAgent(ctx, input);
       case 'list_agents': return listAgents(ctx, input);
       case 'show': return show(ctx, input);
-      case 'report_task': {
-        if (!ctx.tasks) throw new Error('Task conversations unavailable');
-        const id = String(input.task_id ?? '');
-        ctx.tasks.get(id);
-        if (!['active', 'completed', 'failed'].includes(String(input.status))) throw new Error('Invalid task status');
-        if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('Empty task reply');
+      case 'open_mission': return openMission(ctx, input);
+      case 'report_mission': case 'report_task': {
+        if (!ctx.missions) throw new Error('Mission conversations unavailable');
+        const id = missionRef(input);
+        ctx.missions.get(id);
+        if (!['active', 'completed', 'failed'].includes(String(input.status))) throw new Error('Invalid mission status');
+        if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('Empty mission reply');
         const ids = Array.isArray(input.agent_ids) ? input.agent_ids : [];
         if (!ids.every((v): v is string => typeof v === 'string' && !!ctx.agent(v))) throw new Error('Use known full agent IDs');
-        if (ids.length) ctx.tasks.assign(id, ids);
-        ctx.tasks.message(id, 'capcom', input.text, input.status as 'active' | 'completed' | 'failed');
-        return { result: JSON.stringify({ task_id: id, status: input.status }), summary: `replied to task ${id}` };
+        if (ids.length) ctx.missions.assign(id, ids);
+        ctx.missions.message(id, 'capcom', input.text, input.status as 'active' | 'completed' | 'failed');
+        return { result: JSON.stringify({ mission_id: id, status: input.status }), summary: `replied to mission ${id}` };
       }
-      case 'list_tasks': return listTasks(ctx, input);
-      case 'inspect_task': return inspectTask(ctx, input);
+      case 'list_missions': case 'list_tasks': return listMissions(ctx, input);
+      case 'inspect_mission': case 'inspect_task': return inspectMission(ctx, input);
       case 'briefing': return briefing(ctx, input);
+      case 'register_project': return await registerProject(ctx, input);
       case 'spawn_agent': return await spawnAgent(ctx, input);
       case 'launch_squad': return await launchSquad(ctx, input);
       case 'list_fleets': return listFleets(ctx, input);
@@ -858,8 +979,10 @@ export async function runTool(
       case 'interrupt_agent': return await interruptAgent(ctx, input);
       case 'stop_agent': return await stopAgent(ctx, input);
       case 'set_budget': return setBudget(ctx, input);
+      case 'retire_agent': return retireAgent(ctx, input);
       case 'archive_agents': return await archiveAgents(ctx, input);
       case 'purge_transcripts': return await purgeTranscripts(ctx, input);
+      case 'purge_harness': return await purgeHarness(ctx);
       case 'land': return await landWorktrees(ctx, input);
       case 'discard': return await discardWorktrees(ctx, input);
       case 'recall': return doRecall(ctx, input);
@@ -873,6 +996,8 @@ export async function runTool(
       default: {
         const hyg = await runHygieneTool(ctx, name, input);
         if (hyg) return hyg;
+        const imp = await runImproveTool(ctx, name, input);
+        if (imp) return imp;
         const ext = await runExtension(ctx, name, input);
         if (ext) return ext;
         return { result: `unknown tool: ${name}`, summary: `unknown tool ${name}`, isError: true };
@@ -886,12 +1011,69 @@ export async function runTool(
   }
 }
 
+/**
+ * Echar al arnés de este hub: primero los procesos, luego lo que dejaron.
+ *
+ * El orden no es un detalle. Un `test/fake-collector.ts` vivo se reconecta y
+ * vuelve a plantar sus tres máquinas en cuanto se le purga el mundo, así que
+ * purgar sin parar es barrer mientras alguien tira arena. Por eso es UNA
+ * herramienta y no dos: entre las dos llamadas cabía exactamente la carrera
+ * que hace inútil a la primera.
+ *
+ * Y por eso es una herramienta y no un permiso de `Bash(kill:*)` en el
+ * settings de CAPCOM: esto sólo sabe terminar tres programas conocidos, y sólo
+ * los que apuntan a este hub. Ver src/hub/harness.ts.
+ */
+async function purgeHarness(ctx: CeoContext): Promise<ToolOutcome> {
+  if (!ctx.purgeHarness) {
+    return {
+      result: 'this hub cannot purge the harness: no live world is attached',
+      summary: 'purge_harness unavailable',
+      isError: true,
+    };
+  }
+  const { stopped, removed } = await ctx.purgeHarness();
+  const survivors = stopped.filter((p) => p.how === 'gone');
+  const clean = stopped.length === 0 && removed.machines === 0;
+  return {
+    result: JSON.stringify({
+      stopped: stopped.map((p) => ({ pid: p.pid, script: p.script, how: p.how, command: p.command })),
+      removed: { ...removed, costUSD: Number(removed.costUSD.toFixed(2)) },
+      note: clean
+        ? 'nothing to do: no harness process is pointing at this hub and no synthetic machine is in the world'
+        : 'only machines that declared themselves synthetic were touched; no real agent, project or spend was',
+      ...(survivors.length
+        ? { warning: `${survivors.length} process(es) survived SIGKILL; they may not be ours to signal` }
+        : {}),
+    }, null, 1),
+    summary: clean
+      ? 'no harness found on this hub'
+      : `stopped ${stopped.length} harness process(es), removed ${removed.machines} synthetic machine(s), `
+        + `${removed.agents} agent(s), ${removed.projects} project(s), $${removed.costUSD.toFixed(2)} of fictitious spend`,
+  };
+}
+
 function listFleet(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
   const onlyBlocked = input.only_blocked === true;
+  /*
+   * Lo del arnés va rotulado, no escondido.
+   *
+   * Rotulado porque en el incidente del 2026-09-07 el survey le sirvió al
+   * mando siete "proyectos" que no eran repositorios y más de mil dólares que
+   * nadie pagó, sin nada que los distinguiera de los de verdad. Y no escondido
+   * porque en un hub de pruebas —el único donde esto puede aparecer ya, ver
+   * shared/synthetic.ts— el arnés ES lo que hay que poder mirar: filtrarlo
+   * dejaría a quien desarrolla la consola con un survey vacío.
+   *
+   * El gasto marcado así tampoco suma en ningún total: el de la flota lo
+   * calcula el mundo dejándolo fuera (hub/world.ts).
+   */
+  const fixtures = new Set((ctx.machines?.() ?? []).filter(isSynthetic).map((m) => m.id));
   // CAPCOM's own directory is not a project: it is where the commander lives,
   // and listing it invites launching workers there. It is left out entirely;
   // the agents inside it (CAPCOM, or a stray worker) still show in list_agents.
   const controlProjects = new Set(ctx.agents().filter((a) => a.role === 'capcom').map((a) => a.projectId));
+  const machineName = (id: string): string => ctx.machines?.()?.find((m) => m.id === id)?.hostname ?? id;
   const projects = ctx.projects()
     .filter((p) => !controlProjects.has(p.id))
     .filter((p) => p.rollup.total > 0 && (!onlyBlocked || p.rollup.blocked > 0))
@@ -899,6 +1081,9 @@ function listFleet(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
       id: p.id,
       code: p.code,
       name: p.name,
+      // Two clones of one repo on two machines are two projects with one code;
+      // this is what tells them apart in the survey. See `pickProject`.
+      machine: machineName(p.machineId),
       branch: p.gitBranch,
       dirty: p.gitDirty,
       keys: p.keyNames,
@@ -907,6 +1092,11 @@ function listFleet(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
       blocked: p.rollup.blocked,
       spend_usd: Number(p.rollup.costUSD.toFixed(2)),
       budget: projectBudget(ctx, p.id),
+      // Sólo cuando lo es, y con la advertencia pegada: quien lo lea tiene que
+      // saber en la misma línea que ni el proyecto ni el dinero existen.
+      ...(fixtures.has(p.machineId)
+        ? { synthetic: true, spend_note: 'test fixture: not a repository and not real spend' }
+        : {}),
     }));
 
   // Lo que vive fuera de la flota no se cuenta ni se nombra: los CAPCOM que
@@ -919,6 +1109,9 @@ function listFleet(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
       id: a.id, callsign: a.callsign, project: a.projectId,
       wants: a.block?.summary ?? null, kind: a.block?.kind ?? null,
       waiting_sec: a.block ? Math.round((Date.now() - a.block.since) / 1000) : null,
+      // Un fixture bloqueado no espera una respuesta tuya: la cuarentena ya
+      // impide que su pregunta te llegue. Ver shared/synthetic.ts.
+      ...(fixtures.has(a.machineId) ? { synthetic: true } : {}),
     }));
 
   /*
@@ -934,10 +1127,28 @@ function listFleet(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
     address: `squad:${sq.name}`,
   }));
 
+  /*
+   * The machines, so CAPCOM can see that there is more than one and how busy
+   * each is. `projects` lists every code a machine holds — including clones
+   * with no session yet, which the project list above leaves out — because
+   * "which machine has a copy of X" is the question a launch needs answered.
+   */
+  const machines = (ctx.machines?.() ?? []).map((m) => ({
+    id: m.id,
+    name: m.hostname,
+    online: m.online,
+    live_agents: liveAgentsOn(ctx, m.id),
+    cpu_pct: m.load.cpuPct,
+    mem_pct: m.load.memPct,
+    projects: ctx.projects().filter((p) => p.machineId === m.id && !controlProjects.has(p.id)).map((p) => p.code),
+    ...(fixtures.has(m.id) ? { synthetic: true } : {}),
+  }));
+
   return {
-    result: JSON.stringify({ projects, blocked, squads }, null, 1),
+    result: JSON.stringify({ machines, projects, blocked, squads }, null, 1),
     summary: `surveyed ${projects.length} projects, ${blocked.length} blocked`
-      + (squads.length ? `, ${squads.length} squad(s)` : ''),
+      + (squads.length ? `, ${squads.length} squad(s)` : '')
+      + (machines.length > 1 ? `, ${machines.filter((m) => m.online).length}/${machines.length} machines online` : ''),
   };
 }
 
@@ -958,6 +1169,7 @@ async function inspectAgent(ctx: CeoContext, input: Record<string, unknown>): Pr
   const verify = ctx.autonomy?.verify
     ? await ctx.autonomy.verify.summary(a.id).catch(() => null)
     : null;
+  const lineage = lineageOf(ctx, a);
   return {
     result: JSON.stringify({
       id: a.id, callsign: a.callsign, title: a.title, state: a.state,
@@ -968,11 +1180,88 @@ async function inspectAgent(ctx: CeoContext, input: Record<string, unknown>): Pr
       uptime_sec: Math.round(a.uptimeMs / 1000),
       metrics: a.metrics,
       budget: ctx.budgets ? budgetView(ctx.budgets.agentStatus(a)) : null,
-      parent: a.parentId, children: a.childIds, depth: a.depth,
+      parent: a.parentId, children: lineage.children.map((c) => c.id), depth: a.depth,
+      lineage,
       worktree: a.worktree ?? null, branch: a.branch ?? null,
       verify,
     }, null, 1),
     summary: `inspected ${a.callsign} (${a.state})`,
+  };
+}
+
+/** Un nodo del árbol de descendencia tal y como lo lee el modelo. */
+interface LineageNode {
+  id: string;
+  callsign: string;
+  state: string;
+  /** 1 = hijo, 2 = nieto. */
+  generation: number;
+  /** True cuando es un subagente `Task`: no tiene presupuesto ni sesión propia. */
+  subagent: boolean;
+  tokens: number;
+  tool: string | null;
+}
+
+/** Cuántos nodos del árbol se listan antes de resumir. Veinticuatro nietos caben. */
+const LINEAGE_LIMIT = 40;
+
+/**
+ * Quién cuelga de este agente, AHORA y leído de la flota.
+ *
+ * `Agent.childIds` lo escribe el collector y llegó vacío mientras corrían
+ * veinticuatro nietos: la descendencia sólo aparecía al inspeccionar la
+ * misión. Aquí se deriva de `parentId` sobre la flota entera, que es la misma
+ * fuente que usa el libro de presupuestos para cobrar, así que lo que CAPCOM
+ * ve al mirar a un agente y lo que se le cobra no pueden discrepar.
+ */
+function lineageOf(ctx: CeoContext, a: Agent): {
+  parent: string | null;
+  depth: number;
+  children: LineageNode[];
+  descendants: LineageNode[];
+  live_descendants: number;
+  live_subagents: number;
+  max_generation: number;
+  truncated: number;
+} {
+  const byParent = new Map<string, Agent[]>();
+  for (const x of ctx.agents()) {
+    if (!x.parentId) continue;
+    const list = byParent.get(x.parentId);
+    if (list) list.push(x); else byParent.set(x.parentId, [x]);
+  }
+  const node = (x: Agent, generation: number): LineageNode => ({
+    id: x.id, callsign: x.callsign, state: x.state, generation,
+    subagent: x.subagent === true,
+    tokens: (x.metrics.inputTokens ?? 0) + (x.metrics.outputTokens ?? 0) + (x.metrics.cacheReadTokens ?? 0),
+    tool: x.tool,
+  });
+
+  const all: LineageNode[] = [];
+  const seen = new Set<string>([a.id]);
+  let frontier = [a.id];
+  for (let gen = 1; gen <= 64 && frontier.length; gen++) {
+    const next: string[] = [];
+    for (const parent of frontier) {
+      for (const child of byParent.get(parent) ?? []) {
+        if (seen.has(child.id)) continue;
+        seen.add(child.id);
+        all.push(node(child, gen));
+        next.push(child.id);
+      }
+    }
+    frontier = next;
+  }
+  const live = all.filter((n) => !TERMINAL_STATES.has(n.state as Agent['state']));
+  return {
+    parent: a.parentId,
+    depth: a.depth,
+    children: all.filter((n) => n.generation === 1),
+    descendants: all.slice(0, LINEAGE_LIMIT),
+    live_descendants: live.length,
+    live_subagents: live.filter((n) => n.subagent).length,
+    max_generation: live.reduce((d, n) => Math.max(d, n.generation), 0),
+    truncated: Math.max(0, all.length - LINEAGE_LIMIT),
   };
 }
 
@@ -987,15 +1276,152 @@ async function inspectAgent(ctx: CeoContext, input: Record<string, unknown>): Pr
  */
 function refuseWorkspace(ref: string | null, verb: string): ToolOutcome | null {
   if (!ref) return null;
-  const why = excludedWorkspace(ref.includes('/') ? ref.slice(ref.indexOf('/') + 1) : ref);
+  // Un id de proyecto es `<máquina>/<slug>`; una ruta absoluta se pasa entera.
+  // Cortar por la primera barra en `/Users/dan/x` dejaba `Users/dan/x`, cuyo
+  // slug no empieza por guión y no casa con nada: la guarda se saltaba sola.
+  const why = ref.startsWith('/')
+    ? excludedWorkspace(ref)
+    : excludedWorkspace(ref.includes('/') ? ref.slice(ref.indexOf('/') + 1) : ref);
   if (!why) return null;
   return { result: refusalFor(why), summary: `${verb} refused: not a project`, isError: true };
 }
 
-/** A project by id or by the code the operator sees on the field ("AX"). */
-function findProject(ctx: CeoContext, ref: string): Project | undefined {
-  return ctx.project(ref)
-    ?? ctx.projects().find((p) => p.code.toUpperCase() === ref.toUpperCase());
+/* ── Machines: where a launch lands ─────────────────────────────── */
+
+/**
+ * The fleet can span machines: one hub, one collector per Mac, and the same
+ * repository cloned on more than one of them. A project id carries the
+ * machine (`<machineId>/<slug>`), but CAPCOM speaks in codes and paths, and
+ * a code names every clone at once. These helpers decide which clone a launch
+ * goes to, so that a second machine joining the fleet gets work without
+ * anybody having to address it by name.
+ */
+
+/** A machine by id or by the name the survey shows (its hostname). */
+function findMachine(ctx: CeoContext, ref: string): Machine | undefined {
+  const all = ctx.machines?.() ?? [];
+  const wanted = ref.trim().toLowerCase();
+  return all.find((m) => m.id === ref)
+    ?? all.find((m) => m.hostname.toLowerCase() === wanted)
+    ?? all.find((m) => m.hostname.toLowerCase().split('.')[0] === wanted);
+}
+
+function machineRefOf(raw: unknown): string | null {
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+/** The name the survey shows for a machine, or its id when the hub has no name for it. */
+function machineLabel(ctx: CeoContext, machineId: string): string {
+  return ctx.machines?.()?.find((m) => m.id === machineId)?.hostname ?? machineId;
+}
+
+/**
+ * " on <machine>" for a summary — only when there is more than one machine to
+ * tell apart. On a single Mac the readout says what it always said.
+ */
+function onMachine(ctx: CeoContext, machineId: string): string {
+  const real = (ctx.machines?.() ?? []).filter((m) => !isSynthetic(m));
+  return real.length > 1 ? ` on ${machineLabel(ctx, machineId)}` : '';
+}
+
+/** Live workers on a machine: what "busy" means to a launch. */
+function liveAgentsOn(ctx: CeoContext, machineId: string): number {
+  return ctx.agents().filter((a) =>
+    a.machineId === machineId && a.role !== 'capcom' && a.hidden !== true
+    && !TERMINAL_STATES.has(a.state)).length;
+}
+
+/**
+ * The clone a launch should land on when a code or a path matches several.
+ *
+ * Online machines first — a project whose collector is gone cannot spawn —
+ * then the fewest live agents, then the lowest CPU. Ties keep the order the
+ * world lists them in, so one machine behaves exactly as before: a single
+ * match is returned untouched.
+ */
+function pickProject(ctx: CeoContext, matches: Project[]): Project | undefined {
+  if (matches.length <= 1) return matches[0];
+  const machineOf = (p: Project): Machine | undefined => ctx.machines?.()?.find((m) => m.id === p.machineId);
+  const score = (p: Project): [number, number, number] => {
+    const m = machineOf(p);
+    // Without a machine list (a context in a box) every clone is as good as
+    // the next; with one, an offline clone sorts last and a fixture's clone
+    // (shared/synthetic.ts) after that: the harness never takes real work.
+    return [m && isSynthetic(m) ? 2 : m && !m.online ? 1 : 0, liveAgentsOn(ctx, p.machineId), m?.load.cpuPct ?? 0];
+  };
+  return [...matches].sort((a, b) => {
+    const sa = score(a), sb = score(b);
+    return (sa[0] - sb[0]) || (sa[1] - sb[1]) || (sa[2] - sb[2]);
+  })[0];
+}
+
+/**
+ * A project by id, by the code the operator sees on the field ("AX"), or by
+ * absolute path. `machineId` narrows to one machine's clones; without it,
+ * several matches resolve through `pickProject`.
+ */
+function findProject(ctx: CeoContext, ref: string, machineId: string | null = null): Project | undefined {
+  const byId = ctx.project(ref);
+  if (byId) return !machineId || byId.machineId === machineId ? byId : undefined;
+  const pool = machineId ? ctx.projects().filter((p) => p.machineId === machineId) : ctx.projects();
+  const byCode = pool.filter((p) => p.code.toUpperCase() === ref.toUpperCase());
+  if (byCode.length) return pickProject(ctx, byCode);
+  // Una ruta absoluta es un nombre tan bueno como un id, y es como el
+  // operador habla de una carpeta. Ver `projectFor`.
+  if (!ref.startsWith('/')) return undefined;
+  const path = ref.replace(/\/+$/, '');
+  return pickProject(ctx, pool.filter((p) => p.path === path));
+}
+
+/**
+ * El proyecto que nombra esta llamada, dándolo de alta si hace falta.
+ *
+ * Un id, un código, o una RUTA ABSOLUTA. Lo tercero existe porque los
+ * proyectos se descubren de `~/.claude/projects`: una carpeta recién creada no
+ * está ahí, así que `spawn_agent` contestaba «no project» y la única salida
+ * era sembrarla a mano con un `claude -p` de mentira. Una ruta que ORCA no
+ * conoce se registra en la máquina que la tiene y se lanza sobre ella, en la
+ * misma llamada.
+ *
+ * El alta es del collector, que es quien puede mirar el disco: aquí sólo se
+ * elige la máquina. Con varias conectadas, una ruta no dice de quién es, y el
+ * hub no tiene forma de saberlo — así que se lo pregunta a todas: cada
+ * collector registra la carpeta si la tiene y la rechaza si no, y entre las
+ * que la tienen se lanza en la menos cargada. Con `machine` se va a esa y a
+ * ninguna otra.
+ */
+async function projectFor(
+  ctx: CeoContext, ref: string, machineRef: string | null = null,
+): Promise<{ project: Project } | { error: string }> {
+  let machine: Machine | undefined;
+  if (machineRef) {
+    machine = findMachine(ctx, machineRef);
+    if (!machine) {
+      const names = (ctx.machines?.() ?? []).filter((m) => !isSynthetic(m)).map((m) => `${m.hostname}${m.online ? '' : ' (offline)'}`);
+      return { error: `no machine "${machineRef}". Reporting to this hub: ${names.join(', ') || 'none'}` };
+    }
+    if (!machine.online) return { error: `${machine.hostname} is offline: its collector is not connected` };
+  }
+  const known = findProject(ctx, ref, machine?.id ?? null);
+  if (known) return { project: known };
+  if (!ref.startsWith('/')) return { error: `no project "${ref}"${machine ? ` on ${machine.hostname}` : ''}` };
+  const targets = machine ? [machine] : (ctx.machines?.() ?? []).filter((m) => m.online && !isSynthetic(m));
+  if (targets.length === 0) return { error: `no machine is connected, so nobody can register ${ref}` };
+  const answers = await Promise.all(targets.map(async (m) => {
+    try {
+      const data = await ctx.dispatch(m.id, { k: 'project:register', machineId: m.id, path: ref });
+      const id = (data as { projectId?: unknown } | undefined)?.projectId;
+      return { m, id: typeof id === 'string' ? id : null, why: null as string | null };
+    } catch (err) {
+      return { m, id: null, why: err instanceof Error ? err.message : String(err) };
+    }
+  }));
+  const registered = answers.flatMap((a) => (a.id ? [ctx.project(a.id)] : [])).filter((p): p is Project => !!p);
+  const project = pickProject(ctx, registered);
+  if (project) return { project };
+  if (answers.some((a) => a.id)) return { error: `registered ${ref} but the hub has not seen it yet; try again` };
+  const reasons = answers.map((a) => `${a.m.hostname}: ${a.why ?? 'no answer'}`).join(' · ');
+  return { error: `could not register ${ref} on ${targets.length === 1 ? 'the connected machine' : 'any connected machine'} — ${reasons}` };
 }
 
 function listAgents(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
@@ -1118,12 +1544,40 @@ function follow(ctx: CeoContext, o: Pick<CameraDirective, 'what' | 'refs'> & Par
   try { ctx.show(directive({ ...o, by: 'launch' })); } catch { /* the launch stands */ }
 }
 
+/**
+ * Alta explícita de una carpeta, para cuando el operador la pide por su
+ * nombre y no como efecto de un lanzamiento.
+ *
+ * Todo el trabajo lo hace `projectFor`; esto es la puerta con nombre. Existe
+ * porque «da de alta ese proyecto» es una frase que el operador dice, y sin
+ * una herramienta para ella la única forma de contestarla era lanzar un agente
+ * que no hacía falta.
+ */
+async function registerProject(ctx: CeoContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  const ref = typeof input.path === 'string' ? input.path.trim() : '';
+  if (!ref.startsWith('/')) {
+    return { result: 'path must be absolute, e.g. /Users/you/projects/thing', summary: 'register refused: not an absolute path', isError: true };
+  }
+  const refused = refuseWorkspace(ref, 'register');
+  if (refused) return refused;
+  const found = await projectFor(ctx, ref, machineRefOf(input.machine));
+  if ('error' in found) return { result: found.error, summary: 'register failed', isError: true };
+  const p = found.project;
+  return {
+    result: JSON.stringify({ project_id: p.id, code: p.code, name: p.name, path: p.path, machine: machineLabel(ctx, p.machineId), machine_id: p.machineId }),
+    summary: `${p.code} is on the map · ${p.path}${onMachine(ctx, p.machineId)}`,
+  };
+}
+
 async function spawnAgent(ctx: CeoContext, input: Record<string, unknown>): Promise<ToolOutcome> {
   const projectId = String(input.project_id ?? '');
   const refused = refuseWorkspace(projectId, 'spawn');
   if (refused) return refused;
-  const p = ctx.project(projectId);
-  if (!p) return { result: `no project "${projectId}"`, summary: 'spawn failed: no project', isError: true };
+  // Id, código o ruta absoluta; una ruta que ORCA no conoce se da de alta aquí
+  // mismo en vez de contestar «no project». Ver `projectFor`.
+  const found = await projectFor(ctx, projectId, machineRefOf(input.machine));
+  if ('error' in found) return { result: found.error, summary: 'spawn failed: no project', isError: true };
+  const p = found.project;
   const where = excludedWorkspace(p.path);
   if (where) return { result: refusalFor(where), summary: 'spawn refused: not a project', isError: true };
 
@@ -1164,16 +1618,16 @@ async function spawnAgent(ctx: CeoContext, input: Record<string, unknown>): Prom
     return { result: PERMISSION_MODE_HELP, summary: 'spawn refused: bad permission_mode', isError: true };
   }
 
-  const budget = budgetLimit(input.budget_usd, input.budget_min);
+  const budget = budgetLimit(input.budget_tokens, input.budget_usd, input.budget_min);
   if ('error' in budget) return { result: budget.error, summary: 'spawn refused: bad budget', isError: true };
 
-  const taskId = typeof input.task_id === 'string' ? input.task_id : null;
-  if (taskId) { if (!ctx.tasks) throw new Error('Task conversations unavailable'); ctx.tasks.get(taskId); }
+  const missionId = optionalMissionRef(input);
+  if (missionId) { if (!ctx.missions) throw new Error('Mission conversations unavailable'); ctx.missions.get(missionId); }
   // A durable squad label also identifies a Codex rollout arriving after its
   // launch acknowledgement, when no session ID was available yet.
-  if (taskId) {
-    squad ??= ctx.nextSquadName('task');
-    ctx.tasks!.bindSquad(taskId, squad);
+  if (missionId) {
+    squad ??= ctx.nextSquadName('mission');
+    ctx.missions!.bindSquad(missionId, squad);
   }
   const data = await ctx.dispatch(p.machineId, {
     k: 'spawn',
@@ -1192,7 +1646,7 @@ async function spawnAgent(ctx: CeoContext, input: Record<string, unknown>): Prom
     permissionMode,
   });
 
-  if (taskId && (data as SpawnAck | undefined)?.agentId) ctx.tasks!.assign(taskId, [(data as SpawnAck).agentId!]);
+  if (missionId && (data as SpawnAck | undefined)?.agentId) ctx.missions!.assign(missionId, [(data as SpawnAck).agentId!]);
 
   // Fly the operator to it. By id when the session showed in time, by short
   // id when only the CLI's line named it, and by squad when it has one and
@@ -1204,8 +1658,8 @@ async function spawnAgent(ctx: CeoContext, input: Record<string, unknown>): Prom
   else if (squad) follow(ctx, { what: 'squad', refs: [squad], projectId: p.id, note: `spawned into ${squad} on ${p.code}` });
 
   return {
-    result: JSON.stringify({ ok: true, spawned: data, squad, lead, task_id: taskId, budget: hasLimit(budget) ? budget : null }),
-    summary: `spawned ${typeof input.runtime === 'string' && input.runtime ? input.runtime : 'an'} agent on ${p.code}`
+    result: JSON.stringify({ ok: true, spawned: data, project: p.code, machine: machineLabel(ctx, p.machineId), squad, lead, mission_id: missionId, budget: hasLimit(budget) ? budget : null }),
+    summary: `spawned ${typeof input.runtime === 'string' && input.runtime ? input.runtime : 'an'} agent on ${p.code}${onMachine(ctx, p.machineId)}`
       + (squad ? ` in squad ${squad}${lead ? ' as its lead' : ''}` : ''),
   };
 }
@@ -1391,18 +1845,21 @@ async function launchSquad(ctx: CeoContext, input: Record<string, unknown>): Pro
   const projectRef = typeof input.project_id === 'string' && input.project_id ? input.project_id : null;
   const refused = refuseWorkspace(projectRef, 'launch');
   if (refused) return refused;
-  const p = projectRef
-    ? ctx.project(projectRef)
-    : plan.projectCode
-      ? ctx.projects().find((x) => x.code.toUpperCase() === plan.projectCode!.toUpperCase())
-      : undefined;
+  // Igual que `spawn_agent`: id, código o ruta absoluta, y una ruta nueva se
+  // da de alta antes de lanzar. Ver `projectFor`. El código de un preset pasa
+  // por el mismo camino, para que con dos clones elija el menos cargado.
+  const machineRef = machineRefOf(input.machine);
+  const resolved = projectRef
+    ? await projectFor(ctx, projectRef, machineRef)
+    : plan.projectCode ? await projectFor(ctx, plan.projectCode, machineRef) : null;
+  const p = resolved && !('error' in resolved) ? resolved.project : undefined;
   if (!p) {
     return {
-      result: projectRef
-        ? `no project "${projectRef}"`
-        : plan.projectCode
-          ? `the preset names project code "${plan.projectCode}" and no machine is reporting it. Pass project_id.`
-          : 'name a project_id: the preset does not say where it launches.',
+      result: resolved && 'error' in resolved
+        ? (projectRef
+          ? resolved.error
+          : `the preset names project code "${plan.projectCode}" and no machine is reporting it (${resolved.error}). Pass project_id.`)
+        : 'name a project_id: the preset does not say where it launches.',
       summary: 'launch refused: no project',
       isError: true,
     };
@@ -1410,20 +1867,20 @@ async function launchSquad(ctx: CeoContext, input: Record<string, unknown>): Pro
   const whereSquad = excludedWorkspace(p.path);
   if (whereSquad) return { result: refusalFor(whereSquad), summary: 'launch refused: not a project', isError: true };
 
-  const taskId = typeof input.task_id === 'string' ? input.task_id : null;
-  if (taskId) { if (!ctx.tasks) throw new Error('Task conversations unavailable'); ctx.tasks.get(taskId); }
+  const missionId = optionalMissionRef(input);
+  if (missionId) { if (!ctx.missions) throw new Error('Mission conversations unavailable'); ctx.missions.get(missionId); }
   const background = input.background !== false;
   const permissionMode = permissionModeOf(input.permission_mode);
   if (!permissionMode) {
     return { result: PERMISSION_MODE_HELP, summary: 'launch refused: bad permission_mode', isError: true };
   }
-  const memberBudget = budgetLimit(input.budget_usd, input.budget_min);
+  const memberBudget = budgetLimit(input.budget_tokens, input.budget_usd, input.budget_min);
   if ('error' in memberBudget) return { result: memberBudget.error, summary: 'launch refused: bad budget', isError: true };
-  const squadBudget = budgetLimit(input.squad_budget_usd, input.squad_budget_min);
+  const squadBudget = budgetLimit(input.squad_budget_tokens, input.squad_budget_usd, input.squad_budget_min);
   if ('error' in squadBudget) return { result: `squad_${squadBudget.error}`, summary: 'launch refused: bad squad budget', isError: true };
 
   const squad = plan.fixedSquad ?? ctx.nextSquadName(plan.base);
-  if (taskId) ctx.tasks!.bindSquad(taskId, squad);
+  if (missionId) ctx.missions!.bindSquad(missionId, squad);
   // The squad's own ceiling goes on before anyone is up: it is keyed by the
   // label, and the label is the one thing known before the first ack.
   if (ctx.budgets && hasLimit(squadBudget)) ctx.budgets.set({ kind: 'squad', ref: squad }, squadBudget);
@@ -1455,7 +1912,7 @@ async function launchSquad(ctx: CeoContext, input: Record<string, unknown>): Pro
     leadId = leadAck?.agentId ?? null;
     hangBudget(ctx, leadAck, memberBudget);
     if (!leadId) leadId = await settleLead(ctx, squad, leadAck?.shortId ?? null);
-    if (taskId && leadId) ctx.tasks!.assign(taskId, [leadId]);
+    if (missionId && leadId) ctx.missions!.assign(missionId, [leadId]);
     leadCallsign = leadAck?.callsign ?? (leadId ? ctx.agent(leadId)?.callsign ?? null : null);
   }
 
@@ -1464,7 +1921,7 @@ async function launchSquad(ctx: CeoContext, input: Record<string, unknown>): Pro
   for (const [i, m] of plan.members.entries()) {
     try {
       const ack = (await ctx.dispatch(p.machineId, spawn(m, leadId, false))) as SpawnAck | undefined;
-      if (taskId && ack?.agentId) ctx.tasks!.assign(taskId, [ack.agentId]);
+      if (missionId && ack?.agentId) ctx.missions!.assign(missionId, [ack.agentId]);
       hangBudget(ctx, ack, memberBudget);
       launched.push({ member: i + 1, agent_id: ack?.agentId ?? null, callsign: ack?.callsign ?? null });
     } catch (err) {
@@ -1492,6 +1949,7 @@ async function launchSquad(ctx: CeoContext, input: Record<string, unknown>): Pro
       squad,
       address: `squad:${squad}`,
       project: p.code,
+      machine: machineLabel(ctx, p.machineId),
       source: plan.source,
       lead: plan.lead ? { agent_id: leadId, callsign: leadCallsign } : null,
       members: launched,
@@ -1502,7 +1960,7 @@ async function launchSquad(ctx: CeoContext, input: Record<string, unknown>): Pro
       },
       note: notes.length ? notes.join(' ') : null,
     }, null, 1),
-    summary: `launched squad ${squad} on ${p.code} from ${plan.source}: `
+    summary: `launched squad ${squad} on ${p.code}${onMachine(ctx, p.machineId)} from ${plan.source}: `
       + (plan.lead ? `lead ${leadCallsign ?? '(pending)'}, ` : 'no lead, ')
       + `${launched.length}/${plan.members.length} members`
       + (failures.length ? `, ${failures.length} failed` : ''),
@@ -1663,6 +2121,20 @@ async function landWorktrees(ctx: CeoContext, input: Record<string, unknown>): P
         detail: r.ok ? (r.note ?? null) : `${r.reason}: ${r.detail}`,
       });
     } catch { /* el diario nunca decide si un aterrizaje cuenta */ }
+
+    /*
+     * Una rama que entra en el repo de ORCA cambia la consola que el operador
+     * tiene delante, y hasta que alguien construye no existe para él. Se pide
+     * el build; el publicador agrupa, no deja dos a la vez, y si el árbol no
+     * compila no toca lo que está en pie (hub/publisher.ts). No aterrizar
+     * sobre ORCA no publica nada: los demás proyectos no son esta consola.
+     */
+    if (r.ok) {
+      const landedIn = a.projectId ? ctx.project(a.projectId) : undefined;
+      if (isOwnRepo(landedIn?.path)) {
+        ctx.autonomy?.publisher?.request(`${a.callsign} aterrizó ${r.branch ?? 'su rama'}`);
+      }
+    }
   }
   const next = refused.length
     ? 'for a conflict: send_to_agent the worker with the files and ask it to rebase on the project branch and fix them, or resolve in the worktree yourself; for a failing suite: send the output back to the worker; to drop the work: discard.'
@@ -1735,11 +2207,59 @@ async function stopSquad(ctx: CeoContext, input: Record<string, unknown>): Promi
   };
 }
 
+/**
+ * Mandarle texto a un agente, y dejar constancia de que se le mandó.
+ *
+ * El envío ya devolvía la verdad —un fallo del hub sale como error de
+ * herramienta—, pero esa verdad vivía sólo dentro del turno de CAPCOM: con la
+ * primera rotación desaparecía, y la misión se quedaba activa sin que nada ni
+ * nadie supiera que el encargo nunca salió. Por eso el resultado se anota en
+ * la misión del agente: es el único sitio que sobrevive a la sesión que lo
+ * provocó, y es donde lo busca quien luego pregunta por qué no avanza.
+ *
+ * Lo que se anota es lo que se sabe. `sent` significa que el hub llegó a la
+ * máquina del agente y no una línea más: ver `MissionDispatch`.
+ */
 async function sendToAgent(ctx: CeoContext, input: Record<string, unknown>): Promise<ToolOutcome> {
   const a = findAgent(ctx, String(input.agent_id ?? ''));
   if (!a) return { result: 'no such agent', summary: 'send failed', isError: true };
-  await ctx.dispatch(a.machineId, { k: 'say', agentId: a.id, text: String(input.text ?? '') });
-  return { result: JSON.stringify({ ok: true }), summary: `sent to ${a.callsign}` };
+  const mission = activeMissionOf(ctx, a.id);
+  const note = (delivered: boolean, detail?: string): void => {
+    if (!mission || !ctx.missions?.dispatched) return;
+    try {
+      ctx.missions.dispatched(mission.id, {
+        agentId: a.id, callsign: a.callsign, at: Date.now(), delivered,
+        ...(detail ? { detail } : {}),
+      });
+    } catch { /* el registro nunca decide si el envío salió */ }
+  };
+  try {
+    await ctx.dispatch(a.machineId, { k: 'say', agentId: a.id, text: String(input.text ?? '') });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    note(false, detail);
+    return {
+      result: JSON.stringify({ ok: false, agent: a.callsign, detail }, null, 1),
+      summary: `send to ${a.callsign} failed: ${detail}`.slice(0, 160),
+      isError: true,
+    };
+  }
+  note(true);
+  return {
+    result: JSON.stringify({
+      ok: true, agent: a.callsign, delivery: 'sent',
+      note: 'sent means the text reached the machine, not that the agent has read it. Check for activity before assuming it started.',
+    }, null, 1),
+    summary: `sent to ${a.callsign}`,
+  };
+}
+
+/** La misión activa a la que está asignado un agente, si hay una. */
+function activeMissionOf(ctx: CeoContext, agentId: string): CapcomMission | null {
+  for (const m of Object.values(ctx.missions?.all() ?? {})) {
+    if (m.status === 'active' && !m.archivedAt && m.agentIds.includes(agentId)) return m;
+  }
+  return null;
 }
 
 /**
@@ -1811,20 +2331,29 @@ function hangBudget(ctx: CeoContext, ack: SpawnAck | undefined, limit: BudgetLim
 
 const usd2 = (n: number): number => Number(n.toFixed(2));
 
-/** An agent's budget picture as the model reads it: rounded, and only the ceilings that reach it. */
+/**
+ * An agent's budget picture as the model reads it: rounded, and only the
+ * ceilings that reach it. `tokens` is the unit; `spent_usd` is a FLOOR when
+ * `estimated`, never a total, and it is only a ceiling anyone is measured
+ * against when the hub runs in money mode.
+ */
 function budgetView(b: AgentBudget): Record<string, unknown> | null {
   if (b.lines.length === 0) return null;
   return {
     level: b.level,
     pct: Math.round(b.pct * 100),
+    tokens: Math.round(b.tokens),
+    tokens_human: fmtTokens(b.tokens),
     spent_usd: usd2(b.spent_usd),
-    estimated: b.estimated,
-    elapsed_min: Math.round(b.elapsed_min),
+    usd_is_floor: b.estimated,
+    active_min: Math.round(b.active_min),
+    live_subagents_charged: b.descendants,
     last_progress_sec_ago: b.last_progress_at === null ? null : Math.max(0, Math.round((Date.now() - b.last_progress_at) / 1000)),
+    retired: b.retired,
     limits: b.lines.map((l) => ({
       scope: l.scope, ref: l.ref,
-      limit_usd: l.limit_usd, limit_min: l.limit_min,
-      spent_usd: usd2(l.spent_usd), elapsed_min: Math.round(l.elapsed_min),
+      limit_tokens: l.limit_tokens, limit_usd: l.limit_usd, limit_min: l.limit_min,
+      tokens: Math.round(l.tokens), spent_usd: usd2(l.spent_usd), active_min: Math.round(l.active_min),
       pct: Math.round(l.pct * 100),
     })),
   };
@@ -1833,8 +2362,10 @@ function budgetView(b: AgentBudget): Record<string, unknown> | null {
 function scopeView(s: ScopeBudget | null): Record<string, unknown> | null {
   if (!s) return null;
   return {
-    limit_usd: s.limit.usd, limit_min: s.limit.min,
-    spent_usd: usd2(s.spent_usd), estimated: s.estimated, elapsed_min: Math.round(s.elapsed_min),
+    limit_tokens: s.limit.tokens, limit_usd: s.limit.usd, limit_min: s.limit.min,
+    tokens: Math.round(s.tokens), tokens_human: fmtTokens(s.tokens),
+    spent_usd: usd2(s.spent_usd), usd_is_floor: s.estimated, active_min: Math.round(s.active_min),
+    live_subagents_charged: s.descendants,
     pct: Math.round(s.pct * 100), level: s.level, agents: s.agent_ids.length,
   };
 }
@@ -1846,21 +2377,25 @@ function scopeView(s: ScopeBudget | null): Record<string, unknown> | null {
  */
 function projectBudget(ctx: CeoContext, projectId: string): Record<string, unknown> | null {
   if (!ctx.budgets) return null;
-  let agents = 0, spent = 0, limit = 0, capped = true, warn = 0, over = 0;
+  let agents = 0, tokens = 0, spent = 0, limit = 0, capped = true, warn = 0, over = 0;
   for (const a of ctx.agents()) {
-    if (a.projectId !== projectId || a.role === 'capcom') continue;
+    if (a.projectId !== projectId || a.role === 'capcom' || a.subagent) continue;
     const b = ctx.budgets.agentStatus(a);
     if (b.lines.length === 0) continue;
     agents++;
+    tokens += b.tokens;
     spent += b.spent_usd;
-    // Only the agent's own ceiling adds up per project; a squad's or a task's
+    // Only the agent's own ceiling adds up per project; a squad's or a mission's
     // is shared and would be counted once per member.
     const own = b.lines.find((l) => l.scope === 'agent' || l.scope === 'default');
-    if (own?.limit_usd != null) limit += own.limit_usd; else capped = false;
+    if (own?.limit_tokens != null) limit += own.limit_tokens; else capped = false;
     if (b.level === 'over') over++; else if (b.level === 'warn') warn++;
   }
   if (agents === 0) return null;
-  return { agents, spent_usd: usd2(spent), limit_usd: capped ? usd2(limit) : null, warn, over };
+  return {
+    agents, tokens: Math.round(tokens), tokens_human: fmtTokens(tokens),
+    limit_tokens: capped ? limit : null, spent_usd: usd2(spent), warn, over,
+  };
 }
 
 function setBudget(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
@@ -1868,12 +2403,12 @@ function setBudget(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
   const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
   const agentRef = str(input.agent_id);
   const squadIn = str(input.squad);
-  const taskId = str(input.task_id);
-  const named = [agentRef, squadIn, taskId].filter((v) => v !== null).length;
+  const missionId = str(input.mission_id) ?? str(input.task_id);
+  const named = [agentRef, squadIn, missionId].filter((v) => v !== null).length;
   if (named !== 1) {
-    return { result: 'name exactly one of agent_id, squad or task_id', summary: 'set_budget refused: ambiguous target', isError: true };
+    return { result: 'name exactly one of agent_id, squad or mission_id', summary: 'set_budget refused: ambiguous target', isError: true };
   }
-  const limit = budgetLimit(input.budget_usd, input.budget_min);
+  const limit = budgetLimit(input.budget_tokens, input.budget_usd, input.budget_min);
   if ('error' in limit) return { result: limit.error, summary: 'set_budget refused: bad limit', isError: true };
 
   let scope: BudgetScope;
@@ -1891,24 +2426,35 @@ function setBudget(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
     scope = { kind: 'squad', ref: sq.name };
     label = `squad ${sq.name}`;
   } else {
-    if (!ctx.tasks) throw new Error('Task conversations unavailable');
-    ctx.tasks.get(taskId!);
-    scope = { kind: 'task', ref: taskId! };
-    label = `task ${taskId}`;
+    if (!ctx.missions) throw new Error('Mission conversations unavailable');
+    ctx.missions.get(missionId!);
+    scope = { kind: 'mission', ref: missionId! };
+    label = `mission ${missionId}`;
   }
 
   ctx.budgets.set(scope, limit);
   const status = scopeView(ctx.budgets.scopeStatus(scope));
   const cfg = ctx.budgets.config();
   const words = hasLimit(limit)
-    ? [limit.usd !== null ? `$${limit.usd}` : null, limit.min !== null ? `${limit.min} min` : null].filter(Boolean).join(' / ')
+    ? [
+      limit.tokens !== null ? `${fmtTokens(limit.tokens)} tokens` : null,
+      limit.usd !== null ? `$${limit.usd}${cfg.money ? '' : ' (stored, money mode off)'}` : null,
+      limit.min !== null ? `${limit.min} min active` : null,
+    ].filter(Boolean).join(' / ')
     : 'removed';
   return {
     result: JSON.stringify({
       ok: true, scope: scope.kind, ref: scope.ref,
       budget: hasLimit(limit) ? limit : null,
       status,
-      policy: { at_100_percent: cfg.action, progress_window_min: cfg.progressMs / 60_000 },
+      policy: {
+        unit: cfg.money ? 'tokens + usd' : 'tokens',
+        money_mode: cfg.money,
+        at_100_percent: cfg.action,
+        progress_window_min: cfg.progressMs / 60_000,
+        time_axis: 'minutes seen working, not wall clock since launch',
+        subagent_caps: { max_live_descendants: cfg.maxDescendants, max_depth: cfg.maxDepth, on_reach: cfg.swarmAction },
+      },
     }, null, 1),
     summary: `budget on ${label}: ${words}`,
   };
@@ -1967,6 +2513,43 @@ async function purgeTranscripts(ctx: CeoContext, input: Record<string, unknown>)
     result: JSON.stringify({ dry_run: dryRun, purged, skipped, kilobytes: kb, machines: byMachine.size, errors }, null, 2),
     summary: `purge_transcripts: ${head}${errors.length ? ` · ${errors.length} machine(s) failed` : ''}`,
     ...(errors.length && !purged.length ? { isError: true } : {}),
+  };
+}
+
+/**
+ * La salida manual para un fantasma.
+ *
+ * Existe porque las tres herramientas que deberían resolverlo se remitían la
+ * una a la otra: `interrupt_agent` mandaba a `stop_agent`, `stop_agent`
+ * contestaba que sólo vale para sesiones background, y `archive_agents` decía
+ * que no había nada que archivar porque el hub lo tenía por vivo. Un agente
+ * podía quedarse en ese limbo para siempre, avisando.
+ */
+function retireAgent(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
+  if (!ctx.retireAgent) return { result: 'this hub cannot retire agents', summary: 'retire_agent unavailable', isError: true };
+  const ref = String(input.agent_id ?? '').trim();
+  const a = ref ? findAgent(ctx, ref) : undefined;
+  if (!a) return { result: `no agent matching "${ref}"`, summary: `retire_agent failed: no agent ${ref}`, isError: true };
+  const reason = String(input.reason ?? '').trim();
+  if (!reason) return { result: 'say how you know the session is gone: it goes in the feed and in the tombstone', summary: 'retire_agent refused: no reason', isError: true };
+  const r = ctx.retireAgent(a.id, reason, 'capcom');
+  if (!r.ok) return { result: r.detail, summary: `retire_agent failed: ${a.callsign}`, isError: true };
+  // Y se archiva en el mismo gesto. Marcarlo muerto y dejarlo en la flota no
+  // era una salida: el collector redescubre su transcript y lo vuelve a dar de
+  // alta. La lápida es lo que persiste en disco y lo que el mundo consulta
+  // para no readmitirlo.
+  const out = ctx.archiveAgents({ ids: r.ids }, { dryRun: false, by: 'capcom' });
+  return {
+    result: JSON.stringify({
+      ok: true, agent_id: a.id, callsign: a.callsign, state: 'dead', reason,
+      retired: r.ids.length, archived: out.archived.length,
+      kept: out.kept.map((k) => ({ callsign: k.callsign, reason: k.reason })),
+      squads_retired: out.squadsRetired,
+      next: 'it is off the fleet and every periodic check ignores it. The tombstone survives a hub restart,'
+        + ' so re-reading its transcript will not bring it back. If the session turns out to be alive and'
+        + ' writes again, the hub lifts the tombstone on its own.',
+    }, null, 1),
+    summary: `${a.callsign} retired and archived: ${r.detail}`,
   };
 }
 
@@ -2336,10 +2919,70 @@ function resolveCollision(ctx: CeoContext, input: Record<string, unknown>): Tool
   };
 }
 
-/* ── Tasks and the briefing ───────────────────────────────────────── */
+/* ── Missions and the briefing ────────────────────────────────────── */
 
 /**
- * What a task still owes CAPCOM.
+ * Which mission a call names.
+ *
+ * `task_id` is read alongside `mission_id` because CAPCOM sessions launched
+ * before the rename are still running with the old schema in their context,
+ * and a commander mid-flight should not lose a reply to a renamed argument.
+ */
+function missionRef(input: Record<string, unknown>): string {
+  const id = optionalMissionRef(input);
+  if (!id) throw new Error('mission_id is required');
+  return id;
+}
+
+function optionalMissionRef(input: Record<string, unknown>): string | null {
+  for (const key of ['mission_id', 'task_id'] as const) {
+    const v = input[key];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+/**
+ * Open a mission the way the operator's NEW MISSION button does.
+ *
+ * Same store, same id shape, same broadcast: the console gets the row live and
+ * cannot tell who opened it, which is the point. What CAPCOM adds is the
+ * judgement about WHEN — real work in a repository, more than one step or one
+ * agent, anything whose result gets looked up later — and that judgement lives
+ * in the tool's description and the brief, not here.
+ */
+function openMission(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
+  if (!ctx.missions) throw new Error('Mission conversations unavailable');
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  if (!title) throw new Error('A mission needs a title: it is the row the operator reads');
+  const first = typeof input.first_message === 'string' && input.first_message.trim() ? input.first_message.trim() : null;
+  const projectId = typeof input.project_id === 'string' && input.project_id.trim() ? input.project_id.trim() : null;
+  const project = projectId ? ctx.project(projectId) : undefined;
+  if (projectId && !project) throw new Error(`Unknown project: ${projectId}`);
+  const adopt = Array.isArray(input.agent_ids) ? input.agent_ids.filter((v): v is string => typeof v === 'string' && !!v.trim()) : [];
+  if (!adopt.every((id) => !!ctx.agent(id))) throw new Error('Use known full agent IDs');
+
+  let mission = ctx.missions.create(newId(MISSION_ID_PREFIX), title);
+  if (first) {
+    // `capcom` and not `human`: CAPCOM is the one writing, and a thread that
+    // says otherwise makes the operator read their own words back as if they
+    // had typed them here. The opening line carries the project when there is
+    // one, so the mission reads whole from its first message.
+    mission = ctx.missions.message(mission.id, 'capcom', project ? `[${project.code}] ${first}` : first, 'active');
+  }
+  if (adopt.length) mission = ctx.missions.assign(mission.id, adopt);
+  return {
+    result: JSON.stringify({
+      mission_id: mission.id, title: mission.title, status: mission.status,
+      project: project?.code ?? null, agents: missionAgents(ctx, mission),
+    }),
+    summary: `opened mission ${mission.id} "${clip(mission.title, 60)}"`
+      + (adopt.length ? ` with ${adopt.length} agent(s)` : ''),
+  };
+}
+
+/**
+ * What a mission still owes CAPCOM.
  *
  * The rule is positional and deliberately simple: everything after the last
  * `capcom` message is unanswered. A human line there is a question nobody
@@ -2347,33 +2990,12 @@ function resolveCollision(ctx: CeoContext, input: Record<string, unknown>): Tool
  * matching replies to questions by content — is guesswork, and a commander
  * that has just lost its memory needs a rule it can trust, not one it can
  * argue with.
+ *
+ * El cálculo vive en `shared/missions.ts`, junto al modelo, porque el
+ * despertador de `hub/wake.ts` avisa por la misma deuda que estas herramientas
+ * enseñan, y dos implementaciones de lo mismo acabarían discrepando — y la que
+ * discrepa siempre es la que calla.
  */
-interface TaskDebt {
-  /** Human messages with no report_task after them. */
-  humans: TaskMessage[];
-  /** Worker results with no report_task after them. */
-  results: TaskMessage[];
-  /** When CAPCOM last spoke in this task, or 0 for never. */
-  lastCapcomAt: number;
-}
-
-function taskDebt(task: CapcomTask): TaskDebt {
-  let cut = -1;
-  for (let i = task.messages.length - 1; i >= 0; i--) {
-    if (task.messages[i]!.role === 'capcom') { cut = i; break; }
-  }
-  const tail = task.messages.slice(cut + 1);
-  return {
-    humans: tail.filter((m) => m.role === 'human'),
-    results: tail.filter((m) => m.role === 'agent'),
-    lastCapcomAt: cut >= 0 ? task.messages[cut]!.at : 0,
-  };
-}
-
-/** True when the task is active and something in it is waiting on CAPCOM. */
-function taskOwed(task: CapcomTask, debt: TaskDebt): boolean {
-  return task.status === 'active' && (debt.humans.length > 0 || debt.results.length > 0);
-}
 
 function clip(text: string, n: number): string {
   const one = text.replace(/\s+/g, ' ').trim();
@@ -2395,97 +3017,135 @@ function ago(ms: number): string {
   return `${Math.floor(h / 24)}d${h % 24 ? ` ${h % 24}h` : ''}`;
 }
 
-function taskAgents(ctx: CeoContext, task: CapcomTask): { id: string; callsign: string | null; state: string }[] {
-  return task.agentIds.map((id) => {
+function missionAgents(ctx: CeoContext, mission: CapcomMission): { id: string; callsign: string | null; state: string }[] {
+  return mission.agentIds.map((id) => {
     const a = ctx.agent(id);
     return { id, callsign: a?.callsign ?? null, state: a?.state ?? 'unknown' };
   });
 }
 
-function listTasks(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
-  if (!ctx.tasks) throw new Error('Task conversations unavailable');
+/**
+ * Si una misión está parada, mirada con la flota que este contexto ve.
+ *
+ * La regla vive en shared/missions.ts y no aquí: la comparten estas
+ * herramientas, el despertador del hub y el panel de la consola, y tres
+ * versiones de «esto no avanza» acabarían discrepando.
+ */
+function stallOf(ctx: CeoContext, mission: CapcomMission, now: number): MissionStall | null {
+  return missionStall(mission, (id) => ctx.agent(id), now, MISSION_STALL_GRACE_MS);
+}
+
+/** El parón, como lo lee un modelo: el motivo, desde cuándo y qué se sabe. */
+function stallJson(stall: MissionStall | null, now: number): Record<string, unknown> | null {
+  if (!stall) return null;
+  return {
+    reason: stall.reason,
+    since: iso(stall.since),
+    waiting: ago(now - stall.since),
+    agent: stall.callsign ?? stall.agentId,
+    detail: stall.detail,
+  };
+}
+
+function listMissions(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
+  if (!ctx.missions) throw new Error('Mission conversations unavailable');
   const status = typeof input.status === 'string' && input.status.trim() ? input.status.trim() : null;
-  if (status && !['active', 'completed', 'failed'].includes(status)) throw new Error('Invalid task status');
+  if (status && !['active', 'completed', 'failed'].includes(status)) throw new Error('Invalid mission status');
   const onlyPending = input.only_pending === true;
   const limit = Math.max(1, Math.min(100, Number.isFinite(Number(input.limit)) && Number(input.limit) > 0 ? Math.floor(Number(input.limit)) : 20));
   const now = Date.now();
 
-  // Una tarea archivada la retiró el operador: no es trabajo pendiente ni
+  // Una misión archivada la retiró el operador: no es trabajo pendiente ni
   // vuelve por listarla. Se recupera devolviéndola desde la consola.
-  const all = Object.values(ctx.tasks.all())
-    .filter((t) => !t.archivedAt)
-    .filter((t) => !status || t.status === status)
-    .map((t) => ({ task: t, debt: taskDebt(t) }))
-    .filter(({ task, debt }) => !onlyPending || taskOwed(task, debt))
-    .sort((a, b) => b.task.updatedAt - a.task.updatedAt);
+  const all = Object.values(ctx.missions.all())
+    .filter((m) => !m.archivedAt)
+    .filter((m) => !status || m.status === status)
+    .map((m) => ({ mission: m, debt: missionDebt(m), stall: stallOf(ctx, m, now) }))
+    // Una misión parada es trabajo pendiente aunque no deba ningún mensaje:
+    // es exactamente la que se quedaba fuera de `only_pending` y por eso nadie
+    // volvía a mirarla.
+    .filter(({ mission, debt, stall }) => !onlyPending || missionOwed(mission, debt) || !!stall)
+    .sort((a, b) => b.mission.updatedAt - a.mission.updatedAt);
 
-  const tasks = all.slice(0, limit).map(({ task, debt }) => {
-    const last = task.messages.at(-1);
+  const missions = all.slice(0, limit).map(({ mission, debt, stall }) => {
+    const last = mission.messages.at(-1);
     const oldest = debt.humans[0];
     return {
-      id: task.id,
-      title: task.title,
-      status: task.status,
-      created_at: iso(task.createdAt),
-      updated_at: iso(task.updatedAt),
+      id: mission.id,
+      title: mission.title,
+      status: mission.status,
+      created_at: iso(mission.createdAt),
+      updated_at: iso(mission.updatedAt),
       last_message_at: iso(last?.at),
       last_message_role: last?.role ?? null,
-      messages: task.messages.length,
-      agents: taskAgents(ctx, task),
-      squads: task.squads ?? [],
-      awaiting_reply: task.status === 'active' && debt.humans.length > 0,
+      messages: mission.messages.length,
+      agents: missionAgents(ctx, mission),
+      squads: mission.squads ?? [],
+      awaiting_reply: mission.status === 'active' && debt.humans.length > 0,
       // The oldest unanswered line: what the operator is actually waiting on.
       pending_human: oldest ? { text: clip(oldest.text, 200), waiting: ago(now - oldest.at) } : null,
-      unreported_results: task.status === 'active' ? debt.results.length : 0,
+      unreported_results: mission.status === 'active' ? debt.results.length : 0,
+      stalled: stallJson(stall, now),
     };
   });
-  const owed = tasks.filter((t) => t.awaiting_reply || t.unreported_results > 0).length;
+  const owed = missions.filter((m) => m.awaiting_reply || m.unreported_results > 0 || m.stalled).length;
   return {
-    result: JSON.stringify({ tasks, total: all.length, shown: tasks.length }, null, 1),
-    summary: `listed ${tasks.length} of ${all.length} task(s)`
+    result: JSON.stringify({ missions, total: all.length, shown: missions.length }, null, 1),
+    summary: `listed ${missions.length} of ${all.length} mission(s)`
       + (status ? ` (${status})` : '') + (onlyPending ? ', pending only' : '')
       + (owed ? `, ${owed} waiting on you` : ''),
   };
 }
 
-function inspectTask(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
-  if (!ctx.tasks) throw new Error('Task conversations unavailable');
-  const id = String(input.task_id ?? '').trim();
-  const task = ctx.tasks.get(id);
-  const debt = taskDebt(task);
+function inspectMission(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome {
+  if (!ctx.missions) throw new Error('Mission conversations unavailable');
+  const id = missionRef(input);
+  const mission = ctx.missions.get(id);
+  const debt = missionDebt(mission);
   const now = Date.now();
-  const who = (m: TaskMessage): string | null => {
+  const who = (m: MissionMessage): string | null => {
     if (!m.agentId) return null;
     return ctx.agent(m.agentId)?.callsign ?? m.agentId;
   };
-  const agents = task.agentIds.map((agentId) => {
+  const agents = mission.agentIds.map((agentId) => {
     const a = ctx.agent(agentId);
-    const reported = [...task.messages].reverse().find((m) => m.agentId === agentId);
+    const reported = [...mission.messages].reverse().find((m) => m.agentId === agentId);
     return a ? {
       id: a.id, callsign: a.callsign, state: a.state, project: ctx.project(a.projectId)?.code ?? a.projectId,
       squad: a.squad, tool: a.tool, blocked_on: a.block?.summary ?? null,
       last_say: a.lastSay, updated_at: iso(a.updatedAt),
-      last_result_in_task: reported ? clip(reported.text, 200) : null,
-    } : { id: agentId, callsign: null, state: 'unknown', last_result_in_task: reported ? clip(reported.text, 200) : null };
+      last_result_in_mission: reported ? clip(reported.text, 200) : null,
+    } : { id: agentId, callsign: null, state: 'unknown', last_result_in_mission: reported ? clip(reported.text, 200) : null };
   });
+  const stall = stallOf(ctx, mission, now);
   const owed: string[] = [];
-  if (task.status === 'active' && debt.humans.length) owed.push(`reply to ${debt.humans.length} human message(s)`);
-  if (task.status === 'active' && debt.results.length) owed.push(`report ${debt.results.length} worker result(s)`);
+  if (mission.status === 'active' && debt.humans.length) owed.push(`reply to ${debt.humans.length} human message(s)`);
+  if (mission.status === 'active' && debt.results.length) owed.push(`report ${debt.results.length} worker result(s)`);
+  // Un parón es deuda aunque no haya ni un mensaje esperando: era el caso que
+  // se contestaba «owed: nothing» sobre una misión que llevaba horas quieta.
+  if (stall) owed.push(`unstick it (${stall.reason})`);
   return {
     result: JSON.stringify({
-      id: task.id, title: task.title, status: task.status,
-      created_at: iso(task.createdAt), updated_at: iso(task.updatedAt),
-      squads: task.squads ?? [],
+      id: mission.id, title: mission.title, status: mission.status,
+      created_at: iso(mission.createdAt), updated_at: iso(mission.updatedAt),
+      squads: mission.squads ?? [],
       agents,
-      conversation: task.messages.map((m) => ({
+      conversation: mission.messages.map((m) => ({
         role: m.role, at: iso(m.at), agent: who(m), text: m.text,
       })),
-      awaiting_reply: task.status === 'active' && debt.humans.length > 0,
+      awaiting_reply: mission.status === 'active' && debt.humans.length > 0,
       pending_human: debt.humans.map((m) => ({ text: m.text, waiting: ago(now - m.at) })),
       unreported_results: debt.results.map((m) => ({ agent: who(m), text: clip(m.text, 400) })),
+      // El último encargo a cada agente y lo que se sabe de él. `sent` dice que
+      // llegó a la máquina; leerlo es otra cosa, y se mira en `agents[].state`.
+      last_orders: Object.values(mission.dispatches ?? {}).map((d) => ({
+        agent: d.callsign ?? d.agentId, at: iso(d.at),
+        delivery: d.delivered ? 'sent' : 'failed', ...(d.detail ? { detail: d.detail } : {}),
+      })),
+      stalled: stallJson(stall, now),
       owed: owed.length ? owed.join('; ') : 'nothing',
     }, null, 1),
-    summary: `inspected task ${task.id} (${task.status})${owed.length ? ` — owed: ${owed.join('; ')}` : ''}`,
+    summary: `inspected mission ${mission.id} (${mission.status})${owed.length ? ` — owed: ${owed.join('; ')}` : ''}`,
   };
 }
 
@@ -2540,44 +3200,55 @@ function briefing(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome 
       + (a.block?.escalationId ? ` (${a.block.escalationId})` : ''));
   }
 
-  /* Tasks owed, oldest debt first: a human waiting an hour outranks one waiting a minute. */
-  const debts = Object.values(ctx.tasks?.all() ?? {})
-    .map((task) => ({ task, debt: taskDebt(task) }))
-    .filter(({ task, debt }) => taskOwed(task, debt))
-    .sort((a, b) => (a.debt.humans[0]?.at ?? a.task.updatedAt) - (b.debt.humans[0]?.at ?? b.task.updatedAt));
-  const owed = debts.map(({ task, debt }) => {
+  /* Missions owed, oldest debt first: a human waiting an hour outranks one waiting a minute. */
+  const debts = Object.values(ctx.missions?.all() ?? {})
+    .map((mission) => ({ mission, debt: missionDebt(mission) }))
+    .filter(({ mission, debt }) => missionOwed(mission, debt))
+    .sort((a, b) => (a.debt.humans[0]?.at ?? a.mission.updatedAt) - (b.debt.humans[0]?.at ?? b.mission.updatedAt));
+  const owed = debts.map(({ mission, debt }) => {
     const parts: string[] = [];
     const h = debt.humans[0];
     if (h) parts.push(`human waiting ${ago(now - h.at)}: "${clip(h.text, 120)}"`);
     if (debt.results.length) parts.push(`${debt.results.length} unreported result(s) from ${[...new Set(debt.results.map((m) => (m.agentId ? name(m.agentId) : '?')))].join(', ')}`);
-    return `${task.id} "${clip(task.title, 60)}" — ${parts.join('; ')}`;
+    return `${mission.id} "${clip(mission.title, 60)}" — ${parts.join('; ')}`;
   });
 
-  /* Finished lately and nobody reported it. Owned by a task, or by nobody. */
-  const taskOf = new Map<string, CapcomTask>();
-  for (const task of Object.values(ctx.tasks?.all() ?? {})) {
-    // An active task wins over a closed one that also names the agent.
-    for (const id of task.agentIds) if (task.status === 'active' || !taskOf.has(id)) taskOf.set(id, task);
+  /* Active missions that are not moving: the send never landed, nobody is on
+   * them, or nobody has shown a sign of life since the order went out. None of
+   * these owes a message, so none of them appeared above — which is exactly
+   * how two missions stayed "active" and looked healthy for a day. */
+  const stalled = Object.values(ctx.missions?.all() ?? {})
+    .map((mission) => ({ mission, stall: stallOf(ctx, mission, now) }))
+    .filter((x): x is { mission: CapcomMission; stall: MissionStall } => !!x.stall)
+    .sort((a, b) => a.stall.since - b.stall.since)
+    .map(({ mission, stall }) =>
+      `${mission.id} "${clip(mission.title, 60)}" — ${stall.reason} for ${ago(now - stall.since)}: ${clip(stall.detail, 200)}`);
+
+  /* Finished lately and nobody reported it. Owned by a mission, or by nobody. */
+  const missionOf = new Map<string, CapcomMission>();
+  for (const mission of Object.values(ctx.missions?.all() ?? {})) {
+    // An active mission wins over a closed one that also names the agent.
+    for (const id of mission.agentIds) if (mission.status === 'active' || !missionOf.has(id)) missionOf.set(id, mission);
   }
   const finished = agents
     .filter((a) => TERMINAL_STATES.has(a.state) && a.updatedAt >= cutoff)
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .flatMap((a) => {
-      const task = taskOf.get(a.id);
-      if (task) {
-        // A closed task was reported by definition; in an open one, reported
+      const mission = missionOf.get(a.id);
+      if (mission) {
+        // A closed mission was reported by definition; in an open one, reported
         // means CAPCOM spoke after the agent's last result landed.
-        if (task.status !== 'active') return [];
-        const debt = taskDebt(task);
-        const landed = task.messages.some((m) => m.agentId === a.id);
-        // Its result is in the task: reported unless it sits after CAPCOM's
-        // last word. Not in the task yet: reported only if CAPCOM spoke after
+        if (mission.status !== 'active') return [];
+        const debt = missionDebt(mission);
+        const landed = mission.messages.some((m) => m.agentId === a.id);
+        // Its result is in the mission: reported unless it sits after CAPCOM's
+        // last word. Not in the mission yet: reported only if CAPCOM spoke after
         // the agent finished.
         const reported = landed ? !debt.results.some((m) => m.agentId === a.id) : a.updatedAt <= debt.lastCapcomAt;
         if (reported) return [];
       }
       return [`${a.callsign} [${code(a.projectId)}] ${a.state} ${ago(now - a.updatedAt)} ago`
-        + (task ? ` · ${task.id} "${clip(task.title, 40)}"` : ' · no task')
+        + (mission ? ` · ${mission.id} "${clip(mission.title, 40)}"` : ' · no mission')
         + (a.lastSay ? `: "${clip(a.lastSay, 120)}"` : '')];
     });
 
@@ -2609,8 +3280,9 @@ function briefing(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome 
     ...section('CAPCOM SESSION HANDOFFS — earlier history is stored separately', (ctx.handoffs?.() ?? []).slice(-3).map(handoffText), 3),
     ...section('CAPCOM MODEL CHANGES — same session, history retained', ctx.agents().filter(a => a.role === 'capcom').flatMap(a => a.modelControl?.events.slice(-3).map(e => `${new Date(e.at).toISOString()} ${e.text}`) ?? []), 3),
     ...section('BLOCKED — answer with answer_agent or pass up with ask_human', blocked),
-    ...section('TASKS WAITING ON YOU — inspect_task, then report_task', owed),
-    ...section(`FINISHED IN THE LAST ${hours}h, NOT REPORTED — report_task or archive_agents`, finished),
+    ...section('MISSIONS WAITING ON YOU — inspect_mission, then report_mission', owed),
+    ...section('MISSIONS ACTIVE WITH NO PROGRESS — inspect_mission; re-send, reassign or close. ORCA retries nothing for you', stalled),
+    ...section(`FINISHED IN THE LAST ${hours}h, NOT REPORTED — report_mission or archive_agents`, finished),
     ...section('LATEST RESULTS SINCE YOUR LAST BRIEFING — journal for more', journalBriefingLines(ctx, now)),
     ...section('SQUADS WITH NO LIVE MEMBER — inspect_squad or archive_agents', dead),
     ...section('PROJECTS WITH ACTIVITY', projects),
@@ -2618,6 +3290,7 @@ function briefing(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome 
   ];
   return {
     result: lines.join('\n'),
-    summary: `briefing: ${blocked.length} blocked, ${owed.length} task(s) owed, ${finished.length} finished unreported, ${dead.length} dead squad(s)`,
+    summary: `briefing: ${blocked.length} blocked, ${owed.length} mission(s) owed, ${stalled.length} mission(s) not moving,`
+      + ` ${finished.length} finished unreported, ${dead.length} dead squad(s)`,
   };
 }

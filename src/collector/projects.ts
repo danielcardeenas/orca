@@ -65,9 +65,68 @@ export class ProjectRegistry {
    */
   private readonly capcomDir: string | undefined;
 
-  constructor(machineId: string, capcomDir?: string) {
+  /**
+   * Dónde se recuerdan las carpetas dadas de alta a mano. Ver `adopt`.
+   */
+  private readonly registeredFile: string | null;
+
+  constructor(machineId: string, capcomDir?: string, registeredFile?: string | null) {
     this.machineId = machineId;
     this.capcomDir = capcomDir;
+    this.registeredFile = registeredFile ?? null;
+  }
+
+  /**
+   * Una carpeta que alguien puso en el mapa por su ruta, y que hay que
+   * recordar entre arranques.
+   *
+   * El resto de proyectos se redescubren solos: existen porque hay un
+   * transcript bajo `~/.claude/projects` que los produce. Uno recién dado de
+   * alta no tiene ninguno todavía —ése es exactamente su problema— así que sin
+   * esto desaparecería en el siguiente reinicio del collector y el operador
+   * tendría que darlo de alta otra vez. Que es la clase de ritual que este
+   * alta existe para quitar.
+   */
+  register(dir: string): Project {
+    const project = this.ensure(pathToSlug(dir), dir);
+    this.remember(dir);
+    return project;
+  }
+
+  /** Las carpetas recordadas, de vuelta al registro. Se llama al arrancar. */
+  adopt(): string[] {
+    const taken: string[] = [];
+    for (const dir of this.readRegistered()) {
+      if (!safeIsDir(dir)) continue;         // la borraron: no se resucita
+      if (excludedWorkspace(dir, this.capcomDir)) continue;
+      this.ensure(pathToSlug(dir), dir);
+      taken.push(dir);
+    }
+    if (taken.length) log('info', SCOPE, `${taken.length} proyecto(s) dados de alta a mano, readoptados`);
+    return taken;
+  }
+
+  private readRegistered(): string[] {
+    if (!this.registeredFile) return [];
+    try {
+      const raw: unknown = JSON.parse(fs.readFileSync(this.registeredFile, 'utf8'));
+      if (!Array.isArray(raw)) return [];
+      return raw.filter((v): v is string => typeof v === 'string' && path.isAbsolute(v));
+    } catch { return []; }
+  }
+
+  private remember(dir: string): void {
+    if (!this.registeredFile) return;
+    const known = this.readRegistered();
+    if (known.includes(dir)) return;
+    try {
+      fs.mkdirSync(path.dirname(this.registeredFile), { recursive: true });
+      const tmp = `${this.registeredFile}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify([...known, dir], null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, this.registeredFile);
+    } catch (err) {
+      log('warn', SCOPE, `no pude recordar ${dir}: ${errText(err)}`);
+    }
   }
 
   idForSlug(slug: string): string {

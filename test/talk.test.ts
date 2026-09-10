@@ -15,7 +15,7 @@ import { liveText } from '../src/collector/screen.ts';
 import { mergeTalk } from '../src/shared/talk.ts';
 import type { LineBatch, TranscriptRef } from '../src/collector/watch.ts';
 import { World, sanitizeTalkItem } from '../src/hub/world.ts';
-import { classifyPrompt, echoLanded, foldTalk, toolLabel } from '../src/ui/windows/talk.ts';
+import { classifyPrompt, echoLanded, foldTalk, pendingEchoes, timeOrdered, toolLabel } from '../src/ui/windows/talk.ts';
 import { mdLite } from '../src/ui/windows/kinds/ceo.ts';
 import type { Agent, TalkItem } from '../src/shared/types.ts';
 import { MAX_TALK, MAX_TALK_RESULT } from '../src/shared/types.ts';
@@ -220,10 +220,10 @@ export default {
     }),
 
     test('the hub\'s wrappers are recognised: a task prompt and a relayed question are not you', () => {
-      const t = classifyPrompt('[ORCA TASK task_abc] Fix the tests\nThis is a separate task conversation…');
+      const t = classifyPrompt('[ORCA MISSION task_abc] Fix the tests\nThis is a separate task conversation…');
       const e = classifyPrompt('[ESCALATION esc_1] K9 asks: may I delete node_modules? · options: yes | no');
       const h = classifyPrompt('what is up');
-      return ok('roles', t.role === 'task' && t.taskId === 'task_abc' && t.text.startsWith('Fix the tests')
+      return ok('roles', t.role === 'mission' && t.missionId === 'task_abc' && t.text.startsWith('Fix the tests')
         && e.role === 'fleet' && e.escalationId === 'esc_1' && e.text.startsWith('K9 asks')
         && h.role === 'human');
     }),
@@ -233,6 +233,25 @@ export default {
       return ok('landed / not landed',
         echoLanded(' hello there ', 9_500, items) && !echoLanded('something else', 9_500, items)
         && !echoLanded('hello there', 200_000, items));
+    }),
+
+    test('an echo the transcript overtook stops being news', () => {
+      // Lo que dijiste a las 10:00 no volvió con el mismo texto; lo de las 10:05
+      // sí. La cola del CLI es una fila: lo de las 10:00 ya pasó por ella.
+      const echoes = [{ at: 10_000, id: 'a' }, { at: 10_005, id: 'b' }];
+      const left = pendingEchoes(echoes, (e) => e.at === 10_005);
+      // Al revés: lo viejo confirmado no borra lo nuevo, que sigue en cola.
+      const queued = pendingEchoes(echoes, (e) => e.at === 10_000);
+      return eq('pending', [left.map((e) => e.id), queued.map((e) => e.id)], [[], ['b']]);
+    }),
+
+    test('the echo sits where it was written, not at the bottom', () => {
+      const rows = [
+        { at: 3, html: 'reply' },
+        { at: 1, html: 'you' },
+        { at: 2, html: 'echo' },
+      ];
+      return eq('order', timeOrdered(rows), 'youechoreply');
     }),
 
     test('tool names read like tools, not like MCP routes', () => {

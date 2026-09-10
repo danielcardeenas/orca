@@ -98,6 +98,7 @@ export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean)
     <div class="mast__tools">
       <button class="tool" type="button" data-t="fleet" data-key="alt:KeyE">FLEET <kbd>${alt('E')}</kbd></button>
       <button class="tool" type="button" data-t="ceo" data-key="alt:KeyC">CAPCOM <kbd>${alt('C')}</kbd></button>
+      <button class="tool tool--hold" type="button" data-t="talk" data-key="alt:KeyV" title="Hold to talk to CAPCOM · Esc to throw the line away">TALK <kbd>${alt('V')}</kbd></button>
       <button class="tool" type="button" data-t="queue" data-key="alt:KeyQ">QUEUE <span class="tool__n">0</span> <kbd>${alt('Q')}</kbd></button>
       <button class="tool" type="button" data-t="feed" data-key="alt:KeyF">FEED <kbd>${alt('F')}</kbd></button>
       <button class="tool" type="button" data-t="spawn" data-key="alt:KeyN">SPAWN <kbd>${alt('N')}</kbd></button>
@@ -146,6 +147,23 @@ export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean)
   onFullscreen((on) => fullBtn.classList.toggle('is-on', on));
   const deckBtn = el.querySelector<HTMLElement>('[data-t="deck"]')!;
   const deckLabel = el.querySelector<HTMLElement>('[data-deck]')!;
+  /*
+   * TALK is a hold, not a click: down listens, up sends, and a pointer that
+   * leaves or is cancelled throws the line away. Where the browser cannot
+   * listen at all — plain http, no engine — the button is not drawn: a tool
+   * that cannot work is not a tool (hud/voice.ts says which it was).
+   */
+  const talkBtn = el.querySelector<HTMLButtonElement>('[data-t="talk"]')!;
+  talkBtn.hidden = !c.voice.supported;
+  talkBtn.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    if (!c.voice.start()) return;
+    talkBtn.setPointerCapture(e.pointerId);
+  });
+  talkBtn.addEventListener('pointerup', () => c.voice.stop());
+  talkBtn.addEventListener('pointercancel', () => c.voice.cancel());
+  talkBtn.addEventListener('contextmenu', (e) => e.preventDefault());
   const land = lander();
 
   function render() {

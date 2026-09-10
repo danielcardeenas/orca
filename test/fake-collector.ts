@@ -17,16 +17,18 @@
  *   npx tsx test/fake-collector.ts --isolated
  *   npx tsx test/fake-collector.ts --hub=ws://localhost:4479 --token=... --speed=3
  *
- * Sus máquinas se declaran `synthetic` en el `hello`, y el hub las pone en
- * cuarentena: nada de lo que inventen —una escalación, un mensaje de
- * escuadrón— le llega a un CAPCOM de verdad. Ver src/shared/synthetic.ts.
- * Además esto no arranca contra un hub con mando vivo salvo que se le diga.
+ * Sus máquinas se declaran `synthetic` en el `hello`, y un hub que no sea de
+ * pruebas las RECHAZA ahí mismo: la puerta está en el hub, no aquí, y no hay
+ * flag de este lado que la abra. Ver src/shared/synthetic.ts. Dentro de un hub
+ * de pruebas siguen en cuarentena: nada de lo que inventen —una escalación, un
+ * mensaje de escuadrón— cruza a un CAPCOM de verdad.
  *
  * Flags:
  *   --hub=<url>     base ws del hub (default ws://localhost:4479)
  *   --token=<t>     token; si falta usa ORCA_TOKEN o ~/.orca/token
  *   --isolated      su propio ORCA_HOME y su propio hub, como test/visual.ts
- *   --anyway        arrancar aunque el hub tenga un CAPCOM vivo
+ *   --anyway        arrancar aunque el hub DE PRUEBAS tenga un CAPCOM vivo.
+ *                   No abre un hub real: para eso no hay flag.
  *   --chaos         desconecta y reconecta máquinas al azar
  *   --speed=<n>     multiplicador de ritmo (default 1)
  *   --agents=<n>    escala la flota hasta ~n agentes iniciales (default: 20)
@@ -52,6 +54,16 @@ import {
   BEAT_INTERVAL_MS, MAX_ARTIFACT_BYTES, PATHS, PORTS, PROTOCOL_VERSION,
   artifactMime, newId,
 } from '../src/shared/protocol.ts';
+import { pathToSlug } from '../src/shared/workspaces.ts';
+import { HARNESS_ENV } from '../src/shared/synthetic.ts';
+
+/**
+ * De dónde salió este arnés: el repo desde el que alguien lanzó las pruebas.
+ * Viaja en el `hello` para que la consola plante el recinto de fixtures
+ * pegado a la isla de ese proyecto, en vez de dejarlo caer en un slot
+ * cualquiera de la espiral entre islas de verdad. Ver src/shared/synthetic.ts.
+ */
+const HARNESS_HOME = pathToSlug(process.cwd());
 
 /* ── azar ─────────────────────────────────────────────────────────── */
 
@@ -515,6 +527,7 @@ export class FakeMachine {
        * exactamente como se quemó un CAPCOM en nueve minutos.
        */
       synthetic: true,
+      harnessOf: HARNESS_HOME,
     };
 
     this.projects = spec.projects.map((p) => ({
@@ -1397,6 +1410,27 @@ export class FakeMachine {
         return;
       }
 
+      case 'models:list': {
+        /*
+         * El catálogo de esta máquina, como lo daría `providerModels()`: los
+         * alias de Claude Code y unos cuantos de Codex, cada uno diciendo si
+         * su CLI está instalado. Lo pide el SETUP de AUTOMEJORA, que elige el
+         * modelo de un agente que todavía no existe y por eso no puede
+         * preguntarle a ninguna sesión.
+         */
+        this.send({
+          t: 'ack', cmdId, ok: true, detail: 'models',
+          data: [
+            { runtime: 'claude', id: 'opus', label: 'Opus', installed: true },
+            { runtime: 'claude', id: 'fable', label: 'Fable', installed: true },
+            { runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: true },
+            { runtime: 'claude', id: 'haiku', label: 'Haiku', installed: true },
+            { runtime: 'codex', id: 'gpt-5-codex', label: 'GPT-5 Codex', installed: false },
+          ],
+        });
+        return;
+      }
+
       default:
         this.ack(cmdId, false, 'comando no soportado por el collector falso');
     }
@@ -1494,18 +1528,89 @@ export function httpFromWs(url: string): string {
 }
 
 /**
+ * Qué clase de hub hay al otro lado.
+ *
+ * `reachable: false` cuando no contesta, y eso NO es permiso para entrar: no
+ * saber qué hay ahí es exactamente el caso en el que no se arranca. `harness`
+ * lo dice el hub sobre sí mismo (`/api/health`, ver src/shared/synthetic.ts);
+ * un hub viejo que no publique el campo cuenta como real, que es la dirección
+ * segura del error.
+ */
+export async function hubPosture(hubHttp: string): Promise<{
+  reachable: boolean;
+  harness: boolean;
+  capcom: { callsign: string; machineId: string } | null;
+}> {
+  try {
+    const res = await fetch(`${hubHttp}/api/health`, { signal: AbortSignal.timeout(2500) });
+    const health = await res.json() as {
+      harness?: boolean;
+      capcom?: { callsign?: string; machineId?: string } | null;
+    };
+    const cap = health.capcom;
+    return {
+      reachable: true,
+      harness: health.harness === true,
+      capcom: cap ? { callsign: cap.callsign ?? '?', machineId: cap.machineId ?? '?' } : null,
+    };
+  } catch { return { reachable: false, harness: false, capcom: null }; }
+}
+
+/**
  * ¿Manda alguien en ese hub? `null` cuando no, y también cuando no se puede
  * preguntar: un hub que no contesta no tiene un CAPCOM que proteger.
  */
 export async function liveCapcom(
   hubHttp: string,
 ): Promise<{ callsign: string; machineId: string } | null> {
-  try {
-    const res = await fetch(`${hubHttp}/api/health`, { signal: AbortSignal.timeout(2500) });
-    const health = await res.json() as { capcom?: { callsign?: string; machineId?: string } | null };
-    const cap = health.capcom;
-    return cap ? { callsign: cap.callsign ?? '?', machineId: cap.machineId ?? '?' } : null;
-  } catch { return null; }
+  return (await hubPosture(hubHttp)).capcom;
+}
+
+/**
+ * La puerta del mock, como función pura: qué hacer dado lo que hay al otro
+ * lado y lo que pidió la línea de comandos.
+ *
+ * Está separada de `main` para que la prueba pueda interrogarla sin levantar
+ * nada, y porque la regla que impone es la que falló la última vez y merece
+ * poder leerse entera de un vistazo. El hub tiene la suya —rechaza el `hello`
+ * de una máquina sintética si no se declara de pruebas— y ésta es la de este
+ * lado: el mismo criterio, dicho antes y con un mensaje que explica la salida.
+ */
+export function doorVerdict(o: {
+  reachable: boolean;
+  harness: boolean;
+  capcom: { callsign: string } | null;
+  anyway: boolean;
+}): { go: true } | { go: false; why: string[] } {
+  if (!o.reachable) {
+    return { go: false, why: [
+      'ese hub no contesta a /api/health, así que no sé qué es.',
+      'no arranco a ciegas: usa --isolated para un mundo propio.',
+    ] };
+  }
+  /*
+   * La regla nueva, y la razón de todo esto.
+   *
+   * `--anyway` sigue existiendo para lo que se inventó —un hub de pruebas que
+   * ya tiene un CAPCOM dentro— pero dejó de ser una llave maestra. Contra un
+   * hub que no se declara de pruebas no abre nada: el 2026-09-07 abrió, y
+   * fueron ~1.330 agentes y siete proyectos falsos en la consola del operador.
+   * Aunque alguien lo fuerce aquí, el hub cierra la conexión igual.
+   */
+  if (!o.harness) {
+    return { go: false, why: [
+      'ese hub NO se declara de pruebas, así que no admite máquinas sintéticas.',
+      '--anyway no sirve para esto y el hub cerraría la conexión de todas formas.',
+      'usa --isolated: levanta un hub propio, con su ORCA_HOME y su puerto.',
+    ] };
+  }
+  if (o.capcom && !o.anyway) {
+    return { go: false, why: [
+      `ese hub de pruebas tiene mando vivo (${o.capcom.callsign}).`,
+      'usa --isolated para un hub propio, o --anyway si de verdad quieres.',
+    ] };
+  }
+  return { go: true };
 }
 
 /**
@@ -1536,7 +1641,11 @@ async function isolate(): Promise<{ hub: string; token: string; port: number; ho
   const root = new URL('..', import.meta.url).pathname;
   const child = spawn('npx', ['tsx', 'src/hub/server.ts'], {
     cwd: root, stdio: 'inherit',
-    env: { ...process.env, ORCA_PORT: String(port), ORCA_HOME: home },
+    // `ORCA_HARNESS`: este hub nace para el arnés y es el único que admite
+    // máquinas sintéticas. Es lo que lo distingue del de 4479, y va en el
+    // entorno del proceso porque es lo único que no se puede pedir por el
+    // cable. Ver src/shared/synthetic.ts.
+    env: { ...process.env, ORCA_PORT: String(port), ORCA_HOME: home, [HARNESS_ENV]: '1' },
   });
   child.unref();
   process.on('exit', () => {
@@ -1575,19 +1684,17 @@ if (runDirectly) {
     : { hub: hubFlag?.slice('--hub='.length) ?? `ws://localhost:${PORTS.hub}`, token: readToken() };
 
   /*
-   * La puerta.
+   * La puerta. Ver `doorVerdict`, que es donde está la regla.
    *
-   * Contra un hub con mando vivo esto no se arranca solo. La cuarentena del
-   * protocolo (src/shared/synthetic.ts) ya impide que una pregunta inventada
-   * le llegue, pero seguirían apareciendo trescientos agentes de mentira en la
-   * consola que alguien está usando para trabajar, y la confusión de raíz es
-   * ésa. `--isolated` da un mundo propio; `--anyway` dice "ya lo sé".
+   * Un mundo hecho con `--isolated` no pasa por aquí: su hub acaba de nacer
+   * con la marca puesta y no hay nada que preguntarle.
    */
-  if (!isolated && !anyway) {
-    const cap = await liveCapcom(httpFromWs(world.hub));
-    if (cap) {
-      console.error(`[fake] ${world.hub} tiene mando vivo (${cap.callsign}).`);
-      console.error('[fake] no arranco ahí: usa --isolated para un hub propio, o --anyway si de verdad quieres.');
+  if (!isolated) {
+    const posture = await hubPosture(httpFromWs(world.hub));
+    const verdict = doorVerdict({ ...posture, anyway });
+    if (!verdict.go) {
+      console.error(`[fake] ${world.hub}: ${verdict.why[0]}`);
+      for (const line of verdict.why.slice(1)) console.error(`[fake] ${line}`);
       process.exit(1);
     }
   }

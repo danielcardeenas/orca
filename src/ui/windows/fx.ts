@@ -23,6 +23,8 @@
  *   cascade(container)    → void           A1: `.sec`/`.arow`/`.qrow` by cut
  *   foldTo(el, rect)      → Promise<void>  the housing flies to its tray tile
  *   unfoldFrom(el, rect)  → void           the inverse, on restore
+ *   glideFrom(el, rect, s?) → void         land on itself, out of `rect`
+ *   sendToCanvas(el, rect) → void          the flight out to the world
  *
  *   ── controls (IDENTITY §6.2) ────────────────────────────────────────
  *   slabFlash(btn)        → void           invert to ink and cut back
@@ -134,19 +136,31 @@ export function check(el: HTMLElement): Promise<void> {
 
 /* ── A12 · The collapse ─────────────────────────────────────────────── */
 
+/*
+ * Both collapses turn around the housing's own `transform-origin`, which is
+ * `0 0` — never `center center`. A housing on the canvas already carries a
+ * fractional `scale` (the camera's, written by `wm.apply`), and CSS scales it
+ * about that same origin: moving the origin to the centre would teleport the
+ * window by half its size before a single frame of the gesture had played, so
+ * the collapse read as happening somewhere else on the canvas entirely. The
+ * translate paired with each scale is what keeps the bar in the middle, which
+ * is the only thing the centre was ever asked for. The numbers are half of
+ * whatever the scale gives away — `h * (1 - s) / 2` — in the housing's own
+ * pixels, which is the space GSAP's transform lives in either way.
+ */
+
 /**
  * The panel grows a little, falls to a horizontal bar, and to nothing. Never a
  * fade: in the comp a lime confirmation always leaves as geometry.
  */
 export function collapse(el: HTMLElement): Promise<void> {
   if (reduce()) return Promise.resolve();
+  const w = Math.max(1, el.offsetWidth), h = Math.max(1, el.offsetHeight);
   return new Promise((done) => {
     const tl = gsap.timeline({ onComplete: () => done() });
-    // `.win` sets transform-origin 0 0 for its arrival; the collapse is centred.
-    tl.set(el, { transformOrigin: 'center center' });
-    tl.to(el, { scaleX: 1.05, scaleY: 1.04, duration: dur(T.snap), ease: EASE.out });
-    tl.to(el, { scaleY: 0.02, duration: dur(T.quick * 0.8), ease: EASE.inout });
-    tl.to(el, { scaleX: 0, duration: dur(T.snap * 0.7), ease: 'power2.in' });
+    tl.to(el, { scaleX: 1.05, scaleY: 1.04, x: -w * 0.025, y: -h * 0.02, duration: dur(T.snap), ease: EASE.out });
+    tl.to(el, { scaleY: 0.02, y: h * 0.49, duration: dur(T.quick * 0.8), ease: EASE.inout });
+    tl.to(el, { scaleX: 0, x: w / 2, duration: dur(T.snap * 0.7), ease: 'power2.in' });
   });
 }
 
@@ -160,14 +174,14 @@ export function collapse(el: HTMLElement): Promise<void> {
 export function collapseShort(el: HTMLElement): Promise<void> {
   if (reduce()) return Promise.resolve();
   const body = el.querySelector<HTMLElement>('.win__body');
+  const h = Math.max(1, el.offsetHeight);
   // 2px of whatever height the housing happens to have: the bar the comp
   // leaves behind is a thickness, not a fraction.
-  const bar = 2 / Math.max(1, el.offsetHeight);
+  const bar = 2 / h;
   return new Promise((done) => {
     const tl = gsap.timeline({ onComplete: () => done() });
-    tl.set(el, { transformOrigin: 'center center' });
     if (body) tl.to(body, { yPercent: 120, duration: dur(T.quick * 0.55), ease: EASE.inout }, 0);
-    tl.to(el, { scaleY: bar, duration: dur(T.quick), ease: EASE.inout }, 0);
+    tl.to(el, { scaleY: bar, y: (h * (1 - bar)) / 2, duration: dur(T.quick), ease: EASE.inout }, 0);
     // The cut. A bar that fades out is a bar apologising for leaving.
     tl.set(el, { autoAlpha: 0 });
   });
@@ -266,6 +280,18 @@ export function cascade(container: HTMLElement): void {
 export interface FxRect { x: number; y: number; w: number; h: number }
 
 /**
+ * The translate that lands the housing's top-left corner on `to`, in the
+ * housing's own pixels. Same rule as the collapses: the origin stays at `0 0`,
+ * because a window on the canvas is already scaled about it and re-centring
+ * the origin would move the window before the flight began. `r` is what the
+ * screen currently shows, so `r.width / offsetWidth` is the camera's scale.
+ */
+function corner(el: HTMLElement, r: DOMRect, to: FxRect): { dx: number; dy: number } {
+  const s = r.width / Math.max(1, el.offsetWidth) || 1;
+  return { dx: (to.x - r.left) / s, dy: (to.y - r.top) / s };
+}
+
+/**
  * The housing flies to its tray tile and shrinks into it, then cuts. `to` is a
  * viewport rect — the tile's own, when the tray already holds one, and the
  * bottom-left corner when it does not.
@@ -277,12 +303,11 @@ export function foldTo(el: HTMLElement, to: FxRect): Promise<void> {
   if (reduce()) return Promise.resolve();
   const r = el.getBoundingClientRect();
   if (!r.width || !r.height) return Promise.resolve();
-  const dx = (to.x + to.w / 2) - (r.left + r.width / 2);
-  const dy = (to.y + to.h / 2) - (r.top + r.height / 2);
+  const { dx, dy } = corner(el, r, to);
   gsap.killTweensOf(el);
   return new Promise((done) => {
     gsap.fromTo(el,
-      { x: 0, y: 0, scaleX: 1, scaleY: 1, transformOrigin: 'center center' },
+      { x: 0, y: 0, scaleX: 1, scaleY: 1 },
       {
         x: dx, y: dy, scaleX: to.w / r.width, scaleY: to.h / r.height,
         duration: dur(T.quick), ease: EASE.inout,
@@ -291,20 +316,50 @@ export function foldTo(el: HTMLElement, to: FxRect): Promise<void> {
   });
 }
 
-/** The inverse: the window arrives out of the tile it was folded into. */
-export function unfoldFrom(el: HTMLElement, from: FxRect): void {
+/**
+ * The housing is already where it belongs; this plays the flight it did not
+ * make. It starts drawn as `from` — the viewport rect it is leaving behind —
+ * and lands on itself. The manager writes `left/top` (and, on the canvas, a
+ * `scale`) before calling: only the delta is the gesture, so a camera that
+ * keeps moving under a flight cannot leave the housing behind.
+ */
+export function glideFrom(el: HTMLElement, from: FxRect, seconds: number = T.quick): void {
   if (reduce()) return;
   const r = el.getBoundingClientRect();
   if (!r.width || !r.height) return;
-  const dx = (from.x + from.w / 2) - (r.left + r.width / 2);
-  const dy = (from.y + from.h / 2) - (r.top + r.height / 2);
+  const { dx, dy } = corner(el, r, from);
   gsap.killTweensOf(el);
   gsap.fromTo(el,
-    { x: dx, y: dy, scaleX: from.w / r.width, scaleY: from.h / r.height, transformOrigin: 'center center' },
+    { x: dx, y: dy, scaleX: from.w / r.width, scaleY: from.h / r.height },
     {
       x: 0, y: 0, scaleX: 1, scaleY: 1,
-      duration: dur(T.quick), ease: EASE.inout, clearProps: 'transform',
+      duration: dur(seconds), ease: EASE.inout, clearProps: 'transform',
     });
+}
+
+/** The inverse of `foldTo`: the window arrives out of the tile it was folded into. */
+export function unfoldFrom(el: HTMLElement, from: FxRect): void {
+  glideFrom(el, from);
+}
+
+/**
+ * Sending a window to the canvas: it leaves the glass and flies to the place
+ * in the world it will keep, at the camera's scale. The whole point is the
+ * direction — the destination is a world coordinate and may well be off the
+ * screen, and a housing that simply vanished from the front layer would leave
+ * the operator guessing where it went.
+ *
+ * It runs at `T.quick`, like every other flight a housing makes. The trip can
+ * be arbitrarily long, which is an argument for a longer tween and a worse
+ * argument than the one against: this is a gesture the operator repeats all
+ * day, and a window that takes its time going home is a window in the way. A
+ * quick departure in the right direction says the same thing.
+ *
+ * A window whose landing place is far off screen flies out through the edge
+ * and is cut there — which is the answer to "where did it go", drawn.
+ */
+export function sendToCanvas(el: HTMLElement, from: FxRect): void {
+  glideFrom(el, from, T.quick);
 }
 
 /* ── §6.2 · The controls ────────────────────────────────────────────── */

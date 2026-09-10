@@ -80,6 +80,21 @@
   box-shadow: 0 0 10px rgba(255,255,255,0.55);
 }
 
+/*
+ * El handshake que no termina (`ui/handshake.ts`): la misma escena del
+ * arranque, sin shell y sin barrido, cubriendo la consola entera mientras el
+ * hub no acepte el token. `pointer-events` es el punto: el panel se come el
+ * ratón, y el teclado lo para el módulo. Detrás no se escribe.
+ */
+.hs {
+  position: fixed; inset: 0; z-index: var(--z-overlay);
+  background: var(--bezel); pointer-events: auto; cursor: none;
+}
+.hs .px--title {
+  position: absolute; left: 50%; top: 38%; transform: translateX(-50%); white-space: nowrap;
+}
+.hs__pass { top: 58%; }
+
 /* ── Check ────────────────────────────────────────────────────────── */
 
 .check {
@@ -150,7 +165,7 @@
 
 .charset {
   grid-column: 5;
-  margin: 0; color: #e8ece4; font-family: 'Tiny5', monospace;
+  margin: 0; color: #e8ece4; font-family: var(--font-display, 'Tiny5', monospace);
   font-size: clamp(20px, 2.6vw, 30px); line-height: 1.08;
   letter-spacing: var(--track); white-space: pre;
   border-left: 1px solid #2a2e28; padding: 8px 0 8px 14px;

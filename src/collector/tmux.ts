@@ -104,6 +104,49 @@ export function sessionIdOfPane(name: string): string | null {
   return NAME_RE.test(name) ? name.slice(NAME_PREFIX.length) : null;
 }
 
+/**
+ * El comando EXACTO que pone a una persona delante de ese pane.
+ *
+ * Lleva `-L orca` porque las sesiones de ORCA viven en su propio socket y no
+ * en el de por defecto: un operador que teclea `tmux ls` para encontrar a un
+ * agente colgado obtiene «no server running», que es peor que no decir nada.
+ * Pasó el 2026-09-08 y por eso esto es una función y no una plantilla suelta:
+ * todo texto que ORCA imprima sobre cómo llegar a un pane sale de aquí.
+ *
+ * `=name` exige igualdad exacta, igual que el resto de targets de este módulo.
+ */
+export function attachHint(pane: string, socket = TMUX_SOCKET): string {
+  return `tmux -L ${socket} attach -t =${pane}`;
+}
+
+/**
+ * `PATH` no viaja por `-e`, y las demás variables sí.
+ *
+ * Medido contra tmux 3.7c el 2026-09-08, servidor recién arrancado:
+ *
+ *   tmux -L x new-session -d -e "PATH=/tmp/ZZZ:$PATH" -e ORCA_PROBE=yes -- sh -c 'echo $PATH; echo $ORCA_PROBE'
+ *   → ORCA_PROBE=yes                    llega
+ *   → PATH sin /tmp/ZZZ                 NO llega: el proceso inicial hereda el
+ *                                       PATH del servidor de tmux, no el de la
+ *                                       sesión.
+ *
+ * Y es justo la variable que hace falta: los comandos `orca-*` que el brief
+ * promete se le dan al worker poniéndolos en su PATH (ver `shims.ts`). Así que
+ * el PATH se pasa donde tmux no lo puede reescribir, delante del argv, con
+ * `env` — que exec-a en el sitio, así que el pane sigue siendo el CLI y su pid
+ * no cambia. Sigue sin haber shell: `env` recibe un argv, no una línea.
+ *
+ * Sin `/usr/bin/env` no se toca nada: el worker arranca con el PATH del
+ * servidor, que es lo que hacía antes.
+ */
+function withPath(value: string | undefined): string[] {
+  if (!value) return [];
+  try { fs.accessSync(ENV_BIN, fs.constants.X_OK); } catch { return []; }
+  return [ENV_BIN, `PATH=${value}`];
+}
+
+const ENV_BIN = '/usr/bin/env';
+
 export class TmuxHost {
   readonly bin: string | null;
   readonly socket: string;
@@ -123,6 +166,9 @@ export class TmuxHost {
 
   available(): boolean { return this.bin !== null; }
 
+  /** `attachHint`, con el socket de ESTA instancia. Ver esa función. */
+  attachHint(pane: string): string { return attachHint(pane, this.socket); }
+
   /* ── sessions ──────────────────────────────────────────────────── */
 
   async spawn(p: PaneSpawn): Promise<TmuxResult> {
@@ -141,7 +187,7 @@ export class TmuxHost {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
       args.push('-e', `${k}=${v}`);
     }
-    args.push('--', ...p.argv);
+    args.push('--', ...withPath(p.env['PATH']), ...p.argv);
     return this.run(args, 20_000);
   }
 

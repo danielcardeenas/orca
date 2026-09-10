@@ -42,7 +42,100 @@ export function sameWorld(
   return isSynthetic(a) === isSynthetic(b);
 }
 
+/* ── El recinto: dónde se dibuja lo que no ocurrió ────────────────── */
+
+/**
+ * Dónde vive el arnés que levantó esta máquina, si es que lo dijo.
+ *
+ * `''` cuando es del arnés y no declaró de dónde salió —un mock viejo, uno
+ * arrancado desde cualquier parte—; `null` cuando la máquina es de verdad. La
+ * marca sólo vale sobre una máquina ya declarada fixture: `synthetic` es lo
+ * que quita permisos, y ésta no puede ser una puerta para que una máquina real
+ * se cuelgue de la isla de un proyecto ajeno.
+ */
+export function harnessHome(m: Pick<Machine, 'synthetic' | 'harnessOf'> | undefined | null): string | null {
+  if (!isSynthetic(m)) return null;
+  return m?.harnessOf ?? '';
+}
+
+/**
+ * El recinto del arnés es una isla que no es un proyecto, como la de fuera de
+ * la flota (`shared/workspaces.ts`): agrupa a TODAS las máquinas de fixture
+ * que salieron del mismo sitio —el mock levanta tres— para que el campo
+ * dibuje un recinto y no tres islas sueltas repartidas por la espiral.
+ *
+ * El prefijo empieza por `~`, que ningún `machineId` puede llevar, así que un
+ * id de recinto nunca colisiona con un `projectId` de verdad.
+ */
+export const HARNESS_ISLAND = '~harness/';
+
+/** El recinto de lo que salió de este directorio. Sin directorio, uno común. */
+export function harnessIsland(hostSlug: string): string {
+  return `${HARNESS_ISLAND}${hostSlug}`;
+}
+
+/** ¿Es este id el de un recinto del arnés? */
+export function isHarnessIsland(id: string): boolean {
+  return id.startsWith(HARNESS_ISLAND);
+}
+
+/** El slug del directorio anfitrión que hay dentro de un id de recinto. */
+export function harnessHostSlug(islandId: string): string {
+  return isHarnessIsland(islandId) ? islandId.slice(HARNESS_ISLAND.length) : '';
+}
+
+/**
+ * Cómo se rotula el recinto. El código no son dos letras —no es un proyecto—
+ * y la palabra dice en una lo que es todo lo de dentro: nada de esto ocurrió.
+ * El nombre del anfitrión se le añade en el campo, que es quien lo conoce.
+ */
+export const HARNESS_LABEL = { code: '~~', name: 'harness' } as const;
+
 /** Lo que se anota en el feed la primera vez que una máquina del arnés pregunta. */
 export function syntheticNote(machineId: string): string {
   return `máquina sintética ${machineId}: sus preguntas se quedan en la cola del humano, no van al mando`;
+}
+
+/* ── La frontera: qué hub admite fixtures ─────────────────────────── */
+
+/**
+ * La variable con la que un hub se declara DE PRUEBAS.
+ *
+ * Existe porque la cuarentena no bastó. La marca `synthetic` quita permisos a
+ * una máquina ya dentro —sus preguntas no llegan al mando, sus mensajes no
+ * cruzan— pero no impedía que entrara: el 2026-09-07 alguien arrancó el mock
+ * contra el puerto 4479 con `--anyway` y metió ~1.330 agentes y siete
+ * proyectos inventados en la consola del operador, con más de mil dólares de
+ * gasto ficticio. `list_fleet` pasó de 2 KB a 121 KB y dejó de servirle a
+ * CAPCOM. El guardarraíl estaba en el cliente: era una pregunta que se
+ * respondía con un flag.
+ *
+ * Así que la decisión se muda al hub y se invierte. El arnés ya no pide
+ * permiso: es el hub el que tiene que declararse de pruebas, y el hub real
+ * nunca lo hace. Un hub de pruebas nace con esto en su entorno —lo ponen
+ * `test/run.ts`, `test/visual.ts --isolated` y el `--isolated` del propio
+ * mock—; el que arranca `npm start`, `npm run dev` o el servicio del operador
+ * no lo tiene y no hay flag que se lo dé.
+ */
+export const HARNESS_ENV = 'ORCA_HARNESS';
+
+/**
+ * ¿Es este hub de pruebas? Sólo si lo dice su propio entorno.
+ *
+ * El defecto es "no": un entorno sin la variable, uno recortado, uno de un
+ * servicio de arranque, todos son el mundo real. Es la dirección segura del
+ * error — equivocarse dice que no se admiten fixtures, nunca que sí.
+ */
+export function isHarnessHub(env: Record<string, string | undefined>): boolean {
+  const v = env[HARNESS_ENV];
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/** Lo que se cierra la conexión de un fixture que llamó a la puerta equivocada. */
+export const HARNESS_REFUSED = 'hub real: no admite máquinas sintéticas';
+
+/** Lo que se le dice a quien lo intentó, con la salida incluida. */
+export function harnessRefusedWhy(machineId: string): string {
+  return `máquina sintética ${machineId} rechazada: este hub no se declara de pruebas `
+    + `(${HARNESS_ENV} sin definir). Levanta el tuyo con --isolated.`;
 }

@@ -52,12 +52,18 @@ export interface KeyHold {
   held(): boolean;
 }
 
-export function keyHold(key: string): KeyHold {
+/**
+ * `whileTyping` lets a hold engage inside an editable target. Space cannot:
+ * it is a letter there. A chord with a modifier — ⌥V is TALK — is not, and
+ * the operator holding it with the CAPCOM composer focused (the window
+ * focuses it on open) is the ordinary case, not the exception.
+ */
+export function keyHold(key: string, opts: { whileTyping?: boolean } = {}): KeyHold {
   let on = false;
   return {
     down(e, engage) {
       if (e.key !== key) return false;
-      if (typing(e)) return false;
+      if (!opts.whileTyping && typing(e)) return false;
       if (e.repeat || on) return false;
       on = engage();
       return on;

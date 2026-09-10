@@ -11,12 +11,15 @@ import type { FieldHandle } from './field/field.ts';
 import type { DeckSort } from './field/layout.ts';
 import type { WindowManager } from './windows/wm.ts';
 import type { CtxTarget } from './hud/context.ts';
+import type { VoiceHandle } from './hud/voice.ts';
 
 export interface At { x: number; y: number }
 
 export interface Console {
   field: FieldHandle;
   wm: WindowManager;
+  /** Push-to-talk into CAPCOM (`hud/voice.ts`). `supported` says whether TALK is drawn at all. */
+  voice: VoiceHandle;
 
   openAgent(agentId: string, at?: At): void;
   /** The agent's pane, live: look at the CLI itself and type into it. */
@@ -34,9 +37,17 @@ export interface Console {
   openGroup(agentIds: string[], at?: At): void;
   /** A squad by name: its leader first, SAY LEAD and SAY ALL. */
   openSquad(name: string, at?: At): void;
-  openCeo(): void;
-  /** The CAPCOM window on one task's conversation: what a row in the HUD's task panel does. */
-  openTask(taskId: string): void;
+  /** La ventana del mando. `at` es el punto que la abrió, cuando viene de la baldosa. */
+  openCeo(at?: At): void;
+  /**
+   * A mission's own window: its conversation, its results, and a line to
+   * whoever led it. One window per mission — opening one that is already open
+   * raises it instead of making a second — and closing it archives nothing.
+   * Both doors call this: the HUD's mission panel and CAPCOM's rail.
+   * `tab` picks which third opens; without it, a finished mission opens on its
+   * results and a live one on its conversation. See windows/kinds/mission.ts.
+   */
+  openMission(missionId: string, opts?: { tab?: 'talk' | 'crew' | 'results'; at?: At }): void;
   openQueue(): void;
   openFeed(): void;
   openFleet(): void;
@@ -46,6 +57,8 @@ export interface Console {
   openSettings(): void;
   /** What ORCA costs the machines it runs on. See windows/kinds/hygiene.ts. */
   openHygiene(): void;
+  /** Despliega la sección AUTOMEJORA y la trae a la vista (⌥I). */
+  openImprove(): void;
   openGallery(): void;
   openTimeline(): void;
   /** The sound board: audition every clip, assign one per event. */

@@ -16,6 +16,7 @@ import type { CeoMessage, Escalation } from '../shared/types.ts';
 import { newId } from '../shared/protocol.ts';
 import type { Hub } from '../hub/server.ts';
 import { nextSquadName, SQUAD_SEQ_FILE } from '../hub/squad-seq.ts';
+import { stopHarnessProcs } from '../hub/harness.ts';
 import type { CeoContext } from './tools.ts';
 
 /**
@@ -50,9 +51,18 @@ export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext 
   const ctx: CeoContext = {
     handoffs: () => world.state.capcomHandoffs ?? [],
     autonomy: hub.autonomy,
-    tasks: hub.tasks,
+    missions: hub.missions,
+    // AUTOMEJORA. Sólo lo que las herramientas necesitan tocar: leer el
+    // tablero, archivar lo que reporta una revisión y contestar en un hilo.
+    // Nada de config ni de lanzar revisiones — eso es del operador.
+    improve: {
+      state: () => hub.autonomy.improve.store.state(),
+      file: (reviewId, drafts) => hub.autonomy.improve.store.file(reviewId, drafts),
+      note: (id, role, text) => hub.autonomy.improve.store.note(id, role, text),
+    },
     agents: () => Object.values(world.state.agents),
     projects: () => Object.values(world.state.projects),
+    machines: () => Object.values(world.state.machines),
     agent: (id) => world.state.agents[id],
     project: (id) => world.state.projects[id],
     escalation: (id) => world.state.escalations[id],
@@ -65,6 +75,17 @@ export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext 
       .map((e) => ({ question: e.question, answer: e.rememberAs ?? e.answer, projectId: e.projectId, at: e.at })),
 
     dispatch: (_machineId, cmd) => hub.dispatch(cmd),
+
+    /*
+     * Los procesos primero y el mundo después, siempre en ese orden: un mock
+     * vivo replanta sus máquinas en cuanto se le purga por debajo. El puerto
+     * que se pasa es el de ESTE hub, y es lo que acota a quién se señala: un
+     * arnés que apunta a otro sitio no es asunto nuestro. Ver hub/harness.ts.
+     */
+    async purgeHarness() {
+      const stopped = await stopHarnessProcs({ hubPort: hub.port });
+      return { stopped, removed: world.purgeSynthetic() };
+    },
 
     hygiene: hub.hygiene,
 
@@ -181,6 +202,7 @@ export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext 
     acknowledgeCollision: (id) => hub.acknowledgeCollision(id),
 
     archiveAgents: (filter, opts) => hub.archiveAgents(filter, opts),
+    retireAgent: (id, reason, by) => world.retireAgent(id, reason, by),
     archivedAgents: () => hub.archivedAgents(),
     unarchive: (id) => { hub.world.dropTombstone(id); },
 
@@ -190,8 +212,8 @@ export function hubContext(hub: Hub, hopts: HubContextOptions = {}): CeoContext 
       set: (scope, limit) => hub.budgets.set(scope, limit),
       get: (scope) => hub.budgets.get(scope),
       setPendingByShortId: (shortId, limit) => hub.budgets.setPendingByShortId(shortId, limit),
-      agentStatus: (agent) => hub.budgets.agentStatus(agent, world.state.agents, hub.tasks.all()),
-      scopeStatus: (scope) => hub.budgets.scopeStatus(scope, world.state.agents, hub.tasks.all()),
+      agentStatus: (agent) => hub.budgets.agentStatus(agent, world.state.agents, hub.missions.all()),
+      scopeStatus: (scope) => hub.budgets.scopeStatus(scope, world.state.agents, hub.missions.all()),
       config: () => hub.budgets.cfg,
     },
 

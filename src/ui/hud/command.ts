@@ -29,11 +29,13 @@
 import gsap from 'gsap';
 import type { Agent, Project } from '../../shared/types.ts';
 import { store } from '../store.ts';
+import { capcomTurn } from '../../shared/capcom.ts';
+import { toolLabel } from '../windows/talk.ts';
 import { hub } from '../net/client.ts';
 import type { Console } from '../console.ts';
 import { esc } from '../util.ts';
 import { squadsOf } from '../../shared/squads.ts';
-import { archivableTasks } from '../../shared/tasks.ts';
+import { archivableMissions } from '../../shared/missions.ts';
 import { getSound } from './sound.ts';
 import { EASE, REDUCE, T, dur } from '../motion.ts';
 import { toggleFullscreen } from './fullscreen.ts';
@@ -54,7 +56,7 @@ const COMMANDS: { name: string; help: string }[] = [
   { name: 'ceo', help: 'talk to CAPCOM, the command session' },
   { name: 'capcom-new', help: 'New CAPCOM · /capcom-new clean|continuity · same provider/model' },
   { name: 'capcom', help: 'talk to CAPCOM, the command session' },
-  { name: 'tasks', help: 'retire task conversations · /tasks archive|restore|purge|finished|archived [id]' },
+  { name: 'missions', help: 'retire mission conversations · /missions archive|restore|purge|finished|archived [id]' },
   { name: 'feed', help: 'telemetry' },
   { name: 'fleet', help: 'machines, projects, everyone' },
   { name: 'tilt', help: 'tilt the field to see depth' },
@@ -70,6 +72,7 @@ const COMMANDS: { name: string; help: string }[] = [
   { name: 'clear', help: 'drop the selection' },
   { name: 'settings', help: 'the console’s knobs · panel brightness' },
   { name: 'hygiene', help: 'what ORCA costs this machine · disk, load, what could be reclaimed' },
+  { name: 'improve', help: 'AUTOMEJORA · what ORCA proposes about itself · ⌥I' },
   { name: 'help', help: 'keys and commands' },
 ];
 
@@ -86,6 +89,7 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
   el.innerHTML = `
     <span class="cmd__prompt">&gt;</span>
     <input class="cmd__in mono" data-in autocomplete="off" spellcheck="false" placeholder="talk to capcom · @K9 to an agent · @LZ to a project · @audit-01 to a squad · / for commands · ⌘K" />
+    <span class="cmd__turn px" data-turn hidden><i class="cmd__turn-dot" aria-hidden="true"></i><span data-turn-t></span></span>
     <span class="cmd__target is-ceo" data-target>CAPCOM</span>
     <i class="cmd__wipe mono" data-wipe aria-hidden="true"></i>
     <div class="cmd__menu" data-menu></div>
@@ -283,59 +287,59 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
         window.dispatchEvent(new CustomEvent('orca:capcom-new', { detail: arg }));
         break;
       /**
-       * Retirar conversaciones de tarea. `archive` y `restore` son el par
+       * Retirar conversaciones de misión. `archive` y `restore` son el par
        * reversible; `purge` borra, y sólo lo ya archivado. Sin id actúa sobre
        * la conversación abierta, salvo `finished`, que retira de golpe las
        * terminadas — que es lo que se acumula sin que nadie las mire.
        */
-      case 'tasks': {
+      case 'missions': {
         const [what = '', which = ''] = rest;
         const verb = what.toLowerCase();
         if (!['archive', 'restore', 'purge', 'finished', 'archived'].includes(verb)) {
-          c.note('Use /tasks archive|restore|purge [task_id], /tasks finished, or /tasks archived', 'warn'); break;
+          c.note('Use /missions archive|restore|purge [mission_id], /missions finished, or /missions archived', 'warn'); break;
         }
-        const tasks = store.world.tasks ?? {};
+        const missions = store.world.missions ?? {};
         /*
          * Lo archivado no sale en el selector — ése es el punto — así que sin
          * este listado su id no está en ninguna parte de la consola, y
          * `restore` y `purge`, que lo exigen, no se podrían escribir.
          */
         if (verb === 'archived') {
-          const gone = Object.values(tasks).filter((t) => t.archivedAt).sort((a, b) => b.archivedAt! - a.archivedAt!);
-          if (!gone.length) { c.note('No archived task conversations'); break; }
-          for (const t of gone) c.note(`${t.id} · ${t.status} · ${t.title}`);
-          c.note(`${gone.length} archived · /tasks restore <id> brings one back · /tasks purge <id> deletes it`);
+          const gone = Object.values(missions).filter((m) => m.archivedAt).sort((a, b) => b.archivedAt! - a.archivedAt!);
+          if (!gone.length) { c.note('No archived mission conversations'); break; }
+          for (const m of gone) c.note(`${m.id} · ${m.status} · ${m.title}`);
+          c.note(`${gone.length} archived · /missions restore <id> brings one back · /missions purge <id> deletes it`);
           break;
         }
         if (verb === 'finished') {
-          const done = archivableTasks(tasks);
-          if (!done.length) { c.note('No finished task conversations to archive'); break; }
+          const done = archivableMissions(missions);
+          if (!done.length) { c.note('No finished mission conversations to archive'); break; }
           void (async () => {
             let n = 0;
-            for (const t of done) {
-              try { store.upsertTask(await hub.archiveTask(t.id)); n++; }
-              catch (err) { c.note(`Could not archive ${t.title}: ${String(err)}`, 'warn'); }
+            for (const m of done) {
+              try { store.upsertMission(await hub.archiveMission(m.id)); n++; }
+              catch (err) { c.note(`Could not archive ${m.title}: ${String(err)}`, 'warn'); }
             }
-            c.note(`${n} finished task conversation${n === 1 ? '' : 's'} archived · /tasks restore <id> brings one back`);
+            c.note(`${n} finished mission conversation${n === 1 ? '' : 's'} archived · /missions restore <id> brings one back`);
           })();
           break;
         }
-        const id = which || store.activeTaskId || '';
-        const task = tasks[id];
-        if (!id || !task) { c.note('Open a task conversation or name one: /tasks ' + verb + ' task_…', 'warn'); break; }
+        const id = which || store.activeMissionId || '';
+        const mission = missions[id];
+        if (!id || !mission) { c.note('Open a mission conversation or name one: /missions ' + verb + ' mission_…', 'warn'); break; }
         void (async () => {
           try {
             if (verb === 'purge') {
-              if (!task.archivedAt) { c.note(`Archive "${task.title}" first: purging is for what you already retired`, 'warn'); return; }
-              if (!confirm(`Purge "${task.title}"?\n\nIts ${task.messages.length} messages are deleted for good. Archiving already keeps it out of the way.`)) return;
-              await hub.purgeTask(id);
-              store.upsertTask(task, true);
-              c.note(`Task purged: ${task.title}`);
+              if (!mission.archivedAt) { c.note(`Archive "${mission.title}" first: purging is for what you already retired`, 'warn'); return; }
+              if (!confirm(`Purge "${mission.title}"?\n\nIts ${mission.messages.length} messages are deleted for good. Archiving already keeps it out of the way.`)) return;
+              await hub.purgeMission(id);
+              store.upsertMission(mission, true);
+              c.note(`Mission purged: ${mission.title}`);
             } else {
-              store.upsertTask(await hub.archiveTask(id, verb === 'archive'));
-              c.note(verb === 'archive' ? `Task archived: ${task.title} · /tasks restore ${id} brings it back` : `Task restored: ${task.title}`);
+              store.upsertMission(await hub.archiveMission(id, verb === 'archive'));
+              c.note(verb === 'archive' ? `Mission archived: ${mission.title} · /missions restore ${id} brings it back` : `Mission restored: ${mission.title}`);
             }
-          } catch (err) { c.note(`Could not ${verb} task: ${String(err)}`, 'warn'); }
+          } catch (err) { c.note(`Could not ${verb} mission: ${String(err)}`, 'warn'); }
         })();
         break;
       }
@@ -347,6 +351,7 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
       case 'help': c.openHelp(); break;
       case 'settings': c.openSettings(); break;
       case 'hygiene': c.openHygiene(); break;
+      case 'improve': case 'automejora': c.openImprove(); break;
       case 'gallery': c.openGallery(); break;
       case 'timeline': c.openTimeline(); break;
       case 'launch': if (arg) getSound()?.play('launch'); c.openLaunch(arg || undefined, !!arg); break;
@@ -416,8 +421,37 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
     e.stopPropagation();
   });
   chip.addEventListener('click', () => { if (selection.length) { c.field.select([]); setSelection([]); } });
-  store.on((e) => { if (e.k === 'agents' || e.k === 'world') paintTarget(); });
+
+  /*
+   * The turn: what CAPCOM is doing with your line, on the line you typed it.
+   * Before this the only place that said so was the CAPCOM window's status
+   * strip, and the command line — where the line left from — sat still, so
+   * a sent message and a lost one looked the same for as long as the reply
+   * took. Cyan for its thinking and its tools, because the turn is CAPCOM's;
+   * amber when it stopped to ask you. The dot pulses while it is live and
+   * holds under reduced motion. The sound for the same moment is in
+   * `hud/sound.ts` (`capcom.thinking`), off the same state.
+   */
+  const turnEl = el.querySelector<HTMLElement>('[data-turn]')!;
+  const turnText = el.querySelector<HTMLElement>('[data-turn-t]')!;
+  let turnWas = '';
+  function paintTurn() {
+    const t = capcomTurn(store.world.agents, store.world.ceo);
+    const word = t.kind === 'thinking' ? 'THINKING'
+      : t.kind === 'working' ? (t.tool ? `${toolLabel(t.tool)}` : 'WORKING')
+      : t.kind === 'waiting' ? 'WAITING ON YOU' : '';
+    const now = `${t.kind} ${word}`;
+    if (now === turnWas) return;
+    turnWas = now;
+    turnEl.hidden = t.kind === 'idle';
+    turnText.textContent = word;
+    turnEl.classList.toggle('is-waiting', t.kind === 'waiting');
+    el.classList.toggle('is-turn', t.kind !== 'idle');
+  }
+
+  store.on((e) => { if (e.k === 'agents' || e.k === 'world') { paintTarget(); paintTurn(); } else if (e.k === 'ceo') paintTurn(); });
   paintTarget();
+  paintTurn();
 
   return {
     focus() { input.focus(); },

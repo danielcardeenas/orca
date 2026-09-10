@@ -9,9 +9,9 @@
  * state of what it holds — amber for an interrupt or a blocked agent, lime for
  * the window that has the keyboard — so a window still reports from down here.
  *
- * A tile is a switch, not a shortcut: folded unfolds and takes the keyboard,
- * open-but-behind comes forward, and the tile of the window already in front
- * closes it. Clicking the same tile twice puts the window away.
+ * A tile opens or minimizes its window without changing its placement mode.
+ * Retrieving a distant canvas window flies the camera to it. Closing is
+ * explicit in the context menu or through the tray keyboard controls.
  *
  * ── Tray mode ────────────────────────────────────────────────────────
  *
@@ -44,6 +44,7 @@ import gsap from 'gsap';
 import type { Win, WindowManager } from '../windows/wm.ts';
 import { EASE, REDUCE, T, dur } from '../motion.ts';
 import { esc } from '../util.ts';
+import { longPress } from './longpress.ts';
 
 /**
  * The lit state of one tile.
@@ -68,7 +69,7 @@ function lit(w: Win, active: boolean): string {
 function inner(w: Win, index: number, mode: boolean): string {
   const label = w.spec.callsign ?? w.spec.kind.toUpperCase();
   const cap = mode && index <= 9 ? `<kbd class="key tile__n">${index}</kbd>` : '';
-  return `<span>${esc(label.slice(0, 6))}</span><small>${esc(w.spec.kind)}</small>${cap}`;
+  return `<span>${esc(label.slice(0, 6))}</span><small>${esc(w.minimized ? 'folded' : w.mode === 'pinned' ? 'fixed' : w.mode)}</small>${cap}`;
 }
 
 export function mountTray(host: HTMLElement, wm: WindowManager, onContext?: (w: Win, x: number, y: number) => void): { render(list?: Win[]): void } {
@@ -149,7 +150,7 @@ export function mountTray(host: HTMLElement, wm: WindowManager, onContext?: (w: 
       const cls = `tile ${lit(it.w, it.on)}`.trimEnd();
       if (btn.className !== cls) btn.className = cls;
       if (btn.dataset.w !== it.w.id) btn.dataset.w = it.w.id;
-      const title = it.w.spec.title ?? it.w.spec.kind;
+      const title = `${it.w.spec.title ?? it.w.spec.kind} · ${it.w.minimized ? 'Open window' : it.on ? 'Minimize or locate window' : 'Open window'}`;
       if (btn.title !== title) btn.title = title;
       const html = inner(it.w, i + 1, mode);
       if (btn.innerHTML !== html) btn.innerHTML = html;
@@ -195,7 +196,9 @@ export function mountTray(host: HTMLElement, wm: WindowManager, onContext?: (w: 
     wm.toggleWindow(w);
   });
 
-  // A tile's menu is its window's menu: the same rows the chrome gives.
+  // A tile's menu is its window's menu: the same rows the chrome gives —
+  // con el dedo, manteniéndola pulsada.
+  longPress(el, { allow: (t) => !!t.closest('[data-w]') });
   el.addEventListener('contextmenu', (e) => {
     const b = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-w]');
     if (!b) return;

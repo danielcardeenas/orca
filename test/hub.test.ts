@@ -413,11 +413,20 @@ export function testAuth(): TestResult {
     assert(!strict.check(null, '127.0.0.1').ok, 'con ORCA_TOKEN definido no hay puerta trasera');
     assert(strict.allowLoopbackAnonymous === false, 'sin modo dev cuando el humano fijó el token');
 
-    const dev = createAuth({ ORCA_HOME: tempDir() } as NodeJS.ProcessEnv);
+    /*
+     * El modo dev pide ahora una condición más: que el hub escuche sólo en
+     * local. La puerta trasera vale para «lo escribió el dueño en su máquina»
+     * y para nada más; en cuanto el puerto sale de ahí, deja de existir.
+     */
+    const dev = createAuth({ ORCA_HOME: tempDir() } as NodeJS.ProcessEnv, { host: '127.0.0.1' });
     assert(dev.token.length >= 16, 'genera un token usable');
     assert(dev.check(null, '127.0.0.1').anonymous === true, 'en dev, loopback sin token pasa');
     assert(!dev.check(null, '203.0.113.9').ok, 'pero de fuera no');
     assert(dev.banner().some((l) => l.includes('MODO DEV')), 'y lo grita en el arranque');
+
+    const exposed = createAuth({ ORCA_HOME: tempDir() } as NodeJS.ProcessEnv, { host: '0.0.0.0' });
+    assert(exposed.allowLoopbackAnonymous === false, 'escuchando fuera de local no hay modo dev');
+    assert(!exposed.check(null, '127.0.0.1').ok, 'y ni siquiera localhost entra sin token');
 
     assert(isLoopback('::ffff:127.0.0.1') && isLoopback('::1') && !isLoopback('8.8.8.8'), 'detección de loopback');
     return ok(name, `token de ${strict.token.length} chars, modo dev detectado`);
@@ -508,7 +517,8 @@ export async function testEndToEndWithFakeFleet(): Promise<TestResult> {
         }
 
         // Los rollups tienen sentido y hay actividad real.
-        const health = await (await fetch(`http://127.0.0.1:${hub.port}/api/health`)).json() as Record<string, unknown>;
+        // Con token, porque los rollups de la flota ya no salen sin él.
+        const health = await (await fetch(`http://127.0.0.1:${hub.port}/api/health?token=${TOKEN}`)).json() as Record<string, unknown>;
         const agents = health['agents'] as { total: number; byState: Record<string, number> };
         assert(agents.total >= 18, `salud reporta ${agents.total} agentes`);
         const live = (agents.byState['working'] ?? 0) + (agents.byState['thinking'] ?? 0);
@@ -714,11 +724,30 @@ export async function testHttpEndpoints(): Promise<TestResult> {
       const fleet = startFakeFleet({ hub: `ws://127.0.0.1:${hub.port}`, token: TOKEN, quiet: true, speed: 6 });
       try {
         await until(() => hub.world.state.fleet.total >= 15, 8_000, 'agentes');
-        const health = await (await fetch(`http://127.0.0.1:${hub.port}/api/health`)).json() as Record<string, unknown>;
+        const q = `?token=${TOKEN}`;
+        const health = await (await fetch(`http://127.0.0.1:${hub.port}/api/health${q}`)).json() as Record<string, unknown>;
         for (const key of ['ok', 'rev', 'uptimeMs', 'machines', 'agents', 'escalations', 'connections']) {
           assert(key in health, `falta ${key} en /api/health`);
         }
-        const world = await (await fetch(`http://127.0.0.1:${hub.port}/api/world`)).json() as Record<string, unknown>;
+        /*
+         * El mismo endpoint sin token contesta la postura y nada más: vivo,
+         * arnés o no, y si hay mando. Es lo que lee `hubPosture()` antes de
+         * decidir si puede tocar este hub, así que tiene que seguir saliendo
+         * sin credencial; lo que no puede salir es la flota.
+         */
+        const posture = await (await fetch(`http://127.0.0.1:${hub.port}/api/health`)).json() as Record<string, unknown>;
+        assert(posture['ok'] === true, 'la postura sigue diciendo que el hub está vivo');
+        assert('harness' in posture && 'capcom' in posture, 'la postura conserva harness y capcom');
+        for (const leak of ['agents', 'projects', 'costUSD', 'connections', 'keys']) {
+          assert(!(leak in posture), `/api/health sin token no debe publicar ${leak}`);
+        }
+        const machines = posture['machines'] as Record<string, unknown>;
+        assert(!('list' in machines), 'la postura no publica la lista de máquinas');
+        for (const closed of ['/api/world', '/api/traffic', '/api/memory']) {
+          const r = await fetch(`http://127.0.0.1:${hub.port}${closed}`);
+          assert(r.status === 401, `${closed} sin token debe ser 401, fue ${r.status}`);
+        }
+        const world = await (await fetch(`http://127.0.0.1:${hub.port}/api/world${q}`)).json() as Record<string, unknown>;
         for (const key of ['rev', 'machines', 'projects', 'agents', 'escalations', 'keys', 'ceo', 'feed', 'fleet']) {
           assert(key in world, `falta ${key} en /api/world`);
         }

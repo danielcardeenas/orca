@@ -26,7 +26,7 @@ import { TOOLS, run, queryOf, compact, briefingLines } from '../src/agents/tools
 import { EXTENSION_TOOLS, duplicateToolNames } from '../src/agents/extensions.ts';
 import { CEO_TOOLS, type CeoContext } from '../src/agents/tools.ts';
 import type { Agent, Project } from '../src/shared/types.ts';
-import type { CapcomTask } from '../src/shared/tasks.ts';
+import type { CapcomMission } from '../src/shared/missions.ts';
 import { eq, ok, test, type TestModule } from './harness.ts';
 
 /* ── un mundo de mentira ──────────────────────────────────────────── */
@@ -52,7 +52,7 @@ interface Box {
   deps: AutonomyDeps;
   lifecycle: AgentLifecycle;
   agents: Map<string, Agent>;
-  tasks: Record<string, CapcomTask>;
+  missions: Record<string, CapcomMission>;
   clock: { now: number };
   timers: { fn: () => void; ms: number; cancelled: boolean }[];
   journal: JournalApi;
@@ -64,7 +64,7 @@ function box(env: Record<string, string> = {}): Box {
   const dir = mkdtempSync(join(tmpdir(), 'orca-journal-'));
   const lifecycle = new AgentLifecycle();
   const agents = new Map<string, Agent>();
-  const tasks: Record<string, CapcomTask> = {};
+  const missions: Record<string, CapcomMission> = {};
   const clock = { now: 10_000 };
   const timers: Box['timers'] = [];
   const projects: Project[] = [{ id: 'p_ax', code: 'AX', name: 'axolots' } as Project, { id: 'p_or', code: 'OR', name: 'orca' } as Project];
@@ -73,7 +73,7 @@ function box(env: Record<string, string> = {}): Box {
     agent: (id) => agents.get(id),
     projects: () => projects,
     project: (id) => projects.find((p) => p.id === id),
-    tasks: () => structuredClone(tasks),
+    missions: () => structuredClone(missions),
     capcom: () => [...agents.values()].find((a) => a.role === 'capcom' && a.state !== 'done' && a.state !== 'dead') ?? null,
     sayToCapcom: () => 'delivered',
     dispatch: async () => ({}),
@@ -88,7 +88,7 @@ function box(env: Record<string, string> = {}): Box {
   const journal = createJournal(deps);
   const ctx = { autonomy: { journal } } as unknown as CeoContext;
   return {
-    dir, deps, lifecycle, agents, tasks, clock, timers, journal, ctx,
+    dir, deps, lifecycle, agents, missions, clock, timers, journal, ctx,
     async close() { journal.stop?.(); await journal.flush(); rmSync(dir, { recursive: true, force: true }); },
   };
 }
@@ -118,7 +118,7 @@ const tests = [
   test('a launch and its end land on disk with who, what, and how much', async () => {
     const b = box();
     try {
-      b.tasks['task_1'] = { id: 'task_1', title: 'Ship it', status: 'active', createdAt: 0, updatedAt: 0, agentIds: ['w1'], messages: [] };
+      b.missions['task_1'] = { id: 'task_1', title: 'Ship it', status: 'active', createdAt: 0, updatedAt: 0, agentIds: ['w1'], messages: [] };
       arrive(b, agent({ id: 'cap', role: 'capcom', projectId: 'p_or', callsign: 'CAP' }));
       arrive(b, agent({ id: 'w1', parentId: 'cap', squad: 'ship-01', mission: 'Migrate the charges table. Done when the suite is green.' }));
       b.clock.now = 70_000;
@@ -133,11 +133,11 @@ const tests = [
       return ok('launch + end persisted',
         all.length === 2
         && launch?.agentId === 'w1' && launch.by === 'capcom' && launch.project === 'AX' && launch.squad === 'ship-01'
-        && launch.taskId === 'task_1' && launch.brief?.startsWith('Migrate the charges') === true
+        && launch.missionId === 'task_1' && launch.brief?.startsWith('Migrate the charges') === true
         && launch.runtime === 'claude' && launch.model === 'claude-sonnet-5' && launch.at === 1_000
         && end?.state === 'done' && end.costUSD === 1.2345 && end.durationMs === 69_000
         && end.tokens?.input === 100 && end.lines?.added === 120 && end.lines.removed === 30
-        && end.lastSay === 'Migration landed, 12 tests added.' && end.taskId === 'task_1',
+        && end.lastSay === 'Migration landed, 12 tests added.' && end.missionId === 'task_1',
         JSON.stringify({ launch, end }));
     } finally { await b.close(); }
   }),
@@ -281,10 +281,10 @@ const tests = [
     } finally { await b.close(); }
   }),
 
-  test('query filters: project by code, squad, task, agent by callsign, kind, state, by, window, text, order, limit', async () => {
+  test('query filters: project by code, squad, mission, agent by callsign, kind, state, by, window, text, order, limit', async () => {
     const b = box();
     try {
-      b.tasks['task_9'] = { id: 'task_9', title: 't', status: 'active', createdAt: 0, updatedAt: 0, agentIds: ['w2'], messages: [] };
+      b.missions['task_9'] = { id: 'task_9', title: 't', status: 'active', createdAt: 0, updatedAt: 0, agentIds: ['w2'], messages: [] };
       arrive(b, agent({ id: 'cap', role: 'capcom', projectId: 'p_or' }));
       arrive(b, agent({ id: 'w1', callsign: 'K9', mission: 'Refactor the payments módulo. Done when green.' }));
       arrive(b, agent({ id: 'w2', callsign: 'Q2', projectId: 'p_or', squad: 'audit-01', parentId: 'cap', mission: 'Audit deps.' }));
@@ -297,7 +297,7 @@ const tests = [
         ['project by code, any case', j.query({ project: 'ax' }).every((e) => e.projectId === 'p_ax') && j.query({ project: 'ax' }).length === 2, ''],
         ['project by id', j.query({ project: 'p_or' }).length === 2, kinds(j.query({ project: 'p_or' })).join(' ')],
         ['squad', kinds(j.query({ squad: 'audit-01', order: 'asc' })).join(' ') === 'launch:w2 end:w2', kinds(j.query({ squad: 'audit-01' })).join(' ')],
-        ['task', j.query({ taskId: 'task_9' }).length === 2, ''],
+        ['mission', j.query({ missionId: 'task_9' }).length === 2, ''],
         ['agent by callsign', j.query({ agent: 'k9' }).length === 2 && j.query({ agent: 'w2' }).length === 2, ''],
         ['kind', kinds(j.query({ kind: 'end', order: 'asc' })).join(' ') === 'end:w1 end:w2', ''],
         ['state dead', kinds(j.query({ state: 'dead' })).join(' ') === 'end:w2', ''],
@@ -355,7 +355,7 @@ const tests = [
       const total = 200;
       for (let i = 0; i < total; i += 1) {
         now += 1_000;
-        j.append({ kind: 'launch', agentId: `a${i}`, callsign: null, machineId: null, projectId: 'p', project: 'P', squad: null, taskId: null, brief, by: 'human' });
+        j.append({ kind: 'launch', agentId: `a${i}`, callsign: null, machineId: null, projectId: 'p', project: 'P', squad: null, missionId: null, brief, by: 'human' });
       }
       await j.flush();
       const names = readdirSync(dir).filter((n) => n.endsWith('.jsonl')).sort();
@@ -377,8 +377,8 @@ const tests = [
     const dir = mkdtempSync(join(tmpdir(), 'orca-journal-reopen-'));
     try {
       const j = new Journal({ dir });
-      j.append({ kind: 'launch', agentId: 'a1', callsign: null, machineId: null, projectId: null, project: null, squad: null, taskId: null });
-      j.append({ kind: 'end', agentId: 'a1', callsign: null, machineId: null, projectId: null, project: null, squad: null, taskId: null, state: 'done' });
+      j.append({ kind: 'launch', agentId: 'a1', callsign: null, machineId: null, projectId: null, project: null, squad: null, missionId: null });
+      j.append({ kind: 'end', agentId: 'a1', callsign: null, machineId: null, projectId: null, project: null, squad: null, missionId: null, state: 'done' });
       await j.flush();
       const { appendFileSync } = await import('node:fs');
       appendFileSync(join(dir, JOURNAL_FILE), '{"id":"jr_x","at":5,"kind":"lau');
@@ -419,13 +419,13 @@ const tests = [
       arrive(b, agent({ id: 'w1', callsign: 'K9', mission: 'A'.repeat(500) }));
       b.clock.now = 20_000; move(b, 'w1', 'done', { lastSay: 'B'.repeat(500) });
       await b.journal.flush();
-      const out = run(b.ctx, 'journal', { project: 'AX', squad: null, task_id: null, agent: null, kind: null, since: null, until: null, state: null, by: null, text: null, limit: null, newest_first: true, full: false })!;
+      const out = run(b.ctx, 'journal', { project: 'AX', squad: null, mission_id: null, agent: null, kind: null, since: null, until: null, state: null, by: null, text: null, limit: null, newest_first: true, full: false })!;
       const r = JSON.parse(out.result) as { count: number; entries: JournalEntry[] };
-      const full = run(b.ctx, 'journal', { project: null, squad: null, task_id: null, agent: 'K9', kind: 'launch', since: null, until: null, state: null, by: null, text: null, limit: null, newest_first: false, full: true })!;
+      const full = run(b.ctx, 'journal', { project: null, squad: null, mission_id: null, agent: 'K9', kind: 'launch', since: null, until: null, state: null, by: null, text: null, limit: null, newest_first: false, full: true })!;
       const rf = JSON.parse(full.result) as { entries: JournalEntry[] };
       const stats = run(b.ctx, 'journal_stats', { project: null, squad: null, since: null, until: null })!;
-      const bad = run(b.ctx, 'journal', { project: null, squad: null, task_id: null, agent: null, kind: null, since: 'yesterday-ish', until: null, state: null, by: null, text: null, limit: null, newest_first: true, full: false })!;
-      const badKind = run(b.ctx, 'journal', { project: null, squad: null, task_id: null, agent: null, kind: 'launches', since: null, until: null, state: null, by: null, text: null, limit: null, newest_first: true, full: false })!;
+      const bad = run(b.ctx, 'journal', { project: null, squad: null, mission_id: null, agent: null, kind: null, since: 'yesterday-ish', until: null, state: null, by: null, text: null, limit: null, newest_first: true, full: false })!;
+      const badKind = run(b.ctx, 'journal', { project: null, squad: null, mission_id: null, agent: null, kind: 'launches', since: null, until: null, state: null, by: null, text: null, limit: null, newest_first: true, full: false })!;
       const notMine = run(b.ctx, 'list_fleet', {});
       const noJournal = run({} as CeoContext, 'journal', {})!;
       return ok('tools',

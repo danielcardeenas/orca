@@ -49,19 +49,43 @@ try {
   await page.getByRole('option', { name: /gpt-5\.6-luna/ }).click();
   await page.getByRole('button', { name: 'Clean context', exact: true }).waitFor();
   assert.equal(await page.locator('[data-fresh-note]').isVisible(), false);
+  // Con el vaciado retenido se ve lo que la ventana dice MIENTRAS pasa: la
+  // sesión que se va está ociosa, y anunciar IDLE durante el relevo es lo que
+  // hacía pensar que no estaba pasando nada.
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).hold());
   await page.getByRole('button', { name: 'Clean context', exact: true }).click();
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').at(-1)?.model), 'gpt-5.6-luna');
-  assert.equal(await page.getByRole('button', { name: 'New CAPCOM', exact: true }).isDisabled(), true);
-  assert.match(await page.locator('[data-transfer-text]').innerText(), /codex\/gpt-6-astra → codex\/gpt-6-astra/);
+  await page.locator('.capcom__status', { hasText: 'CHANGING' }).waitFor();
+  assert.match(await page.locator('.capcom__status').innerText(), /clearing context/);
+  assert.equal(await page.locator('.band').evaluate(b => b.classList.contains('is-off')), false);
+  await page.locator('[data-detail]', { hasText: /clearing context…/ }).waitFor();
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).release());
+  // Quedarse en el proveedor vacía en el sitio: hay recibo, no traspaso. Darlo
+  // por plan pintaba `undefined/undefined`, `NaN KB` y un «Invalid handoff id».
+  await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
+  await page.locator('.capcom__status', { hasText: 'IDLE' }).waitFor();
+  assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.equal(await page.locator('textarea[data-in]').inputValue(), 'Preserve this operator draft');
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').length), 1);
+  // Cruzar de proveedor sí prepara una sesión aparte, y eso se sigue por fases.
+  await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
+  await page.locator('[data-fresh-model] button').click();
+  await page.getByRole('option', { name: /Sonnet/ }).click();
+  await page.getByRole('button', { name: 'Clean context · prepare', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'New CAPCOM', exact: true }).isDisabled(), true);
+  assert.match(await page.locator('[data-transfer-text]').innerText(), /codex\/gpt-6-astra → claude\/sonnet/);
+  // Preparar tarda hasta dos minutos: la ventana entera lo dice, no sólo el panel.
+  await page.locator('.capcom__status', { hasText: 'CHANGING' }).waitFor();
+  assert.match(await page.locator('.capcom__status').innerText(), /preparing claude\/sonnet · clean context/);
   await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).fail());
   await page.getByRole('button', { name: 'CLOSE', exact: true }).waitFor();
   assert.match(await page.locator('[data-transfer-text]').innerText(), /Original CAPCOM retained/);
-  const input = page.locator('.cmd__in');
-  await input.fill('/capcom-new continuity'); await input.press('Enter');
-  await page.getByText('CAPCOM · CONTINUITY', { exact: true }).waitFor();
-  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string, mode?: string}) => c.k === 'capcom:new').at(-1)?.mode), 'continuity');
+  await page.getByRole('button', { name: 'CLOSE', exact: true }).click();
+  // Y el mismo camino en continuidad, hasta el final.
+  await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
+  await page.locator('[data-fresh-model] button').click();
+  await page.getByRole('option', { name: /Sonnet/ }).click();
+  await page.getByRole('button', { name: 'With continuity · prepare', exact: true }).click();
   await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).complete());
   // Un recibo de algo que salió bien se pliega solo: no hay nada que decidir y
   // el alto es de la conversación. El titular y la fase siguen en la línea.
@@ -74,10 +98,19 @@ try {
   await page.locator('[data-transfer-details] summary').click();
   await page.getByRole('button', { name: 'CLOSE', exact: true }).waitFor();
   assert.match(await page.locator('[data-transfer-text]').innerText(), /Backup:/);
+  await page.getByRole('button', { name: 'CLOSE', exact: true }).click();
+  const input = page.locator('.cmd__in');
   await input.fill('/capcom-new invalid'); await input.press('Enter');
   assert.match(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).notes.at(-1)), /clean.*continuity/);
+  // El slash promete «mismo proveedor y modelo»: la elección que quedó en el
+  // panel —Sonnet, de otro runtime— no puede cruzar de proveedor a su espalda.
+  await input.fill('/capcom-new continuity'); await input.press('Enter');
+  await page.locator('[data-detail]', { hasText: /continuity active · 99999999/ }).waitFor();
+  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string, mode?: string}) => c.k === 'capcom:new').at(-1)?.mode), 'continuity');
+  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string, model?: string}) => c.k === 'capcom:new').at(-1)?.model), undefined);
   await input.fill('/capcom-new clean'); await input.press('Enter');
-  await page.getByText('CAPCOM · CLEAN CONTEXT', { exact: true }).waitFor();
+  await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
+  assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.deepEqual(errors, []);
-  console.log('Fresh UI passed: visible modes, scope, chosen model, draft, progress, failure/retry, folded receipt, clean/continuity slash commands, desktop/mobile.');
+  console.log('Fresh UI passed: visible modes, scope, chosen model, CHANGING status and running band while the relay lasts, in-place clear receipt without a fake plan, cross-provider plan phases, draft, failure/retry, folded receipt, slash commands that keep the provider, desktop/mobile.');
 } finally { await browser.close(); await server.close(); }

@@ -22,6 +22,7 @@ import { FleetStore } from '../src/hub/fleets.ts';
 import { AnswerMemory } from '../src/hub/memory.ts';
 import { HubStore } from '../src/hub/persist.ts';
 import { startHub, type Hub } from '../src/hub/server.ts';
+import { PROTOCOL_VERSION } from '../src/shared/protocol.ts';
 import { squadsOf } from '../src/shared/squads.ts';
 import { startFakeFleet } from './fake-collector.ts';
 import { ok, test, until, type TestModule } from './harness.ts';
@@ -170,6 +171,38 @@ const tests = [
         'an unknown project code is exit 1, naming the known ones',
         r.code === 1 && r.stderr.includes('no project "ZZ"') && r.stderr.includes(code),
         r.stderr.trim().slice(0, 100),
+      );
+    });
+  }),
+
+  test('the same repo on two machines is not ambiguity: --machine pins it, and without it the hub decides', async () => {
+    return await withFleet(async (hub, code) => {
+      // A second, real machine with a clone of the fleet's project: same code,
+      // same path, another machine id. Nobody is listening on it.
+      const src = Object.values(hub.world.state.projects).find((p) => p.code === code)!;
+      const host = hub.world.state.machines[src.machineId]!.hostname;
+      const now = Date.now();
+      hub.world.applyCollector({
+        t: 'hello', v: PROTOCOL_VERSION, token: '',
+        machine: {
+          id: 'm2', hostname: 'mac-b.local', platform: 'darwin', version: '0', online: true,
+          lastSeen: now, connectedAt: now, load: { sessions: 0, activeSessions: 0, cpuPct: null, memPct: null },
+        },
+      }, 'm2');
+      hub.world.applyCollector({
+        t: 'project:new', machineId: 'm2', project: { ...src, id: `m2/${src.slug}`, machineId: 'm2', sessionIds: [] },
+      }, 'm2');
+      const brief = 'A brief long enough to be taken seriously by the spawn tool.';
+      const pinned = await orca(hub.port, ['spawn', code, brief, '--machine', host, '--json']);
+      const free = await orca(hub.port, ['spawn', code, brief, '--json']);
+      const bad = await orca(hub.port, ['spawn', code, brief, '--machine', 'mac-z']);
+      const pinnedTo = String(((pinned.json?.['result'] ?? {}) as { machine?: string }).machine ?? '');
+      return ok(
+        'two clones: --machine pins, no --machine is handed to the hub',
+        pinned.code === 0 && pinnedTo === host
+          && free.code !== 1 && !free.stderr.includes('matches 2 projects')
+          && bad.code === 1 && bad.stderr.includes('no machine "mac-z"') && bad.stderr.includes('mac-b.local'),
+        `pinned → ${pinnedTo || '(none)'} (${pinned.code}) · free ${free.code} · bad: ${bad.stderr.trim().slice(0, 80)}`,
       );
     });
   }),

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readBounded } from './uploads.ts';
 
 export const RECOVERY_IMAGE_LIMIT = 8 * 1024 * 1024;
 const formats = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' } as const;
@@ -25,20 +26,14 @@ export async function uploadRecoveryImage(req: IncomingMessage, res: ServerRespo
   if (!Object.hasOwn(formats, mime)) { reply(415, { error: 'Choose a PNG, JPEG, WebP or GIF image.' }); return; }
   if (Number(req.headers['content-length']) > RECOVERY_IMAGE_LIMIT) { reply(413, { error: 'Images must be 8 MB or smaller.' }); return; }
   try {
-    const chunks: Buffer[] = [];
-    let size = 0;
     // Read bounded bytes even when Content-Length is absent or incorrect.
-    for await (const raw of req.iterator({ destroyOnReturn: false })) {
-      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
-      size += chunk.length;
-      if (size > RECOVERY_IMAGE_LIMIT) {
-        res.setHeader('connection', 'close');
-        reply(413, { error: 'Images must be 8 MB or smaller.' });
-        return;
-      }
-      chunks.push(chunk);
+    const bytes = await readBounded(req, RECOVERY_IMAGE_LIMIT);
+    if (!bytes) {
+      res.setHeader('connection', 'close');
+      reply(413, { error: 'Images must be 8 MB or smaller.' });
+      return;
     }
-    const bytes = Buffer.concat(chunks);
+    const size = bytes.length;
     if (!imageMatches(bytes, mime)) { reply(415, { error: 'The file does not match its image format.' }); return; }
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const path = join(directory, `${randomUUID()}.${formats[mime as keyof typeof formats]}`);

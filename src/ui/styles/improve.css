@@ -1,0 +1,458 @@
+/*
+ * AUTOMEJORA — la sección en la que ORCA se mira a sí misma.
+ *
+ * Todo lo demás en el campo reporta la FLOTA. Esto reporta el INSTRUMENTO, y
+ * por eso tiene forma y color propios: si se vistiera como el panel de
+ * misiones, el operador leería una propuesta sobre la consola como si fuera
+ * trabajo de un agente.
+ *
+ * ── El color ───────────────────────────────────────────────────────
+ *
+ * `--auto`, un violeta que no existe en ninguna otra parte de ORCA. En este
+ * console el color es significado —lima vivo, ámbar te necesita, rojo brecha,
+ * cian CAPCOM, azul esperando a otro— y todos esos hablan de agentes. Ninguno
+ * podía prestarse aquí sin mentir: en particular el ámbar, que significa «un
+ * humano tiene que contestar YA a un agente parado», y una propuesta de mejora
+ * no para a nadie. Un tono nuevo, usado sólo aquí, es lo que mantiene esa
+ * disciplina intacta.
+ *
+ * ── La forma ───────────────────────────────────────────────────────
+ *
+ * Una propuesta es UNA LÍNEA, como una misión: área, título, sus dos
+ * medidores y cuándo se movió. Antes era una ficha con dos líneas de resumen y
+ * un mordisco en la esquina, y ocho fichas ocupaban media pantalla para decir
+ * ocho titulares; el resumen entero, la evidencia y la conversación viven un
+ * clic más allá, en el detalle, que es donde se leen de verdad.
+ *
+ * Lo que la distingue de una fila de misiones no es el tamaño: es el color y
+ * la barra del borde izquierdo, CONTINUA cuando la propuesta se apoya en
+ * mediciones y DISCONTINUA cuando es una hipótesis. La textura dice de qué
+ * está hecha la idea, igual que la trama de un tile dice qué runtime corre
+ * dentro. Se lee sin color y sin leer. (El mordisco de la esquina se fue con
+ * la ficha: en una línea de 26 px cortaba la barra en vez de dibujar una
+ * silueta, y el `clip-path` hace ahora otro trabajo — el barrido de entrada,
+ * `algnRowSweep`.)
+ */
+
+:root {
+  /* ORCA mirándose a sí misma. Sólo esta sección. Nunca un estado de agente. */
+  --auto: #b47cff;
+  --auto-line: rgba(180, 124, 255, 0.95);
+  --auto-glow: rgba(180, 124, 255, 0.32);
+  --auto-dim: #6e4fa0;
+  --auto-deep: #150e26;
+}
+
+/*
+ * Sin posición propia: vive en el carril de la izquierda (`.hud__col`), debajo
+ * del panel de misiones y empujada por él. Estaba flotando en la esquina
+ * derecha, y allí ni se empujaba con nadie ni dejaba de disputarle el rincón
+ * al radar.
+ */
+.improve {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /*
+   * Sólido, no translúcido. El campo pasaba por debajo: un tile naranja detrás
+   * de una fila la teñía, y el color aquí es significado —violeta es el
+   * instrumento— así que un fondo que deja pasar el estado de la flota miente
+   * sobre lo que se está leyendo. El panel de misiones lleva su slab opaco por
+   * la misma razón.
+   */
+  background: #0b0a0d;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-panel);
+  padding: 8px 8px 6px;
+}
+
+/* ── cabecera ─────────────────────────────────────────────────────── */
+
+.improve__head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 2px 6px;
+  cursor: pointer; user-select: none;
+  border: 0; background: none; width: 100%; text-align: left;
+  color: var(--auto);
+  font: inherit;
+}
+.improve__sigil { display: block; margin: 0 2px 0 4px; flex: none; }
+.improve__t { margin: 0 auto 0 0; font-size: 12px; letter-spacing: 0.16em; color: var(--auto); }
+/* La cuenta de novedades: relleno cuando hay algo que nadie ha visto. */
+.improve__n {
+  min-width: 20px; padding: 2px 5px; text-align: center;
+  font-size: 10px; letter-spacing: 0.14em;
+  border: 1px solid var(--auto-dim); color: var(--auto);
+  border-radius: 2px;
+}
+.improve.has-new .improve__n { background: var(--auto); border-color: var(--auto); color: #150e26; }
+.improve__fold { color: var(--ink-dimmer); font-size: 9px; }
+.improve__head:hover .improve__fold { color: var(--auto); }
+.improve.is-folded .improve__body { display: none; }
+
+/* ── la línea de estado: cuándo vuelve a mirar, y a costa de qué ──── */
+
+.improve__status {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 5px 6px; margin-bottom: 6px;
+  background: var(--auto-deep);
+  border-left: 2px solid var(--auto-dim);
+  font-size: 9px; letter-spacing: 0.12em; color: var(--ink-dim);
+}
+.improve__when { flex: 1 1 auto; min-width: 0; color: var(--ink-mid); }
+.improve.is-paused .improve__when { color: var(--auto); }
+/* El hub no puede guardar. Rojo, porque es lo único aquí que es una avería. */
+.improve.is-degraded .improve__status { border-left-color: var(--red); }
+.improve.is-degraded .improve__when { color: var(--red); }
+/* Sin enlace: lo que se ve es lo último que se supo, y el marco lo dice. */
+.improve.is-offline .improve__status { border-left-color: var(--st-idle); }
+.improve.is-offline .improve__when { color: var(--ink-dim); }
+.improve__btn {
+  border: 1px solid var(--line); background: transparent; color: var(--ink-dim);
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 3px 6px; border-radius: 2px; flex: none;
+}
+.improve__btn:hover:not(:disabled) { border-color: var(--auto); color: var(--auto); }
+.improve__btn:disabled { opacity: 0.4; }
+.improve__btn.is-on { background: var(--auto); border-color: var(--auto); color: #150e26; }
+
+/* Los límites, plegados: se miran una vez y se olvidan. */
+.improve__setup {
+  display: none; gap: 6px; flex-wrap: wrap; align-items: center;
+  padding: 5px 6px; margin-bottom: 6px;
+  border: 1px dashed var(--line);
+  font-size: 9px; letter-spacing: 0.12em; color: var(--ink-dim);
+}
+.improve.show-setup .improve__setup { display: flex; }
+.improve__setup b { color: var(--ink-mid); font-weight: 400; }
+
+/*
+ * Los dos selectores y el presupuesto escrito a mano.
+ *
+ * Van dentro del mismo `.improve__setup` que ya existía, así que heredan su
+ * envoltura y su tratamiento táctil. Lo único propio es el hueco del `pick` y
+ * la caja de número: el selector es el de `ui/controls.ts`, el mismo de toda
+ * la consola, y se abre como diálogo en un teléfono sin que esto tenga que
+ * saber nada de eso.
+ */
+/*
+ * Cada ajuste es UNA pieza: la etiqueta, el valor y su botón no se separan.
+ *
+ * Sueltos en el flex, `MIN SIGNAL 40` se quedaba en una línea y su `CHANGE`
+ * caía a la siguiente, junto al valor del ajuste de abajo. Un botón que no se
+ * sabe a qué pertenece es peor que uno que no cabe.
+ */
+.improve__field { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+
+.improve__pick { display: inline-flex; align-items: center; gap: 6px; }
+.improve__pick .pick { min-width: 96px; }
+
+.improve__custom { display: inline-flex; align-items: center; gap: 4px; }
+.improve__num {
+  width: 88px; padding: 3px 6px;
+  background: #0d0c11; border: 1px solid var(--line); color: var(--ink);
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px;
+  border-radius: 2px;
+}
+.improve__num:focus { outline: none; border-color: var(--auto); }
+.improve__num::placeholder { color: var(--ink-faint); }
+
+/*
+ * Qué va a pasar de verdad, en una línea entera para ella sola: dice el
+ * runtime y el modelo resueltos, qué cuenta el presupuesto —entrada, salida y
+ * lectura de caché— y que es un freno y no un muro. Es la frase que evita que
+ * alguien lea «400K» como una garantía.
+ */
+.improve__note {
+  flex-basis: 100%;
+  color: var(--ink-dimmer); line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.improve.is-catalog-error .improve__note { color: var(--red); }
+
+@media (pointer: coarse) {
+  body[data-sheet="improve"] .improve__num { min-height: 40px; width: 110px; font-size: 16px; }
+  body[data-sheet="improve"] .improve__pick .pick { min-width: 120px; }
+}
+
+/*
+ * El cuerpo tiene que poder encoger o el `max-height` del panel no significa
+ * nada: sin `min-height: 0` la lista impone su altura natural, el panel crece
+ * por debajo del borde de la pantalla y las fichas de abajo dejan de ser
+ * alcanzables — con la barra de scroll puesta y sin usarse.
+ */
+.improve__body { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+/* ── el revisor en vuelo ──────────────────────────────────────────── */
+
+/*
+ * La fila que dice que hay alguien trabajando. Dos colores a la vez, y son dos
+ * cosas distintas: el marco es violeta —qué función cumple— y el punto y la
+ * palabra llevan `--st`, el color de estado real del agente. Un revisor
+ * bloqueado sale ámbar y uno muerto sale rojo dentro de un marco violeta, que
+ * es exactamente lo que hay que poder leer de un vistazo.
+ */
+.improve__agent {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px; margin-bottom: 6px;
+  border: 1px solid var(--auto-dim);
+  background: var(--auto-deep);
+}
+.improve__agent[hidden] { display: none; }
+/* El estado, como punto y no como fondo: el fondo es del marco. */
+.improve__agent::before {
+  content: ''; width: 6px; height: 6px; flex: none;
+  background: var(--st, var(--auto));
+}
+.improve__agent-go {
+  border: 1px solid var(--auto-dim); background: transparent; color: var(--auto);
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  padding: 3px 7px; border-radius: 2px; flex: none;
+}
+.improve__agent-go:hover:not(:disabled) { background: var(--auto); color: #150e26; }
+.improve__agent-go:disabled { opacity: 0.5; }
+.improve__agent-meta {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 9px; letter-spacing: 0.12em; color: var(--st, var(--ink-mid));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.improve__agent-stop { flex: none; }
+.improve__agent-stop:hover { border-color: var(--red); color: var(--red); }
+/* Parándose: el marco se apaga y el estado deja de fingir que trabaja. */
+.improve__agent.is-stopping { opacity: 0.7; }
+.improve__agent.is-stopping .improve__agent-meta { color: var(--ink-dim); }
+
+/* Quién propuso una ficha, y cómo llegar hasta él. */
+.imp__by { margin: 8px 0 0; font-size: 9px; letter-spacing: 0.14em; color: var(--ink-dimmer); }
+.imp__who-go {
+  border: 0; background: none; padding: 0 2px; color: var(--auto);
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.imp__who-go:hover { color: var(--ink-bright); }
+
+/*
+ * El foco del teclado, en toda la sección. El navegador trae un anillo que no
+ * es de ningún sistema de diseño; aquí es el violeta de la sección, con hueco,
+ * para que se vea sobre un fondo casi negro.
+ */
+.improve :focus-visible {
+  outline: 1px solid var(--auto);
+  outline-offset: 2px;
+}
+
+.improve__list { overflow: auto; min-height: 0; flex: 1 1 auto; overscroll-behavior: contain; padding-right: 2px; }
+
+/* ── la ficha ─────────────────────────────────────────────────────── */
+
+/*
+ * Una línea: título, medidores, área · tipo · cuándo, y la flecha del detalle.
+ * Nada envuelve — el resumen entero está a un clic, dentro — porque una fila
+ * que crece a dos líneas descoloca la columna de al lado y deja de poder
+ * leerse en diagonal, que es para lo que está la lista.
+ */
+.imp {
+  position: relative;
+  display: grid;
+  /*
+   * El título manda. Los medidores son dos bloques fijos y el área se recorta
+   * antes que él: al revés —cada columna pidiendo lo suyo— «PERFORMANCE ·
+   * BACK IN 2D» dejaba el titular en dos letras, y un titular de dos letras no
+   * es una lista que se lea en diagonal.
+   */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, max-content) 18px;
+  gap: 2px 8px; align-items: center;
+  margin: 0 0 4px;
+  padding: 5px 8px 5px 12px;
+  background: var(--auto-deep);
+}
+/* La barra del borde: continua = medido, discontinua = hipótesis. */
+.imp::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--auto-dim);
+}
+.imp.is-hypothesis::before {
+  background: repeating-linear-gradient(to bottom, var(--auto-dim) 0 3px, transparent 3px 6px);
+}
+.imp.is-new::before { background: var(--auto); }
+.imp.is-new.is-hypothesis::before {
+  background: repeating-linear-gradient(to bottom, var(--auto) 0 3px, transparent 3px 6px);
+}
+.imp.is-snoozed, .imp.is-dismissed { opacity: 0.5; }
+.imp.is-snoozed:hover, .imp.is-dismissed:hover { opacity: 0.85; }
+.imp.is-sent::before { background: var(--lime); }
+
+.imp__tags {
+  min-width: 0; font-size: 9px; letter-spacing: 0.14em; color: var(--auto-dim);
+  white-space: nowrap; text-align: right; overflow: hidden; text-overflow: ellipsis;
+}
+/* Una hipótesis lleva el violeta vivo también en su etiqueta: la barra lo dice
+   con la textura y esto lo repite con el color, sin gastar una palabra. */
+.imp__tags.is-hyp { color: var(--auto); }
+.imp__grade { display: flex; gap: 7px; }
+.imp__meter { font-size: 9px; letter-spacing: 0.1em; color: var(--ink-dimmer); white-space: nowrap; }
+.imp__meter i { font-style: normal; color: var(--auto); letter-spacing: 0.05em; }
+
+.imp__title {
+  display: block; min-width: 0; width: 100%; text-align: left;
+  border: 0; background: none; padding: 0; margin: 0;
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-bright);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.imp__title:hover { color: var(--auto); }
+/* El resumen entero, dentro del detalle: en la fila no cabía sin envolverla. */
+.imp__sum {
+  margin: 0 0 2px; font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px; line-height: 1.45; color: var(--ink-mid);
+  overflow-wrap: anywhere;
+}
+.imp__chev {
+  border: 0; background: none; color: var(--ink-dimmer);
+  font-size: 10px; line-height: 1; padding: 2px 0; text-align: right;
+}
+.imp__chev:hover { color: var(--auto); }
+.imp.is-open .imp__chev { transform: rotate(90deg); }
+/* Un aviso que nadie ha visto lleva su marca, y la marca no parpadea. Va con
+   la barra del borde, que es el lado por el que se lee la fila. */
+.imp__dot {
+  position: absolute; left: 4px; top: 50%; transform: translateY(-50%);
+  width: 4px; height: 4px; background: var(--auto);
+}
+.imp:not(.is-new) .imp__dot { display: none; }
+
+/* ── el detalle ───────────────────────────────────────────────────── */
+
+.imp__d {
+  grid-column: 1 / -1;
+  margin-top: 6px; border-top: 1px solid var(--line-soft); padding-top: 6px;
+}
+.imp__k {
+  display: block; margin: 6px 0 2px;
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-dimmer);
+}
+.imp__ev { margin: 0; padding: 0; list-style: none; }
+.imp__ev li {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px; line-height: 1.5; color: var(--ink-mid);
+  padding-left: 10px; position: relative; overflow-wrap: anywhere;
+}
+.imp__ev li::before { content: '·'; position: absolute; left: 2px; color: var(--auto-dim); }
+.imp__hyp {
+  margin: 0; padding: 5px 7px;
+  background: var(--auto-deep); border-left: 2px dashed var(--auto-dim);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px; line-height: 1.5; color: var(--ink-mid); overflow-wrap: anywhere;
+}
+.imp__long {
+  margin: 0; max-height: 190px; overflow: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px; line-height: 1.55; color: var(--ink-dim);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.imp__q {
+  margin: 0; padding: 6px 8px;
+  border: 1px solid var(--auto-dim); background: var(--auto-deep);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere;
+}
+
+/* La conversación: quién dijo qué, en el orden en el que se dijo. */
+.imp__talk { margin: 0; padding: 0; list-style: none; }
+.imp__talk li {
+  display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 6px;
+  padding: 3px 0; font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px; line-height: 1.5; color: var(--ink-mid); overflow-wrap: anywhere;
+}
+.imp__who {
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dimmer);
+}
+.imp__talk li.is-human .imp__who { color: var(--auto); }
+.imp__talk li.is-capcom .imp__who { color: var(--cyan); }
+
+.imp__reply { display: flex; gap: 5px; margin-top: 5px; }
+.imp__reply textarea {
+  flex: 1; min-width: 0; resize: none; height: 46px;
+  background: #0d0c11; border: 1px solid var(--line); color: var(--ink);
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+  padding: 5px 6px; border-radius: 2px;
+}
+.imp__reply textarea:focus { outline: none; border-color: var(--auto); }
+
+.imp__acts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.imp__act {
+  border: 1px solid var(--line); background: transparent; color: var(--ink-dim);
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 4px 7px; border-radius: 2px;
+}
+.imp__act:hover:not(:disabled) { border-color: var(--auto); color: var(--auto); }
+.imp__act:disabled { opacity: 0.4; }
+/* Lo único de esta sección que produce trabajo se ve que lo produce. */
+.imp__act.is-send { border-color: var(--auto); color: var(--auto); }
+.imp__act.is-send:hover:not(:disabled) { background: var(--auto); color: #150e26; }
+.imp__mission {
+  font-size: 9px; letter-spacing: 0.12em; color: var(--lime);
+  border: 1px solid rgba(192, 249, 74, 0.4); background: transparent;
+  padding: 4px 7px; border-radius: 2px;
+  font-family: var(--font-display, 'Tiny5', monospace); text-transform: uppercase;
+}
+.imp__mission:hover { background: var(--lime); color: #111; }
+
+.improve__empty {
+  margin: 10px 4px; font-size: 10px; letter-spacing: 0.12em; line-height: 1.7;
+  color: var(--ink-dimmer);
+}
+.improve__more {
+  width: 100%; border: 0; background: none; padding: 5px;
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-dimmer);
+}
+.improve__more:hover { color: var(--auto); }
+
+/* El campo es lo primero: por debajo de esto, la sección estorbaría — salvo
+   que la barra de secciones la abra como hoja, y eso lo decide hud.css con más
+   especificidad (`body[data-sheet="improve"] .improve`). Ver docs/MISSIONS.md. */
+@media (max-width: 1180px) { .improve { display: none; } }
+
+/*
+ * El revisor, en un teléfono.
+ *
+ * La adaptación móvil de las dos secciones vive en `hud.css` y no entra aquí
+ * (mission_mtsaa02eqa14rjii). Lo que sí es mío es lo que se añadió DESPUÉS: la
+ * fila del revisor y el enlace al autor de una propuesta. Se les da el mismo
+ * mínimo táctil y el mismo enganche —`body[data-sheet="improve"]`— para que la
+ * hoja siga siendo una sola pieza en vez de dos con criterios distintos.
+ *
+ * Y hay una razón para que el revisor se pueda tocar y no sólo leer: en un
+ * teléfono es el ÚNICO sitio desde el que se llega al agente que está
+ * revisando, porque no hay `⌥I` ni ventana que abrir a mano.
+ */
+@media (pointer: coarse) {
+  /*
+   * Dos filas, no tres. Envolviendo sin más, el callsign, la lectura y STOP
+   * caían cada uno en su línea y la fila se comía media pantalla con hueco a
+   * la derecha. En rejilla: quién y cómo pararlo arriba, en los dos extremos,
+   * y lo que está haciendo debajo, entero.
+   */
+  body[data-sheet="improve"] .improve__agent {
+    display: grid; grid-template-columns: auto auto 1fr auto;
+    align-items: center; gap: 4px 10px; padding: 8px;
+  }
+  body[data-sheet="improve"] .improve__agent::before { grid-row: 1; }
+  body[data-sheet="improve"] .improve__agent-go { grid-row: 1; min-height: 40px; padding: 8px 14px; font-size: 12px; }
+  body[data-sheet="improve"] .improve__agent-stop { grid-row: 1; grid-column: 4; justify-self: end; }
+  body[data-sheet="improve"] .improve__agent-meta {
+    grid-row: 2; grid-column: 1 / -1;
+    white-space: normal; font-size: 11px; letter-spacing: 0.1em;
+  }
+  /* El autor de una propuesta: un enlace de 9px no se puede tocar. */
+  body[data-sheet="improve"] .imp__by { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+  body[data-sheet="improve"] .imp__who-go { min-height: 36px; padding: 0 10px; font-size: 11px; }
+}

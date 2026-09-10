@@ -17,11 +17,19 @@ export { mdLite } from '../markdown.ts';
  *
  * Behind TALK sits CAPCOM — a CLI session with `role: 'capcom'` — or nobody.
  * The input calls `hub.say` either way; who hears it is the hub's problem, and
- * with no CAPCOM the hub answers with a line saying so. A task conversation
- * (the picker at the top) swaps TALK for that task's own messages, with the
- * same live strip underneath. (The file is still called ceo.ts: that was the
- * API commander removed on 2026-09-06; the window kind is persisted in
- * layouts, so it is renamed separately.)
+ * with no CAPCOM the hub answers with a line saying so. (The file is still
+ * called ceo.ts: that was the API commander removed on 2026-09-06; the window
+ * kind is persisted in layouts, so it is renamed separately.)
+ *
+ * ── The rail is a door, not a view ─────────────────────────────────────
+ *
+ * A mission used to be a tab here: pressing one swapped this window for that
+ * mission's conversation, so having two in front of you was impossible and
+ * reading a result while writing to the commander meant choosing. Missions
+ * now have windows of their own (`kinds/mission.ts`), and the rail at the top
+ * is the index that opens them — the same call the HUD's mission panel makes,
+ * so there is exactly one way to be inside a mission. What stays here is what
+ * was always CAPCOM's: its own session.
  *
  * The strip above the input is the one line that says what CAPCOM is doing
  * *right now* — state, the tool in its hand, speed, burn — so you never have
@@ -29,27 +37,29 @@ export { mdLite } from '../markdown.ts';
  */
 
 import type { Agent, AgentMessage, Escalation, FeedItem, TalkItem } from '../../../shared/types.ts';
-import { visibleTasks, type CapcomTask, type TaskMessage } from '../../../shared/tasks.ts';
+import { missionGlimpse, visibleMissions, type MissionMessage } from '../../../shared/missions.ts';
+import { PHASE_DOT, PHASE_WORD, missionRows, railSplit, type MissionRow } from '../../hud/mission-status.ts';
 import { pick, type PickHandle } from '../../controls.ts';
 import { capcomOf as sharedCapcomOf } from '../../../shared/capcom.ts';
 import { store, type OutgoingMessage } from '../../store.ts';
 import { drafts, draftKey } from '../../drafts.ts';
-import { hub } from '../../net/client.ts';
+import { hub, uploadFile } from '../../net/client.ts';
+import { bindAttach } from '../attach.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { glyphBurst, slabFlash } from '../fx.ts';
 import { ago, clock, esc, money, stateVar, stateWord, tokens } from '../../util.ts';
 import { talkStepHtml } from '../talk-step.ts';
-import { echoLanded, foldTalk, toolLabel, type TalkGroup } from '../talk.ts';
+import { echoLanded, foldTalk, pendingEchoes, timeOrdered, toolLabel, type TalkGroup } from '../talk.ts';
 import { refIndex, type RefIndex } from '../refs.ts';
 import { linkPaths } from '../paths.ts';
 import { handoffNotice } from '../capcom-handoff.ts';
 import { dismissNotice, noticeDismissed, setNoticeOpen } from '../notice.ts';
 import { handoffText } from '../../../shared/handoff.ts';
+import { bindComposer, composerHint } from '../composer.ts';
 import { mountCapcomModel } from '../capcom-model.ts';
 import type { HistoryPage } from '../../../shared/provider-handoff.ts';
 
-const ORDERS = ['FLEET STATUS', 'WHAT NEEDS ME', 'SPEND', 'STOP THE BURNERS', 'WHO IS STUCK'];
 
 /** No CAPCOM session on this machine: what the API loop is, in one line. */
 const API_NOTE = 'API COMMAND · no CAPCOM session on this machine · start one with orca capcom';
@@ -174,21 +184,21 @@ function echoLabel(m: OutgoingMessage): string {
 export function mountCeo(ctx: WinCtx, c: Console) {
   const body = ctx.body;
   const key = ctx.win.id;
-  let selected: string | null = null;
-  try { selected = localStorage.getItem('orca.capcom.task'); } catch {}
   let tab: Tab = 'talk';
   try { const t = localStorage.getItem('orca.capcom.tab'); if (TABS.includes(t as Tab)) tab = t as Tab; } catch {}
-  let taskPicker: PickHandle | null = null;
-  let pickerSig = '';
+  let missionPicker: PickHandle | null = null;
+  let railSig = '';
   /** Steps the operator unfolded. Survives a re-render; not a reload. */
   const opened = new Set<string>();
   let stopGlyphs: (() => void) | null = null;
 
   body.innerHTML = `
-    <div class="row capcom__top">
-      <div data-task-picker style="flex:1;min-width:0"></div>
-      <button class="chip" type="button" data-archive-task hidden>ARCHIVE</button>
-      <button class="chip" type="button" data-new-task>NEW TASK</button>
+    <div class="capcom__top">
+      <div class="rail" data-strip aria-label="missions"></div>
+      <div class="rail__end">
+        <div data-more hidden></div>
+        <button class="chip" type="button" data-new-mission>+ NEW</button>
+      </div>
     </div>
     <div class="tabs" role="tablist" data-tabs>
       <button class="tab" type="button" role="tab" data-tab="talk">TALK</button>
@@ -199,16 +209,17 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     <div data-handoff hidden></div>
     <div class="win__scroll scroll" data-log></div>
     <div class="capcom__status" data-status></div>
-    <div class="ceo__orders ceo__orders--strip" data-orders>${ORDERS.map((o, i) => `<button class="chip" type="button" data-order="${esc(o)}"${i < 9 ? ` data-key="${i + 1}"` : ''}>${o}</button>`).join('')}</div>
     <div class="ceo__in">
-      <textarea class="input" rows="2" data-in placeholder="message capcom · enter sends, shift+enter newline"></textarea>
-      <button class="slab-btn" type="button" data-send data-key="enter">SEND</button>
+      <textarea class="input" rows="2" data-in aria-label="Message capcom" placeholder="${esc(composerHint('message capcom'))}"></textarea>
+      <button class="slab-btn" type="button" data-send>SEND</button>
     </div>
   `;
   const modelHost = document.createElement('div');
   body.querySelector('.ceo__in')!.before(modelHost);
   const modelControl = mountCapcomModel(modelHost, cmd => hub.cmd(cmd), id => c.openTerminal(id), path => c.openFile({ path, agentId: capcomOf()?.id ?? null }));
   const log = body.querySelector<HTMLElement>('[data-log]')!;
+  const stripEl = body.querySelector<HTMLElement>('[data-strip]')!;
+  const moreHost = body.querySelector<HTMLElement>('[data-more]')!;
   const handoffHost = body.querySelector<HTMLElement>('[data-handoff]')!;
   let handoffSig = '';
   handoffHost.addEventListener('click', (event) => {
@@ -234,10 +245,9 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   }, true);
   const band = body.querySelector<HTMLElement>('[data-band]')!;
   const status = body.querySelector<HTMLElement>('[data-status]')!;
-  const orders = body.querySelector<HTMLElement>('[data-orders]')!;
   const input = body.querySelector<HTMLTextAreaElement>('[data-in]')!;
   // The unsent line, per conversation, survives a reload (drafts.ts).
-  const draft = drafts.bind(input, draftKey('capcom', selected));
+  const draft = drafts.bind(input, draftKey('capcom'));
   draft.restore();
   const tabsEl = body.querySelector<HTMLElement>('[data-tabs]')!;
   const workCount = body.querySelector<HTMLElement>('[data-work-count]')!;
@@ -248,6 +258,11 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   if (stamp) stamp.textContent = 'capcom';
 
   let pinned = true;
+  /**
+   * Dónde iba la lectura de cada conversación. Volver a una misión y aterrizar
+   * en el fondo es perder el sitio donde la dejaste; sobrevive al cambio de
+   * pestaña, no a la recarga, igual que un scroll.
+   */
   let sig = '';
   let statusSig = '';
   let historyAgent = '';
@@ -270,7 +285,9 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   log.addEventListener('click', event => { if ((event.target as HTMLElement).closest('[data-earlier]')) void loadHistory(); });
   /** The fleet's names, for turning callsigns in CAPCOM's prose into places. Rebuilt per render. */
   let refs: RefIndex = refIndex([]);
-  log.addEventListener('scroll', () => { pinned = log.scrollTop + log.clientHeight >= log.scrollHeight - 24; });
+  log.addEventListener('scroll', () => {
+    pinned = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
+  });
 
   const setTab = (t: Tab) => {
     if (tab === t) return;
@@ -289,64 +306,66 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     });
   }
 
-  const selectTask = (id: string | null) => {
-    draft.save();
-    selected = id;
-    draft.rekey(draftKey('capcom', id));
-    input.value = '';
-    draft.restore();
-    sig = ''; pinned = true;
-    if (tab !== 'talk') { tab = 'talk'; try { localStorage.setItem('orca.capcom.tab', tab); } catch {} }
-    // The store remembers the pick and tells the HUD's task panel; `selected` already agrees.
-    store.selectTask(id);
-    render();
-  };
-  body.querySelector<HTMLButtonElement>('[data-new-task]')!.addEventListener('click', async (e) => {
+  body.querySelector<HTMLButtonElement>('[data-new-mission]')!.addEventListener('click', async (e) => {
     const button = e.currentTarget as HTMLButtonElement;
     button.disabled = true;
-    try { const task = await hub.createTask(); store.upsertTask(task); selectTask(task.id); input.focus(); }
-    catch (err) { c.note(`Could not create task: ${String(err)}`, 'warn'); }
-    finally { button.disabled = false; }
-  });
-  /**
-   * Retirar la conversación abierta. Una tarea en marcha no se archiva de un
-   * clic: sus workers siguen ahí y su hilo es lo que los explica, así que se
-   * pregunta. Una terminada se va sin ceremonia, y vuelve igual de fácil.
-   */
-  body.querySelector<HTMLButtonElement>('[data-archive-task]')!.addEventListener('click', async (e) => {
-    const button = e.currentTarget as HTMLButtonElement;
-    const id = selected;
-    const task = id ? store.world.tasks?.[id] : undefined;
-    if (!id || !task) return;
-    if (task.status === 'active' && !confirm(`"${task.title}" sigue activa. Archivarla la retira de la consola; sus agentes y su conversación se conservan.\n\n¿Archivar?`)) return;
-    button.disabled = true;
-    try { store.upsertTask(await hub.archiveTask(id)); c.note(`Task archived: ${task.title}`, 'info'); }
-    catch (err) { c.note(`Could not archive task: ${String(err)}`, 'warn'); }
+    // Nace y se abre en su propia ventana, que es donde se le escribe: crear
+    // una misión y no tener dónde decirle qué es sería media orden.
+    try { const mission = await hub.createMission(); store.upsertMission(mission); c.openMission(mission.id, { tab: 'talk' }); }
+    catch (err) { c.note(`Could not create mission: ${String(err)}`, 'warn'); }
     finally { button.disabled = false; }
   });
 
-  function renderPicker() {
-    const tasks = visibleTasks(store.world.tasks ?? {});
-    body.querySelector<HTMLButtonElement>('[data-archive-task]')!.hidden = !selected;
-    const s = JSON.stringify([selected, tasks.map((t) => [t.id, t.title, t.status])]);
-    if (s === pickerSig || taskPicker?.isOpen()) return;
-    pickerSig = s;
-    taskPicker?.dispose();
-    const host = body.querySelector<HTMLElement>('[data-task-picker]')!;
-    host.replaceChildren();
-    taskPicker = pick({ name: 'conversation', value: selected ?? '', search: tasks.length > 6,
-      options: [{ value: '', label: 'GENERAL · FLEET' }, ...tasks.map((t) => ({ value: t.id, label: t.title, hint: t.status }))],
-      onChange: (id) => selectTask(id || null),
+  /**
+   * La cinta de misiones: las abiertas, siempre a la vista, un clic cada una.
+   *
+   * Era un selector de vista —pulsar una cambiaba ESTA ventana por su
+   * conversación— y ahora es una puerta: cada misión tiene ventana propia, así
+   * que pulsar una la abre o la trae al frente. La otra puerta es el panel del
+   * HUD, y las dos llaman a lo mismo (`c.openMission`), de manera que no puede
+   * haber dos maneras de estar en una misión.
+   *
+   * Esta ventana se queda con lo que siempre fue suyo: la sesión de CAPCOM.
+   * El punto de cada pestaña lleva la fase que ya lee el panel del HUD
+   * (`missionRows`), así que la ventana y el panel no pueden discrepar; el
+   * ámbar es «te toca a ti». Lo terminado se pliega bajo MORE.
+   */
+  function renderRail() {
+    const rows = missionRows(visibleMissions(store.world.missions ?? {}), (id) => store.world.agents[id]);
+    const { strip, folded } = railSplit(rows, store.activeMissionId);
+    const s = JSON.stringify([store.activeMissionId, strip.map((r) => [r.id, r.title, r.phase]), folded.map((r) => [r.id, r.title])]);
+    if (s === railSig || missionPicker?.isOpen()) return;
+    railSig = s;
+
+    const tab = (r: MissionRow) => `<button class="rail__c${r.id === store.activeMissionId ? ' is-on' : ''}" type="button"
+      data-conv="${esc(r.id)}"
+      title="${esc(`${r.title} · ${PHASE_WORD[r.phase]} · moved ${ago(r.at)} · opens its own window`)}"
+      style="--dot:${PHASE_DOT[r.phase]}"><i class="rail__dot"></i><b>${esc(r.title)}</b><span class="rail__ago">${ago(r.at)}</span></button>`;
+    stripEl.innerHTML = strip.length ? strip.map(tab).join('')
+      : `<span class="rail__none px px--tiny">NO OPEN MISSIONS</span>`;
+    stripEl.querySelectorAll<HTMLElement>('[data-conv]').forEach((b) =>
+      b.addEventListener('click', () => c.openMission(b.dataset.conv!)));
+    // Que la que está delante se vea sin buscarla: la cinta puede haber crecido
+    // más allá de su ancho.
+    stripEl.querySelector<HTMLElement>('.rail__c.is-on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+    missionPicker?.dispose(); missionPicker = null;
+    moreHost.replaceChildren();
+    moreHost.hidden = folded.length === 0;
+    if (!folded.length) return;
+    missionPicker = pick({ name: 'finished missions', placeholder: `MORE ${folded.length}`, value: '', search: folded.length > 6,
+      options: folded.map((r) => ({ value: r.id, label: r.title, hint: PHASE_WORD[r.phase] })),
+      onChange: (id) => { if (id) c.openMission(id); },
     });
-    host.appendChild(taskPicker.el);
+    moreHost.appendChild(missionPicker.el);
   }
 
   /* ── Pieces ─────────────────────────────────────────────────────── */
 
-  /** The workers this conversation is about: the task's, or everyone CAPCOM put out there. */
+  /** The workers CAPCOM has out there. A mission's own crew is in its window. */
   function workers(): Agent[] {
-    return (selected ? store.everyone() : Object.values(store.world.agents))
-      .filter((a) => a.role !== 'capcom' && (selected ? store.world.tasks?.[selected]?.agentIds.includes(a.id) : (a.mission || a.squad || a.parentId)))
+    return Object.values(store.world.agents)
+      .filter((a) => a.role !== 'capcom' && (a.mission || a.squad || a.parentId))
       .sort((a, b) => Number(b.state === 'blocked') - Number(a.state === 'blocked') || b.startedAt - a.startedAt);
   }
 
@@ -361,15 +380,27 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     return [...unique.values()].sort((x, y) => x.at - y.at);
   }
 
-  /** Local echoes for this conversation that the transcript has not confirmed yet. */
-  function echoes(items: readonly TalkItem[], task?: CapcomTask): OutgoingMessage[] {
-    return store.outgoing.filter((m) => m.agentId === null && (m.taskId ?? null) === (selected ?? null))
-      .filter((m) => task
-        ? !task.messages.some((t) => t.role === 'human' && t.text.trim() === m.text.trim() && t.at >= m.at - 60_000)
-        : !echoLanded(m.text, m.at, items))
-      .slice(-3);
+  /** Local echoes for CAPCOM's own conversation that the transcript has not confirmed yet. */
+  function echoes(items: readonly TalkItem[]): OutgoingMessage[] {
+    const mine = store.outgoing.filter((m) => m.agentId === null && !m.missionId);
+    return pendingEchoes(mine, (m) => echoLanded(m.text, m.at, items)).slice(-3);
   }
 
+
+  /** Cuánto de una misión se lee desde GENERAL antes de que sea la misión. */
+  const GLIMPSE = 260;
+  /** Quién dijo la línea que la mirilla enseña. Un worker tiene nombre; tú, no. */
+  function saidBy(m: MissionMessage): string {
+    if (m.role === 'human') return 'YOU';
+    return store.world.agents[m.agentId ?? '']?.callsign ?? m.role.toUpperCase();
+  }
+  function cut(text: string, max: number): string {
+    const raw = text.trim();
+    if (raw.length <= max) return raw;
+    const head = raw.slice(0, max);
+    const space = head.lastIndexOf(' ');
+    return `${(space > max * 0.7 ? head.slice(0, space) : head).trimEnd()}…`;
+  }
 
   function groupHtml(g: TalkGroup): string {
     const t = `<span class="talk__t">${clock(g.at)}</span>`;
@@ -384,11 +415,14 @@ export function mountCeo(ctx: WinCtx, c: Console) {
           ${g.escalationId ? `<button class="chip" type="button" data-esc="${esc(g.escalationId)}"${live ? ' style="--chip-state:var(--amber)"' : ''}>${live ? 'STILL OPEN · ANSWER' : e ? esc(e.status.toUpperCase()) : 'QUESTION'}</button>` : ''}
         </div></div>`;
       }
-      case 'task': {
-        const task = g.taskId ? store.world.tasks?.[g.taskId] : undefined;
-        return `<div class="talk__g is-task"><div class="talk__who px">TASK ${t}</div><div>
-          <button class="chip" type="button" data-task-go="${esc(g.taskId ?? '')}">${esc(task?.title ?? g.text.split('\n')[0] ?? 'task')} ▸</button>
-          <div class="talk__ctx mono">CAPCOM was handed this task's conversation. Open it to read the exchange.</div>
+      case 'mission': {
+        const mission = g.missionId ? store.world.missions?.[g.missionId] : undefined;
+        const seen = mission ? missionGlimpse(mission, g.at) : null;
+        return `<div class="talk__g is-mission"><div class="talk__who px">MISSION ${t}</div><div>
+          <button class="chip" type="button" data-mission-go="${esc(g.missionId ?? '')}"><span>${esc(mission?.title ?? g.text.split('\n')[0] ?? 'mission')}</span> ▸</button>
+          ${seen?.said ? `<div class="talk__text mono"><b>${esc(saidBy(seen.said))}</b> ${esc(cut(seen.said.text, GLIMPSE))}</div>` : ''}
+          ${seen?.back ? `<div class="talk__text talk__ctx mono"><b>CAPCOM</b> ${mdLite(cut(seen.back.text, GLIMPSE), refs)}</div>` : ''}
+          <div class="talk__ctx mono">${seen?.said ? 'The mission has the rest.' : "CAPCOM was handed this mission's conversation. Open it to read the exchange."}</div>
         </div></div>`;
       }
       case 'system':
@@ -437,7 +471,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
         <div class="block__q mono">${esc(esca.question)}</div>
         ${esca.context ? `<div class="mono" style="margin-top:6px;color:var(--ink-dim)">${esc(esca.context)}</div>` : ''}
         <div class="block__opts">${esca.options.map((o) => `<button class="slab-btn slab-btn--amber slab-btn--sm" type="button" data-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
-        ${esca.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><input class="input" data-ans placeholder="type an answer" /><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-ans-send>SEND</button></div>`}
+        ${esca.optionsOnly ? '' : `<div class="row" style="margin-top:8px"><textarea class="input" rows="2" data-ans aria-label="Answer" placeholder="${esc(composerHint('type an answer'))}"></textarea><button class="slab-btn slab-btn--amber slab-btn--sm slab-btn--fit" type="button" data-ans-send>SEND</button></div>`}
       </div>`;
     }
     if (a.state === 'blocked' && a.block) {
@@ -453,7 +487,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   function wire(a?: Agent) {
     log.querySelectorAll<HTMLElement>('[data-esc]').forEach((b) => b.addEventListener('click', () => c.openInterrupt(b.dataset.esc!)));
     log.querySelectorAll<HTMLElement>('[data-question]').forEach((b) => b.addEventListener('click', () => c.openInterrupt(b.dataset.question!)));
-    log.querySelectorAll<HTMLElement>('[data-task-go]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.taskGo) selectTask(b.dataset.taskGo); }));
+    log.querySelectorAll<HTMLElement>('[data-mission-go]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.missionGo) c.openMission(b.dataset.missionGo); }));
     log.querySelectorAll<HTMLDetailsElement>('[data-step]').forEach((d) => d.addEventListener('toggle', () => {
       if (d.open) opened.add(d.dataset.step!); else opened.delete(d.dataset.step!);
     }));
@@ -480,11 +514,13 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     if (blockEl && a) {
       const escId = blockEl.dataset.block!;
       blockEl.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) => b.addEventListener('click', () => { slabFlash(b); c.answer(escId, b.dataset.opt!, null); }));
-      const ans = blockEl.querySelector<HTMLInputElement>('[data-ans]');
+      const ans = blockEl.querySelector<HTMLTextAreaElement>('[data-ans]');
       const ansBtn = blockEl.querySelector<HTMLElement>('[data-ans-send]');
       const sendAns = () => { const v = ans?.value.trim(); if (v) { slabFlash(ansBtn); c.answer(escId, v, null); ans!.value = ''; } };
       ansBtn?.addEventListener('click', sendAns);
-      ans?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sendAns(); } });
+      // Varias líneas: Enter salta, ⌘/⌃Enter manda. El bloque se repinta entero,
+      // así que el listener se va con el elemento viejo.
+      if (ans) bindComposer(ans, sendAns);
     }
     stopGlyphs?.(); stopGlyphs = null;
     const glyphHost = log.querySelector<HTMLElement>('[data-glyphs]');
@@ -510,6 +546,9 @@ export function mountCeo(ctx: WinCtx, c: Console) {
       items.length, items[items.length - 1]?.id,
       echo.map((m) => [m.id, m.status, m.elapsedMs]),
       groups.filter((g) => g.escalationId).map((g) => store.world.escalations[g.escalationId!]?.status),
+      // La mirilla de una misión vive de su conversación, no del transcript:
+      // sin esto, CAPCOM contesta dentro de la misión y aquí no cambia nada.
+      groups.filter((g) => g.missionId).map((g) => [g.missionId, store.world.missions?.[g.missionId!]?.updatedAt]),
       store.world.talkLive?.[a.id] ?? null,
       // While it works the row carries a seconds counter; otherwise a coarse clock is enough.
       live ? Math.floor(now / 1000) : Math.floor(now / 30000),
@@ -518,33 +557,20 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     sig = s;
     const last = groups[groups.length - 1];
     const stepShowing = !!last && last.role === 'capcom' && last.parts.some((p) => p.kind === 'step' && p.step.kind === 'tool' && !p.step.result);
+    // Por hora, no por fuente: un eco todavía sin confirmar pertenece al minuto
+    // en que lo escribiste, no al final de todo lo que CAPCOM dijo desde entonces.
+    const talk = timeOrdered([
+      ...groups.map((g) => ({ at: g.at, html: groupHtml(g) })),
+      ...echo.map((m) => ({ at: m.at, html: echoHtml(m) })),
+    ]);
     const body = groups.length || echo.length
-      ? `<div class="talk">${groups.map(groupHtml).join('')}${echo.map(echoHtml).join('')}${liveHtml(a, stepShowing)}</div>`
+      ? `<div class="talk">${talk}${liveHtml(a, stepShowing)}</div>`
       : `<div class="ceo__empty mono">Nothing said yet. CAPCOM commands the fleet on your behalf — it surveys, spawns agents with real briefs, unblocks them, and absorbs the questions they raise so you only see the ones that need you.${
         items.length === 0 && a.lastSay ? '<br/><br/><span style="color:var(--ink-dimmer)">This collector does not send the conversation yet · restart it to see the transcript here.</span>' : ''}</div>`;
     log.dataset.fileAgent = a.id;
     const archive = `<div class="capcom__archive">${historyNext !== null ? `<button type="button" class="chip" data-earlier ${historyLoading ? 'disabled' : ''}>${historyLoading ? 'LOADING HISTORY…' : historyText ? 'LOAD EARLIER MESSAGES' : 'LOAD PREVIOUS CONVERSATION'}</button>` : '<span class="mono">Beginning of saved conversation</span>'}${historyError ? `<p class="mono">${esc(historyError)}</p>` : ''}${historyText ? `<div class="md capcom__archive-text">${mdLite(historyText)}</div><div class="mono capcom__archive-boundary">CURRENT SESSION</div>` : ''}</div>`;
     log.innerHTML = linkPaths(`${archive}${blockHtml(a, now)}${body}`, { root: store.world.projects[a.projectId]?.path ?? null });
     wire(a);
-  }
-
-  function renderTalkTask(task: CapcomTask | undefined, a: Agent | undefined) {
-    const questions = task ? Object.values(store.world.escalations).filter((e) => task.agentIds.includes(e.agentId) && (e.status === 'pending' || e.status === 'with_ceo')) : [];
-    const echo = task ? echoes([], task) : [];
-    const live = a && (a.state === 'thinking' || a.state === 'working');
-    const s = JSON.stringify(['task', task, questions.map((q) => q.id), echo.map((m) => [m.id, m.status, m.elapsedMs]), a?.state, a?.tool, a?.toolDetail,
-      a ? store.world.talkLive?.[a.id] ?? null : null, live ? Math.floor(Date.now() / 1000) : 0]);
-    if (s === sig) return;
-    sig = s;
-    if (!task) { log.innerHTML = '<p class="sec mono">Waiting for this task from the hub.</p>'; wire(); return; }
-    const who = (m: TaskMessage) => m.role === 'human' ? 'YOU' : m.role === 'agent' ? esc(store.world.agents[m.agentId ?? '']?.callsign ?? 'AGENT') : m.role.toUpperCase();
-    const cls = (m: TaskMessage) => m.role === 'human' ? 'is-human' : m.role === 'capcom' ? 'is-capcom' : m.role === 'agent' ? 'is-fleet' : 'is-system';
-    log.innerHTML = `${questions.map((e) => `<div class="sec"><button class="chip" type="button" data-question="${esc(e.id)}" style="--chip-state:var(--amber)">QUESTION · ${esc(e.question)}</button></div>`).join('')}
-      ${task.messages.length || echo.length ? `<div class="talk">${task.messages.map((m) => `<div class="talk__g ${cls(m)}"><div class="talk__who px">${who(m)} <span class="talk__t">${clock(m.at)}</span></div><div class="talk__text mono">${m.role === 'capcom' ? mdLite(m.text, refs) : esc(m.text)}</div></div>`).join('')}${echo.map(echoHtml).join('')}${a ? liveHtml(a) : ''}</div>`
-        : '<div class="ceo__empty mono">Describe the task and name its project. Its messages, workers and results will stay here.</div>'}`;
-    if (a) log.dataset.fileAgent = a.id;
-    log.innerHTML = linkPaths(log.innerHTML, { root: store.world.projects[a?.projectId ?? '']?.path ?? null });
-    wire();
   }
 
   function renderTalkApi() {
@@ -576,7 +602,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     if (s === sig) return;
     sig = s;
     log.innerHTML = `
-      <p class="capcom__note mono">${selected ? 'Agents CAPCOM assigned to this task.' : 'Everyone CAPCOM has out there.'} Open one for its mission and results; LOCATE shows it on the field; TERMINAL opens its CLI.</p>
+      <p class="capcom__note mono">Everyone CAPCOM has out there. Open one for its mission and results; LOCATE shows it on the field; TERMINAL opens its CLI.</p>
       ${agents.length ? agents.slice(0, 60).map((a) => `
       <div class="sec capcom__worker">
         <div class="row row--wrap" style="gap:6px">
@@ -587,7 +613,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
         </div>
         <div class="mono capcom__mission">${esc(a.mission || a.title)}</div>
         ${a.block ? `<div class="mono" style="color:var(--amber)">${esc(a.block.summary)}</div>` : ''}
-      </div>`).join('') : `<p class="sec mono">${selected ? 'No agents assigned yet. Describe the task and its project to CAPCOM.' : 'Nobody out there yet. Ask CAPCOM for something and it will spawn who it needs.'}</p>`}
+      </div>`).join('') : `<p class="sec mono">Nobody out there yet. Ask CAPCOM for something and it will spawn who it needs.</p>`}
       <div class="sec"><button class="chip" type="button" data-fleet>VIEW FULL FLEET</button></div>`;
     wire();
   }
@@ -621,29 +647,38 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     const ceo = store.world.ceo;
     const parts: string[] = [];
     let s: string;
+    // Un relevo en marcha manda sobre el estado de la sesión: la que se va está
+    // ociosa mientras se prepara la que llega, y anunciar IDLE durante los dos
+    // minutos que eso dura es lo que hace pensar que no está pasando nada.
+    const moving = modelControl.transition();
     if (a) {
       const peer = a.state === 'blocked' && a.block?.kind === 'peer';
-      const now = a.state === 'working' && a.tool ? `${toolLabel(a.tool)} · ${a.toolDetail ?? ''}` : a.state === 'thinking' ? 'composing' : a.state === 'blocked' ? a.block?.summary ?? 'blocked' : '';
-      s = JSON.stringify(['cap', a.state, now, Math.round(a.metrics.tokensPerSec), a.metrics.costUSD.toFixed(2), a.pane, store.linkUp]);
+      const now = moving ?? (a.state === 'working' && a.tool ? `${toolLabel(a.tool)} · ${a.toolDetail ?? ''}` : a.state === 'thinking' ? 'composing' : a.state === 'blocked' ? a.block?.summary ?? 'blocked' : '');
+      s = JSON.stringify(['cap', a.state, now, Math.round(a.metrics.tokensPerSec), a.metrics.costUSD.toFixed(2), a.pane, store.linkUp, moving]);
       if (s === statusSig) return;
       statusSig = s;
-      parts.push(`<span class="status ${a.state === 'blocked' && !peer ? 'is-alert' : a.state === 'working' || a.state === 'thinking' ? 'is-on' : a.state === 'dead' ? 'is-dead' : ''}">${esc(stateWord(a))}</span>`);
+      parts.push(`<span class="status ${moving ? 'is-on' : a.state === 'blocked' && !peer ? 'is-alert' : a.state === 'working' || a.state === 'thinking' ? 'is-on' : a.state === 'dead' ? 'is-dead' : ''}">${esc(moving ? 'CHANGING' : stateWord(a))}</span>`);
       if (now) parts.push(`<span class="capcom__now mono" title="${esc(now)}">${esc(now)}</span>`);
       parts.push(`<span class="px px--tiny capcom__stat">${Math.round(a.metrics.tokensPerSec)} TOK/S</span>`);
       parts.push(`<span class="px px--tiny capcom__stat">${esc(money(a.metrics.costUSD))}</span>`);
       parts.push(`<span class="capcom__acts"><button class="chip" type="button" data-term title="${a.pane ? 'The CLI itself: the whole conversation, live, and a keyboard into it' : 'No pane: this CAPCOM runs with --bg (no tmux on its machine)'}">TERM</button><button class="chip" type="button" data-fly>FLY</button></span>`);
       if (!store.linkUp) parts.push('<span class="px px--tiny" style="color:var(--red)">LINK DOWN</span>');
       band.hidden = false;
-      band.classList.toggle('is-off', a.state !== 'working' && a.state !== 'thinking');
+      band.classList.toggle('is-off', !moving && a.state !== 'working' && a.state !== 'thinking');
       band.style.setProperty('--band-t', `${Math.max(0.35, 1.6 - Math.min(1, a.metrics.tokensPerSec / 80) * 1.2)}s`);
       ctx.setCallsign('CAPCOM', store.world.projects[a.projectId]?.code);
       ctx.setState(a.state === 'blocked' && !peer ? 'blocked' : a.state === 'dead' ? 'dead' : null, stateVar(a));
     } else {
-      s = JSON.stringify(['api', ceo.thinking, store.linkUp]);
+      s = JSON.stringify(['api', ceo.thinking, store.linkUp, moving]);
       if (s === statusSig) return;
       statusSig = s;
-      parts.push(`<span class="px px--tiny">${API_NOTE}</span>`);
-      band.hidden = true;
+      // El hueco del relevo: la sesión vieja ya no está y la nueva aún no se
+      // ha publicado. Sin esto la ventana pasa a hablar de la API, como si no
+      // hubiera mando — justo en el minuto en que se está fabricando uno.
+      if (moving) parts.push(`<span class="status is-on">CHANGING</span><span class="capcom__now mono">${esc(moving)}</span>`);
+      else parts.push(`<span class="px px--tiny">${API_NOTE}</span>`);
+      band.hidden = !moving;
+      band.classList.toggle('is-off', !moving);
       ctx.setCallsign('CAPCOM');
       ctx.setState(null, ceo.thinking ? 'var(--st-thinking)' : 'var(--lime)');
     }
@@ -666,16 +701,14 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     modelControl.update(a, store.linkUp);
     const handoff = (store.world.capcomHandoffs ?? []).filter((h) => !a || h.toId === a.id)
       .filter((h) => !noticeDismissed(`handoff:${h.id}`)).at(-1);
-    handoffHost.hidden = !handoff || !!selected || tab !== 'talk';
+    handoffHost.hidden = !handoff || tab !== 'talk';
     const nextHandoffSig = handoff ? JSON.stringify(handoff) : '';
     if (handoffSig !== nextHandoffSig) {
       handoffSig = nextHandoffSig;
       handoffHost.innerHTML = handoff ? handoffNotice(handoff) : '';
     }
-    const task = selected ? store.world.tasks?.[selected] : undefined;
-    orders.hidden = !!selected;
     paintTabs();
-    renderPicker();
+    renderRail();
     renderStatus(a);
     const n = workers().length;
     workCount.textContent = n ? ` ${n}` : '';
@@ -684,10 +717,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     const ev = events(a).length;
     eventsCount.textContent = ev ? ` ${ev}` : '';
 
-    if (selected) {
-      ctx.setTitle(task ? `${task.status.toUpperCase()} · ${task.title}` : 'LOADING TASK');
-      if (!a) ctx.setState(null, task?.status === 'completed' ? 'var(--lime)' : 'var(--ink-dim)');
-    } else if (a) {
+    if (a) {
       ctx.setTitle(a.state === 'working' && a.tool ? `${toolLabel(a.tool)} · ${a.toolDetail ?? ''}` : a.state === 'thinking' ? 'THINKING' : a.title || a.mission || 'COMMAND SESSION');
     } else {
       const under = Object.values(store.world.agents).filter((x) => x.state !== 'done' && x.state !== 'dead').length;
@@ -696,7 +726,6 @@ export function mountCeo(ctx: WinCtx, c: Console) {
 
     if (tab === 'work') { renderWork(); return; }
     if (tab === 'events') { renderEvents(a); return; }
-    if (selected) { renderTalkTask(task, a); return; }
     if (a) renderTalkGeneral(a); else renderTalkApi();
   }
 
@@ -705,7 +734,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     const t = text.trim();
     if (!t) return false;
     if (!store.linkUp) { c.note('link down · CAPCOM cannot hear you', 'warn'); return false; }
-    hub.say(t, selected ?? undefined);
+    hub.say(t);
     pinned = true;
     if (tab !== 'talk') setTab('talk');
     return true;
@@ -715,15 +744,14 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   // TALK carries the collector's receipt independently of the reply.
   const sent = () => { input.value = ''; draft.clear(); };
   sendBtn.addEventListener('click', () => { slabFlash(sendBtn); if (send(input.value)) sent(); });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); slabFlash(sendBtn); if (send(input.value)) sent(); }
-  });
-  orders.querySelectorAll<HTMLElement>('[data-order]').forEach((b) => b.addEventListener('click', () => send(b.dataset.order!.toLowerCase())));
+  // Enter salta línea; manda ⌘/⌃Enter y manda el botón. Ver `windows/composer.ts`.
+  const unbindComposer = bindComposer(input, () => { slabFlash(sendBtn); if (send(input.value)) sent(); });
+  // Un archivo soltado o pegado sube al hub y su ruta entra en el texto; el
+  // lienzo deja aquí los que se soltaron fuera de toda baldosa (attach.ts).
+  const unbindAttach = bindAttach(input, { key: draftKey('capcom'), upload: uploadFile, note: c.note });
 
   const off = store.on((e) => {
-    // The HUD's task panel picks tasks too: follow the store, do not fight it.
-    if (e.k === 'tasks' && store.activeTaskId !== selected) { selectTask(store.activeTaskId); return; }
-    if (e.k === 'tasks' || e.k === 'ceo' || e.k === 'world' || e.k === 'link' || e.k === 'agents' || e.k === 'traffic'
+    if (e.k === 'missions' || e.k === 'ceo' || e.k === 'world' || e.k === 'link' || e.k === 'agents' || e.k === 'traffic'
       || e.k === 'feed' || e.k === 'escalations' || e.k === 'talk' || e.k === 'delivery') render();
   });
   // One second: the live row counts seconds while CAPCOM works, and the
@@ -731,7 +759,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   const tick = window.setInterval(render, 1000);
   render();
   setTimeout(() => { if (input.isConnected && document.activeElement === document.body) input.focus(); }, 80);
-  return { dispose() { historyDisposed = true; modelControl.dispose(); taskPicker?.dispose(); off(); clearInterval(tick); stopGlyphs?.(); draft.dispose(); LOGS.delete(key); } };
+  return { dispose() { historyDisposed = true; modelControl.dispose(); missionPicker?.dispose(); off(); clearInterval(tick); stopGlyphs?.(); unbindComposer(); unbindAttach(); draft.dispose(); LOGS.delete(key); } };
 }
 
 /** The name this window has in the plan. `mountCeo` stays for the wiring. */

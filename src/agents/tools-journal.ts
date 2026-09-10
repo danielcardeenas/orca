@@ -33,7 +33,7 @@ export const TOOLS: ToolSpec[] = [
       properties: {
         project: { type: ['string', 'null'], description: 'Project id or code. Null for all.' },
         squad: { type: ['string', 'null'], description: 'Squad label, e.g. "audit-01". Null for all.' },
-        task_id: { type: ['string', 'null'], description: 'Only entries of agents bound to this ORCA task. Null for all.' },
+        mission_id: { type: ['string', 'null'], description: 'Only entries of agents bound to this ORCA mission. Null for all.' },
         agent: { type: ['string', 'null'], description: 'Agent id or callsign. Null for all.' },
         kind: { type: ['string', 'null'], enum: [...JOURNAL_KINDS, null], description: 'One kind: launch, end, escalation, answer, rotation, landing. Null for every kind.' },
         since: { type: ['string', 'null'], description: WHEN },
@@ -45,7 +45,7 @@ export const TOOLS: ToolSpec[] = [
         newest_first: { type: 'boolean', description: 'True (the default) for newest first; false for oldest first.' },
         full: { type: 'boolean', description: 'Return the full brief, last message, question and answer instead of the clipped ones.' },
       },
-      required: ['project', 'squad', 'task_id', 'agent', 'kind', 'since', 'until', 'state', 'by', 'text', 'limit', 'newest_first', 'full'],
+      required: ['project', 'squad', 'mission_id', 'agent', 'kind', 'since', 'until', 'state', 'by', 'text', 'limit', 'newest_first', 'full'],
       additionalProperties: false,
     },
     strict: true,
@@ -103,7 +103,7 @@ export function queryOf(input: Record<string, unknown>, now = Date.now()): Journ
   const limit = input.limit == null ? null : Number(input.limit);
   if (limit !== null && (!Number.isFinite(limit) || limit < 1)) return { error: 'limit must be a positive integer' };
   return {
-    project: str(input.project), squad: str(input.squad), taskId: str(input.task_id), agent: str(input.agent),
+    project: str(input.project), squad: str(input.squad), missionId: str(input.mission_id) ?? str(input.task_id), agent: str(input.agent),
     kind: (kind as JournalKind | null), since, until,
     state: state as 'done' | 'dead' | null, by: by as JournalQuery['by'],
     text: str(input.text), limit, order: input.newest_first === false ? 'asc' : 'desc',

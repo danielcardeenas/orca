@@ -125,7 +125,7 @@ const create = [
 ];
 
 const landing = [
-  test('a clean land: rebase, suite, one commit on main naming the callsign and the task, worker branch levelled', async () => {
+  test('a clean land: rebase, suite, one commit on main naming the callsign and the mission, worker branch levelled', async () => {
     const dir = repo();
     try {
       const r = await createWorktree(dir, 'k9');

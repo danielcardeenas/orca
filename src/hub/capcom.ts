@@ -25,6 +25,7 @@
 
 import type { Agent, Escalation } from '../shared/types.ts';
 import { capcomOf, ESCALATION_PREFIX } from '../shared/capcom.ts';
+import { syntheticNote } from '../shared/synthetic.ts';
 
 // Lives in shared/ so the console picks the same session the hub routes to,
 // and recognises the escalation prefix the hub writes.
@@ -93,6 +94,15 @@ export interface CapcomDeps {
   markWithCeo(id: string): void;
   /** Give up on CAPCOM: put the question in front of the human, with a reason. */
   giveUp(id: string, reason: string): void;
+  /**
+   * ¿Puede lo que viene de esta máquina llegarle al mando?
+   *
+   * Falso para el arnés: `test/fake-collector.ts` levanta agentes que escalan
+   * preguntas inventadas, y un CAPCOM de verdad las contesta una por una hasta
+   * quedarse sin contexto. Ver shared/synthetic.ts. Sin la dependencia todo es
+   * enrutable, que es lo que quiere un test que sólo mira el reloj.
+   */
+  routable?(machineId: string): boolean;
   /** Callsign of an agent, for the line CAPCOM reads. */
   callsign?(agentId: string): string | null;
   /** One line for the operator's feed. Optional so tests need not care. */
@@ -111,6 +121,8 @@ export class CapcomRouter {
   private held = new Map<string, CapcomTimer>();
   /** Said once, the first time a fleet actually gets a CAPCOM. */
   private announced = false;
+  /** Máquinas en cuarentena de las que ya se avisó una vez. */
+  private quarantined = new Set<string>();
   /**
    * A rotation in progress: the session going away, and the deadline for the
    * new one to show. While set, `fromId` is never a delivery target and what
@@ -184,7 +196,7 @@ export class CapcomRouter {
    * retiring session is not a target, and everything addressed to CAPCOM is
    * held. Without this the window between the old pane dying and the new
    * transcript appearing reads as "no CAPCOM connected": the operator's
-   * message is refused, a task prompt goes nowhere, and a rotation that was
+   * message is refused, a mission prompt goes nowhere, and a rotation that was
    * meant to be invisible costs them a retype.
    */
   rotating(fromId: string, holdMs = CAPCOM_ROTATION_HOLD_MS): void {
@@ -252,6 +264,17 @@ export class CapcomRouter {
     if (this.cleanCutoff !== null && esc.askedAt <= this.cleanCutoff) return false;
     // Its own question would loop straight back into it.
     if (esc.agentId === cap.id) return false;
+    // De otro mundo: el arnés preguntando al mando de verdad. La pregunta se
+    // queda donde estaba —la cola del humano, visible en la consola— y el mando
+    // no gasta un turno en ella. `sweep` vuelve a pasar por aquí, así que se
+    // dice una vez por máquina y no ciento treinta veces.
+    if (this.deps.routable && !this.deps.routable(esc.machineId)) {
+      if (!this.quarantined.has(esc.machineId)) {
+        this.quarantined.add(esc.machineId);
+        this.deps.note?.(syntheticNote(esc.machineId));
+      }
+      return false;
+    }
     if (this.held.has(escalationId)) return true;
 
     this.announce(cap);

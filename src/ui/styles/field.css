@@ -84,27 +84,27 @@
 
 .lbl__row { display: flex; align-items: baseline; gap: calc(4px * var(--u)); white-space: nowrap; }
 .lbl__cs {
-  font-family: 'Tiny5', monospace; font-size: calc(12px * var(--u)); letter-spacing: 0.12em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: calc(12px * var(--u)); letter-spacing: 0.12em;
   color: var(--ink-bright); text-transform: uppercase;
 }
 .lbl__pj {
-  font-family: 'Tiny5', monospace; font-size: calc(9px * var(--u)); letter-spacing: 0.14em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: calc(9px * var(--u)); letter-spacing: 0.14em;
   color: var(--ink-dimmer); text-transform: uppercase;
 }
 .lbl__rt {
-  font-family: 'Tiny5', monospace; font-size: calc(7px * var(--u)); letter-spacing: 0.12em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: calc(7px * var(--u)); letter-spacing: 0.12em;
   color: var(--ink-faint); text-transform: uppercase;
   padding: 0 calc(2px * var(--u)); border: 1px solid var(--line-soft);
 }
 /* Runtime · model · machine. The band already stops short of the sigil; this
    only keeps a long model name from pushing the callsign off its line. */
 .lbl__meta {
-  font-family: 'Tiny5', monospace; font-size: calc(7px * var(--u)); letter-spacing: 0.16em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: calc(7px * var(--u)); letter-spacing: 0.16em;
   color: var(--ink-faint); text-transform: uppercase;
   max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .lbl__title {
-  font-family: 'Geist Mono', monospace; font-size: calc(10px * var(--u)); letter-spacing: 0.01em;
+  font-family: var(--font-mono, 'Geist Mono', monospace); font-size: calc(10px * var(--u)); letter-spacing: 0.01em;
   color: var(--ink-mid);
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; word-break: break-word;
@@ -114,18 +114,18 @@
 /* Two lines. The mission is the sentence that says why the agent exists;
    eleven characters and an ellipsis explain nothing. */
 .lbl__mission {
-  font-family: 'Geist Mono', monospace; font-size: calc(8px * var(--u));
+  font-family: var(--font-mono, 'Geist Mono', monospace); font-size: calc(8px * var(--u));
   color: var(--ink-dim);
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; word-break: break-word;
 }
 /* NOW lives in the bottom band: one line, the full 89 %, no bite to dodge. */
 .lbl__now {
-  font-family: 'Geist Mono', monospace; font-size: calc(9px * var(--u));
+  font-family: var(--font-mono, 'Geist Mono', monospace); font-size: calc(9px * var(--u));
   color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .lbl__now b {
-  font-family: 'Tiny5', monospace; font-weight: 400; font-size: calc(8px * var(--u));
+  font-family: var(--font-display, 'Tiny5', monospace); font-weight: 400; font-size: calc(8px * var(--u));
   letter-spacing: 0.14em; color: var(--lime); margin-right: calc(3px * var(--u));
   text-transform: uppercase;
 }
@@ -140,7 +140,7 @@
 }
 .lbl__m { display: flex; flex-direction: column; gap: calc(1px * var(--u)); min-width: 0; overflow: hidden; }
 .lbl__mv {
-  font-family: 'Tiny5', monospace; font-size: calc(7px * var(--u)); letter-spacing: 0.04em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: calc(7px * var(--u)); letter-spacing: 0.04em;
   color: var(--ink-bright); font-variant-numeric: tabular-nums;
   white-space: nowrap; overflow: hidden; text-overflow: clip;
 }
@@ -148,7 +148,7 @@
    reads as measured-and-none, which would be a lie. */
 .lbl__mv.is-nil { color: var(--ink-faint); }
 .lbl__mk {
-  font-family: 'Tiny5', monospace; font-size: calc(5px * var(--u)); letter-spacing: 0.10em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: calc(5px * var(--u)); letter-spacing: 0.10em;
   color: var(--ink-dimmer); white-space: nowrap; overflow: hidden;
 }
 
@@ -246,11 +246,11 @@
   display: flex; align-items: baseline; gap: 8px; white-space: nowrap;
   padding: 3px 6px; border: 1px solid var(--line-soft); background: rgba(11,10,13,0.6);
 }
-.rgn__code { font-family: 'Tiny5', monospace; font-size: 12px; letter-spacing: 0.14em; color: var(--ink-bright); }
-.rgn__name { font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em; color: var(--ink-dim); text-transform: uppercase; }
-.rgn__n { font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.12em; color: var(--ink-dimmer); }
+.rgn__code { font-family: var(--font-display, 'Tiny5', monospace); font-size: 12px; letter-spacing: 0.14em; color: var(--ink-bright); }
+.rgn__name { font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; letter-spacing: 0.16em; color: var(--ink-dim); text-transform: uppercase; }
+.rgn__n { font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; letter-spacing: 0.12em; color: var(--ink-dimmer); }
 .rgn.has-blocked .rgn__n { color: var(--amber); }
-.rgn__open { font-family: 'Tiny5', monospace; font-size: 11px; color: var(--ink-dimmer); padding: 0 2px 0 6px; border-left: 1px solid var(--line-soft); margin-left: 2px; }
+.rgn__open { font-family: var(--font-display, 'Tiny5', monospace); font-size: 11px; color: var(--ink-dimmer); padding: 0 2px 0 6px; border-left: 1px solid var(--line-soft); margin-left: 2px; }
 .rgn__open:hover { color: var(--lime); }
 .rgn:hover { border-color: var(--line); }
 /* The label is the region's handle (drag moves the project); a moved one wears a lime tick. */
@@ -275,6 +275,22 @@
 .rgn--off .rgn__name { color: var(--ink-dimmer); }
 .rgn--off:hover { opacity: 1; border-color: var(--line); }
 
+/*
+ * El recinto del arnés: lo que levantan las pruebas, encerrado junto a la
+ * isla desde la que se lanzaron. El rótulo repite la doble línea con la que
+ * el campo dibuja su valla (`C_HARNESS`), así que la misma palabra vale a
+ * cualquier zoom: donde el recinto ya no se lee, el chip sigue teniendo dos
+ * bordes. Apagado como la isla de fuera de la flota —tampoco es flota— pero
+ * distinto de ella: aquello quedó ahí, esto se irá cuando acaben las pruebas.
+ */
+.rgn--harness {
+  border-style: double; border-width: 3px; border-color: var(--line-soft);
+  background: rgba(11,10,13,0.45); opacity: 0.58; padding: 1px 4px;
+}
+.rgn--harness .rgn__code { color: var(--ink-dimmer); letter-spacing: 0.2em; }
+.rgn--harness .rgn__name { color: var(--ink-dimmer); }
+.rgn--harness:hover { opacity: 1; border-color: var(--line); }
+
 /* The squad rótulo, its outline legend and roster live in squad.css. */
 
 /*
@@ -286,7 +302,7 @@
   position: absolute; left: 0; top: 0; will-change: transform;
   display: flex; align-items: baseline; gap: 6px; white-space: nowrap;
   padding: 2px 5px; border: 1px solid var(--amber); background: rgba(11,10,13,0.72);
-  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.14em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; letter-spacing: 0.14em;
   color: var(--amber); text-transform: uppercase;
 }
 .you__n { color: var(--ink-bright); }
@@ -305,7 +321,7 @@
   padding: 3px 8px; background: var(--shell); border-bottom: 1px solid var(--line-soft);
 }
 .srf__bar .px { font-size: 9px; }
-.srf__x { background: transparent; border: 0; color: var(--ink-dim); font-family: 'Tiny5', monospace; font-size: 10px; padding: 0 2px; }
+.srf__x { background: transparent; border: 0; color: var(--ink-dim); font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; padding: 0 2px; }
 .srf__x:hover { color: var(--lime); }
 
 /* ── Lasso ────────────────────────────────────────────────────────── */

@@ -61,6 +61,13 @@ const mod: TestModule = {
       const otherUp = h.up({ key: 'f' });
       return eq('one engage', [rep, other, first, second, otherUp, engages, h.held()], [false, false, true, false, false, 1, true]);
     }),
+    test('hold: whileTyping lets a chord engage inside a field', () => {
+      const h = keyHold('KeyV', { whileTyping: true });
+      const inField = h.down({ key: 'KeyV', target: textarea }, () => true);
+      const released = h.up({ key: 'KeyV' });
+      const strict = keyHold('KeyV').down({ key: 'KeyV', target: textarea }, () => true);
+      return ok('chord in a field', inField && released && !strict, `inField=${inField} released=${released} strict=${strict}`);
+    }),
     test('hold: cancel drops a held mode silently', () => {
       const h = keyHold(' ');
       h.down(down(canvas), () => true);

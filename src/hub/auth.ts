@@ -22,12 +22,19 @@ import { dirname, join } from 'node:path';
 export const ORCA_DIR = process.env['ORCA_HOME'] ?? join(homedir(), '.orca');
 export const TOKEN_FILE = join(ORCA_DIR, 'token');
 
-/** Código de cierre para un token inválido. Acordado con la consola. */
-export const CLOSE_UNAUTHORIZED = 4001;
-/** Versión de protocolo incompatible. */
-export const CLOSE_BAD_VERSION = 4002;
-/** Hello ausente o malformado. */
-export const CLOSE_BAD_HELLO = 4003;
+/*
+ * Los códigos de cierre viven en el protocolo (`shared/protocol.ts`): los
+ * acuerda el hub con la consola, y la consola no puede importar nada de aquí.
+ * Se reexportan para que quien ya los pedía a este módulo los siga teniendo.
+ */
+export {
+  CLOSE_UNAUTHORIZED, CLOSE_BAD_VERSION, CLOSE_BAD_HELLO, CLOSE_NOT_HARNESS,
+} from '../shared/protocol.ts';
+
+export interface AuthOptions {
+  /** Dónde va a escuchar el hub. Sin esto se asume expuesto. */
+  host?: string;
+}
 
 export interface Auth {
   token: string;
@@ -61,6 +68,22 @@ export function isLoopback(remote: string | null | undefined): boolean {
   return /^127\./.test(addr);
 }
 
+/**
+ * Si el hub sólo es alcanzable desde su propia máquina.
+ *
+ * De esto depende que la puerta anónima exista. En cuanto el hub escucha en
+ * algo más ancho —0.0.0.0, la IP de la tailnet— "viene de loopback" deja de
+ * significar "lo escribió el dueño", porque cualquier proxy en la misma
+ * máquina reescribe esa dirección sin querer.
+ *
+ * Sin dato se asume lo peor. Quien no dice dónde escucha no puede pedir que se
+ * le suponga a salvo.
+ */
+export function bindsLocalOnly(host: string | null | undefined): boolean {
+  if (!host) return false;
+  return isLoopback(host);
+}
+
 /** El archivo de token depende del entorno que se pase, no del global: así una
  *  prueba puede darse su propio ORCA_HOME sin tocar el del humano. */
 function tokenFileFor(env: NodeJS.ProcessEnv): string {
@@ -83,7 +106,7 @@ function persist(file: string, token: string): void {
   chmodSync(file, 0o600);   // por si el archivo ya existía con otro modo
 }
 
-export function createAuth(env: NodeJS.ProcessEnv = process.env): Auth {
+export function createAuth(env: NodeJS.ProcessEnv = process.env, opts: AuthOptions = {}): Auth {
   const file = tokenFileFor(env);
   const fromEnv = (env['ORCA_TOKEN'] ?? '').trim();
   let token = fromEnv;
@@ -105,8 +128,16 @@ export function createAuth(env: NodeJS.ProcessEnv = process.env): Auth {
     }
   }
 
-  // Sólo hay puerta trasera local cuando el humano no ha fijado ORCA_TOKEN.
-  const allowLoopbackAnonymous = fromEnv.length === 0 && env['ORCA_STRICT_AUTH'] !== '1';
+  /*
+   * La puerta trasera local pide tres cosas a la vez, y basta que falle una:
+   * que el humano no haya fijado ORCA_TOKEN, que no haya pedido rigor, y que
+   * el hub sólo escuche en local. La tercera es la que importa al exponerlo:
+   * detrás de un túnel todo el tráfico de internet llega como 127.0.0.1, y sin
+   * ella la puerta se abriría al mundo en silencio, sin un error que lo diga.
+   */
+  const localOnly = bindsLocalOnly(opts.host);
+  const allowLoopbackAnonymous =
+    fromEnv.length === 0 && env['ORCA_STRICT_AUTH'] !== '1' && localOnly;
 
   return {
     token,
@@ -134,7 +165,13 @@ export function createAuth(env: NodeJS.ProcessEnv = process.env): Auth {
       }
       if (allowLoopbackAnonymous) {
         lines.push('[auth] ⚠ MODO DEV: se aceptan conexiones de localhost SIN token.');
-        lines.push('[auth] ⚠ Define ORCA_TOKEN (o ORCA_STRICT_AUTH=1) antes de exponer este puerto.');
+        lines.push('[auth] ⚠ Existe sólo porque el hub escucha en local; expuesto, esta puerta no está.');
+      } else if (!localOnly) {
+        // El caso del hub alcanzable desde la tailnet o desde un túnel. Aquí
+        // se le exige token hasta a localhost, y lo primero que hace falta
+        // saber es cómo entra la consola desde el móvil.
+        lines.push(`[auth] escuchando en ${opts.host ?? '?'}: se exige token a todo el mundo, también a localhost.`);
+        lines.push(`[auth] consola: abre la url con ?k=${token} la primera vez (se guarda en el navegador).`);
       }
       return lines;
     },

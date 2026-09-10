@@ -93,37 +93,72 @@ export function sigilBits(seed: string): number {
   return bits;
 }
 
-/** One cell is a fifth of the box; offsets run −0.4em … +0.4em from centre. */
+/**
+ * El mismo glifo como cinco filas de `#` y `.`, que es lo que come `drawBits`
+ * (`gfx/logo.ts`) y con él `paintBits` (`gfx/algn.ts`).
+ *
+ * Existe porque hay dos formas de pintar un sigilo y las dos hacen falta: el
+ * DOM para lo que va dentro de una línea de texto, y el lienzo para lo que
+ * tiene que salir nítido a un tamaño fijo junto a una insignia — que es como
+ * el arranque pinta el suyo. Los bits son los mismos, y son de aquí, así que
+ * las dos formas no pueden dibujar cosas distintas.
+ */
+export function sigilRows(bits: number): string[] {
+  const b = bits & MASK;
+  const rows: string[] = [];
+  for (let cy = 0; cy < SIGIL_N; cy++) {
+    let row = '';
+    for (let cx = 0; cx < SIGIL_N; cx++) {
+      const cxm = Math.min(cx, SIGIL_N - 1 - cx);
+      row += ((b >> (cy * COLS + cxm)) & 1) === 1 ? '#' : '.';
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** One cell is a fifth of the box; a cell's top-left runs 0 … 0.8em from the box's. */
 const STEP = 1 / SIGIL_N;
-const off = (i: number) => `${((i - 2) * STEP).toFixed(1)}em`;
+const cell = (i: number) => `${(i * STEP).toFixed(1)}em`;
 
 /**
- * The same glyph as DOM, for the window header and the squad label.
+ * The same glyph as DOM, for the window header, the squad label and the
+ * mission's crew list.
  *
- * One `<i class="sigil">` of 1em, painted by up to 25 box-shadows of its own
- * box: a spread of −0.4em shrinks the 1em box to one 0.2em cell, and the
- * offset moves that cell onto its place in the grid. Colour is `currentColor`,
- * so the caller decides ink.
+ * One `<i class="sigil">` of 1em, painted by up to 25 background layers of its
+ * own box: every layer is a flat `linear-gradient` of `currentColor` sized to
+ * one 0.2em cell and positioned onto its place in the 5×5 grid, so the caller
+ * still decides the ink and the element still costs one node.
+ *
+ * It used to be 25 box-shadows, and it drew **nothing**: an outer shadow is
+ * clipped against the element's own border-box, and every cell of this glyph
+ * falls inside that box, so all 25 were cut away. The bug was quiet — the
+ * markup was there, the geometry was right, and the squad label and the window
+ * header just had a 1em hole where their mark should be. `hud/improve.ts` went
+ * to canvas over exactly this. Backgrounds paint inside the box, which is
+ * where the glyph lives.
  *
  * `inverted` (the squad lead) emits the **complement** of the glyph rather
- * than a background plus holes. Outer box-shadows paint *behind* the element's
- * own background, so a `background: currentColor` would swallow every shadow;
- * complementing gets the same picture — a block of ink with the glyph cut out
- * — with one code path, and the cut-outs show the real surface underneath
- * instead of a hard-coded body colour. `.sigil.is-inv` carries the note.
+ * than a filled box with holes: the same picture — a block of ink with the
+ * glyph cut out — through one code path, and the cut-outs show the real
+ * surface underneath instead of a hard-coded body colour.
  */
 export function sigilHTML(bits: number, inverted = false): string {
   const b = bits & MASK;
-  const parts: string[] = [];
+  const layers: string[] = [];
+  const spots: string[] = [];
   for (let cy = 0; cy < SIGIL_N; cy++) {
     for (let cx = 0; cx < SIGIL_N; cx++) {
       const cxm = Math.min(cx, SIGIL_N - 1 - cx);
       const on = ((b >> (cy * COLS + cxm)) & 1) === 1;
       if (on === inverted) continue; // inverted paints the cells the glyph leaves
-      parts.push(`${off(cx)} ${off(cy)} 0 -0.4em currentColor`);
+      layers.push('linear-gradient(currentColor,currentColor)');
+      spots.push(`${cell(cx)} ${cell(cy)}`);
     }
   }
   const cls = inverted ? 'sigil is-inv' : 'sigil';
-  const shadow = parts.length ? ` style="box-shadow:${parts.join(',')}"` : '';
-  return `<i class="${cls}"${shadow} aria-hidden="true"></i>`;
+  const style = layers.length
+    ? ` style="background-image:${layers.join(',')};background-position:${spots.join(',')};background-size:${STEP}em ${STEP}em;background-repeat:no-repeat"`
+    : '';
+  return `<i class="${cls}"${style} aria-hidden="true"></i>`;
 }

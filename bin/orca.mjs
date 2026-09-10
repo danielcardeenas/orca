@@ -21,6 +21,8 @@
  *   orca say K9 "<text>"                       text into a running agent
  *   orca tell "<subject>" --to squad:audit-01 --kind warning [--body ...]
  *   orca stop K9 --reason "<why>"              stop one; `squad:<name>` stops all
+ *   orca retire K9 --reason "<why>"            declare a ghost gone: its session gets marked dead
+ *                                              and stops generating notices nobody can silence
  *   orca land K9 [--no-tests] [--message "…"]  a worker's branch into the project's (ORCA_WORKTREES=1)
  *   orca discard K9 [--force]                  drop a worker's worktree and branch
  *   orca archive [--project AX] [--squad s] [--older-than 24h] [--state done|dead] [--dry-run]
@@ -100,9 +102,18 @@ function usage() {
                                                a squad: lead first, members hanging off it
   orca fleets [--full]                         the saved presets (~/.orca/fleets)
   orca launch <preset> [--project <p>]         launch a preset
+      --machine <host|id>                      spawn, squad, launch: run it on that machine. Without it, a repo
+                                               cloned on several machines goes to the least busy one
   orca say <K9> "<text>"                       text into a running agent
   orca tell "<subject>" --to <K9|project:p|squad:s> [--kind notice|handoff|warning] [--body "..."]
   orca stop <K9 | squad:name> --reason "<why>"
+  orca retire <K9 | agent-id> --reason "<why>"
+                                               the way out for a ghost: a session whose pane and process
+                                               are gone but that the hub still counts alive, so it keeps
+                                               firing notices no tool can silence. Marks it dead with your
+                                               reason and makes it archivable. Check it really is gone
+                                               (tmux -L orca ls, pgrep); if it keeps working, the hub
+                                               undoes the burial on its own.
   orca land <K9 | squad:name> [--no-tests] [--message "<title>"]
                                                rebase a worker's branch onto the project's, run the suite, one commit
   orca discard <K9 | squad:name> [--force]     drop a worker's worktree and branch; --force even with unlanded work
@@ -211,11 +222,22 @@ async function world() {
  * A project the way a person names it — "AX", "axolots", or the id — into the
  * id the tools take. Ambiguity is an error, never a guess: a spawn on the
  * wrong repo is an hour of somebody's output in the wrong place.
+ *
+ * One exception, which is not ambiguity: the same repository cloned on two
+ * machines is two projects with one code and one path. Those are handed to
+ * the hub by code, and the hub sends the work to the least busy clone —
+ * unless `--machine` names one, in which case only that machine's clone
+ * counts.
  */
-async function projectId(ref) {
+async function projectId(ref, machineRef = null) {
   if (!ref) return null;
   const w = await world();
-  const all = Object.values(w.projects ?? {});
+  const machines = Object.values(w.machines ?? {});
+  let all = Object.values(w.projects ?? {});
+  if (machineRef) {
+    const m = machineId(machines, machineRef);
+    all = all.filter((p) => p.machineId === m);
+  }
   const r = String(ref).trim().toLowerCase();
   const exact = all.filter((p) => p.id === ref);
   if (exact.length === 1) return exact[0].id;
@@ -223,11 +245,25 @@ async function projectId(ref) {
   if (byCode.length === 1) return byCode[0].id;
   const byName = all.filter((p) => String(p.name).toLowerCase() === r);
   if (byName.length === 1) return byName[0].id;
-  const hits = [...byCode, ...byName];
+  const hits = [...new Set([...byCode, ...byName])];
   if (hits.length > 1) {
+    const clones = new Set(hits.map((p) => `${p.code}|${p.path}`)).size === 1
+      && new Set(hits.map((p) => p.machineId)).size === hits.length;
+    if (clones) return hits[0].code;
     fail(1, `"${ref}" matches ${hits.length} projects: ${hits.map((p) => `${p.code} ${p.name} (${p.id})`).join(', ')} — use the id`);
   }
-  fail(1, `no project "${ref}". Known: ${all.map((p) => `${p.code} ${p.name}`).join(', ') || 'none — is a collector running?'}`);
+  const where = machineRef ? ` on ${machineRef}` : '';
+  fail(1, `no project "${ref}"${where}. Known: ${all.map((p) => `${p.code} ${p.name}`).join(', ') || 'none — is a collector running?'}`);
+}
+
+/** `--machine` the way a person types it — hostname, its first label, or the id — into the id. */
+function machineId(machines, ref) {
+  const r = String(ref).trim().toLowerCase();
+  const hit = machines.find((m) => m.id === ref)
+    ?? machines.find((m) => String(m.hostname).toLowerCase() === r)
+    ?? machines.find((m) => String(m.hostname).toLowerCase().split('.')[0] === r);
+  if (!hit) fail(1, `no machine "${ref}". Reporting: ${machines.map((m) => `${m.hostname}${m.online ? '' : ' (offline)'}`).join(', ') || 'none'}`);
+  return hit.id;
 }
 
 /** `@path` reads the file; anything else is the text itself. */
@@ -454,7 +490,8 @@ async function main() {
       const [, proj, mission] = pos;
       if (!proj || !mission) fail(1, 'orca spawn <project> "<brief>"');
       const out = await tool('spawn_agent', {
-        project_id: await projectId(proj),
+        project_id: await projectId(proj, opts.machine ?? null),
+        machine: opts.machine ?? null,
         mission: brief(mission),
         parent_agent_id: opts.parent ?? null,
         background: opts.fg !== true,
@@ -475,7 +512,8 @@ async function main() {
       const members = (opts.member ?? []).map(brief);
       if (!members.length) fail(1, 'a squad needs at least one --member "<brief>"');
       const out = await tool('launch_squad', {
-        project_id: await projectId(opts.project),
+        project_id: await projectId(opts.project, opts.machine ?? null),
+        machine: opts.machine ?? null,
         preset: null,
         squad: name,
         lead_mission: brief(opts.lead),
@@ -492,7 +530,8 @@ async function main() {
       const preset = pos[1];
       if (!preset) fail(1, 'orca launch <preset> [--project <p>]  ·  see `orca fleets`');
       const out = await tool('launch_squad', {
-        project_id: opts.project ? await projectId(opts.project) : null,
+        project_id: opts.project ? await projectId(opts.project, opts.machine ?? null) : null,
+        machine: opts.machine ?? null,
         preset,
         squad: null, lead_mission: null, members: null, lead_model: null,
         background: opts.fg !== true,
@@ -578,6 +617,38 @@ async function main() {
       return print(sq
         ? await tool('stop_squad', { squad: sq, reason })
         : await tool('stop_agent', { agent_id: ref, reason }));
+    }
+
+    /**
+     * Retirar un fantasma.
+     *
+     * Está aquí y no sólo en MCP porque una sesión de CAPCOM negocia su lista
+     * de herramientas al arrancar: una herramienta que nace después no existe
+     * para el CAPCOM en funciones hasta que reconecte. La única salida para un
+     * agente fantasma no puede ser algo que quien recibe el aviso no puede
+     * invocar. Un terminal siempre está.
+     */
+    case 'retire': {
+      const ref = pos[1];
+      if (!ref) fail(1, 'orca retire <K9 | agent-id> --reason "<why>"');
+      const reason = opts.reason ?? pos[2] ?? '';
+      if (!reason) fail(1, 'say how you know it is gone: --reason "<why>". It goes in the feed and in the tombstone.');
+      if (squadOf(ref)) fail(1, 'retire takes one agent: a squad is retired member by member, and each one deserves its own reason.');
+      const out = await tool('retire_agent', { agent_id: ref, reason });
+      if (json) return print(out);
+      console.log(out.summary);
+      // Un rechazo trae el motivo en `result` como texto plano, y el motivo es
+      // justo lo que el operador necesita: "ya está en done, archívalo" es una
+      // instrucción, y tragársela deja al operador con un código de salida.
+      if (typeof out.result === 'string' && out.result.trim() && out.result !== out.summary) {
+        console.log(`  ${out.result.trim()}`);
+      }
+      const r = out.result && typeof out.result === 'object' ? out.result : {};
+      if (r.retired > 1) console.log(`  ${r.retired} sessions retired (the agent and its Task subagents), ${r.archived} archived`);
+      for (const k of r.kept ?? []) console.log(`  ${k.callsign}  kept: ${k.reason}`);
+      if (r.next) console.log(`  next: ${r.next}`);
+      if (out.isError) process.exit(3);
+      return;
     }
 
     case 'archive': case 'cleanup': {

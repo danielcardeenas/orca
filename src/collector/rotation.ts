@@ -7,7 +7,7 @@
  * survived each squeeze. Nothing errors. Answers just get vaguer.
  *
  * The fix is to stop treating the session as the record. The hub is the
- * record — the tasks, the escalations, the memory all live there and survive a
+ * record — the missions, the escalations, the memory all live there and survive a
  * restart — and `briefing` reads it in one call. So a session past a
  * threshold is simply replaced by a fresh one with the same brief, which
  * calls `briefing` and carries on. That is a rotation, and this file is the

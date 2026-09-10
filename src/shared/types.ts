@@ -27,6 +27,18 @@ export interface Machine {
    * acabe en el pane de un CAPCOM de verdad.
    */
   synthetic?: boolean;
+  /**
+   * De qué directorio salió el arnés: el slug del `cwd` del proceso que lo
+   * levantó, que es el repo en el que alguien está trabajando cuando corre
+   * las pruebas. Lo declara la propia máquina, como `synthetic`, y el hub
+   * sólo lo cree si también se declaró fixture: una máquina de verdad no
+   * puede decir que es el arnés de nadie.
+   *
+   * Existe para la consola: con esto el recinto del arnés se planta pegado a
+   * la isla del proyecto anfitrión en vez de caer en un slot cualquiera de la
+   * espiral. Ver shared/synthetic.ts.
+   */
+  harnessOf?: string;
   /** Load signals for the deck's machine strip. */
   load: {
     sessions: number;
@@ -602,7 +614,7 @@ export interface KeyDescriptor {
 /** Complete console state. The UI renders this and nothing else. */
 export interface WorldState {
   capcomHandoffs?: import('./handoff.ts').CapcomHandoff[];
-  tasks?: Record<string, import('./tasks.ts').CapcomTask>;
+  missions?: Record<string, import('./missions.ts').CapcomMission>;
   /** Bumped on every mutation; the UI diffs on it. */
   rev: number;
   at: number;

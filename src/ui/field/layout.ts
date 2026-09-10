@@ -21,6 +21,7 @@
  */
 
 import { squadName } from '../../shared/squads.ts';
+import { HARNESS_LABEL, harnessHostSlug, harnessIsland, isHarnessIsland } from '../../shared/synthetic.ts';
 import { OFF_FLEET_LABEL, islandOf, isOffFleet } from '../../shared/workspaces.ts';
 import type { Agent, AgentState, Placement, Project } from '../../shared/types.ts';
 import { TRAY_CELLS } from './blocks.ts';
@@ -56,6 +57,27 @@ export interface RegionPlacement {
   at: number;
 }
 
+/**
+ * En qué isla cae un agente: su proyecto, salvo que su máquina sea del arnés.
+ *
+ * Lo del arnés va a un recinto por directorio anfitrión y no al proyecto que
+ * dice tener —sus proyectos son de mentira igual que él, y repartidos por la
+ * espiral serían seis islas nuevas cada vez que alguien corre las pruebas—.
+ * Lo demás sigue la regla de siempre (`islandOf`: el proyecto, o la isla de
+ * fuera de la flota).
+ *
+ * El mapa —máquina del arnés → slug del directorio del que salió, `''` si no
+ * lo dijo— lo trae la consola, que es quien tiene las máquinas. Aquí no se
+ * deduce nada de un nombre.
+ */
+export function islandIn(
+  harness: Map<string, string>,
+  a: { machineId: string; projectId: string; workspace?: import('../../shared/workspaces.ts').ExcludedWorkspace },
+): string {
+  const home = harness.get(a.machineId);
+  return home === undefined ? islandOf(a) : harnessIsland(home);
+}
+
 /** The key a squad block is filed under: its project and its name. */
 export const squadKey = (projectId: string, name: string) => `${projectId}\u0000${name}`;
 
@@ -85,6 +107,13 @@ export const BLOCK_PAD = 0.08;
 export const CAPCOM_SCALE = 1.4;
 /** Air CAPCOM keeps from any region or pinned tile: about a gutter and a half. */
 export const CAPCOM_CLEAR = 0.4;
+/**
+ * Air the harness enclosure keeps from the island it came out of, and from
+ * anything else it has to dodge. Wider than a gutter on purpose: it is a
+ * neighbour, not part of the region — near enough to read as "these are its
+ * tests", far enough that the two outlines never look like one box.
+ */
+const HARNESS_CLEAR = 0.7;
 /** Golden angle. */
 const PHI = 2.399963;
 
@@ -165,6 +194,14 @@ export interface Region {
    * la lea como una isla más. Ver `shared/workspaces.ts`.
    */
   offFleet: boolean;
+  /**
+   * True para el recinto del arnés: lo que levantaron las pruebas, agrupado
+   * en una sola caja que se planta junto a la isla del proyecto desde el que
+   * se lanzaron. No es flota, no ocupa slot en la espiral y se dibuja como lo
+   * que es —doble marco, apagado— para que nadie lea una tesela de fixture
+   * como un agente de verdad. Ver `shared/synthetic.ts`.
+   */
+  harness: boolean;
   machineId: string;
   cx: number; cy: number;
   hw: number; hh: number;
@@ -218,19 +255,15 @@ export function emptyLayout(): Layout {
 }
 
 /**
- * Depth from what the agent is doing. Front to back: needs a human, working,
- * thinking, booting, waiting on a peer, idle, done, dead.
+ * Where a tile stands off the plane. Every tile stands on it: the field used
+ * to lift a tile by state (blocked forward, dead sunk back), and under a
+ * perspective camera that read as parallax — the working agents sliding over
+ * their project while the operator panned. State is carried by the tile's
+ * edge, its colour and the halo; the plane stays one plane. Kept as a
+ * function so the one place a depth could come from is still this one.
  */
-export function depthOf(a: Agent): number {
-  switch (a.state) {
-    case 'blocked': return a.block?.kind === 'peer' ? 0.12 : 0.42;
-    case 'working': return 0.16 + Math.min(1, a.metrics.tokensPerSec / 80) * 0.12;
-    case 'thinking': return 0.1;
-    case 'booting': return 0.06;
-    case 'idle': return -0.18;
-    case 'done': return -0.5;
-    case 'dead': return -0.7;
-  }
+export function depthOf(_a: Agent): number {
+  return 0;
 }
 
 export function layoutFleet(
@@ -242,6 +275,13 @@ export function layoutFleet(
   squadPlacements: Map<string, SquadPlacement> = new Map(),
   regionPlacements: Map<string, RegionPlacement> = new Map(),
   absorbed: Map<string, string> = new Map(),
+  /**
+   * Las máquinas del arnés, y de qué directorio salió cada una (`''` si no lo
+   * dijo). Lo que entra por aquí no se dibuja como flota: sus agentes van
+   * todos al mismo recinto, uno por anfitrión. El mapa lo trae la consola,
+   * que es quien tiene las máquinas; el layout no deduce nada por el nombre.
+   */
+  harness: Map<string, string> = new Map(),
 ): Layout {
   if (mode.kind === 'deck') return layoutDeck(agents, projects, prev, mode.sort);
   const order = prev.order;
@@ -274,18 +314,22 @@ export function layoutFleet(
    */
   const capcom = agents.find((a) => a.role === 'capcom') ?? null;
 
+  const island = (a: Agent) => islandIn(harness, a);
+
   /* ── Group by project, lineage order inside ─────────────────────── */
   const byProject = new Map<string, Agent[]>();
   for (const a of agents) {
     if (folded.has(a.id) || a === capcom) continue;
-    const list = byProject.get(islandOf(a));
-    if (list) list.push(a); else byProject.set(islandOf(a), [a]);
+    const list = byProject.get(island(a));
+    if (list) list.push(a); else byProject.set(island(a), [a]);
   }
   const countOf = new Map<string, number>();
-  for (const a of agents) if (a !== capcom) countOf.set(islandOf(a), (countOf.get(islandOf(a)) ?? 0) + 1);
+  for (const a of agents) if (a !== capcom) countOf.set(island(a), (countOf.get(island(a)) ?? 0) + 1);
   // Projects that have gone quiet keep their slot; new ones take the next.
   const ids = [...byProject.keys()].sort((p, q) => (projects.get(p)?.name ?? p).localeCompare(projects.get(q)?.name ?? q));
-  for (const id of ids) if (!order.has(id)) order.set(id, order.size);
+  // El recinto del arnés no toma slot: se planta junto a su anfitrión y se va
+  // con las pruebas. Un slot suyo empujaría la flota real cada vez.
+  for (const id of ids) if (!isHarnessIsland(id) && !order.has(id)) order.set(id, order.size);
 
   /* ── Size every region first: the spiral spacing depends on the largest ── */
   const sized = ids.map((id) => {
@@ -298,31 +342,110 @@ export function layoutFleet(
     const h = rows * TILE_H + (rows - 1) * GAP_Y + RGN_PAD * 2 + 0.5; // room for the label
     return { id, list, cells, cols, rows, w, h };
   });
-  const maxDiag = sized.reduce((m, s) => Math.max(m, Math.hypot(s.w, s.h)), 4);
+  // El arnés no cuenta para el espaciado: una flota de fixtures con veinte
+  // teselas separaría las islas de verdad mientras corren las pruebas y las
+  // volvería a juntar al acabar. La espiral la miden los proyectos.
+  const maxDiag = sized.reduce((m, s) => (isHarnessIsland(s.id) ? m : Math.max(m, Math.hypot(s.w, s.h))), 4);
   const spacing = maxDiag * 0.78 + 1.2;
 
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  /*
+   * Dónde está cada región, antes de poner una sola tesela.
+   *
+   * Va en dos tiempos porque el recinto del arnés se planta junto a la isla
+   * de la que salió, y eso exige saber ya dónde está esa isla: primero la
+   * espiral, con los proyectos; después los recintos, que esquivan lo puesto.
+   */
+  const at = new Map<string, { cx: number; cy: number; moved: boolean }>();
+  const box = (s: { w: number; h: number }, cx: number, cy: number, pad = 0) =>
+    ({ minX: cx - s.w / 2 - pad, minY: cy - s.h / 2 - pad, maxX: cx + s.w / 2 + pad, maxY: cy + s.h / 2 + pad });
+  const half = (v: number) => Math.round(v * 2) / 2;
 
   for (const s of sized) {
+    if (isHarnessIsland(s.id)) continue;
     const slot = order.get(s.id) ?? 0;
     // Slot 0 is one ring out: the centre of the spiral is the command's.
     const r = spacing * Math.sqrt(slot + 1);
     const ang = slot * PHI;
     // The spiral only places what nobody has placed.
     const placedRegion = regionPlacements.get(s.id);
-    const cx = placedRegion ? placedRegion.x : Math.round(Math.cos(ang) * r * 2) / 2;
-    const cy = placedRegion ? placedRegion.y : Math.round(Math.sin(ang) * r * 2) / 2;
+    at.set(s.id, {
+      cx: placedRegion ? placedRegion.x : half(Math.cos(ang) * r),
+      cy: placedRegion ? placedRegion.y : half(Math.sin(ang) * r),
+      moved: !!placedRegion,
+    });
+  }
+
+  /*
+   * El recinto, junto a su anfitrión: a la derecha y a ras de su borde de
+   * arriba, que es donde el ojo lo lee como una nota al margen de esa isla y
+   * no como una isla más. Si ahí ya hay algo prueba el otro lado, arriba y
+   * abajo, y en último caso baja por la derecha hasta despejar. Sin anfitrión
+   * —un mock arrancado desde cualquier parte— se va al margen derecho de todo.
+   */
+  const bySlug = new Map<string, string>();
+  for (const s of sized) {
+    if (isHarnessIsland(s.id)) continue;
+    const slug = projects.get(s.id)?.slug;
+    if (slug) bySlug.set(slug, s.id);
+  }
+  const sizeOf = new Map(sized.map((s) => [s.id, s]));
+  for (const s of sized) {
+    if (!isHarnessIsland(s.id)) continue;
+    const placedRegion = regionPlacements.get(s.id);
+    if (placedRegion) { at.set(s.id, { cx: placedRegion.x, cy: placedRegion.y, moved: true }); continue; }
+    const taken = [...at].map(([id, c]) => box(sizeOf.get(id)!, c.cx, c.cy));
+    const clear = (cx: number, cy: number) => {
+      const b = box(s, cx, cy, HARNESS_CLEAR);
+      return !taken.some((t) => b.minX < t.maxX && b.maxX > t.minX && b.minY < t.maxY && b.maxY > t.minY);
+    };
+    const hostId = bySlug.get(harnessHostSlug(s.id));
+    const host = hostId ? sizeOf.get(hostId) : undefined;
+    const hc = hostId ? at.get(hostId) : undefined;
+    let spot: { cx: number; cy: number };
+    if (host && hc) {
+      const top = hc.cy + host.h / 2 - s.h / 2;
+      const right = hc.cx + host.w / 2 + HARNESS_CLEAR + s.w / 2;
+      const cands = [
+        { cx: right, cy: top },
+        { cx: hc.cx - host.w / 2 - HARNESS_CLEAR - s.w / 2, cy: top },
+        { cx: hc.cx, cy: hc.cy - host.h / 2 - HARNESS_CLEAR - s.h / 2 },
+        { cx: hc.cx, cy: hc.cy + host.h / 2 + HARNESS_CLEAR + s.h / 2 },
+      ];
+      spot = cands.find((c) => clear(c.cx, c.cy)) ?? { cx: right, cy: top };
+      for (let i = 0; i < 32 && !clear(spot.cx, spot.cy); i++) spot = { cx: spot.cx, cy: spot.cy - (s.h + HARNESS_CLEAR) };
+    } else {
+      const edge = taken.reduce((m, t) => Math.max(m, t.maxX), 0);
+      spot = { cx: edge + HARNESS_CLEAR + s.w / 2, cy: 0 };
+    }
+    at.set(s.id, { cx: half(spot.cx), cy: half(spot.cy), moved: false });
+  }
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+  for (const s of sized) {
+    const here = at.get(s.id)!;
+    const cx = here.cx, cy = here.cy;
+    const placedRegion = here.moved;
 
     const p = projects.get(s.id);
     // La isla de fuera de la flota no tiene proyecto del que sacar rótulo: lo
     // trae puesto. El id crudo sólo queda para lo que no es ni una cosa ni la
     // otra, que es un proyecto que aún no ha llegado en el snapshot.
     const off = !p && isOffFleet(s.id);
+    // El recinto se rotula por su anfitrión: «harness · orca» dice de quién
+    // son estas pruebas, que es lo único que hay que saber para descartarlas.
+    const harnessHere = isHarnessIsland(s.id);
+    const hostName = harnessHere
+      ? projects.get(bySlug.get(harnessHostSlug(s.id)) ?? '')?.name ?? null
+      : null;
     const region: Region = {
       id: s.id,
-      code: p?.code ?? (off ? OFF_FLEET_LABEL.code : '??'),
-      name: p?.name ?? (off ? OFF_FLEET_LABEL.name : s.id),
+      code: harnessHere ? HARNESS_LABEL.code : p?.code ?? (off ? OFF_FLEET_LABEL.code : '??'),
+      name: harnessHere
+        ? (hostName ? `${HARNESS_LABEL.name} · ${hostName}` : HARNESS_LABEL.name)
+        : p?.name ?? (off ? OFF_FLEET_LABEL.name : s.id),
       offFleet: off,
+      harness: harnessHere,
       machineId: p?.machineId ?? s.id.slice(0, Math.max(0, s.id.indexOf('/'))),
       cx, cy, hw: s.w / 2, hh: s.h / 2,
       count: countOf.get(s.id) ?? 0,
@@ -399,8 +522,8 @@ export function layoutFleet(
           const kz = depthOf(k);
           const old = prev.spots.get(k.id);
           spots.set(k.id, old
-            ? { ...old, tx: kx, ty: ky, tz: kz, pinned: false, projectId: islandOf(k), scale: g.scale, trayOf: e.parent.id }
-            : { id: k.id, x: kx, y: ky, z: kz, tx: kx, ty: ky, tz: kz, pinned: false, projectId: islandOf(k), scale: g.scale, trayOf: e.parent.id });
+            ? { ...old, tx: kx, ty: ky, tz: kz, pinned: false, projectId: island(k), scale: g.scale, trayOf: e.parent.id }
+            : { id: k.id, x: kx, y: ky, z: kz, tx: kx, ty: ky, tz: kz, pinned: false, projectId: island(k), scale: g.scale, trayOf: e.parent.id });
         });
         void TRAY_INSET;
         minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
@@ -417,8 +540,8 @@ export function layoutFleet(
 
       const old = prev.spots.get(a.id);
       const spot: Spot = old
-        ? { ...old, tx, ty, tz, pinned, projectId: islandOf(a), scale: 1, trayOf: null }
-        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: islandOf(a), scale: 1, trayOf: null };
+        ? { ...old, tx, ty, tz, pinned, projectId: island(a), scale: 1, trayOf: null }
+        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(a), scale: 1, trayOf: null };
       spots.set(a.id, spot);
 
       minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
@@ -474,8 +597,8 @@ export function layoutFleet(
     const tz = depthOf(capcom);
     const old = prev.spots.get(capcom.id);
     spots.set(capcom.id, old
-      ? { ...old, tx, ty, tz, pinned, projectId: islandOf(capcom), scale: CAPCOM_SCALE, trayOf: null }
-      : { id: capcom.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: islandOf(capcom), scale: CAPCOM_SCALE, trayOf: null });
+      ? { ...old, tx, ty, tz, pinned, projectId: island(capcom), scale: CAPCOM_SCALE, trayOf: null }
+      : { id: capcom.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(capcom), scale: CAPCOM_SCALE, trayOf: null });
     minX = Math.min(minX, tx - hw); maxX = Math.max(maxX, tx + hw);
     minY = Math.min(minY, ty - hh); maxY = Math.max(maxY, ty + hh);
   }

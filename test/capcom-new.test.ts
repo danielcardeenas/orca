@@ -352,7 +352,7 @@ export default { suite: 'Fresh CAPCOM', tests: [
     } finally { r.dispose(); }
   }),
   test('continuity checkpoint is bounded metadata; histories and complete rules remain externally retrievable', () => {
-    const world = { tasks: { task_a: { id: 'task_a', title: 'Pending title', status: 'active', agentIds: ['worker'], messages: [{ id: 'message_a', text: 'CONVERSATION_MUST_NOT_LEAK' }] } }, agents: {}, escalations: {} } as unknown as WorldState;
+    const world = { missions: { task_a: { id: 'task_a', title: 'Pending title', status: 'active', agentIds: ['worker'], messages: [{ id: 'message_a', text: 'CONVERSATION_MUST_NOT_LEAK' }] } }, agents: {}, escalations: {} } as unknown as WorldState;
     const checkpoint = freshCapcomCheckpoint(world, []);
     assert.match(checkpoint, /task_a/); assert.match(checkpoint, /message_a/); assert.ok(!checkpoint.includes('CONVERSATION_MUST_NOT_LEAK'));
     assert.match(checkpoint, /recall/); assert.ok(checkpoint.length < 48 * 1024);

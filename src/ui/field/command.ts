@@ -7,12 +7,12 @@
  * is holding, and the way the core itself beats.
  *
  * - **The ring** is a rounded outline a gutter out from the tile, drawn in
- *   segments: one arc per task the hub keeps open (`WorldState.tasks`, status
- *   `active`). An arc is lit while the task moves — its conversation grew in
- *   the last `TASK_HOT_MS`, or one of its agents is thinking or working — and
- *   dim while it waits. A completed task is gone from the ring. The arc of the
- *   task the operator has open (`store.activeTaskId`) is drawn heavier. With
- *   no task at all the ring is one faint continuous line: the post is there,
+ *   segments: one arc per mission the hub keeps open (`WorldState.missions`,
+ *   status `active`). An arc is lit while the mission moves — its conversation
+ *   grew in the last `MISSION_HOT_MS`, or one of its agents is thinking or
+ *   working — and dim while it waits. A completed mission is gone from the ring.
+ *   The arc of the mission the operator has open (`store.activeMissionId`) is
+ *   drawn heavier. With no mission at all the ring is one faint continuous line: the post is there,
  *   and it holds nothing.
  * - **The notches** are amber ticks on the bottom of the ring, one per
  *   escalation nobody has answered yet (`pending` or `with_ceo`, the same rule
@@ -26,7 +26,7 @@
  *   dimmer when the agent is done. Fifty of them are noise, so they are a
  *   preference and off by default.
  *
- * Every piece is a `Prefs` flag (`capcomTasks`, `capcomNotches`,
+ * Every piece is a `Prefs` flag (`capcomMissions`, `capcomNotches`,
  * `capcomPulse`, `capcomLinks`), and each falls back to what the field drew
  * before it existed. The state is computed once per feed and once a second
  * (`commandState` is pure, and tested), and the halo is one quad with one
@@ -38,7 +38,7 @@
 
 import * as THREE from 'three';
 import type { Agent, WorldState } from '../../shared/types.ts';
-import type { CapcomTask } from '../../shared/tasks.ts';
+import type { CapcomMission } from '../../shared/missions.ts';
 import { TILE_W, TILE_H } from './layout.ts';
 import { shaderMotion } from '../motion.ts';
 
@@ -58,8 +58,8 @@ export const RING_R = 0.24;
  */
 export const HALO_REACH = RING_OFF + RING_W / 2 + NOTCH_LEN + 0.04;
 
-/** A task whose conversation moved this recently is lit. */
-export const TASK_HOT_MS = 2 * 60_000;
+/** A mission whose conversation moved this recently is lit. */
+export const MISSION_HOT_MS = 2 * 60_000;
 /** Bits in a float mantissa the shader can trust. */
 export const MAX_SEGMENTS = 24;
 /** Past this the ticks stop being marks and become a bar. */
@@ -68,7 +68,7 @@ export const MAX_NOTCHES = 12;
 /* ── State ────────────────────────────────────────────────────────── */
 
 export interface CommandFlags {
-  tasks: boolean;
+  missions: boolean;
   notches: boolean;
   pulse: boolean;
   links: boolean;
@@ -77,9 +77,9 @@ export interface CommandFlags {
 export interface CommandState {
   /** Arcs on the ring. 0 draws the faint continuous line. */
   segments: number;
-  /** Bit i set: segment i is lit (its task moved recently). */
+  /** Bit i set: segment i is lit (its mission moved recently). */
   lit: number;
-  /** Segment of the task the operator has open, or -1. */
+  /** Segment of the mission the operator has open, or -1. */
   active: number;
   /** Amber ticks: questions nobody has answered. */
   notches: number;
@@ -91,17 +91,17 @@ export interface CommandState {
 
 export const REST: CommandState = { segments: 0, lit: 0, active: -1, notches: 0, turn: 0, waiting: 0 };
 
-/** The hub's open tasks, oldest first — the order the ring is read in, clockwise from the top. */
-export function openTasks(tasks: WorldState['tasks']): CapcomTask[] {
-  return Object.values(tasks ?? {})
+/** The hub's open missions, oldest first — the order the ring is read in, clockwise from the top. */
+export function openMissions(missions: WorldState['missions']): CapcomMission[] {
+  return Object.values(missions ?? {})
     // Retirada por el operador: sin arco, aunque siguiera activa cuando se archivó.
     .filter((t) => t.status === 'active' && !t.archivedAt)
     .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
 }
 
-/** A task is lit while it moves: a fresh message, or an agent of its own at work. */
-export function taskHot(t: CapcomTask, agent: (id: string) => Agent | undefined, now: number): boolean {
-  if (now - t.updatedAt < TASK_HOT_MS) return true;
+/** A mission is lit while it moves: a fresh message, or an agent of its own at work. */
+export function missionHot(t: CapcomMission, agent: (id: string) => Agent | undefined, now: number): boolean {
+  if (now - t.updatedAt < MISSION_HOT_MS) return true;
   for (const id of t.agentIds) {
     const a = agent(id);
     if (a && (a.state === 'working' || a.state === 'thinking' || a.state === 'booting')) return true;
@@ -111,7 +111,7 @@ export function taskHot(t: CapcomTask, agent: (id: string) => Agent | undefined,
 
 /**
  * The ring, the notches and the turn, from the world. Pure: the field calls
- * it once per feed and once a second (a task cools by the clock alone), and
+ * it once per feed and once a second (a mission cools by the clock alone), and
  * a test calls it with a world it made up.
  *
  * `pending` is the set of agents with an escalation a person can still
@@ -119,22 +119,22 @@ export function taskHot(t: CapcomTask, agent: (id: string) => Agent | undefined,
  * escalations themselves, so one agent asking twice is two ticks.
  */
 export function commandState(
-  w: Pick<WorldState, 'tasks' | 'escalations'>,
+  w: Pick<WorldState, 'missions' | 'escalations'>,
   capcom: Agent | null,
   agent: (id: string) => Agent | undefined,
   now: number,
-  activeTaskId: string | null,
-  flags: Pick<CommandFlags, 'tasks' | 'notches' | 'pulse'>,
+  activeMissionId: string | null,
+  flags: Pick<CommandFlags, 'missions' | 'notches' | 'pulse'>,
 ): CommandState {
   if (!capcom) return REST;
   let segments = 0, lit = 0, active = -1;
-  if (flags.tasks) {
-    const open = openTasks(w.tasks);
+  if (flags.missions) {
+    const open = openMissions(w.missions);
     segments = Math.min(open.length, MAX_SEGMENTS);
     for (let i = 0; i < segments; i++) {
       const t = open[i]!;
-      if (taskHot(t, agent, now)) lit += 2 ** i;
-      if (t.id === activeTaskId) active = i;
+      if (missionHot(t, agent, now)) lit += 2 ** i;
+      if (t.id === activeMissionId) active = i;
     }
   }
   let notches = 0;
@@ -198,7 +198,7 @@ const FRAG = /* glsl */ `
   uniform float uNotchLen;
   uniform float uSeg;     // segments; 0 is the faint line
   uniform float uLit;     // bitmask of lit segments
-  uniform float uActive;  // the operator's open task, or -1
+  uniform float uActive;  // the operator's open mission, or -1
   uniform float uNotch;   // amber ticks
   uniform vec3 uMode;     // turn, waiting, selected
   uniform vec2 uAlpha;    // alpha, alpha under focus

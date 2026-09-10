@@ -46,7 +46,11 @@ export function createMedia(
 ): MediaHandle {
   const entries = new Map<string, Entry>();
   const loader = new THREE.TextureLoader();
-  const frameMat = new THREE.MeshBasicMaterial({ color: 0x2a2e38 });
+  // The frame sits a hair behind the picture, closer than the depth buffer
+  // can tell apart from a few dozen units out. It never writes depth and is
+  // drawn first (renderOrder), so the picture is painted over it and not
+  // fought for pixel by pixel — the flicker that only zooming in used to stop.
+  const frameMat = new THREE.MeshBasicMaterial({ color: 0x2a2e38, depthWrite: false });
 
   function sizeOf(a: Artifact): { w: number; h: number } {
     const ratio = a.width && a.height ? a.height / a.width : (a.kind === 'html' || a.kind === 'text' ? 0.7 : 0.62);
@@ -87,6 +91,8 @@ export function createMedia(
       const frame = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), frameMat);
       frame.scale.set(w + 0.08, h + 0.08, 1);
       frame.position.set(e.x, e.y, e.z - 0.004);
+      frame.renderOrder = 0;
+      mesh.renderOrder = 1;
       scene.add(frame, mesh);
       e.mesh = mesh; e.frame = frame;
     } else {

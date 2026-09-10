@@ -20,6 +20,15 @@ export function mountAlarm(): () => void {
   const off = store.on((e) => {
     if (REDUCE.value) return;
     if (e.k === 'alarm' && e.on) {
+      /*
+       * Nada del arnés timbra. El anillo es una interrupción de pantalla
+       * entera —el gesto más caro que hace la consola— y una máquina de
+       * fixture bloquea cada pocos segundos mientras dure la prueba: el
+       * anillo dejaría de significar «alguien te necesita» para significar
+       * «hay pruebas corriendo». La pregunta sigue contando en el mástil y
+       * en la cola, que es donde se mira. Ver `shared/synthetic.ts`.
+       */
+      if (store.fromHarness(store.knownAgent(e.agentId))) return;
       // Coalesce: ten agents blocking in one patch is one ring, not ten.
       const now = performance.now();
       if (now - last < 600) return;

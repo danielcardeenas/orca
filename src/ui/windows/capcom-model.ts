@@ -3,6 +3,7 @@ import type { Agent } from '../../shared/types.ts';
 import { parseModelControl, type ModelControl } from '../../shared/model-control.ts';
 import type { Command } from '../../shared/protocol.ts';
 import { pick, type PickHandle } from '../controls.ts';
+import { markForRuntime, markSVG } from '../gfx/marks.ts';
 import type { ProviderModel, ProviderHandoffPlan } from '../../shared/provider-handoff.ts';
 
 /** Stable composer control: never replaces the operator's draft or transcript. */
@@ -61,7 +62,20 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   let disposed = false;
   function paint() {
     host.hidden = !agent || !['codex', 'claude'].includes(agent.runtime) || (!!options && (!agent.pane || !!agent.subagent));
-    active.textContent = `${agent?.runtime === 'codex' ? 'CODEX' : 'CLAUDE'} · ${state?.active ?? agent?.model ?? 'model unknown'}`;
+    /*
+     * La misma marca que la lista, en la línea que se ve con el menú CERRADO.
+     * Dentro del selector la marca separa dos bloques; aquí dice de quién es el
+     * modelo que está corriendo AHORA, que es lo que el operador mira antes de
+     * abrir nada. El nombre del runtime sigue escrito al lado: la marca
+     * acompaña al texto, no lo sustituye —un dibujo de 18px no es un nombre.
+     */
+    const runtime = agent?.runtime === 'codex' ? 'codex' : 'claude';
+    active.textContent = '';
+    const amark = markSVG(markForRuntime(runtime));
+    if (amark) active.insertAdjacentHTML('beforeend', amark);
+    active.insertAdjacentText('beforeend',
+      `${runtime.toUpperCase()} · ${state?.active ?? agent?.model ?? 'model unknown'}`);
+    active.classList.toggle('has-mark', !!amark);
     const pending = state?.phase === 'queued' || state?.phase === 'applying' || plan?.phase === 'preparing';
     load.disabled = busy || !!pending || !connected;
     fresh.disabled = busy || !!pending || !connected || !agent?.pane || !(agent.state === 'idle' || (agent.state === 'blocked' && agent.block?.kind === 'error'));
@@ -70,7 +84,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     load.textContent = busy ? 'LOADING…' : catalogError ? 'RETRY MODELS' : 'CHANGE MODEL';
     cancel.hidden = state?.phase !== 'queued'; cancel.disabled = busy || !connected;
     open.hidden = !error && state?.phase !== 'failed';
-    detail.textContent = error || [pending ? `${state?.requested} · ${state?.detail}` : state?.detail ?? 'Same provider · keeps this conversation', catalogError].filter(Boolean).join(' ');
+    detail.textContent = error || [resetNote || (pending ? `${state?.requested} · ${state?.detail}` : state?.detail ?? 'Same provider · keeps this conversation'), catalogError].filter(Boolean).join(' ');
     review.hidden = !plan;
     continued.hidden = !options || plan?.phase !== 'complete' || !plan.toId;
     if (plan) {
@@ -95,18 +109,48 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
       if (plan.phase === 'preparing') detail.textContent = plan.contextMode === 'clean' ? 'CAPCOM · preparing clean context' : `HANDOFF IN PROGRESS · ${subject} is preparing a continuation`;
     }
   }
+  /**
+   * Lo que dice el vaciado en el sitio, que no tiene plan que enseñar.
+   *
+   * `capcom:new` contesta dos cosas distintas según por dónde vaya: cruzar de
+   * proveedor devuelve un plan de traspaso —con archivo, hashes y fases—, y
+   * quedarse en el mismo devuelve el recibo de un `/clear`, que no tiene nada
+   * de eso. Darlo por plan pintaba `undefined/undefined` y `NaN KB`, y además
+   * preguntaba por un traspaso con id vacío, que el collector rechaza con
+   * «Invalid handoff id». El acta duradera la publica el mundo (SESSION
+   * CHANGED); aquí sólo hace falta decir qué está pasando y cómo acabó.
+   */
+  let resetNote = '';
+  /** ¿Hay un cambio de CAPCOM en marcha, y en qué anda? */
+  let moving: string | null = null;
+  /** ¿Vino un plan de traspaso, o el recibo de un vaciado en el sitio? */
+  function isPlan(v: unknown): v is ProviderHandoffPlan {
+    const p = v as Partial<ProviderHandoffPlan> | null;
+    return !!p && typeof p.id === 'string' && typeof p.phase === 'string' && typeof p.runtime === 'string';
+  }
   async function newCapcom(mode: 'clean' | 'continuity') {
     if (!agent || fresh.disabled || options) return;
     const id = agent.id;
     const model = freshModel;
-    busy = true; error = ''; freshChoice.hidden = true; paint();
+    busy = true; error = ''; freshChoice.hidden = true;
+    resetNote = `CAPCOM · ${mode === 'clean' ? 'clearing context' : 'clearing context with continuity'}…`;
+    moving = mode === 'clean' ? 'clearing context' : 'clearing context · continuity';
+    paint();
     try {
-      plan = await command({ k: 'capcom:new', agentId: id, mode, ...(model ? { model } : {}) }) as ProviderHandoffPlan;
-      localStorage.setItem(storageKey, JSON.stringify({ id: plan.id, agentId: id }));
-      window.clearTimeout(poll);
-      poll = window.setTimeout(() => { void check(); }, 1500);
-    } catch (e) { error = e instanceof Error ? e.message : String(e); }
-    finally { busy = false; if (!disposed) paint(); }
+      const result = await command({ k: 'capcom:new', agentId: id, mode, ...(model ? { model } : {}) });
+      if (isPlan(result)) {
+        resetNote = ''; moving = null; plan = result;
+        localStorage.setItem(storageKey, JSON.stringify({ id: plan.id, agentId: id }));
+        window.clearTimeout(poll);
+        poll = window.setTimeout(() => { void check(); }, 1500);
+      } else {
+        // Vaciado en el sitio: no hay nada que seguir ni que confirmar.
+        plan = undefined; localStorage.removeItem(storageKey);
+        const to = (result as { toId?: unknown } | null)?.toId;
+        resetNote = `CAPCOM · ${mode === 'clean' ? 'clean context' : 'continuity'} active${typeof to === 'string' ? ` · ${to.slice(0, 8)}` : ''}`;
+      }
+    } catch (e) { resetNote = ''; error = e instanceof Error ? e.message : String(e); }
+    finally { busy = false; moving = null; if (!disposed) paint(); }
   }
   /**
    * Con qué modelo nace el relevo. Vacío = el que ya corre.
@@ -150,7 +194,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
      * botón es lo que hace desconfiar de una consola.
      */
     const cross = (m: ProviderModel) => ({ value: m.id, label: m.label,
-      group: m.runtime === 'claude' ? 'CLAUDE CODE' : 'CODEX',
+      group: m.runtime === 'claude' ? 'CLAUDE CODE' : 'CODEX', mark: markForRuntime(m.runtime),
       hint: m.installed ? 'prepares and verifies · slower' : 'CLI not installed', disabled: !m.installed });
     if (!choices.length && !others.length) {
       // Nunca una lista inventada: o la dio el CLI, o se dice por qué no.
@@ -162,6 +206,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     }
     freshPicker = pick({ name: 'capcom-fresh-model', value: freshModel || active, search: choices.length + others.length > 6,
       options: [...choices.map(c => ({ value: c.id, label: c.label, group: (agent?.runtime ?? '').toUpperCase(),
+        mark: markForRuntime(agent?.runtime ?? ''),
         hint: c.id === active ? 'current · clears in place' : 'clears in place' })), ...others.map(cross)],
       onChange: id => { freshModel = id === active ? '' : id; freshModelSig = ''; paintFreshModel(); } });
     freshModelHost.replaceChildren(freshPicker.el);
@@ -183,6 +228,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   fresh.addEventListener('click', () => {
     freshChoice.hidden = !freshChoice.hidden;
     if (freshChoice.hidden) return;
+    resetNote = '';
     freshModel = ''; freshModelSig = ''; paintFreshModel();
     // El catálogo lo llena el CLI cuando se le pregunta, y hasta entonces no
     // hay lista que ofrecer. Preguntarlo aquí es lo que hace que la elección
@@ -224,13 +270,15 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     if (options || disposed) return;
     const mode = (event as CustomEvent).detail;
     if (fresh.disabled) { error = 'New CAPCOM requires a connected, hosted and idle command session. Wait until its current turn finishes.'; paint(); return; }
-    if (mode === 'clean' || mode === 'continuity') void newCapcom(mode);
+    // `/capcom-new clean` promete el mismo proveedor y modelo: una elección que
+    // quedó en el panel de al lado no puede cruzar de proveedor a su espalda.
+    if (mode === 'clean' || mode === 'continuity') { freshModel = ''; freshModelSig = ''; void newCapcom(mode); }
     else freshChoice.hidden = false;
   };
   if (!options) window.addEventListener('orca:capcom-new', requestedFresh);
   async function prepare(runtime: string, model: string) {
     const id = agent?.id; if (!id) return;
-    busy = true; error = ''; paint();
+    busy = true; error = ''; resetNote = ''; paint();
     try { const result = await command({ k: 'handoff:prepare', agentId: id, runtime, model }) as ProviderHandoffPlan;
       if (!disposed && agent?.id === id) { plan = result; picker?.dispose(); picker = undefined; pickerHost.replaceChildren(); }
     } catch (e) { error = e instanceof Error ? e.message : String(e); }
@@ -270,7 +318,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     const id = agent?.id;
     if (!id) return;
     if (plan?.phase === 'review') plan = undefined;
-    busy = true; error = ''; paint();
+    busy = true; error = ''; resetNote = ''; paint();
     try {
       const incident = options && agent && quotaIncident(agent);
       let result: ModelControl;
@@ -312,9 +360,9 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
       if (state?.phase === 'applying' || state?.phase === 'queued') return;
       if (!choices.length && !catalog.length) { catalogError ||= `No model catalog available. Retry when ${subject} is idle.`; return; }
       picker = pick({ name: 'capcom-model', value: state?.active ?? '', placeholder: 'Choose model', search: true,
-        options: [...choices.map(c => ({ value: c.id, label: c.label, group: agent!.runtime.toUpperCase(), hint: c.id === state?.active ? 'active' : 'same session' })),
-          ...unverified.map(p => ({ value: p.id, label: p.label, group: agent!.runtime.toUpperCase(), hint: 'session catalog not ready · retry', disabled: true })),
-          ...alternatives.map(p => ({ value: `${p.runtime}:${p.id}`, label: p.label, group: p.runtime === 'claude' ? 'CLAUDE CODE' : 'CODEX', hint: p.installed ? 'handoff · review first' : 'CLI not installed', disabled: !p.installed }))],
+        options: [...choices.map(c => ({ value: c.id, label: c.label, group: agent!.runtime.toUpperCase(), mark: markForRuntime(agent!.runtime), hint: c.id === state?.active ? 'active' : 'same session' })),
+          ...unverified.map(p => ({ value: p.id, label: p.label, group: agent!.runtime.toUpperCase(), mark: markForRuntime(agent!.runtime), hint: 'session catalog not ready · retry', disabled: true })),
+          ...alternatives.map(p => ({ value: `${p.runtime}:${p.id}`, label: p.label, group: p.runtime === 'claude' ? 'CLAUDE CODE' : 'CODEX', mark: markForRuntime(p.runtime), hint: p.installed ? 'handoff · review first' : 'CLI not installed', disabled: !p.installed }))],
         onChange: model => { if (model.includes(':')) { const [runtime, id] = model.split(':'); void prepare(runtime!, id!); } else void request(model); } });
       pickerHost.replaceChildren(picker.el);
       // Open after the originating click has finished bubbling to document.
@@ -325,6 +373,20 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   cancel.addEventListener('click', () => { void request(null); });
   open.addEventListener('click', () => { if (agent) terminal(agent.id); });
   return {
+    /**
+     * Qué cambio de mando está en marcha, para quien pinta la ventana.
+     *
+     * Un relevo tarda: vaciar en el sitio son segundos y cruzar de proveedor
+     * hasta dos minutos, y durante todo ese rato la sesión que se va sigue
+     * ociosa — así que la ventana anunciaba IDLE, que es cierto de la sesión y
+     * falso del mando. Esto es lo único que hace falta saber fuera para que la
+     * banda de actividad y el estado digan que está pasando algo.
+     */
+    transition(): string | null {
+      if (moving) return moving;
+      if (plan?.phase !== 'preparing') return null;
+      return `preparing ${plan.runtime}/${plan.model}${plan.contextMode === 'clean' ? ' · clean context' : ''}`;
+    },
     update(next: Agent | undefined, link: boolean) {
       if (agent?.id !== next?.id) { state = undefined; error = ''; catalogError = ''; picker?.dispose(); picker = undefined; pickerHost.replaceChildren(); }
       agent = next; connected = link;

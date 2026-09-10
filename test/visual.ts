@@ -22,7 +22,7 @@
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, unlink } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +32,10 @@ import type { Agent, Escalation, Machine, Project } from '../src/shared/types.ts
 import { emptyRollup } from '../src/shared/types.ts';
 import { PATHS, PORTS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
 import { freePort, sleep, until } from './harness.ts';
+// La lectura de un pid justo antes de señalarlo, con su grupo: la misma que usa
+// `purge_harness` desde el día que un `includes` sobre `ps` paró a un agente.
+import { identify } from '../src/hub/harness.ts';
+import { HARNESS_ENV } from '../src/shared/synthetic.ts';
 
 export const ROOT = new URL('..', import.meta.url).pathname;
 export const SHOTS = join(ROOT, 'test', 'shots');
@@ -101,9 +105,30 @@ function inLinkedWorktree(cwd: string): boolean {
  * started. Borrowing someone's Vite while running our own hub gives a console
  * that renders our tree and talks to their fleet, and it photographs fine.
  */
-export function sharing(o: { alone: boolean; hubUp: boolean; uiUp: boolean }): { hub: 'reuse' | 'own'; ui: 'reuse' | 'own' } {
+export function sharing(o: {
+  alone: boolean;
+  hubUp: boolean;
+  uiUp: boolean;
+  /** ¿Se declara de pruebas el hub que ya está sirviendo? Ver src/shared/synthetic.ts. */
+  hubHarness?: boolean;
+  /** ¿Va a hacer falta la flota sintética en este run? */
+  wantFleet?: boolean;
+}): { hub: 'reuse' | 'own'; ui: 'reuse' | 'own' } {
   if (o.alone) return { hub: 'own', ui: 'own' };
-  const hub = o.hubUp ? 'reuse' : 'own';
+  /*
+   * Un hub que no es de pruebas no recibe fixtures, y punto.
+   *
+   * Este arnés era la vía por la que el mock entraba en el hub real: reutilizaba
+   * el 4479 de `npm run dev` y le arrancaba encima una flota sintética con
+   * `--anyway`. El 2026-09-07 eso puso ~1.330 agentes falsos en la consola del
+   * operador. Ahora el hub rechaza esas máquinas por su cuenta, así que
+   * reutilizarlo aquí sólo daría un run sin flota y frames vacíos: mejor
+   * levantar el propio, que nace declarado de pruebas, y dejar el del operador
+   * como estaba. Sin flota que plantar —`--fleet=false`— compartir sigue siendo
+   * lo correcto: no se le inyecta nada.
+   */
+  const usable = o.hubUp && (o.wantFleet !== true || o.hubHarness === true);
+  const hub = usable ? 'reuse' : 'own';
   return { hub, ui: hub === 'reuse' && o.uiUp ? 'reuse' : 'own' };
 }
 
@@ -123,6 +148,8 @@ export const GPU_ARGS = ['--use-gl=angle', '--enable-gpu', '--ignore-gpu-blockli
 export interface OrcaHook {
   frame(): void;
   open(id: string): void;
+  /** El visor de un archivo, como pinchar una ruta en una conversación. Ver file-viewer.shots.ts. */
+  openFile?(path: string, at?: { x: number; y: number }): void;
   openKind(k: string): void;
   tilt(on: boolean): void;
   stats(): { agents: number; drawn: number; segments: number; fps: number };
@@ -130,10 +157,24 @@ export interface OrcaHook {
   view(): { minX: number; minY: number; maxX: number; maxY: number };
   select(ids: string[]): void;
   note(t: string): void;
-  /** Put a task in the console's store without giving the hub one. See hud-tasks.shots.ts. */
-  task(t: import('../src/shared/tasks.ts').CapcomTask): void;
+  /** Put a mission in the console's store without giving the hub one. See hud-missions.shots.ts. */
+  mission(m: import('../src/shared/missions.ts').CapcomMission): void;
   /** Live, non-CAPCOM agents on the field: the ones a click can actually fly to. */
   agentIds(): string[];
+  /** El tablero de AUTOMEJORA, sin dárselo al hub. Ver hud-improve.shots.ts. */
+  improve(
+    state: import('../src/shared/improve.ts').ImproveState,
+    verdict: import('../src/shared/improve.ts').DueVerdict | null,
+    extra?: { choice?: ReturnType<typeof import('../src/shared/improve.ts').effectiveChoice>; machineId?: string | null },
+  ): void;
+  improveReveal(): void;
+  callsignOf?(id: string): string | null;
+  machineOf?(id: string): string | null;
+  /** Un informe de higiene inyectado. Ver hyg-strays.shots.ts. */
+  hygiene(reports: import('../src/shared/hygiene.ts').HygieneReport[]): void;
+  openHygiene(): void;
+  /** El rectángulo en pantalla de un tile, para recortar una foto sobre él. */
+  screenOf(id: string): { x: number; y: number; w: number; h: number } | null;
 }
 
 declare global {
@@ -250,14 +291,59 @@ async function shootConsole(browser: Browser) {
     miss('field-02-project', 'no region label was on screen');
   }
 
-  /* 03 · an agent's window, from double-clicking its tile. */
+  /* 03 · an agent's window, from clicking its tile. */
   const at = await firstTilePoint(page);
   if (at) {
-    await page.mouse.dblclick(at.x, at.y);
+    await page.mouse.click(at.x, at.y);
     const got = await until(async () => (await page.locator('.win.is-agent').count()) > 0, 6000, 200);
     await sleep(900);
-    if (got) await shot(page, 'field-03-agent');
-    else miss('field-03-agent', 'the double click did not open an agent window');
+    if (got) {
+      const sourceId = await page.locator('.win.is-agent').first().getAttribute('data-window-source');
+      const sourcePoint = async () => page.evaluate(id => {
+        const r = id ? window.__orca?.screenOf(id) : null;
+        if (!r) throw new Error(`Agent source left the field: ${id}; active=${window.__orca?.agentIds().includes(id ?? '')}`);
+        for (const [fx, fy] of [[0.5, 0.6], [0.25, 0.5], [0.4, 0.8]]) {
+          const x = r.x + r.w * fx!, y = r.y + r.h * fy!;
+          const target = document.elementFromPoint(x, y);
+          if (target?.closest('.field') && !target.closest('.rgn,.squad')) return { x, y };
+        }
+        // Say what is on top: "obscured" alone sends the reader back to the
+        // browser to find out, and the answer is one `className` away.
+        const on = document.elementFromPoint(r.x + r.w * 0.5, r.y + r.h * 0.6) as HTMLElement | null;
+        throw new Error(`Agent source is obscured by ${on?.className || on?.tagName || 'nothing'}`);
+      }, sourceId);
+      await shot(page, 'field-03-agent');
+      await (async () => { const p = await sourcePoint(); await page.mouse.click(p.x, p.y); })();
+      if (!await until(async () => await page.locator('.win.is-agent').count() === 0, 2000, 100)) throw new Error('Second agent click must close its window');
+      await (async () => { const p = await sourcePoint(); await page.mouse.dblclick(p.x, p.y); })();
+      if (!await until(async () => await page.locator('.win.is-agent').count() === 0, 2000, 100)) throw new Error('Native double-click must not reopen after its two toggles');
+      await (async () => { const p = await sourcePoint(); await page.mouse.click(p.x, p.y); })();
+      await until(async () => await page.locator('.win.is-agent').count() > 0, 2000, 100);
+      const agentWindow = page.locator('.win.is-agent').first();
+      const winId = await agentWindow.getAttribute('data-window-id');
+      // The window arrived in front, at reading size — that is what a click on
+      // a tile gives now, and why nobody has to fly anywhere to read it. The
+      // flight below belongs to the canvas, so `CANVAS` sends it there first;
+      // framing the whole fleet then leaves it the stamp it used to open as.
+      if (!await agentWindow.evaluate(el => el.classList.contains('is-canvas'))) {
+        await agentWindow.locator('[data-w-front]').click();
+        await sleep(400);
+      }
+      await page.evaluate(() => window.__orca?.frame());
+      await sleep(1200);
+      await page.locator(`.tray [data-w="${winId}"]`).click();
+      const readable = await until(async () => {
+        const r = await agentWindow.boundingBox();
+        const vp = page.viewportSize()!;
+        return !!r && r.x >= 8 && r.y >= 100 && r.x + r.width <= vp.width && r.y + r.height <= vp.height - 90 &&
+          await agentWindow.evaluate(el => el.classList.contains('is-canvas') && !el.classList.contains('is-min'));
+      }, 6000, 100);
+      if (!readable) throw new Error('Tray retrieval must fly to the canvas window at reading size');
+      await shot(page, 'field-03-agent-located');
+      await page.locator(`.tray [data-w="${winId}"]`).click();
+      if (!await until(async () => await agentWindow.evaluate(el => el.classList.contains('is-min')), 2000, 100)) throw new Error('Second tray activation must minimize without switching modes');
+    }
+    else miss('field-03-agent', 'the click did not open an agent window');
   } else {
     miss('field-03-agent', 'no tile was large enough to carry a label');
   }
@@ -319,7 +405,15 @@ async function shootConsole(browser: Browser) {
   await sleep(700);
   const mins = page.locator('.win:not(.is-min) [data-w-min]');
   for (let i = 0; i < 2 && await mins.count(); i++) {
-    await mins.first().click();
+    // Tray activation retrieves in place; an explicit minimize command folds
+    // even a canvas window whose chrome is currently outside the viewport.
+    const firstHousing = mins.first().locator('xpath=ancestor::section');
+    const id = await firstHousing.getAttribute('data-window-id');
+    if (id) {
+      await page.locator(`.tray [data-w="${id}"]`).click();
+      const housing = page.locator(`.win[data-window-id="${id}"]`);
+      if (!(await housing.evaluate(el => el.classList.contains('is-min')))) await pressBare(page, '-');
+    }
     await sleep(400);
   }
   await sleep(600);
@@ -689,7 +783,7 @@ async function shootMobile(browser: Browser) {
   await shot(page, 'mobile-01-field');
 
   const at = await firstTilePoint(page);
-  if (at) await page.mouse.dblclick(at.x, at.y);
+  if (at) await page.mouse.click(at.x, at.y);
   if (!await until(async () => (await page.locator('.win').count()) > 0, 4000, 200)) {
     await pressBare(page, 'q');
   }
@@ -709,6 +803,8 @@ export async function newPage(browser: Browser, w: number, h: number): Promise<P
     reducedMotion: 'no-preference',
   });
   const page = await ctx.newPage();
+  // Fixtures include unknown/external origins; photograph the whole synthetic fleet.
+  await page.addInitScript({ content: "localStorage.setItem('orca.prefs.v1', JSON.stringify({ origin: 'all' }))" });
   await trackSockets(page);
   page.on('console', (m) => {
     if (m.type() === 'error') console.error('  [browser]', m.text());
@@ -722,7 +818,8 @@ export async function newPage(browser: Browser, w: number, h: number): Promise<P
  * the reconnect. Vite's own HMR socket is left alone: block that one and the
  * dev server reloads the page out from under the shot.
  */
-async function trackSockets(page: Page) {
+/** Apunta los sockets de consola de la página, para poder cortarlos a mano. */
+export async function trackSockets(page: Page) {
   // Handed over as source, not as a function: tsx compiles this file with
   // esbuild's keepNames, and the `__name` helper it injects does not exist in
   // the page, so a serialised closure would throw before it patched anything.
@@ -744,7 +841,12 @@ async function trackSockets(page: Page) {
 }
 
 export async function open(page: Page, url: string) {
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
+  const target = new URL(url);
+  if (target.hostname === '127.0.0.1' && target.port === String(uiPort())) {
+    const token = orcaToken();
+    if (token) target.searchParams.set('k', token);
+  }
+  await page.goto(target.href, { waitUntil: 'domcontentloaded' });
   await fontsReady(page);
 }
 
@@ -788,28 +890,17 @@ async function closeAllWindows(page: Page) {
   await sleep(300);
 }
 
-/**
- * A point low in the first tile that carries a label, in viewport pixels.
- *
- * Low on purpose. The label sits in the tile's top-left, and the window the
- * click opens arrives from the cursor with its header along the tile's top
- * edge — click up there and the second half of the double click lands on that
- * header, which folds the window into the tray instead of showing it. The
- * tile's geometry is recovered from the label: the field sizes a label to
- * two-thirds of its tile and insets it by the same pads every time.
- */
+/** Use the field's actual projection, not an estimate from label typography. */
 async function firstTilePoint(page: Page): Promise<{ x: number; y: number } | null> {
   return page.evaluate(() => {
-    const ASPECT = 0.78; // TILE_H / TILE_W, from src/ui/field/layout.ts
-    for (const el of document.querySelectorAll<HTMLElement>('.lbl')) {
-      if (el.hidden) continue;
-      const r = el.getBoundingClientRect();
-      if (r.width < 24) continue;
-      const tw = r.width / 0.66;
-      const th = tw * ASPECT;
-      const x = r.left - Math.max(5, tw * 0.07) + tw * 0.5;
-      const y = r.top - Math.max(4, th * 0.09) + th * 0.78;
-      if (x < 40 || x > innerWidth - 40 || y < 70 || y > innerHeight - 100) continue;
+    for (const id of window.__orca?.agentIds() ?? []) {
+      const r = window.__orca?.screenOf(id);
+      if (!r || r.w < 24 || r.h < 20) continue;
+      const x = r.x + r.w * 0.5, y = r.y + r.h * 0.6;
+      if (x < 40 || x > innerWidth - 40 || y < 112 || y > innerHeight - 100) continue;
+      if (r.x < 40 || r.x + r.w > innerWidth - 40 || r.y < 112 || r.y + r.h > innerHeight - 100) continue;
+      const target = document.elementFromPoint(x, y);
+      if (!target?.closest('.field') || target.closest('.rgn, .squad')) continue;
       return { x: Math.round(x), y: Math.round(y) };
     }
     return null;
@@ -926,7 +1017,15 @@ export async function injectEscalation(): Promise<Injected | null> {
   };
 }
 
-function orcaToken(): string {
+/**
+ * El token del hub, para las urls de consola.
+ *
+ * Exportado porque un `*.shots.ts` que abre la consola por su cuenta necesita
+ * el mismo que usa la flota sintética: el hub escucha en 0.0.0.0 y ahí se
+ * exige token también a localhost, así que sin `?k=…` una consola nueva se
+ * queda en HANDSHAKE con el mundo vacío y sin un solo error en consola.
+ */
+export function orcaToken(): string {
   const env = process.env['ORCA_TOKEN'];
   if (env) return env;
   try {
@@ -943,7 +1042,23 @@ const procs: ChildProcess[] = [];
  * should be able to shoot frames without a port fight, and a cold checkout
  * should not need one.
  */
-export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ hubWasUp: boolean; uiWasUp: boolean }> {
+export async function ensureServers(
+  opts: {
+    fleet?: boolean;
+    /**
+     * Will this run put synthetic machines on the hub at all? Defaults to
+     * whether we start the fleet ourselves. `test/field-stress.ts` passes
+     * `{ fleet: false, fixtures: true }`: it declines the standard fleet
+     * because it spawns its own, sized, one per measurement — but it is still
+     * a run that injects fixtures, and only a test hub takes those.
+     */
+    fixtures?: boolean;
+  } = {},
+): Promise<{ hubWasUp: boolean; uiWasUp: boolean }> {
+  // Antes de levantar nada: lo que dejó una corrida que no pudo despedirse.
+  const swept = sweepStaleRuns();
+  if (swept) console.log(`[visual] ${swept} servidor(es) de corridas anteriores, cerrados`);
+
   const alone = isolatedRun();
   if (alone && !TEMP_HOME) {
     // Its own ORCA_HOME, so this run's hub writes its token and state where
@@ -958,7 +1073,14 @@ export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ h
   // Probe only what we could actually share; `sharing` holds the rule.
   const hubUp = !alone && await httpOk(`http://127.0.0.1:${PORTS.hub}/api/health`, 1500);
   const uiUp = hubUp && await httpOk(`http://127.0.0.1:${PORTS.ui}/`, 1500);
-  const plan = sharing({ alone, hubUp, uiUp });
+  // A hub only takes synthetic machines if it says it is a test hub, and the
+  // operator's never does. Ask before planning to borrow it for a fleet.
+  const hubHarness = hubUp && await hubIsHarness(`http://127.0.0.1:${PORTS.hub}/api/health`);
+  const wantFleet = opts.fixtures ?? opts.fleet !== false;
+  const plan = sharing({ alone, hubUp, uiUp, hubHarness, wantFleet });
+  if (hubUp && plan.hub === 'own' && wantFleet) {
+    console.log(`[visual] hub on ${PORTS.hub} is not a test hub: starting our own instead of feeding it fixtures`);
+  }
 
   const hubWasUp = plan.hub === 'reuse';
   const hub = hubWasUp ? PORTS.hub : await freePort();
@@ -967,7 +1089,9 @@ export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ h
     console.log(`[visual] hub already on ${hub}, reusing it`);
   } else {
     console.log(`[visual] starting hub on ${hub}`);
-    spawnProc('hub', 'npx', ['tsx', 'src/hub/server.ts'], { ORCA_PORT: String(hub) });
+    // `ORCA_HARNESS`: our hub is a test hub, and only a test hub accepts the
+    // synthetic fleet below. See src/shared/synthetic.ts.
+    spawnProc('hub', 'npx', ['tsx', 'src/hub/server.ts'], { ORCA_PORT: String(hub), [HARNESS_ENV]: '1' });
     if (!await waitForHttp(`http://127.0.0.1:${hub}/api/health`, 20_000)) throw new Error('hub never came up');
   }
 
@@ -977,10 +1101,10 @@ export async function ensureServers(opts: { fleet?: boolean } = {}): Promise<{ h
   let fleetStarted = false;
   if (opts.fleet !== false && !await hasSyntheticFleet()) {
     console.log('[visual] starting synthetic fleet');
-    // `--anyway`: the fleet's own door refuses a hub with a live CAPCOM, and
-    // this harness has already decided what it is allowed to share (see
-    // `sharing`). Its machines declare themselves synthetic on the wire, so
-    // nothing they invent reaches that CAPCOM either way.
+    // `--anyway`: the fleet's own door refuses a TEST hub that has a live
+    // CAPCOM inside, and this harness has already decided what it is allowed to
+    // share (see `sharing`). It no longer opens a real hub — that door is the
+    // hub's now — so by here the target is a test hub either way.
     spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=3', '--anyway']);
     fleetStarted = true;
   }
@@ -1018,6 +1142,117 @@ async function hasSyntheticFleet(): Promise<boolean> {
   } catch { return false; }
 }
 
+/*
+ * ── Restos ────────────────────────────────────────────────────────────
+ *
+ * Los servidores que arranca este arnés están `detached`, en su propio grupo,
+ * y eso es deliberado: `npx` bifurca al proceso de verdad, y señalar sólo al
+ * envoltorio dejaba una flota sintética hablándole al hub para siempre. Pero
+ * lo que salva de una muerte a medias del padre también los salva de una
+ * muerte limpia: si el arnés se va sin poder ejecutar `shutdown` —un SIGKILL,
+ * un agente al que le cortan la tarea, un `--keep` interrumpido a lo bruto—
+ * sus hijos se quedan sirviendo. Se acumulan en silencio: siete Vite de
+ * quince horas, cada uno con su esbuild, en la máquina del operador.
+ *
+ * No hay señal que valga para eso, porque el proceso que tendría que mandarla
+ * ya no existe. Así que cada corrida deja escrito lo que levantó, y la
+ * siguiente barre lo de las corridas cuyo dueño ya no vive. La red se tiende
+ * antes de levantar nada (`ensureServers`), que es cuando importa.
+ *
+ * El registro dice el pid y CON QUÉ se lanzó, y se mata sólo si el proceso que
+ * hoy tiene ese pid sigue siendo aquél: los pid se reciclan, y matar a un
+ * tercero por un número repetido sería mucho peor que dejar un Vite colgado.
+ */
+export const RUNS_DIR = join(tmpdir(), 'orca-visual-runs');
+const RUN_FILE = join(RUNS_DIR, `${process.pid}.json`);
+interface RunRecord { owner: number; at: number; procs: { pid: number; mark: string }[] }
+const started: { pid: number; mark: string }[] = [];
+
+/**
+ * Lo que se lanzó, tal y como `ps` lo va a enseñar. `npx` no aparece: bifurca,
+ * y lo que queda en el pid es `npm exec <argv>`. Cualquier otro binario sí se
+ * nombra, que es lo que hace la marca lo bastante específica para no
+ * confundirse con un proceso ajeno que herede el número.
+ */
+export function markOf(cmd: string, argv: string[]): string {
+  return cmd === 'npx' ? argv.join(' ') : [cmd, ...argv].join(' ');
+}
+
+function noteStarted(pid: number | undefined, cmd: string, argv: string[]): void {
+  if (!pid) return;
+  started.push({ pid, mark: markOf(cmd, argv) });
+  const rec: RunRecord = { owner: process.pid, at: Date.now(), procs: started };
+  try {
+    mkdirSync(RUNS_DIR, { recursive: true });
+    writeFileSync(RUN_FILE, JSON.stringify(rec), 'utf8');
+  } catch { /* sin registro se sigue igual: es una red, no el mecanismo */ }
+}
+
+function forgetRun(): void {
+  try { rmSync(RUN_FILE, { force: true }); } catch { /* ya no estaba */ }
+}
+
+/** ¿Sigue vivo este pid? Sin señal: el 0 sólo comprueba. */
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
+ * ¿Es el proceso que hay HOY en ese pid el que apuntó aquella corrida?
+ *
+ * Compara por la COLA DE TOKENS y no con un `includes`. La diferencia no es
+ * cosmética: el 2026-09-09 `purge_harness` paró al agente que estaba
+ * construyendo el arnés porque su brief citaba `tsx test/fake-collector.ts
+ * --hub=… --anyway`, y un `includes` sobre la línea de `ps` no distingue
+ * ejecutar de nombrar (ver `src/hub/harness.ts` y docs/SYNTHETIC-HARNESS.md).
+ * Aquí el pid ya viene de un registro propio, pero los números se reciclan, y
+ * el que hereda uno puede ser justo un agente hablando de esto: exigir que el
+ * comando TERMINE exactamente en lo que se lanzó deja fuera al que lo menciona.
+ */
+function stillOurs(id: { command: string } | null, mark: string): boolean {
+  if (!id) return false;
+  const now = id.command.trim().split(/\s+/).filter(Boolean);
+  const want = mark.trim().split(/\s+/).filter(Boolean);
+  if (!want.length || now.length < want.length) return false;
+  return now.slice(now.length - want.length).join(' ') === want.join(' ');
+}
+
+/**
+ * Matar lo que dejaron las corridas que ya no están. Devuelve cuántos grupos
+ * se cerraron, para poder decirlo: un barrido callado que mata procesos ajenos
+ * sería justo lo que nadie quiere de una herramienta de pruebas.
+ */
+export function sweepStaleRuns(): number {
+  let killed = 0;
+  let files: string[];
+  try { files = readdirSync(RUNS_DIR); } catch { return 0; }
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    const path = join(RUNS_DIR, f);
+    let rec: RunRecord;
+    try { rec = JSON.parse(readFileSync(path, 'utf8')) as RunRecord; } catch { rmSync(path, { force: true }); continue; }
+    // Una corrida viva es dueña de lo suyo, incluido un `--keep` a propósito.
+    if (rec.owner !== process.pid && alive(rec.owner)) continue;
+    if (rec.owner === process.pid) continue;
+    for (const { pid, mark } of rec.procs ?? []) {
+      // Se relee el pid en el momento del disparo, no se confía en el registro:
+      // entre que se escribió y ahora, el número pudo cambiar de dueño.
+      const id = identify(pid);
+      if (!stillOurs(id, mark)) continue;
+      /*
+       * Al grupo sólo si este pid LO LIDERA. `npx` bifurca, y por eso hay que
+       * poder alcanzar al grupo; pero señalar `-pid` de quien no lo lidera
+       * alcanza a sus hermanos, a su shell y a su pane. Aquí se viene a cerrar
+       * un servidor, no una sesión.
+       */
+      const target = id!.pgid === pid ? -pid : pid;
+      try { process.kill(target, 'SIGTERM'); killed++; } catch { /* ya se fue */ }
+    }
+    rmSync(path, { force: true });
+  }
+  return killed;
+}
+
 export function spawnProc(label: string, cmd: string, argv: string[], env: Record<string, string> = {}): ChildProcess {
   const p = spawn(cmd, argv, {
     cwd: ROOT,
@@ -1038,6 +1273,8 @@ export function spawnProc(label: string, cmd: string, argv: string[], env: Recor
     if (s && /error|Error|EADDR/.test(s)) console.error(tag, s);
   });
   procs.push(p);
+  // Apuntado en el registro por si esta corrida no llega a despedirse.
+  noteStarted(p.pid, cmd, argv);
   return p;
 }
 
@@ -1045,6 +1282,21 @@ export async function httpOk(url: string, timeoutMs: number): Promise<boolean> {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     return r.ok || r.status === 404;
+  } catch { return false; }
+}
+
+/**
+ * Does the hub already serving on that port declare itself a test hub?
+ *
+ * By what it publishes about itself, not by its port: a hub on 4479 can be
+ * either. A hub that cannot be asked, or an older one with no such field,
+ * counts as real — the safe direction for this particular error.
+ */
+export async function hubIsHarness(healthUrl: string): Promise<boolean> {
+  try {
+    const r = await fetch(healthUrl, { signal: AbortSignal.timeout(1500) });
+    if (!r.ok) return false;
+    return ((await r.json()) as { harness?: boolean }).harness === true;
   } catch { return false; }
 }
 
@@ -1062,6 +1314,8 @@ export function signalProc(p: ChildProcess, sig: NodeJS.Signals = 'SIGTERM') {
 export function shutdown() {
   for (const p of procs) signalProc(p);
   procs.length = 0;
+  started.length = 0;
+  forgetRun();
   // An isolated run's ORCA_HOME held nothing but that run's hub state.
   if (TEMP_HOME && !keep) {
     rmSync(TEMP_HOME, { recursive: true, force: true });
@@ -1075,6 +1329,11 @@ const runDirectly = (process.argv[1] ?? '').endsWith('visual.ts');
 if (runDirectly) {
   process.on('SIGINT', () => { shutdown(); process.exit(130); });
   process.on('SIGTERM', () => { shutdown(); process.exit(143); });
+  // Cerrar la terminal, y cualquier salida que no pase por las de arriba —un
+  // throw sin capturar, un `process.exit` de otro sitio—. `exit` sólo admite
+  // trabajo síncrono, y matar un grupo lo es.
+  process.on('SIGHUP', () => { shutdown(); process.exit(129); });
+  process.on('exit', () => { if (!keep) shutdown(); });
   main()
     .then(() => { if (!keep) { shutdown(); process.exit(0); } })
     .catch((err) => {

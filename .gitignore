@@ -17,3 +17,7 @@ test/shots/
 # Sobras de las corridas de autoverificación de agentes (scripts y salidas
 # que el propio agente genera para comprobarse). No son código del proyecto.
 orca-selftest/
+
+# Worktrees que abren los agentes para trabajar aislados: copias enteras del
+# repo con su propio historial, no archivos de este.
+.claude/worktrees/

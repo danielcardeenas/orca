@@ -55,8 +55,8 @@ const mod: TestModule = {
   suite: 'drafts',
   tests: [
     test('draftKey: one key per destination, all under the same prefix', () => {
-      const a = draftKey('capcom'), b = draftKey('capcom', 'task-7'), c = draftKey('agent', 'a1');
-      return ok('keys', a === `${DRAFT_PREFIX}capcom` && b === `${DRAFT_PREFIX}capcom:task-7` && c === `${DRAFT_PREFIX}agent:a1`, `${a} ${b} ${c}`);
+      const a = draftKey('capcom'), b = draftKey('capcom', 'mission-7'), c = draftKey('agent', 'a1');
+      return ok('keys', a === `${DRAFT_PREFIX}capcom` && b === `${DRAFT_PREFIX}capcom:mission-7` && c === `${DRAFT_PREFIX}agent:a1`, `${a} ${b} ${c}`);
     }),
 
     test('typing writes after the debounce, not on every keystroke', () => {
@@ -128,7 +128,7 @@ const mod: TestModule = {
         `stored=${JSON.stringify(s.map.get(K))} get=${JSON.stringify(d.get(K))} pending=${t.pending.size}`);
     }),
 
-    test('rekey(): CAPCOM switches task, each conversation keeps its own line', () => {
+    test('rekey(): CAPCOM switches mission, each conversation keeps its own line', () => {
       const s = memStorage(); const t = fakeTimers();
       const d = createDrafts(s, t.io);
       const f = field();
@@ -138,10 +138,10 @@ const mod: TestModule = {
       b.rekey(draftKey('capcom', 't1'));
       f.value = ''; b.restore();
       const onT1 = f.value;
-      f.type('task line'); t.fire();
+      f.type('mission line'); t.fire();
       b.save(); b.rekey(draftKey('capcom')); f.value = ''; b.restore();
       const back = f.value;
-      return ok('separate', onT1 === '' && back === 'general line' && s.map.get(draftKey('capcom', 't1')) === 'task line',
+      return ok('separate', onT1 === '' && back === 'general line' && s.map.get(draftKey('capcom', 't1')) === 'mission line',
         `t1=${JSON.stringify(onT1)} back=${JSON.stringify(back)} stored=${JSON.stringify([...s.map])}`);
     }),
 

@@ -6,6 +6,15 @@ export interface ScreenPrompt {
   kind: 'permission' | 'trust';
   runtime: 'claude' | 'codex';
   summary: string;
+  /**
+   * La pregunta literal que el diálogo está esperando, recortada a una línea.
+   *
+   * Existe para que un bloqueo pueda decir QUÉ se pregunta y no sólo que algo
+   * pasa. Es texto del CLI, no del agente ni del repositorio: el diálogo de
+   * confianza pregunta siempre lo mismo, y el de permisos ya trae su contexto
+   * saneado en `summary`.
+   */
+  question: string;
   /** Hash includes unredacted request and options, never exported as text. */
   fingerprint: string;
   onceKey: string | null;
@@ -20,7 +29,13 @@ export function promptOn(screen: string, _tail = 30): ScreenPrompt | null {
   if (trust >= 0 && /Enter to confirm.*Esc to cancel/i.test(lines.at(-1)!)) {
     const text = lines.slice(trust).join('\n');
     if (!/Yes, I trust this folder/.test(text)) return null;
-    return { kind: 'trust', runtime: 'claude', summary: 'Workspace trust requires manual terminal review', fingerprint: hash(text), onceKey: null, denyKey: 'Escape' };
+    return {
+      kind: 'trust', runtime: 'claude',
+      summary: 'Workspace trust requires manual terminal review',
+      // Sólo hasta el '?': el resto del párrafo es la explicación larga del CLI.
+      question: `${lines[trust]!.trim().split('?')[0]!.trim()}?`,
+      fingerprint: hash(text), onceKey: null, denyKey: 'Escape',
+    };
   }
   const i = lastIndex(lines, l => /^\s*(?:Do you want to proceed\?|Would you like to run the following command\?|Allow the .+ MCP server to run tool "[^"\n]+"\?)\s*$/.test(l));
   if (i < 0) return null;
@@ -57,7 +72,7 @@ export function promptOn(screen: string, _tail = 30): ScreenPrompt | null {
   }
   const raw = lines.slice(runtime === 'claude' ? 0 : start).join('\n').replace(/^[ \t]*[❯›>]\s*(?=\d\.)/gm, '').split('\n').map(l => l.trim()).join('\n');
   const context = runtime === 'claude' ? lines[start]!.trim() : lines.slice(i, lines.findIndex((l, n) => n > i && /(?:[1-9])\.\s*(?:Yes|Allow)/.test(l))).join('\n');
-  return { kind: 'permission', runtime, summary: safePermissionContext(context) + (runtime === 'claude' ? commandShape(lines.slice(0, i)) : ''), fingerprint: hash(raw), onceKey: once[0]!.key, denyKey: 'Escape' };
+  return { kind: 'permission', runtime, summary: safePermissionContext(context) + (runtime === 'claude' ? commandShape(lines.slice(0, i)) : ''), question: lines[i]!.trim(), fingerprint: hash(raw), onceKey: once[0]!.key, denyKey: 'Escape' };
 }
 
 function commandShape(lines: string[]): string {

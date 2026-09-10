@@ -15,6 +15,8 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { startHub } from '../src/hub/server.ts';
+import { PROTOCOL_VERSION, type ServerFrame } from '../src/shared/protocol.ts';
+import { isSupervised } from '../src/shared/restart.ts';
 import { ok, eq, test, freePort, type TestModule } from './harness.ts';
 
 /**
@@ -154,6 +156,57 @@ const tests = [
     return ok('un archivo sin cambios responde 304',
       stamp !== '' && again.status === 304, `last-modified "${stamp}", segunda respuesta http ${again.status}`);
   })),
+
+  /*
+   * La otra mitad del aviso de actualización. Publicar cambia dist/ y la
+   * consola lo ve sola; lo que ninguna recarga arregla es un hub que sigue
+   * corriendo el código de antes, así que el hub lo dice él mismo nada más
+   * conectar.
+   *
+   * Se prueban LAS DOS puertas a propósito. Una consola de navegador entra
+   * con el token en la query y el hub le manda el mundo sin esperar `hello`;
+   * todo lo demás entra saludando. Cablear el aviso en una sola de las dos
+   * es un fallo que las pruebas por WebSocket no ven —entran por la del
+   * `hello`— mientras la consola de verdad, que entra por la otra, no se
+   * entera de nada. Pasó al escribir esto.
+   */
+  ...(['query', 'hello'] as const).map((puerta) =>
+    test(`el hub dice qué código corre a una consola que entra por ${puerta}`, async () => {
+      const port = await freePort();
+      const hub = await startHub({ port, host: '127.0.0.1', quiet: true });
+      try {
+        const { WebSocket } = await import('ws');
+        const token = hub.auth.token ?? '';
+        const url = `ws://127.0.0.1:${port}/ws/console${puerta === 'query' ? `?token=${encodeURIComponent(token)}` : ''}`;
+        const ws = new WebSocket(url);
+        const seen: ServerFrame[] = [];
+        const arrived = await new Promise<boolean>((resolve) => {
+          const t = setTimeout(() => resolve(false), 8000);
+          ws.on('open', () => {
+            if (puerta === 'hello') ws.send(JSON.stringify({ t: 'hello', v: PROTOCOL_VERSION, token }));
+          });
+          ws.on('message', (data) => {
+            let frame: ServerFrame;
+            try { frame = JSON.parse(String(data)) as ServerFrame; } catch { return; }
+            seen.push(frame);
+            if (frame.t === 'server') { clearTimeout(t); resolve(true); }
+          });
+          ws.on('error', () => { clearTimeout(t); resolve(false); });
+        });
+        ws.close();
+        const rev = seen.find((f) => f.t === 'server');
+        // Primero lo que se pinta, luego lo que se avisa.
+        const order = seen.findIndex((f) => f.t === 'world') < seen.findIndex((f) => f.t === 'server');
+        // `restartable` es si este proceso puede darse el relevo, y eso no es
+        // una opinión del hub: es si hay un supervisor delante ahora mismo.
+        const offer = rev?.t === 'server' && rev.restartable === isSupervised(process.env);
+        return ok(`el hub dice qué código corre (${puerta})`,
+          arrived && rev?.t === 'server' && /^[0-9a-f]{12}$/.test(rev.rev) && rev.stale === false && order && offer,
+          `frames=${seen.map((f) => f.t).join(',')} rev=${rev?.t === 'server' ? rev.rev : '—'} restartable=${rev?.t === 'server' ? rev.restartable : '—'}`);
+      } finally {
+        await hub.close();
+      }
+    })),
 
   test('el websocket sigue vivo con el servido estático delante', () => withHub(async (base) => {
     const { WebSocket } = await import('ws');

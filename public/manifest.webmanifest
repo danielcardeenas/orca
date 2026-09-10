@@ -1,21 +1,66 @@
 {
   "id": "/",
-  "name": "ORCA · Field",
+  "name": "ORCA \u00b7 Field",
   "short_name": "ORCA",
   "description": "Orchestration & Reconnaissance Console for Agents.",
   "lang": "en",
   "start_url": "/",
   "scope": "/",
   "display": "fullscreen",
-  "display_override": ["fullscreen", "standalone"],
-  "orientation": "landscape",
+  "display_override": [
+    "fullscreen",
+    "standalone"
+  ],
+  "orientation": "any",
   "background_color": "#0b0a0d",
   "theme_color": "#0b0a0d",
-  "categories": ["developer tools", "utilities"],
+  "categories": [
+    "developer tools",
+    "utilities"
+  ],
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
   "icons": [
-    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshots/wide.png",
+      "sizes": "1280x800",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "ORCA field \u00b7 synthetic fleet"
+    },
+    {
+      "src": "/screenshots/narrow.png",
+      "sizes": "432x864",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "ORCA on a phone \u00b7 synthetic fleet"
+    }
   ]
 }

@@ -12,6 +12,8 @@ import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, realpathSync } from
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { WebSocket } from 'ws';
+import { PATHS, PROTOCOL_VERSION, type ServerFrame } from '../src/shared/protocol.ts';
 import { createAuth } from '../src/hub/auth.ts';
 import { findPaths, fileKind } from '../src/ui/windows/paths.ts';
 import { startHub } from '../src/hub/server.ts';
@@ -268,6 +270,53 @@ const tests = [
     const r = await fetch(url(base, join(ROOT, 'src', 'a.ts')).replace(TEST_TOKEN, 'nope'));
     return eq('401', r.status, 401);
   })),
+
+  /* ── files:allow: una carpeta que el operador autoriza desde el visor ── */
+  test('files:allow abre la carpeta pedida, la home no, y un hub nuevo la recuerda', async () => {
+    fixture();
+    const rootsFile = join(FIXTURE, 'file-roots.json');
+    const target = join(OUTSIDE, 'outside.txt');
+    /** Una consola mínima: hello, un comando, su ack. */
+    const allow = async (port: number, path: string): Promise<{ ok: boolean; detail?: string; data?: unknown }> => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${PATHS.console}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => { ws.once('open', () => resolve()); ws.once('error', reject); });
+      ws.send(JSON.stringify({ t: 'hello', v: PROTOCOL_VERSION, token: TEST_TOKEN }));
+      const id = `cmd-${Math.random().toString(36).slice(2)}`;
+      ws.send(JSON.stringify({ t: 'cmd', id, cmd: { k: 'files:allow', path } }));
+      try {
+        return await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('sin ack')), 5000);
+          ws.on('message', (d) => {
+            const f = JSON.parse(d.toString()) as ServerFrame;
+            if (f.t === 'ack' && f.cmdId === id) { clearTimeout(timer); resolve(f); }
+          });
+        });
+      } finally { ws.close(); }
+    };
+    const start = async () => {
+      const port = await freePort();
+      const hub = await startHub({ port, host: '127.0.0.1', quiet: true, fileRootsFile: rootsFile, auth: createAuth({ ORCA_TOKEN: TEST_TOKEN, ORCA_STRICT_AUTH: '1' }) });
+      return { port, base: `http://127.0.0.1:${port}`, hub };
+    };
+    const first = await start();
+    try {
+      const before = (await fetch(url(first.base, target))).status;
+      const home = await allow(first.port, homedir());
+      const done = await allow(first.port, target);
+      const after = await fetch(url(first.base, target));
+      const body = await after.text();
+      if (before !== 403) return eq('antes: 403', before, 403);
+      if (home.ok) return ok('la home no se autoriza', false, JSON.stringify(home));
+      if (!done.ok || (done.data as { root?: string }).root !== OUTSIDE) return ok('ack con la raíz', false, JSON.stringify(done));
+      if (after.status !== 200 || body !== CANARY) return ok('después: 200 con el contenido', false, `${after.status} ${body.slice(0, 40)}`);
+    } finally { await first.hub.close(); }
+    const second = await start();
+    try {
+      const r = await fetch(url(second.base, target));
+      const still = (await fetch(url(second.base, join(OUTSIDE, '..', 'project', '..', '..', 'nope.txt')))).status;
+      return ok('un hub nuevo con el mismo json sirve la carpeta y nada más', r.status === 200 && still !== 200, `reopen=${r.status} traversal=${still}`);
+    } finally { await second.hub.close(); }
+  }),
 ];
 
 export default { suite: 'files', tests } satisfies TestModule;

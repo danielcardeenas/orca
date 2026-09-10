@@ -60,4 +60,22 @@ export default { suite: 'Origin and visual cleanup', tests: [
       return ok('archive visibility, filters and active work preserved', true);
     } finally { setPref('origin', previous.origin); setPref('showAll', previous.showAll); }
   }),
+  test('el CAPCOM vivo no se puede esconder del campo; uno terminado sí', () => {
+    const previous = { showAll: getPref('showAll'), origin: getPref('origin') };
+    try {
+      setPref('origin', 'all'); setPref('showAll', false);
+      const store = new Store(); const w = emptyWorld();
+      const all = [
+        agent('cap', { role: 'capcom', state: 'working' }),
+        agent('past', { role: 'capcom', state: 'done' }),
+        agent('w1', { origin: 'orca', state: 'working' }),
+      ];
+      w.agents = Object.fromEntries(all.map((a) => [a.id, a])); store.replaceWorld(w);
+      // Un descarte en bloque se lleva lo que puede y deja al mando donde está.
+      assert.equal(store.dismiss(['cap', 'past', 'w1']), 2);
+      assert.deepEqual(Object.keys(store.world.agents), ['cap']);
+      assert(!store.isDismissed('cap'));
+      return ok('el mando sigue en el campo tras un DISMISS', true);
+    } finally { setPref('origin', previous.origin); setPref('showAll', previous.showAll); }
+  }),
 ] };

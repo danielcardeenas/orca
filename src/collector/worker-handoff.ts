@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { AgentHandle, CommandDeps } from './commands.ts';
 import { paneEnv } from './commands.ts';
+import { shimsFor } from './shims.ts';
 import { ProviderHandoffs, prepareProvider, providerModels } from './provider-handoff.ts';
 import { ModelController, resumedPromptReady } from './model-control.ts';
 import { runtimeBin } from './runtime.ts';
@@ -76,7 +77,9 @@ export class WorkerHandoffs {
     if (!a?.pane || !a.alive || a.subagent || !name || !bin) throw new Error('Source or destination unavailable');
     const cwd = this.cwd(a);
     if (p.cwd !== cwd) throw new Error('Worker directory changed after preparation');
-    const env = { ...paneEnv(this.deps.keys.materialize(a.projectId, a.parentId ?? 'orca')), ORCA_PARENT_ID: a.parentId ?? '', ORCA_PANE: name };
+    // El relevo conserva el PATH del original: un miembro que cambia de proveedor
+    // sigue teniendo `orca-tell` para avisar a su líder. Ver shims.ts.
+    const env = { ...paneEnv(this.deps.keys.materialize(a.projectId, a.parentId ?? 'orca'), shimsFor(a.squad ?? null, a.lead === true)), ORCA_PARENT_ID: a.parentId ?? '', ORCA_PANE: name };
     // Normal project permissions remain in effect. Never grant CAPCOM's fleet credentials here.
     const args = p.runtime === 'claude' ? ['--resume', id, '--model', p.model, '--tools', 'default']
       : ['resume', id, '-C', cwd, '-m', p.model, '-s', 'workspace-write', '-a', 'on-request'];

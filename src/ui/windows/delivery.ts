@@ -2,9 +2,9 @@ import { store } from '../store.ts';
 import { esc } from '../util.ts';
 
 /** Local echo and collector receipts, shared by every conversation entry point. */
-export function mountDelivery(host: HTMLElement, agentId: string | null, taskId?: () => string | null) {
+export function mountDelivery(host: HTMLElement, agentId: string | null, missionId?: () => string | null) {
   const render = () => {
-    const messages = store.outgoing.filter((m) => m.agentId === agentId && (m.taskId ?? null) === (taskId?.() ?? null)).slice(-3);
+    const messages = store.outgoing.filter((m) => m.agentId === agentId && (m.missionId ?? null) === (missionId?.() ?? null)).slice(-3);
     host.hidden = !messages.length;
     host.innerHTML = messages.map((m) => {
       const label = m.status === 'sending' ? 'SENDING…'
@@ -18,7 +18,7 @@ export function mountDelivery(host: HTMLElement, agentId: string | null, taskId?
   host.classList.add('delivery');
   host.setAttribute('role', 'log');
   host.setAttribute('aria-live', 'polite');
-  const off = store.on((e) => { if (e.k === 'delivery' || e.k === 'tasks') render(); });
+  const off = store.on((e) => { if (e.k === 'delivery' || e.k === 'missions') render(); });
   render();
   return off;
 }

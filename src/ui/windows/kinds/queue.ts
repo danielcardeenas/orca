@@ -10,11 +10,14 @@ import { store } from '../../store.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { ago, esc } from '../../util.ts';
+import { longPress } from '../../hud/longpress.ts';
 
 export function mountQueue(ctx: WinCtx, c: Console) {
   const body = ctx.body;
   body.innerHTML = `<div class="sec row row--split"><span class="px px--tiny" data-sum></span><span class="px px--tiny" data-oldest></span></div><div class="win__scroll scroll" data-list></div>`;
   const list = body.querySelector<HTMLElement>('[data-list]')!;
+  // Mantener pulsada una fila es su clic derecho.
+  longPress(list, { allow: (t) => !!t.closest('.qrow') });
   const sum = body.querySelector<HTMLElement>('[data-sum]')!;
   const oldest = body.querySelector<HTMLElement>('[data-oldest]')!;
   let sig = '';
@@ -25,7 +28,7 @@ export function mountQueue(ctx: WinCtx, c: Console) {
     const withEsc = new Set(pending.map((e) => e.agentId));
     const perms = store.blockedAgents().filter((a) => a.block?.kind !== 'peer' && !withEsc.has(a.id));
     const n = pending.length + perms.length;
-    const s = [pending.map((e) => e.id + e.status).join(','), perms.map((a) => a.id).join(','), Math.floor(now / 10000)].join('|');
+    const s = [pending.map((e) => e.id + e.status + (store.fromHarness(e) ? 'H' : '')).join(','), perms.map((a) => a.id).join(','), Math.floor(now / 10000)].join('|');
     if (s === sig) return;
     sig = s;
 
@@ -42,8 +45,11 @@ export function mountQueue(ctx: WinCtx, c: Console) {
       const a = store.world.agents[e.agentId];
       const p = store.world.projects[e.projectId];
       const unblocks = 1 + store.dammedBehind(e.agentId).length;
-      return `<div class="qrow" data-esc="${esc(e.id)}" data-agent="${esc(e.agentId)}">
-        <div class="qrow__h"><span class="qrow__cs">${esc(a?.callsign ?? '??')} <span class="win__pj">${esc(p?.code ?? '')}</span></span><span class="qrow__meta">${ago(e.askedAt, now)}</span></div>
+      // La fila del arnés se queda —hay que poder mirarla— pero dice lo que
+      // es antes de que nadie lea la pregunta: nadie espera esta respuesta.
+      const fake = store.fromHarness(e);
+      return `<div class="qrow${fake ? ' qrow--harness' : ''}" data-esc="${esc(e.id)}" data-agent="${esc(e.agentId)}">
+        <div class="qrow__h"><span class="qrow__cs">${esc(a?.callsign ?? '??')} <span class="win__pj">${esc(p?.code ?? '')}</span></span><span class="qrow__meta">${fake ? 'HARNESS · ' : ''}${ago(e.askedAt, now)}</span></div>
         <div class="qrow__q mono">${esc(e.question)}</div>
         <div class="qrow__meta">${e.status === 'with_ceo' ? 'CAPCOM LOOKING · ' : ''}${e.urgency.toUpperCase()} · <b>UNBLOCKS ${unblocks}</b>${e.options.length ? ` · ${e.options.length} OPTIONS` : ''}</div>
       </div>`;

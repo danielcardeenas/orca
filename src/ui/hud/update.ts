@@ -36,12 +36,24 @@
  * the index has no hashed assets, so that baseline is empty and the poll
  * never starts.
  *
+ * ── La otra mitad: el hub ────────────────────────────────────────────
+ *
+ * Recargar actualiza la consola y nada más. El hub carga su código al
+ * arrancar y no lo vuelve a mirar, así que después de publicar puede quedar
+ * un bundle nuevo hablando con un proceso viejo — y el síntoma de eso no se
+ * parece a la causa. Por eso hay una segunda píldora, con un texto distinto
+ * porque la acción es distinta: ésta no se arregla con un clic, se arregla
+ * reiniciando ORCA. El hub la manda (`server` en shared/protocol.ts,
+ * hub/source-rev.ts); aquí sólo se pinta.
+ *
  * `buildFingerprint` and `createUpdateSentinel` are DOM-free so the logic
  * is tested in test/update.test.ts without a browser.
  */
 
 import { drafts } from '../drafts.ts';
+import { hub } from '../net/client.ts';
 import { store } from '../store.ts';
+import { activatePending, registerServiceWorker } from '../pwa.ts';
 
 /** The hashed asset paths an index.html refers to, sorted, one per line. Empty when there are none. */
 export function buildFingerprint(html: string): string {
@@ -73,6 +85,13 @@ export interface UpdateSentinel {
 }
 
 export const UPDATE_POLL_MS = 60_000;
+
+/**
+ * Cuánto se espera a que el enlace se caiga después de pedir el relevo. Un hub
+ * que iba a reiniciarse lo hace en menos de un segundo; pasado esto, lo que
+ * hubo es un frame que no llegó o un hub que dijo que no.
+ */
+export const RESTART_GIVE_UP_MS = 15_000;
 
 export function createUpdateSentinel(baseline: string, io: SentinelIO, intervalMs = UPDATE_POLL_MS): UpdateSentinel {
   let reason: string | null = null;
@@ -120,6 +139,90 @@ export function createUpdateSentinel(baseline: string, io: SentinelIO, intervalM
   return sentinel;
 }
 
+/**
+ * La píldora del servidor: se enciende cuando el hub dice que lo que corre ya
+ * no es lo que hay escrito.
+ *
+ * Es un botón sólo cuando puede serlo. Un hub bajo `tools/supervise.mjs` sabe
+ * pedirse el relevo (shared/restart.ts) y entonces el clic lo reinicia de
+ * verdad; sin supervisor no hay nada que pulsar y el aviso se queda en lo que
+ * era, un cartel que dice qué hacer en la terminal. Ofrecer un botón que no
+ * puede funcionar es peor que no ofrecerlo: el operador cree que ya está.
+ *
+ * El relevo no tiene ack —lo que contestaría es justo lo que se muere—, así
+ * que la confirmación es el enlace: cae, vuelve, y ahí sí se recarga sola.
+ * Recargar aquí no rompe la doctrina, la cumple: el clic ES la autorización, y
+ * dejar la consola vieja hablando con el hub nuevo sería la única forma de que
+ * ese clic terminara en algo peor de lo que arregló. Si el enlace no llega a
+ * caerse, no pasó nada y la píldora vuelve a ofrecerlo.
+ */
+function mountServerPill(host: HTMLElement, ask: () => void): () => void {
+  const el = document.createElement('button');
+  el.className = 'update update--server';
+  el.type = 'button';
+  el.hidden = true;
+  host.appendChild(el);
+
+  /** `asked`: se pidió y el enlace sigue arriba. `down`: ya cayó; al volver, recarga. */
+  let phase: 'idle' | 'asked' | 'down' = 'idle';
+  let giveUp: number | null = null;
+
+  const label = (text: string) => {
+    el.innerHTML = `<i class="update__dot" aria-hidden="true"></i>${text}`;
+  };
+
+  const paint = () => {
+    const s = store.server;
+    el.hidden = s?.stale !== true;
+    if (phase !== 'idle') {
+      el.disabled = true;
+      label('RESTARTING ORCA · WAITING FOR THE LINK');
+      el.title = 'El hub se está reiniciando. La consola se recargará sola en cuanto vuelva.';
+      return;
+    }
+    el.disabled = s?.restartable !== true;
+    label(s?.restartable === true ? 'SERVER CODE CHANGED · CLICK TO RESTART' : 'SERVER CODE CHANGED · RESTART ORCA');
+    el.title = s?.restartable === true
+      ? 'Se public\u00f3 c\u00f3digo del hub o del collector despu\u00e9s de que este proceso arrancara. '
+        + 'El clic los reinicia y recarga la consola; los agentes no se tocan.'
+      : 'Se public\u00f3 c\u00f3digo del hub o del collector despu\u00e9s de que este proceso arrancara. '
+        + 'Recargar la p\u00e1gina no lo aplica y este hub no corre bajo supervisor: rein\u00edcialo con npm run prod.';
+  };
+
+  el.addEventListener('click', () => {
+    if (phase !== 'idle' || store.server?.restartable !== true) return;
+    // Lo que se estuviera escribiendo, al disco antes de que se caiga el cable.
+    drafts.flush();
+    phase = 'asked';
+    paint();
+    ask();
+    // Si el enlace ni se inmuta, no pasó nada: se devuelve el botón en vez de
+    // dejar al operador mirando un "reiniciando" que no reinicia.
+    giveUp = window.setTimeout(() => {
+      if (phase !== 'asked') return;
+      phase = 'idle';
+      paint();
+    }, RESTART_GIVE_UP_MS);
+  });
+
+  paint();
+  const off = store.on((e) => {
+    if (e.k === 'server') { paint(); return; }
+    if (e.k !== 'link') return;
+    if (phase === 'asked' && !e.up) { phase = 'down'; return; }
+    if (phase === 'down' && e.up) {
+      if (giveUp !== null) window.clearTimeout(giveUp);
+      location.reload();
+    }
+  });
+
+  return () => {
+    if (giveUp !== null) window.clearTimeout(giveUp);
+    off();
+    el.remove();
+  };
+}
+
 /** The pill in the HUD. Hidden until a build shows up; the click is the reload. */
 export function mountUpdate(host: HTMLElement): { sentinel: UpdateSentinel; dispose(): void } {
   const el = document.createElement('button');
@@ -146,8 +249,22 @@ export function mountUpdate(host: HTMLElement): { sentinel: UpdateSentinel; disp
   el.addEventListener('click', () => {
     // The last keystrokes may still be inside the debounce; land them first.
     drafts.flush();
-    location.reload();
+    /*
+     * And hand over to the waiting service worker before reloading, or the
+     * reload would be served by the old one from the old cache and the pill
+     * would need a second click. Resolves right away when there is no worker
+     * (development, or an origin without https), so the reload is never held.
+     */
+    void activatePending().then(() => location.reload(), () => location.reload());
   });
+
+  /*
+   * The installable console (docs/PWA.md). Registering here and not in main.ts
+   * is deliberate: the worker's only visible effect is this pill, and a worker
+   * waiting to take over is exactly what the pill announces. Development and
+   * plain http do nothing — see pwa.ts.
+   */
+  registerServiceWorker((why) => sentinel.mark(why));
 
   // Development: the plugin in vite.config.ts says which file changed.
   import.meta.hot?.on('orca:update', (data: { file?: string } | undefined) => sentinel.mark(data?.file ?? 'source'));
@@ -158,9 +275,12 @@ export function mountUpdate(host: HTMLElement): { sentinel: UpdateSentinel; disp
   document.addEventListener('visibilitychange', onVisible);
   const off = store.on((e) => { if (e.k === 'link' && e.up) void sentinel.check(); });
 
+  const unmountServer = mountServerPill(host, () => hub.restart());
+
   return {
     sentinel,
     dispose() {
+      unmountServer();
       sentinel.stop();
       document.removeEventListener('visibilitychange', onVisible);
       off();

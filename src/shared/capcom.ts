@@ -5,8 +5,8 @@
  * another one answers it.
  */
 
-import type { Agent } from './types.ts';
-import { TERMINAL_STATES } from './types.ts';
+import type { Agent, AgentState } from './types.ts';
+import { LIVE_STATES, TERMINAL_STATES } from './types.ts';
 
 /**
  * The prefix the hub puts on an agent's question when it relays it to CAPCOM
@@ -41,4 +41,45 @@ export function capcomOf(agents: Iterable<Agent> | Record<string, Agent>): Agent
       || (a.startedAt === best.startedAt && a.updatedAt > best.updatedAt)) best = a;
   }
   return best;
+}
+
+/* ── The turn ────────────────────────────────────────────────────── */
+
+/**
+ * What CAPCOM is doing with your line right now, as the command line shows
+ * it. One of four words: nothing, thinking, working (with the tool in its
+ * hand), or waiting on you. A block on another agent is not waiting on you,
+ * so it reads as working; a CAPCOM that is booting is thinking, for the same
+ * reason a cursor blinks before the first character.
+ */
+export type CapcomTurn =
+  | { kind: 'idle' }
+  | { kind: 'thinking' }
+  | { kind: 'working'; tool: string | null }
+  | { kind: 'waiting' };
+
+export function capcomTurn(agents: Iterable<Agent> | Record<string, Agent>, ceo?: { thinking: boolean }): CapcomTurn {
+  const a = capcomOf(agents);
+  if (!a) return ceo?.thinking ? { kind: 'thinking' } : { kind: 'idle' };
+  switch (a.state) {
+    case 'booting': case 'thinking': return { kind: 'thinking' };
+    case 'working': return { kind: 'working', tool: a.tool ?? null };
+    case 'blocked': return a.block?.kind === 'peer' ? { kind: 'working', tool: null } : { kind: 'waiting' };
+    default: return { kind: 'idle' };
+  }
+}
+
+/** How long after your line a turn that starts still counts as yours. */
+export const TURN_AFTER_MS = 30_000;
+
+/**
+ * CAPCOM took your line: it was not live, now it is, and you sent it
+ * something moments ago. A turn it starts on its own — a relayed question,
+ * a mission's next step — is not this; the command line shows it, but the
+ * sound is for the line you are waiting on.
+ */
+export function turnStarted(before: AgentState | undefined, after: AgentState, sentAt: number | null, now: number): boolean {
+  if (sentAt === null || now - sentAt > TURN_AFTER_MS || now < sentAt) return false;
+  const wasLive = before !== undefined && LIVE_STATES.has(before) && before !== 'blocked';
+  return !wasLive && LIVE_STATES.has(after) && after !== 'blocked';
 }

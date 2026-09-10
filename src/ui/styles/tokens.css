@@ -26,6 +26,36 @@
   font-weight: 400;
   font-display: swap;
 }
+/*
+ * The switchable faces (SETTINGS › TYPE). Every one of them is self-hosted
+ * and OFL, like the three above: the console never reaches for a CDN.
+ *
+ *   Space Grotesk  Florian Karsten, OFL 1.1 — Google Fonts (variable, 300–700)
+ *   Martian Mono   Evil Martians, OFL 1.1 — Google Fonts (variable, 100–800)
+ *   Commit Mono    Eigil Nikolajsen, OFL 1.1 — @fontsource/commit-mono 5.3.0
+ *
+ * Latin subset only, as Google cuts it: Latin-1 plus the punctuation the world
+ * uses (· — ↑ ↓ €). A glyph outside it falls to the stack's tail, which is a
+ * wrong shape and never an empty box.
+ */
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/space-grotesk.woff2') format('woff2');
+  font-weight: 300 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Martian Mono';
+  src: url('/fonts/martian-mono.woff2') format('woff2');
+  font-weight: 100 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Commit Mono';
+  src: url('/fonts/commit-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
 
 :root {
   /* ── Ground ─────────────────────────────────────────────────────── */
@@ -49,6 +79,15 @@
   --cyan-deep: #0b2a33;
 
   /* ── Type ───────────────────────────────────────────────────────── */
+  /*
+   * Two families, and the whole console reads from them. The values here are
+   * the defaults `prefs.ts` also carries, so the first paint is already the
+   * chosen face and nothing swaps under the operator; picking another writes
+   * these same two properties onto <html> (see `fonts.ts`).
+   */
+  --font-display: 'Space Grotesk', 'Tiny5', system-ui, sans-serif;
+  --font-mono: 'Commit Mono', 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
+
   --ink: #e8e8ea;
   --ink-bright: #f2f4f0;
   --ink-mid: #c5cad3;
@@ -115,12 +154,18 @@ html, body {
 body {
   background: var(--bezel);
   color: var(--ink);
-  font-family: 'Tiny5', 'Jersey 10', monospace;
-  /* Pixel type must not be smoothed or the whole world turns to mush. */
-  -webkit-font-smoothing: none;
-  -moz-osx-font-smoothing: unset;
+  font-family: var(--font-display, 'Tiny5', 'Jersey 10', monospace);
   user-select: none;
   cursor: none;
+}
+/*
+ * Pixel type must not be smoothed or the whole world turns to mush — and a
+ * vector face left unsmoothed is exactly as bad the other way. So the switch
+ * follows the chosen display face, which `fonts.ts` stamps on <html>.
+ */
+html[data-font-display="tiny5"] body {
+  -webkit-font-smoothing: none;
+  -moz-osx-font-smoothing: unset;
 }
 body a, body button, body input, body textarea { cursor: none; }
 ::selection { background: var(--lime); color: #111; }
@@ -131,7 +176,7 @@ input, textarea { cursor: text !important; }
 /* ── Pixel type scale ─────────────────────────────────────────────── */
 
 .px {
-  font-family: 'Tiny5', monospace;
+  font-family: var(--font-display, 'Tiny5', monospace);
   font-weight: 400;
   letter-spacing: var(--track);
   text-transform: uppercase;
@@ -150,7 +195,7 @@ input, textarea { cursor: text !important; }
 
 /* Machine-readable text — logs, code, commands — steps out of pixel type. */
 .mono {
-  font-family: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--font-mono, 'Geist Mono', ui-monospace, SFMono-Regular, monospace);
   font-size: 11px;
   letter-spacing: 0.02em;
   line-height: 1.35;
@@ -263,7 +308,7 @@ body.is-field .fx-grain { opacity: 0.025; }
 .tile {
   position: relative; border: 0; padding: 0; margin: 0;
   color: var(--ink-mid); background: var(--tile);
-  font-family: 'Tiny5', monospace; font-size: 11px; letter-spacing: 0.12em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: 11px; letter-spacing: 0.12em;
   text-align: left;
   clip-path: polygon(
     0 0, 100% 0, 100% 30%,
@@ -283,7 +328,7 @@ body.is-field .fx-grain { opacity: 0.025; }
 
 .status {
   align-self: start;
-  font-family: 'Tiny5', monospace; font-size: 10px; letter-spacing: 0.16em;
+  font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; letter-spacing: 0.16em;
   padding: 4px 10px; border-radius: 4px;
   background: var(--pill-off); color: #c8c8cc;
   text-transform: uppercase;
@@ -326,7 +371,7 @@ body.is-field .fx-grain { opacity: 0.025; }
 }
 .warn::after {
   content: '!'; position: absolute; left: 50%; top: 55%; transform: translate(-50%, -50%);
-  color: #1a0000; font-family: 'Tiny5', monospace; font-size: 11px;
+  color: #1a0000; font-family: var(--font-display, 'Tiny5', monospace); font-size: 11px;
 }
 
 /* Scrolling banner track, as used by SIGNAL DETECTED and SYS BREACH. */

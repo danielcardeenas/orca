@@ -141,7 +141,7 @@ function autonomyDeps(dispatch: AutonomyDeps['dispatch'], agents: Agent[] = [age
   return {
     agents: () => agents,
     agent: (id) => agents.find((a) => a.id === id),
-    projects: () => [], project: () => undefined, tasks: () => ({}), capcom: () => null,
+    projects: () => [], project: () => undefined, missions: () => ({}), capcom: () => null,
     sayToCapcom: () => false, dispatch, stopAgent: async () => undefined,
     dir: '/tmp/orca-verify-none', env: {}, now: () => T0,
     setTimer: () => ({ cancel() {} }), setInterval: () => ({ cancel() {} }),

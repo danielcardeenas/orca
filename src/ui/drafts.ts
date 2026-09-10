@@ -45,7 +45,7 @@ export const DRAFT_PREFIX = 'orca.draft.';
 /** Short enough that a reload right after the last keystroke still finds it. */
 export const DRAFT_DEBOUNCE_MS = 150;
 
-/** `capcom`, `capcom:task-17`, `agent:a1`, `command`: one key per destination. */
+/** `capcom`, `capcom:mission-17`, `agent:a1`, `command`: one key per destination. */
 export function draftKey(scope: string, target?: string | null): string {
   return `${DRAFT_PREFIX}${scope}${target ? `:${target}` : ''}`;
 }
@@ -57,7 +57,7 @@ export interface DraftBinding {
   save(): void;
   /** The line was sent: forget it. */
   clear(): void;
-  /** The field now speaks to another destination (CAPCOM's task picker). */
+  /** The field now speaks to another destination (CAPCOM's mission picker). */
   rekey(key: string): void;
   dispose(): void;
 }

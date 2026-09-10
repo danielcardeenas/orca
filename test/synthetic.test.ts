@@ -27,7 +27,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 
-import type { Agent, Escalation, Machine } from '../src/shared/types.ts';
+import type { Agent, Escalation, Machine, Project } from '../src/shared/types.ts';
+import { emptyRollup } from '../src/shared/types.ts';
 import { PATHS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
 import type { Command } from '../src/shared/protocol.ts';
 import { isSynthetic, sameWorld } from '../src/shared/synthetic.ts';
@@ -37,7 +38,9 @@ import { AnswerMemory } from '../src/hub/memory.ts';
 import { HubStore } from '../src/hub/persist.ts';
 import { FleetStore } from '../src/hub/fleets.ts';
 import { startHub, type Hub } from '../src/hub/server.ts';
-import { startFakeFleet } from './fake-collector.ts';
+import { doorVerdict, startFakeFleet } from './fake-collector.ts';
+import { CLOSE_NOT_HARNESS } from '../src/hub/auth.ts';
+import { harnessInvocation, harnessProcs, stopHarnessProcs } from '../src/hub/harness.ts';
 import { ok, eq, test, until, type TestModule } from './harness.ts';
 
 const TOKEN = 'test-token-synthetic-0';
@@ -84,12 +87,25 @@ function escalation(over: Partial<Escalation> = {}): Escalation {
   };
 }
 
+function project(id: string, machineId: string): Project {
+  return {
+    id, machineId, slug: `-tmp-${id}`, name: id, path: `/tmp/${id}`, code: id.slice(-2).toUpperCase(),
+    gitBranch: null, gitDirty: false, keyNames: [], sessionIds: [], rollup: emptyRollup(),
+  };
+}
+
 function tempDir(): string { return mkdtempSync(join(tmpdir(), 'orca-synthetic-')); }
 
-async function withHub<T>(fn: (hub: Hub) => Promise<T>): Promise<T> {
+/**
+ * Un hub de usar y tirar. `harness` es la postura de la frontera: sin decir
+ * nada sale la de esta corrida —`test/run.ts` la marca de pruebas entera— y
+ * `false` pide explícitamente un hub como el del operador.
+ */
+async function withHub<T>(fn: (hub: Hub) => Promise<T>, opts: { harness?: boolean } = {}): Promise<T> {
   const dir = tempDir();
   const hub = await startHub({
     port: 0, host: '127.0.0.1', quiet: true,
+    ...(opts.harness === undefined ? {} : { harness: opts.harness }),
     auth: createAuth({ ORCA_TOKEN: TOKEN } as NodeJS.ProcessEnv),
     store: new HubStore({ dir }),
     memory: new AnswerMemory(join(dir, 'memory.jsonl')),
@@ -114,6 +130,22 @@ async function collector(port: number, m: Machine): Promise<{
   });
   ws.send(JSON.stringify({ t: 'hello', v: PROTOCOL_VERSION, token: TOKEN, machine: m }));
   return { ws, says, close: () => ws.close() };
+}
+
+/**
+ * Un collector que se anuncia y espera respuesta: o entra, o le cierran.
+ *
+ * `code` es el del cierre — 4004 es «este hub no admite fixtures», ver
+ * `hub/auth.ts` — y `null` mientras siga conectado.
+ */
+async function knock(port: number, m: Machine): Promise<{ code: number | null; close(): void }> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}${PATHS.collector}?token=${TOKEN}`);
+  let code: number | null = null;
+  ws.on('close', (c) => { code = c; });
+  await new Promise<void>((res, rej) => { ws.once('open', () => res()); ws.once('error', rej); });
+  ws.send(JSON.stringify({ t: 'hello', v: PROTOCOL_VERSION, token: TOKEN, machine: m }));
+  await until(() => code !== null, 2000);
+  return { get code() { return code; }, close: () => ws.close() };
 }
 
 /* ── la marca ─────────────────────────────────────────────────────── */
@@ -147,6 +179,25 @@ const marking = [
       m?.synthetic === true && lying?.synthetic === undefined
       && world.state.machines['m3']?.synthetic === true,
       `hello: ${String(m?.synthetic)} · inventado: ${String(lying?.synthetic)} · tras reconectar: ${String(world.state.machines['m3']?.synthetic)}`,
+    );
+  }),
+
+  test('de dónde salió el arnés lo dice el arnés, y sólo el arnés', () => {
+    const home = '-Users-dan-projects-orca';
+    const fake = sanitizeMachine({ ...machine('m1'), synthetic: true, harnessOf: home });
+    // Una máquina de verdad no puede colgarse de la isla de un proyecto ajeno:
+    // el origen sólo se cree sobre una marca que ya quita permisos.
+    const real = sanitizeMachine({ ...machine('m2'), harnessOf: home });
+    const world = new World();
+    world.upsertMachine(fake!);
+    // Y se conserva: una reconexión sin él no vacía el recinto en el que la
+    // consola ya había plantado sus teselas.
+    world.upsertMachine(sanitizeMachine({ ...machine('m1'), synthetic: true })!);
+    const kept = world.state.machines['m1']?.harnessOf;
+    return ok(
+      'el origen del arnés se sanea y se conserva',
+      fake?.harnessOf === home && real?.harnessOf === undefined && kept === home,
+      `arnés: ${String(fake?.harnessOf)} · real: ${String(real?.harnessOf)} · tras reconectar: ${String(kept)}`,
     );
   }),
 ];
@@ -301,7 +352,364 @@ const harness = [
   }),
 ];
 
+/* ── la frontera: quién puede siquiera entrar ─────────────────────── */
+
+const border = [
+  test('un hub que no se declara de pruebas rechaza a la máquina sintética; uno que sí, la acepta', async () => {
+    // El mismo `hello`, la misma máquina, dos hubs. Lo único que cambia es la
+    // postura del hub, que es exactamente donde el operador quiso la decisión.
+    const real = await withHub(async (hub) => {
+      const knocked = await knock(hub.port, machine('m-fake', true));
+      const inside = Object.keys(hub.world.state.machines).length;
+      knocked.close();
+      return { code: knocked.code, inside };
+    }, { harness: false });
+
+    const test0 = await withHub(async (hub) => {
+      const knocked = await knock(hub.port, machine('m-fake', true));
+      const inside = await until(() => hub.world.state.machines['m-fake'] !== undefined, 2000);
+      knocked.close();
+      return { code: knocked.code, inside };
+    }, { harness: true });
+
+    return ok(
+      'la puerta la abre el hub, no el cliente',
+      real.code === CLOSE_NOT_HARNESS && real.inside === 0
+      && test0.code === null && test0.inside,
+      `hub real: cierre ${String(real.code)}, ${real.inside} máquinas dentro · `
+      + `hub de pruebas: cierre ${String(test0.code)}, entró ${String(test0.inside)}`,
+    );
+  }),
+
+  test('un collector de verdad entra en el hub real: la puerta filtra fixtures, no collectors', async () => {
+    // Sin esto, un hub que rechazara TODO pasaría la prueba de arriba.
+    return await withHub(async (hub) => {
+      const knocked = await knock(hub.port, machine('m-real'));
+      const inside = await until(() => hub.world.state.machines['m-real'] !== undefined, 2000);
+      knocked.close();
+      return ok(
+        'lo real sigue entrando',
+        knocked.code === null && inside,
+        `cierre ${String(knocked.code)} · dentro: ${String(inside)}`,
+      );
+    }, { harness: false });
+  }),
+
+  test('el arnés entero se estrella contra un hub real, con --anyway o sin él', async () => {
+    // Lo que ocurrió el 2026-09-07, ahora del lado que no puede fallar: aunque
+    // alguien salte la puerta del mock, sus tres máquinas no entran.
+    return await withHub(async (hub) => {
+      const fleet = startFakeFleet({ hub: `ws://127.0.0.1:${hub.port}`, token: TOKEN, quiet: true, speed: 6 });
+      try {
+        const got = await until(() => Object.keys(hub.world.state.machines).length > 0, 2500);
+        return ok(
+          'ni una máquina, ni un agente, ni un dólar',
+          !got && Object.keys(hub.world.state.agents).length === 0,
+          `${Object.keys(hub.world.state.machines).length} máquinas · `
+          + `${Object.keys(hub.world.state.agents).length} agentes`,
+        );
+      } finally { fleet.stop(); }
+    }, { harness: false });
+  }),
+
+  test('--anyway sigue sirviendo para un hub de pruebas con mando, y para nada más', () => {
+    const real = doorVerdict({ reachable: true, harness: false, capcom: null, anyway: true });
+    const realConMando = doorVerdict({ reachable: true, harness: false, capcom: { callsign: 'CC' }, anyway: true });
+    const pruebasConMando = doorVerdict({ reachable: true, harness: true, capcom: { callsign: 'CC' }, anyway: false });
+    const pruebasAnyway = doorVerdict({ reachable: true, harness: true, capcom: { callsign: 'CC' }, anyway: true });
+    const mudo = doorVerdict({ reachable: false, harness: false, capcom: null, anyway: true });
+    return ok(
+      '--anyway dejó de ser una llave maestra',
+      !real.go && !realConMando.go && !pruebasConMando.go && pruebasAnyway.go && !mudo.go
+      // Y el mensaje dice qué hacer: sin eso, quien lo intente vuelve a probar flags.
+      && !real.go && real.why.some((l) => l.includes('--isolated')),
+      `hub real: ${real.go ? 'ABRE' : 'no'} · real+mando: ${realConMando.go ? 'ABRE' : 'no'} · `
+      + `pruebas+mando: ${pruebasConMando.go ? 'abre' : 'NO'} · con --anyway: ${pruebasAnyway.go ? 'abre' : 'NO'} · `
+      + `hub mudo: ${mudo.go ? 'ABRE' : 'no'}`,
+    );
+  }),
+];
+
+/* ── contención: purgar un mundo ya contaminado ───────────────────── */
+
+const containment = [
+  test('la purga se lleva lo del arnés y no roza lo real', async () => {
+    const world = new World();
+    world.upsertMachine(machine('m-real'));
+    world.upsertMachine(machine('m-fake', true));
+    world.applyCollector({ t: 'project:new', machineId: 'm-real', project: project('p-real', 'm-real') }, 'm-real');
+    world.applyCollector({ t: 'project:new', machineId: 'm-fake', project: project('p-fake', 'm-fake') }, 'm-fake');
+    world.applyCollector({
+      t: 'agent:new', machineId: 'm-real',
+      agent: agent({ id: 'r1', machineId: 'm-real', projectId: 'p-real' }),
+    }, 'm-real');
+    world.applyCollector({
+      t: 'agent:new', machineId: 'm-fake',
+      agent: agent({ id: 'f1', machineId: 'm-fake', projectId: 'p-fake' }),
+    }, 'm-fake');
+    const esc = escalation({ agentId: 'f1', machineId: 'm-fake', projectId: 'p-fake' });
+    world.applyCollector({ t: 'escalation', machineId: 'm-fake', escalation: esc }, 'm-fake');
+
+    const removed = world.purgeSynthetic();
+    const st = world.state;
+    return ok(
+      'un golpe deja el mundo real intacto',
+      removed.machines === 1 && removed.agents === 1 && removed.projects === 1 && removed.escalations === 1
+      && st.machines['m-fake'] === undefined && st.agents['f1'] === undefined
+      && st.projects['p-fake'] === undefined && st.escalations[esc.id] === undefined
+      && st.machines['m-real'] !== undefined && st.agents['r1'] !== undefined
+      && st.projects['p-real'] !== undefined,
+      `quitado ${JSON.stringify(removed)} · quedan ${Object.keys(st.machines).length} máquinas, `
+      + `${Object.keys(st.agents).length} agentes, ${Object.keys(st.projects).length} proyectos`,
+    );
+  }),
+
+  test('el gasto del arnés no suma en el total de la flota, y el real sí', async () => {
+    // Los mil dólares ficticios del incidente entraron por este contador: es el
+    // que enseña el HUD y el que publica /api/health.
+    const world = new World();
+    world.upsertMachine(machine('m-real'));
+    world.upsertMachine(machine('m-fake', true));
+    const spend = (id: string, machineId: string, projectId: string, usd: number): void => {
+      const a = agent({ id, machineId, projectId });
+      a.metrics.costUSD = usd;
+      world.applyCollector({ t: 'agent:new', machineId, agent: a }, machineId);
+    };
+    spend('r1', 'm-real', 'p-real', 12);
+    spend('f1', 'm-fake', 'p-fake', 1000);
+    world.settle();
+    // Con los dos dentro: el arnés cuenta como agente y no cuenta como dinero.
+    const before = world.state.fleet.costUSD;
+    const agentsBefore = world.state.fleet.total;
+    world.purgeSynthetic();
+    world.settle();
+    return ok(
+      'el total de la flota son dólares de verdad',
+      Math.abs(before - 12) < 1e-9 && agentsBefore === 2
+      && Math.abs(world.state.fleet.costUSD - 12) < 1e-9 && world.state.fleet.total === 1,
+      `con el arnés dentro: $${before.toFixed(2)} sobre ${agentsBefore} agentes · tras purgarlo: `
+      + `$${world.state.fleet.costUSD.toFixed(2)} sobre ${world.state.fleet.total} agentes`,
+    );
+  }),
+
+  test('sólo se señala a un programa del arnés que apunte a ESTE hub', () => {
+    const ps = [
+      '  501 node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479 --speed=3 --anyway',
+      '  502 node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:5599 --speed=3',
+      '  503 node /usr/bin/tsx test/fake-collector.ts --isolated',
+      '  504 node /usr/bin/tsx test/visual.ts',
+      '  505 node /usr/bin/tsx src/hub/server.ts',
+      '  506 node /usr/bin/tsx src/collector/index.ts',
+      '  507 node /usr/bin/tsx test/run.ts',
+      '  508 claude --mcp-config /Users/x/.orca/capcom/.mcp.json',
+      // La forma real del mock: tsx no aparece como ejecutable sino como par
+      // de loaders de node. Sin reconocerla no se pararía al que sí molesta.
+      '  509 node --require /r/node_modules/tsx/dist/preflight.cjs --import file:///r/node_modules/tsx/dist/loader.mjs test/fake-collector.ts --hub=ws://127.0.0.1:4479 --anyway',
+      '  510 npm exec tsx test/field-stress.ts',
+    ].join('\n');
+    const hit = harnessProcs(ps, { hubPort: 4479 }).map((p) => p.pid).sort((a, b) => a - b);
+    return eq(
+      'la lista de a quién se puede matar es corta a propósito',
+      hit.join(','),
+      // 501: el mock contra nosotros. 504: el arnés visual, que arranca uno.
+      // 509 es el mismo mock en su forma real, y 510 el de rendimiento.
+      // 502 apunta a otro puerto, 503 tiene su propio mundo, y del 505 al 508
+      // no son del arnés: el hub, el collector, `npm test` y el propio CAPCOM.
+      '501,504,509,510',
+    );
+  }),
+
+  /*
+   * El incidente del 2026-09-09, en una prueba.
+   *
+   * CAPCOM llamó a `purge_harness` en un latido y la operación mató a un agente
+   * de la flota: el que estaba trabajando en el arnés. Su brief citaba el
+   * comando del mock —`tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479
+   * --speed=3 --anyway`— y ese texto viaja en su línea de comandos, así que la
+   * regla de entonces, un `includes` sobre la línea entera, encontró el script
+   * y encontró el puerto. Los dos leídos de un PROMPT.
+   *
+   * Cada línea de aquí abajo nombra el script y nombra el hub real. Ninguna lo
+   * está ejecutando, y ésa es toda la diferencia que hay que ver.
+   */
+  test('nombrar el arnés no es ejecutarlo: prompts, editores y shells no se señalan', () => {
+    const ps = [
+      // El agente que murió, tal y como `ps` lo enseñaba.
+      '  68523 /Users/d/.local/bin/claude --session-id 8ecbcf65-dcb8-4b91-88d1-43261cdaef92 --permission-mode auto --name EL HARNESS NO DEBE PODER ENTRAR EN EL HUB REAL Alguien arrancó tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479 --speed=3 --anyway',
+      '  601 codex exec arregla test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      '  602 /bin/zsh -lc npx tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      '  603 vim test/fake-collector.ts',
+      '  604 grep -rn --hub=ws://127.0.0.1:4479 test/fake-collector.ts',
+      '  605 node /usr/bin/tsx scripts/mirror/test/fake-collector.ts.bak --hub=ws://127.0.0.1:4479',
+      '  606 node /usr/bin/tsx test/fake-collector-notes.ts --hub=ws://127.0.0.1:4479',
+      // Y uno de verdad en la misma foto: si nada se señalara, la prueba
+      // pasaría por no hacer nada, que es la forma barata de estar en verde.
+      '  607 node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+    ].join('\n');
+    const hit = harnessProcs(ps, { hubPort: 4479 }).map((p) => p.pid).sort((a, b) => a - b);
+    return eq('sólo el que ejecuta el script', hit.join(','), '607');
+  }),
+
+  /*
+   * El mismo incidente por la otra puerta, la que quedó abierta al arreglarlo.
+   *
+   * La regla estructural mira quién es el ejecutable y qué hay entre él y el
+   * script. Entre medias se admitía cualquier módulo —`.js`, `.mjs`, `.cjs`, o
+   * cualquier ruta con `node_modules`— porque la forma real del mock carga dos
+   * (`--require preflight.cjs`, `--import loader.mjs`). Pero un módulo suelto no
+   * es un cargador: es EL PROGRAMA, y lo que sigue son sus argumentos.
+   *
+   * Con eso, un agente lanzado como `node .../cli.js` cuyo prompt cite el script
+   * volvía a encajar entero —ejecutable de la lista blanca, `cli.js` colado como
+   * preámbulo, `--print` como opción, y el prompt aportando script y puerto—, que
+   * es exactamente cómo murió el agente del 2026-09-09. Medido contra el código
+   * anterior a esta prueba: los pid 901 y 902 salían señalados.
+   */
+  test('un módulo suelto es el programa, no un preámbulo: cli.js y report.js no se señalan', () => {
+    const ps = [
+      // Un agente de la flota al que le hablan del arnés, lanzado por node.
+      '  901 node /Users/d/.local/share/claude/versions/2.1.266/cli.js --print arregla test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      // El mismo caso con el prompt empezando por el script, que es el peor.
+      '  902 node /opt/agents/cli.mjs --name test/fake-collector.ts --hub=ws://127.0.0.1:4479 se cuela en el hub',
+      // Cualquier herramienta que reciba la ruta como argumento.
+      '  903 node tools/report.js test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      // Y las formas reales del mock, que tienen que seguir reconociéndose: un
+      // arreglo que las pierda deja el problema original sin resolver.
+      '  904 node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      '  905 node --require /r/node_modules/tsx/dist/preflight.cjs --import file:///r/node_modules/tsx/dist/loader.mjs test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      '  906 node /r/node_modules/.bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+    ].join('\n');
+    const hit = harnessProcs(ps, { hubPort: 4479 }).map((p) => p.pid).sort((a, b) => a - b);
+    return eq('el programa no es el script que nombra', hit.join(','), '904,905,906');
+  }),
+
+  /*
+   * El contrato entero, en una matriz.
+   *
+   * Las dos correcciones anteriores quitaban formas de la lista de lo señalable
+   * —primero los módulos sueltos, después las opciones que no ejecutan— y las
+   * dos veces se quedó algo fuera. La línea de node no es una lista de palabras
+   * con excepciones: `--eval=0` y `-e0` llevan el valor pegado, `--title` es una
+   * opción con valor que nadie había enumerado, y detrás de cada una volvía a
+   * caber el mismo falso positivo. La lista de lo que node acepta no se puede
+   * completar desde aquí.
+   *
+   * Así que la regla dejó de descartar y pasó a RECONOCER: cinco formas, todas
+   * sacadas de `ps` o de `package.json`, y lo que no encaje entero no se toca.
+   * Esta prueba es ese contrato escrito al derecho y al revés — lo que tiene que
+   * seguir reconociéndose, y todo lo que se probó a colar por el borde: las
+   * cuatro escrituras de `--eval`, `--print` y `--check`, las opciones con valor
+   * que nadie enumeró, el script puesto como módulo de carga, los programas que
+   * sólo lo nombran, los vecinos del nombre, el delimitador y los runtimes que
+   * ORCA no usa.
+   *
+   * Medida contra la versión anterior a este cambio: catorce de estas líneas
+   * salían señaladas.
+   */
+  test('el contrato de invocaciones: cinco formas reconocidas, y lo demás no se toca', () => {
+    const S = 'test/fake-collector.ts';
+    const matriz: [string, boolean][] = [
+      // Las formas reales, que son las que no se pueden perder.
+      [`tsx ${S} --hub=ws://127.0.0.1:4479`, true],
+      ['tsx test/visual.ts', true],
+      [`node /Users/d/p/orca/node_modules/.bin/tsx ${S}`, true],
+      [`node /usr/bin/tsx ${S} --speed=3`, true],
+      [`node --require /r/node_modules/tsx/dist/preflight.cjs --import file:///r/node_modules/tsx/dist/loader.mjs ${S} --hub=ws://127.0.0.1:4479`, true],
+      [`node --require=/r/node_modules/tsx/dist/preflight.cjs --import=file:///r/node_modules/tsx/dist/loader.mjs ${S}`, true],
+      [`node -r /r/x/preflight.cjs /r/node_modules/.bin/tsx ${S}`, true],
+      [`npx tsx ${S}`, true],
+      ['npm exec tsx test/field-stress.ts', true],
+      [`npm exec -- tsx ${S}`, true],
+      ['npm x -- tsx test/visual.ts', true],
+      // La misma opción escrita de las cuatro maneras: separada, pegada con `=`,
+      // corta, y corta con el valor pegado. Ninguna ejecuta el archivo.
+      [`node --eval ${S}`, false], [`node --eval=0 ${S}`, false], [`node -e ${S}`, false], [`node -e0 ${S}`, false],
+      [`node --print ${S}`, false], [`node --print=0 ${S}`, false], [`node -p ${S}`, false], [`node -p0 ${S}`, false],
+      [`node --check ${S}`, false], [`node -c ${S}`, false], [`node --check=1 ${S}`, false],
+      [`node --version ${S}`, false], [`node -v ${S}`, false],
+      // Opciones con valor que nadie enumeró: es la clase entera, no tres casos.
+      [`node --title ${S} tools/report.js`, false],
+      [`node --conditions ${S} tools/report.js`, false],
+      [`node --stack-size ${S} tools/report.js`, false],
+      [`node --max-old-space-size=4096 ${S}`, false],
+      [`node --inspect-brk=9229 ${S}`, false],
+      // El script puesto como módulo de carga: un `.ts` no es un cargador.
+      [`node --require ${S} tools/report.js`, false],
+      [`node --require=${S} tools/report.js`, false],
+      [`node --import ${S} tools/report.js`, false],
+      [`node --loader ${S} tools/report.js`, false],
+      [`node -r ${S} /r/node_modules/.bin/tsx tools/report.js`, false],
+      // Programas que sólo lo NOMBRAN: el incidente, y sus parientes.
+      [`/Users/d/.local/bin/claude --session-id 8ecbcf65 --name arregla tsx ${S} --hub=ws://127.0.0.1:4479`, false],
+      [`node /Users/d/.local/share/claude/versions/2.1.266/cli.js --print arregla ${S}`, false],
+      [`node /Users/d/.local/share/claude/versions/2.1.266/cli.js -p tsx ${S}`, false],
+      [`node /opt/agents/cli.mjs --name ${S} se cuela`, false],
+      [`node tools/report.js ${S}`, false],
+      [`node /r/node_modules/@x/grok/cli.js exec tsx ${S}`, false],
+      [`codex exec arregla ${S}`, false],
+      [`/bin/zsh -lc npx tsx ${S}`, false],
+      [`vim ${S}`, false],
+      [`grep -rn --hub=ws://127.0.0.1:4479 ${S}`, false],
+      // Vecinos del nombre: parecerse no es serlo.
+      [`node /usr/bin/tsx scripts/mirror/${S}.bak`, false],
+      ['node /usr/bin/tsx test/fake-collector-notes.ts', false],
+      ['node /usr/bin/tsx test/run.ts', false],
+      ['node /usr/bin/tsx src/hub/server.ts', false],
+      // Delimitador y subcomandos que no llevan el script en la línea.
+      ['npm run mock', false],
+      [`npm exec ${S}`, false],
+      [`npx ${S}`, false],
+      [`node -- ${S}`, false],
+      // Runtimes que ORCA no arranca: fuera del contrato a propósito.
+      [`bun ${S}`, false],
+      [`deno run -A ${S}`, false],
+    ];
+    const fallos = matriz
+      .filter(([linea, debe]) => (harnessInvocation(linea) !== null) !== debe)
+      .map(([linea]) => linea);
+    return eq(
+      `las ${matriz.length} formas de la matriz caen del lado que les toca`,
+      fallos.join(' · ') || 'ninguno',
+      'ninguno',
+    );
+  }),
+
+  test('la señal se vuelve a mirar antes de mandarla, y no se le da al grupo ajeno', async () => {
+    const ps = [
+      '  701 node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      '  702 node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+      '  703 node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479',
+    ].join('\n');
+    const sent: string[] = [];
+    const stopped = await stopHarnessProcs({
+      hubPort: 4479,
+      ps,
+      graceMs: 0,
+      deps: {
+        identify: (pid) => {
+          // 701 sigue siendo él y lidera su grupo: se le puede dar al grupo.
+          if (pid === 701) return { pgid: 701, command: 'node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479' };
+          // 702 sigue siendo él pero cuelga del grupo de otro: sólo a él.
+          if (pid === 702) return { pgid: 4242, command: 'node /usr/bin/tsx test/fake-collector.ts --hub=ws://127.0.0.1:4479' };
+          // 703 se fue y su número lo heredó un agente. Ni una señal.
+          if (pid === 703) return { pgid: 703, command: '/Users/d/.local/bin/claude --session-id x --name arregla test/fake-collector.ts --hub=ws://127.0.0.1:4479' };
+          return null;
+        },
+        send: (target, sig) => { sent.push(`${target}:${sig}`); },
+      },
+    });
+    const how = stopped.map((x) => `${x.pid}:${x.how}`).sort().join(' ');
+    // `term` sale de `alive()`, que sobre pids inventados dice que no están:
+    // lo que se comprueba aquí es a QUIÉN se le manda, no quién muere.
+    return ok(
+      'la señal se vuelve a mirar antes de mandarla, y no se le da al grupo ajeno',
+      sent.join(' ') === '-701:SIGTERM 702:SIGTERM' && how.includes('703:changed'),
+      `señales: [${sent.join(', ')}] · resultado: ${how}`,
+    );
+  }),
+];
+
 export default {
   suite: 'El arnés en cuarentena',
-  tests: [...marking, ...routing, ...harness],
+  tests: [...marking, ...routing, ...harness, ...border, ...containment],
 } satisfies TestModule;

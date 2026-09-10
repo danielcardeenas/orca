@@ -1,10 +1,19 @@
+import { PushService } from './push.ts';
 import { quotaIncident } from '../shared/recovery.ts';
 import { freshCapcomCheckpoint } from './capcom-checkpoint.ts';
 import { RecoveryCoordinator } from './recovery.ts';
 import { HygieneRegistry, sanitizeReport } from './hygiene.ts';
-import { TaskStore } from './tasks.ts';
+import { createSourceSentinel, sourceRev, type SourceSentinel } from './source-rev.ts';
+import { autopublishEnabled, createPublisher, finishedOwnWork, spawnPublish } from './publisher.ts';
+import { RESTART_EXIT_CODE, isSupervised } from '../shared/restart.ts';
+import { MissionStore } from './missions.ts';
 import { uploadRecoveryImage } from './recovery-images.ts';
-import { taskPrompt, type CapcomTask } from '../shared/tasks.ts';
+import { uploadFile } from './uploads.ts';
+import { transcribeHandler, vocabulary, whisperConfig } from './transcribe.ts';
+import { FILE_ROOTS_FILE, FileRoots } from './file-roots.ts';
+import { MISSION_ID, leadPrompt, missionLeadOf, missionPrompt, type CapcomMission } from '../shared/missions.ts';
+import { implementerBrief, implementerSquad, proposalHandoff, proposalMissionTitle } from '../shared/improve.ts';
+import { buildDebrief } from '../shared/debrief.ts';
 /**
  * ORCA hub — servidor HTTP + WebSocket.
  *
@@ -36,7 +45,7 @@ import type {
   Agent, AgentMessage, CeoMessage, Collision, Machine, MessageKind,
 } from '../shared/types.ts';
 import { TERMINAL_STATES } from '../shared/types.ts';
-import { sameWorld } from '../shared/synthetic.ts';
+import { HARNESS_ENV, HARNESS_REFUSED, harnessRefusedWhy, isHarnessHub, sameWorld } from '../shared/synthetic.ts';
 import type {
   ClientFrame, CollectorFrame, Command, CommandFrame, PatchOp, ServerFrame, TermFrame,
 } from '../shared/protocol.ts';
@@ -49,7 +58,7 @@ import { World } from './world.ts';
 import type { WorldEvent } from './world.ts';
 import { PatchBus } from './bus.ts';
 import type { PatchFrame } from './bus.ts';
-import { CLOSE_BAD_HELLO, CLOSE_BAD_VERSION, CLOSE_UNAUTHORIZED, ORCA_DIR, createAuth } from './auth.ts';
+import { CLOSE_BAD_HELLO, CLOSE_BAD_VERSION, CLOSE_NOT_HARNESS, CLOSE_UNAUTHORIZED, ORCA_DIR, createAuth } from './auth.ts';
 import type { Auth } from './auth.ts';
 import { HubStore } from './persist.ts';
 import { FleetStore } from './fleets.ts';
@@ -64,7 +73,7 @@ import { AnswerMemory, MEMORY_FILE } from './memory.ts';
 import { CapcomRouter, capcomOf, realTimers } from './capcom.ts';
 import { HandoffStore } from './handoffs.ts';
 import { parseHandoff, handoffText, HANDOFF_NOTICE_PREFIX } from '../shared/handoff.ts';
-import { BudgetBook, budgetConfig } from './budgets.ts';
+import { BudgetBook, budgetConfig, type BudgetEvent } from './budgets.ts';
 import type { CapcomTimer } from './capcom.ts';
 import { serveMcp } from './mcp.ts';
 import { envRoots, resolveServedPath, scratchpadRoots, streamFile } from './files.ts';
@@ -84,6 +93,13 @@ const PING_INTERVAL_MS = 15_000;
 const SWEEP_INTERVAL_MS = 2_000;
 // Margen que se da a las peticiones en vuelo al cerrar antes de cortar por lo sano.
 const CLOSE_GRACE_MS = 1_000;
+/**
+ * Lo que se le da al frame de relevo para salir por el cable antes de que el
+ * hub empiece a cerrar sockets. Medio segundo es de sobra para un frame de
+ * veinte bytes por un socket ya abierto, y es tiempo que el operador ya está
+ * esperando de todos modos: acaba de pedir un reinicio.
+ */
+const RESTART_GRACE_MS = 500;
 /** Si una consola acumula esto en el buffer, dejó de leer: no la ahogamos más. */
 const MAX_BUFFERED = 4 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
@@ -188,8 +204,26 @@ export interface HubOptions {
    * `ORCA_FILE_ROOTS`. Ver files.ts.
    */
   fileRoots?: string[];
+  /**
+   * Dónde persisten las carpetas que el operador autoriza desde el visor
+   * (`files:allow`). Sin decir nada: el json real, salvo en el arnés, que
+   * no toca el disco del operador. `null`: sólo en memoria.
+   */
+  fileRootsFile?: string | null;
   /** El libro de presupuestos. Una prueba inyecta el suyo, con reloj propio. */
   budgets?: BudgetBook;
+  /**
+   * ¿Es este hub de pruebas, y por tanto admite máquinas sintéticas?
+   *
+   * Por defecto lo dice el entorno (`ORCA_HARNESS`, ver shared/synthetic.ts) y
+   * nada más: ni un flag del cliente ni un frame del protocolo. Está aquí
+   * porque una prueba que arranca un hub EN PROCESO necesita poder pedir las
+   * dos posturas —`test/run.ts` marca la corrida entera como arnés, y la
+   * prueba de la frontera necesita un hub que no lo sea— y porque un hub que
+   * lee su entorno al arrancar no se puede examinar de otra forma. El
+   * `src/orca.ts` de producción no lo pasa nunca.
+   */
+  harness?: boolean;
 }
 
 /** Lo que el CEO necesita decir para meter un mensaje en la flota. */
@@ -228,12 +262,22 @@ export interface Hub {
   /** Los presets de flotilla en disco: lo que `/launch` y `launch_squad` leen. */
   fleets: FleetStore;
   auth: Auth;
+  /**
+   * ¿Es este hub de pruebas? Lo que decide si una máquina sintética puede
+   * siquiera conectarse. Ver shared/synthetic.ts.
+   */
+  harness: boolean;
   http: Server;
   port: number;
   url: string;
+  /**
+   * La consola construida que este hub sirve, o null si no hay ninguna. Lo lee
+   * el arranque para saber si decir «abre esta url» o «construye primero».
+   */
+  dist: string | null;
   /** Publica un mensaje del CEO a todas las consolas y lo persiste. */
   pushCeoMessage(msg: CeoMessage): void;
-  tasks: TaskStore;
+  missions: MissionStore;
   /**
    * Higiene: el último informe de cada máquina y el total de la flota. En
    * memoria, fuera del mundo. `refresh` pide muestra fresca a cada collector
@@ -306,8 +350,45 @@ function parseFrame(data: RawData, max = MAX_FRAME_BYTES): unknown {
   return JSON.parse(text);
 }
 
+/**
+ * Cabeceras que sólo pone un intermediario. Su presencia significa que el otro
+ * extremo del socket es el proxy, no el cliente.
+ */
+const PROXY_HEADERS = ['cf-connecting-ip', 'x-real-ip', 'x-forwarded-for'] as const;
+
+/**
+ * Una dirección que nunca es loopback y no finge ser una IP.
+ *
+ * Es lo que se devuelve cuando hay un proxy delante y no se le ha autorizado:
+ * no sabemos quién llama, y eso ya basta para que deje de contar como local.
+ */
+const BEHIND_PROXY = 'proxy';
+
+/** La primera dirección de un `x-forwarded-for`, que es la del cliente. */
+function firstForwarded(raw: string): string {
+  const first = raw.split(',')[0] ?? '';
+  return first.trim();
+}
+
+/**
+ * De dónde viene la petición.
+ *
+ * Con el hub detrás de un túnel, `socket.remoteAddress` es siempre 127.0.0.1 —
+ * el proxy corre en la misma máquina— y todo internet pasaría por local. Así
+ * que si vienen cabeceras de proxy, el socket ya no es la fuente de la verdad:
+ * o el humano ha dicho que se pueden creer (ORCA_TRUST_PROXY=1), o la petición
+ * deja de ser local. Falla cerrado, que es lo que hay que hacer cuando la
+ * alternativa es abrir la flota entera sin un solo error en el log.
+ */
 function remoteOf(req: IncomingMessage): string {
-  return req.socket.remoteAddress ?? '';
+  let forwarded = '';
+  for (const h of PROXY_HEADERS) {
+    const v = req.headers[h];
+    const raw = Array.isArray(v) ? v[0] : v;
+    if (typeof raw === 'string' && raw.trim().length > 0) { forwarded = firstForwarded(raw); break; }
+  }
+  if (!forwarded) return req.socket.remoteAddress ?? '';
+  return process.env['ORCA_TRUST_PROXY'] === '1' ? forwarded : BEHIND_PROXY;
 }
 
 function tokenFromRequest(req: IncomingMessage): string | null {
@@ -339,6 +420,7 @@ function describeCommand(cmd: Command): string {
     case 'answer': return `answer ${cmd.escalationId}`;
     case 'deliver': return `deliver ${cmd.message.kind} → ${cmd.agentId}`;
     case 'reply': return `reply ${cmd.messageId}`;
+    case 'project:register': return `project:register ${cmd.path}`;
     case 'key:set': return `key:set ${cmd.projectId}/${cmd.name} (valor omitido)`;
     case 'key:remove': return `key:remove ${cmd.projectId}/${cmd.name}`;
     case 'artifact:read': return `artifact:read ${cmd.artifactId}`;
@@ -347,6 +429,9 @@ function describeCommand(cmd: Command): string {
     case 'autonomy': return `autonomy ${cmd.op} ${cmd.agentId}`;
     case 'land': return `land ${cmd.agentId}`;
     case 'discard': return `discard ${cmd.agentId}`;
+    case 'strays:clean': return `strays:clean ${cmd.ids.length} en ${cmd.machineId}${cmd.dryRun ? ' (dry run)' : ''}`;
+    case 'models:list': return `models:list ${cmd.machineId}`;
+    case 'files:allow': return `files:allow ${cmd.path}`;
     default: return 'desconocido';
   }
 }
@@ -357,7 +442,13 @@ function isCommand(v: unknown): v is Command {
   return typeof k === 'string' && [
     'spawn', 'say', 'interrupt', 'permit', 'stop', 'resume', 'remove', 'answer', 'deliver',
     'reply', 'key:set', 'key:remove', 'artifact:read', 'resync', 'logs', 'autonomy',
-    'recovery:settings', 'recovery:status', 'recovery:decide', 'land', 'discard', 'model:list', 'model:set', 'capcom:new', 'handoff:models', 'handoff:prepare', 'handoff:commit', 'handoff:status', 'handoff:history',
+    'recovery:settings', 'recovery:status', 'recovery:decide', 'files:allow', 'land', 'discard', 'model:list', 'model:set', 'capcom:new', 'handoff:models', 'handoff:prepare', 'handoff:commit', 'handoff:status', 'handoff:history',
+    // La consola puede pedir limpiar restos. Sigue sin ser un `kill` genérico:
+    // el collector sólo obedece sobre lo que su propio escáner reconoció como
+    // huérfano de ORCA, y lo revalida antes de mandar una señal.
+    'strays:clean',
+    // Leer el catálogo de una máquina no cambia nada en ella.
+    'models:list',
   ].includes(k);
 }
 
@@ -372,6 +463,14 @@ function isCommand(v: unknown): v is Command {
  * los collectors marcan hacia fuera. En desarrollo no estorba: Vite sirve por
  * su lado y aquí simplemente no hay dist/.
  */
+/**
+ * El código del servidor, para saber si sigue siendo el que corre.
+ *
+ * Es la carpeta `src/` de este mismo árbol: `source-rev.ts` decide qué parte
+ * de ella cuenta y por qué.
+ */
+const SRC_DIR: string = fileURLToPath(new URL('..', import.meta.url));
+
 const DIST_DIR: string | null = (() => {
   const guess = fileURLToPath(new URL('../../dist', import.meta.url));
   return existsSync(join(guess, 'index.html')) ? guess : null;
@@ -529,13 +628,41 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const log = (...args: unknown[]): void => { if (!quiet) console.log('[hub]', ...args); };
   const warn = (...args: unknown[]): void => { if (!quiet) console.warn('[hub]', ...args); };
 
-  const auth = options.auth ?? createAuth();
+  /*
+   * Dónde escucha, resuelto aquí y no en el arranque, porque de esto depende
+   * si existe la puerta anónima local: un hub alcanzable desde la tailnet no
+   * puede fiarse de que una petición diga venir de 127.0.0.1.
+   */
+  const host = options.host ?? process.env['ORCA_HOST'] ?? '0.0.0.0';
+  const auth = options.auth ?? createAuth(process.env, { host });
   const store = options.store ?? new HubStore();
   const mem = options.memory ?? new AnswerMemory(MEMORY_FILE);
   const history = options.history ?? new History();
   const artifactCache = options.artifactCache ?? ARTIFACT_CACHE_DIR;
   const fileRoots = options.fileRoots ?? [];
   const fleets = options.fleets ?? new FleetStore();
+  /*
+   * La frontera del arnés, resuelta una vez al arrancar.
+   *
+   * Se lee del entorno del PROCESO, no de nada que llegue por el cable: es la
+   * corrección del incidente del 2026-09-07, donde quien decidía si el arnés
+   * entraba era el propio arnés y le bastó un `--anyway`. Ver
+   * shared/synthetic.ts.
+   */
+  const harness = options.harness ?? isHarnessHub(process.env);
+  // Carpetas que el operador autorizó desde el visor (file-roots.ts).
+  const approvedRoots = new FileRoots(options.fileRootsFile !== undefined ? options.fileRootsFile : harness ? null : FILE_ROOTS_FILE);
+
+  // whisper.cpp, looked up on every request: a model dropped into
+  // ORCA_HOME/models while the hub runs is found without a restart. The
+  // vocabulary is the fleet as it stands when the operator speaks.
+  const transcribeAudio = transcribeHandler({
+    config: () => whisperConfig(ORCA_DIR),
+    vocabulary: () => vocabulary(world.state),
+  });
+  let push: PushService | null = null;
+  const getPush = () => push ??= new PushService(ORCA_DIR);
+  if (!harness && existsSync(join(ORCA_DIR, 'push.json'))) getPush();
 
   const collectors = new Map<string, CollectorConn>();   // machineId → conn
   const orphanCollectors = new Set<CollectorConn>();     // aún sin hello
@@ -553,6 +680,38 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
 
   // Ciclo de vida tipado para el squad autonomy; se alimenta desde onEvent.
   const lifecycle = new AgentLifecycle();
+
+  /*
+   * Publicar la consola cuando el trabajo sobre ORCA termina.
+   *
+   * Un agente que acaba de mejorar la consola deja el trabajo en el disco, y
+   * hasta que alguien construye no existe para el operador. Aquí se cierra ese
+   * hueco y sólo ése: se construye, y a partir de ahí manda la doctrina de
+   * siempre — se enciende la píldora y el clic es del operador. Ver
+   * hub/publisher.ts y docs/PRODUCCION.md.
+   */
+  const publisher = autopublishEnabled(process.env, harness)
+    ? createPublisher({
+      run: () => spawnPublish(),
+      // unref: un build pendiente no puede ser la razón de que ORCA no salga.
+      setTimer: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return t; },
+      clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+      note: (line) => log(line),
+      // A CAPCOM, que es quien puede arreglar un árbol que no compila. Al
+      // operador no se le interrumpe con un build roto: él sólo verá la
+      // píldora cuando haya algo que de verdad se pueda aplicar.
+      tellCapcom: (text) => { capcomRouter.humanSays(text); },
+    })
+    : null;
+
+  const offPublishOnDone = publisher
+    ? lifecycle.on('agent:state', (change) => {
+      const projectId = change.agent.projectId;
+      const project = projectId ? world.state.projects[projectId] : undefined;
+      if (!finishedOwnWork(change, project?.path)) return;
+      publisher.request(`${change.agent.callsign} terminó sobre ${project?.name ?? 'ORCA'}`);
+    })
+    : null;
 
   const world = new World({
     onOps: (ops: PatchOp[]) => bus.push(ops),
@@ -616,6 +775,12 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     onFlush: (frame: PatchFrame) => publishPatch(frame),
   });
 
+  // Coalesce bursts without scanning or writing push state on the patch path.
+  const pushTimer = setInterval(() => {
+    if (push && !harness) void push.observe(world.state).catch(() => warn('push persistence failed'));
+  }, 2000);
+  pushTimer.unref();
+
   /*
    * El mando de la flota.
    *
@@ -663,7 +828,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     agent: (id) => world.state.agents[id],
     projects: () => Object.values(world.state.projects),
     project: (id) => world.state.projects[id],
-    tasks: () => tasks.all(),
+    missions: () => missions.all(),
     capcom: () => capcomRouter.live(),
     contextCutoff: () => capcomRouter.contextCutoff(),
     sayToCapcom: (text) => capcomRouter.humanSays(text),
@@ -682,46 +847,88 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     note: (text) => {
       world.pushFeed('', [{ id: newId('f_auto'), at: Date.now(), level: 'info', source: 'AUTONOMY', text }]);
     },
+    // Para el operador, no para el registro: una pregunta suya que lleva media
+    // hora sin contestar merece el mismo nivel que una escalación que se quedó
+    // sin respuesta, y por el mismo motivo.
+    alert: (text) => {
+      log(text);
+      world.pushFeed('', [{ id: newId('f_mission'), at: Date.now(), level: 'warn', source: 'CAPCOM', text }]);
+    },
+    // El mismo camino que `relay`: el mensaje entra al mundo y el collector lo
+    // escribe en el buzón del destinatario. Ver `wake.tellLead`.
+    tellAgent: ({ toAgentId, kind, subject, body }) =>
+      hub.relayMessage({ kind, scope: 'agent', toAgentId, subject, body }).delivered.length > 0,
+    saidTo: (fromAgentId, since) => Object.values(world.state.messages)
+      .filter((m) => m.fromAgentId === fromAgentId && m.at >= since)
+      .map((m) => ({ toAgentId: m.toAgentId, toSquad: m.toSquad })),
     lifecycle,
+    ...(publisher ? { publisher } : {}),
+    // El tablero de AUTOMEJORA entero, empujado cuando cambia. Son unos pocos
+    // kilobytes cada varias horas: mucho más barato que un `PatchOp` por
+    // propuesta y una máquina de estados en la consola para reensamblarlo.
+    improveChanged: () => broadcast({ t: 'improve', ...improveWire() }),
+    /*
+     * El techo del revisor, por el libro que ya frena a todos los demás. Por
+     * short id mientras la sesión no ha aparecido: el libro lo resuelve solo
+     * cuando el CLI la nombra. Un presupuesto propio para esta sección sería
+     * una segunda contabilidad que un día discrepa de la que se enseña.
+     */
+    improveBudget: (ref, tokens) => {
+      const limit = { tokens, usd: null, min: null };
+      if (ref.agentId) budgets.set({ kind: 'agent', ref: ref.agentId }, limit);
+      else if (ref.shortId) budgets.setPendingByShortId(ref.shortId, limit);
+    },
   });
 
-  const taskResultTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const taskResultSeen = new Map<string, string>();
-  const tasks = new TaskStore(store.dir, (task) => {
-    const purged = (task as CapcomTask & { purged?: true }).purged === true;
+  const missionResultTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const missionResultSeen = new Map<string, string>();
+  const missions = new MissionStore(store.dir, (mission) => {
+    const purged = (mission as CapcomMission & { purged?: true }).purged === true;
     if (purged) {
-      if (world.state.tasks) delete world.state.tasks[task.id];
-      clearTimeout(taskResultTimers.get(task.id));
-      taskResultTimers.delete(task.id); taskResultSeen.delete(task.id);
-    } else (world.state.tasks ??= {})[task.id] = task;
-    broadcast({ t: 'task', task, ...(purged ? { purged: true } : {}) });
-    const last = task.messages.at(-1);
-    // Una tarea retirada no despierta a CAPCOM con la actividad de sus workers.
-    if (purged || task.archivedAt || task.status !== 'active' || last?.role !== 'agent' || taskResultSeen.get(task.id) === last.id) return;
-    taskResultSeen.set(task.id, last.id);
-    clearTimeout(taskResultTimers.get(task.id));
-    taskResultTimers.set(task.id, setTimeout(() => {
-      taskResultTimers.delete(task.id);
-      const current = tasks.get(task.id);
+      if (world.state.missions) delete world.state.missions[mission.id];
+      clearTimeout(missionResultTimers.get(mission.id));
+      missionResultTimers.delete(mission.id); missionResultSeen.delete(mission.id);
+    } else (world.state.missions ??= {})[mission.id] = mission;
+    broadcast({ t: 'mission', mission, ...(purged ? { purged: true } : {}) });
+    const last = mission.messages.at(-1);
+    // Una misión retirada no despierta a CAPCOM con la actividad de sus workers.
+    if (purged || mission.archivedAt || mission.status !== 'active' || last?.role !== 'agent' || missionResultSeen.get(mission.id) === last.id) return;
+    missionResultSeen.set(mission.id, last.id);
+    clearTimeout(missionResultTimers.get(mission.id));
+    missionResultTimers.set(mission.id, setTimeout(() => {
+      missionResultTimers.delete(mission.id);
+      const current = missions.get(mission.id);
       if (current.status !== 'active') return;
       const cutoff = capcomRouter.contextCutoff();
       const sourceAt = last.agentId ? world.state.agents[last.agentId]?.updatedAt : undefined;
       if (cutoff !== null && (last.at <= cutoff || (sourceAt !== undefined && sourceAt <= cutoff))) return;
-      const prompt = cutoff === null ? `Worker results arrived. Review them and report progress or completion to this task.\n${taskPrompt(current)}`
-        : `[ORCA TASK ${current.id}] New worker message; historical context is not attached. Use report_task(task_id="${current.id}") for replies.\n${last.text}`;
+      /*
+       * Quién habló decide qué se le pide a CAPCOM. Si fue el LÍDER de la
+       * misión, el trabajo ya está consolidado y verificado por él: CAPCOM
+       * publica y no rehace. Un miembro de squad no llega aquí mientras su
+       * líder viva (`observe` se lo manda al líder); lo que sí llega es un
+       * agente suelto, y ése sí se revisa como siempre.
+       */
+      const lead = missionLeadOf(current, (id) => world.state.agents[id], Object.values(world.state.agents));
+      const fromLead = !!lead && last.agentId === lead.agent.id;
+      const ask = fromLead
+        ? `The lead of this mission (${lead.agent.callsign}) reported. It consolidated and verified its crew's work; publish its result with report_mission (completed, failed, or active if it says more is coming). Do not redo, re-test or re-verify the work, and do not launch anyone for it.`
+        : 'Worker results arrived. Review them and report progress or completion to this mission.';
+      const prompt = cutoff === null ? `${ask}\n${missionPrompt(current)}`
+        : `[ORCA MISSION ${current.id}] ${ask} Historical context is not attached. Use report_mission(mission_id="${current.id}") for replies.\n${last.text}`;
       const sent = capcomRouter.humanSays(prompt, (agentId, text) => {
         void dispatchLocal({ k: 'say', agentId, text }).catch((err) => {
-          log(`task ${task.id}: worker update delivery failed: ${String(err)}`);
+          log(`mission ${mission.id}: worker update delivery failed: ${String(err)}`);
         });
-      }, (reason) => { tasks.message(task.id, 'system', `Delivery failed: ${reason}`); });
+      }, (reason) => { missions.message(mission.id, 'system', `Delivery failed: ${reason}`); });
       if (!sent) options.onUnrouted?.(prompt, hub);
     }, 750));
   });
-  world.state.tasks = tasks.all();
+  world.state.missions = missions.all();
   const recovery = new RecoveryCoordinator({
     dir: store.dir, agents: () => Object.values(world.state.agents), dispatch: dispatchLocal,
     automatic: process.env.ORCA_RECOVERY_AUTO === '1',
-    budgetBlock: a => budgets.agentStatus(a, world.state.agents, tasks.all()).level === 'over' ? 'Recovery cannot bypass the work budget. Review the budget or wait.' : null,
+    budgetBlock: a => budgets.agentStatus(a, world.state.agents, missions.all()).level === 'over' ? 'Recovery cannot bypass the work budget. Review the budget or wait.' : null,
     notifyAllowed: (supervisor, a) => supervisor.role !== 'capcom' || capcomRouter.contextCutoff() === null || (quotaIncident(a)?.since ?? 0) > capcomRouter.contextCutoff()!,
     notify: async (supervisor, text) => {
       try { await dispatchLocal({ k: 'say', agentId: supervisor.id, text }); return true; }
@@ -756,28 +963,72 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     return sent;
   };
 
-  const budgets = options.budgets ?? new BudgetBook(store.dir, budgetConfig());
+  // El libro pregunta al mundo si un agente sigue existiendo antes de decir
+  // nada de él. Sin esto, un fantasma —sesión de tmux desaparecida, estado
+  // congelado en `working`— avisaba en bucle y ninguna herramienta lo alcanzaba.
+  const budgets = options.budgets
+    ?? new BudgetBook(store.dir, budgetConfig(), { liveness: () => ({ machines: world.state.machines }) });
   const budgetNote = (level: 'warn' | 'alert', text: string, agentId: string | null): void => {
     world.pushFeed('', [{
       id: newId('f_bud'), at: Date.now(), level, source: 'BUDGET', text,
       ...(agentId ? { agentId, projectId: world.state.agents[agentId]?.projectId } : {}),
     }]);
   };
+  /** Cuántas líneas del detalle caben en un aviso agrupado antes de resumir. */
+  const BUDGET_DIGEST_LINES = 6;
+
+  /**
+   * Una ráfaga es UN suceso.
+   *
+   * Trece `[BUDGET 100%]` seguidos, por el mismo motivo y en el mismo instante,
+   * taparon un informe que el operador estaba leyendo. El feed sigue llevando
+   * una entrada por aviso — es historia, y cada una cuelga de su agente —, pero
+   * a CAPCOM le llega un solo mensaje por pasada, con la cuenta por severidad,
+   * el peor caso y las primeras líneas completas.
+   */
+  const budgetDigest = (events: BudgetEvent[]): string => {
+    const rank = (e: BudgetEvent): number => (e.kind === 'stop' ? 0 : e.kind === 'swarm' ? 1 : e.kind === 'over' ? 2 : 3);
+    const sorted = [...events].sort((a, b) => rank(a) - rank(b) || pctOf(b) - pctOf(a));
+    const count = (k: BudgetEvent['kind']) => events.filter((e) => e.kind === k).length;
+    const worst = sorted.filter((e) => e.kind !== 'swarm').reduce<BudgetEvent | null>(
+      (w, e) => (!w || pctOf(e) > pctOf(w) ? e : w), null);
+    const tally = [
+      count('stop') ? `${count('stop')} stopped` : null,
+      count('over') ? `${count('over')} at 100%` : null,
+      count('warn') ? `${count('warn')} at 80%` : null,
+      count('swarm') ? `${count('swarm')} over the subagent cap` : null,
+    ].filter(Boolean).join(', ');
+    const head = `[BUDGET] ${events.length} budget notices in one sweep — ${tally}.`
+      + (worst && worst.kind !== 'swarm' ? ` Worst: ${worst.label} at ${Math.round(worst.pct * 100)}%.` : '');
+    const shown = sorted.slice(0, BUDGET_DIGEST_LINES).map((e) => `· ${e.text}`);
+    const rest = sorted.length - shown.length;
+    return [head, ...shown, rest > 0 ? `· …and ${rest} more, all of them in the console feed.` : null]
+      .filter(Boolean).join('\n');
+  };
+
+  const pctOf = (e: BudgetEvent): number => (e.kind === 'swarm' ? 0 : e.pct);
+
   const budgetSweep = (): void => {
-    const events = budgets.tick(world.state.agents, tasks.all());
+    const events = budgets.tick(world.state.agents, missions.all());
+    if (events.length === 0) return;
+
     for (const ev of events) {
-      const first = ev.kind === 'stop' ? ev.agentId : ev.agentIds[0] ?? null;
-      budgetNote(ev.kind === 'warn' ? 'warn' : 'alert', ev.text, first);
+      const subject = ev.kind === 'warn' || ev.kind === 'over' ? ev.agentIds[0] ?? null : ev.agentId;
+      budgetNote(ev.kind === 'warn' ? 'warn' : 'alert', ev.text, subject);
       log(ev.text);
-      const sent = capcomRouter.humanSays(ev.text);
-      if (!sent) options.onUnrouted?.(ev.text, hub);
-      if (ev.kind === 'stop') {
-        void dispatchLocal({ k: 'stop', agentId: ev.agentId }).catch((err) => {
-          const cs = world.state.agents[ev.agentId]?.callsign ?? ev.agentId;
-          budgetNote('alert', `[BUDGET STOP] ${cs}: the stop did not go through (${String(err)})`, ev.agentId);
-        });
-      }
     }
+
+    const stops = events.flatMap((ev) => (ev.kind === 'stop' ? [ev.agentId] : ev.kind === 'swarm' ? ev.stopIds : []));
+    for (const agentId of stops) {
+      void dispatchLocal({ k: 'stop', agentId }).catch((err) => {
+        const cs = world.state.agents[agentId]?.callsign ?? agentId;
+        budgetNote('alert', `[BUDGET STOP] ${cs}: the stop did not go through (${String(err)})`, agentId);
+      });
+    }
+
+    const text = events.length === 1 ? events[0]!.text : budgetDigest(events);
+    const sent = capcomRouter.humanSays(text);
+    if (!sent) options.onUnrouted?.(text, hub);
   };
 
   // La conversación con CAPCOM sobrevive a los reinicios del hub.
@@ -815,6 +1066,53 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     send(conn, { t: 'world', state: world.snapshot(bus.rev) });
   }
 
+  /* ── ¿corre este hub el código que hay en disco? ─────────────────── */
+
+  /**
+   * Perezoso a propósito: el centinela nace con la primera consola. Sin nadie
+   * mirando no hay a quién avisar, y así ninguna suite que no conecte una
+   * consola se pone a escanear `src/`. Ver hub/source-rev.ts.
+   */
+  let source: SourceSentinel | null = null;
+  let sourceBoot: Promise<SourceSentinel> | null = null;
+
+  function sendServerRev(conn: ConsoleConn, s: SourceSentinel): void {
+    send(conn, { t: 'server', rev: s.boot(), stale: s.stale(), restartable: isSupervised() });
+  }
+
+  /**
+   * Decirle a una consola recién saludada qué código corre este hub.
+   *
+   * Va aparte porque hay DOS formas de entrar —el token en la query, que es
+   * la del navegador, y el `hello`, que es la de todo lo demás— y las dos
+   * tienen que contarlo. Cablearlo sólo en una fue el fallo obvio: el frame
+   * llegaba en las pruebas por WebSocket y no llegaba nunca en la consola de
+   * verdad, que entra por la otra puerta.
+   */
+  function greetSource(conn: ConsoleConn): void {
+    void ensureSource()
+      .then((s) => { if (conn.authed && conn.ws.readyState === WebSocket.OPEN) sendServerRev(conn, s); })
+      .catch(() => { /* sin árbol que mirar: no hay nada que decir */ });
+  }
+
+  function ensureSource(): Promise<SourceSentinel> {
+    return sourceBoot ??= sourceRev(SRC_DIR).then((boot) => {
+      const s = createSourceSentinel(boot, {
+        rev: () => sourceRev(SRC_DIR),
+        // unref: este reloj no puede ser nunca la razón de que ORCA no salga.
+        set: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return t; },
+        clear: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+      });
+      s.onStale(() => {
+        log('el código del servidor cambió desde que este proceso arrancó; reinicia ORCA para aplicarlo');
+        for (const conn of consoles) if (conn.authed) sendServerRev(conn, s);
+      });
+      s.start();
+      source = s;
+      return s;
+    });
+  }
+
   function publishPatch(frame: PatchFrame): void {
     if (consoles.size === 0) return;
     const payload = JSON.stringify({ t: 'patch', rev: frame.rev, ops: frame.ops } satisfies ServerFrame);
@@ -845,6 +1143,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   function targetOf(cmd: Command): { machineId: string | null; broadcast: boolean; error?: string } {
     switch (cmd.k) {
       case 'recovery:settings': return { machineId: null, broadcast: false };
+      case 'files:allow': return { machineId: null, broadcast: false };   // el hub sirve los archivos; nadie más
       case 'resync':
         return { machineId: null, broadcast: true };
       case 'spawn':
@@ -884,8 +1183,13 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         return asker ? { machineId: asker.machineId, broadcast: false }
           : { machineId: null, broadcast: false, error: `el que preguntó ya no existe: ${m.fromAgentId}` };
       }
+      case 'project:register':
       case 'transcripts:purge':
+      case 'strays:clean':
+      case 'models:list':
         // La máquina viene en el comando: sus agentes ya no están en el mundo.
+        // En `project:register` es lo único que puede venir — el proyecto es
+        // justo lo que todavía no existe.
         return world.state.machines[cmd.machineId]
           ? { machineId: cmd.machineId, broadcast: false }
           : { machineId: null, broadcast: false, error: `máquina desconocida: ${cmd.machineId}` };
@@ -948,6 +1252,19 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   }
 
   function dispatchCommand(cmdId: string, cmd: Command, consoleId: string | null): void {
+    // Parar a alguien le saca del ciclo de presupuesto en el acto, venga la
+    // orden de la consola, de `stop_agent`, de `stop_squad` o del propio libro.
+    // Esperar al `dead` del collector es lo que dejaba a dos escuadrones
+    // muertos avisando durante horas: la sesión de tmux ya no existía y el
+    // estado nunca llegó.
+    if (cmd.k === 'stop') budgets.retire(cmd.agentId);
+    if (cmd.k === 'files:allow') {
+      const request = cmd;
+      void approvedRoots.allow(request.path)
+        .then((r) => r.ok ? ackTo(consoleId, cmdId, true, undefined, { root: r.root, added: r.added, roots: approvedRoots.list() }) : ackTo(consoleId, cmdId, false, r.reason))
+        .catch((e) => ackTo(consoleId, cmdId, false, String(e)));
+      return;
+    }
     if (cmd.k === 'recovery:settings') {
       try {
         const data = Object.hasOwn(cmd, 'automatic') ? recovery.setAutomatic(cmd.automatic!) : recovery.settings();
@@ -986,7 +1303,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     if (cmd.k === 'handoff:prepare') {
       const id = cmd.agentId; const a = world.state.agents[id]; const cap = a?.role === 'capcom';
       cmd = { ...cmd, checkpoint: JSON.stringify({ agent: a,
-        tasks: Object.values(world.state.tasks ?? {}).filter(t => cap || t.agentIds.includes(id)),
+        missions: Object.values(world.state.missions ?? {}).filter(m => cap || m.agentIds.includes(id)),
         escalations: Object.values(world.state.escalations).filter(e => cap || e.agentId === id),
         messages: Object.values(world.state.messages).filter(m => cap || m.fromAgentId === id || m.toAgentId === id || (!!a?.squad && m.toSquad === a.squad)) }, null, 2) };
     }
@@ -1340,6 +1657,22 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
             ws.close(CLOSE_BAD_HELLO, 'hello sin machine.id');
             return;
           }
+          /*
+           * La puerta del arnés, y está aquí a propósito.
+           *
+           * Antes vivía en el cliente —el mock preguntaba si había mando vivo y
+           * `--anyway` respondía que siguiera— y por eso no aguantó: quien
+           * decidía era el que quería entrar. Ahora la máquina declara lo que
+           * es en su `hello` y decide el hub, con lo único que el arnés no
+           * puede falsificar desde fuera: su propio entorno. Se rechaza ANTES
+           * de tocar el mundo, así que ni un agente ni un proyecto ni un dólar
+           * inventado llegan a existir. Ver shared/synthetic.ts.
+           */
+          if (frame.machine?.synthetic === true && !harness) {
+            warn(harnessRefusedWhy(machineId));
+            ws.close(CLOSE_NOT_HARNESS, HARNESS_REFUSED);
+            return;
+          }
           // Reconexión: la conexión vieja de esa máquina se descarta.
           const previous = collectors.get(machineId);
           if (previous && previous !== conn) {
@@ -1423,6 +1756,33 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           return;
         }
 
+        if (frame.t === 'improve:report') {
+          /*
+           * Un revisor archivó. Aquí se decide si vale, porque el hub es el
+           * único que sabe qué revisión está en vuelo y de quién es: el
+           * collector sólo sabe que un fichero apareció en un repo.
+           *
+           * El recibo vuelve SIEMPRE, también cuando se rechaza entero. Un
+           * informe que se pierde en silencio se lleva por delante la revisión
+           * entera sin que el agente pueda corregir nada.
+           */
+          const reply = (body: Omit<Extract<CommandFrame, { t: 'improve:ack' }>, 't' | 'reportId'>) => {
+            if (typeof frame.reportId === 'string') send(conn, { t: 'improve:ack', reportId: frame.reportId, ...body });
+          };
+          try {
+            const out = autonomy.improve.report({
+              agentId: typeof frame.agentId === 'string' ? frame.agentId : null,
+              reviewId: typeof frame.reviewId === 'string' ? frame.reviewId : null,
+              proposals: (Array.isArray(frame.proposals) ? frame.proposals : []) as never,
+            });
+            reply({ ok: out.filed + out.merged > 0, filed: out.filed, merged: out.merged, ...(out.rejected.length ? { rejected: out.rejected } : {}) });
+            log(`improve: ${out.filed} nueva(s), ${out.merged} fundida(s) de ${frame.agentId ?? 'un agente'}`);
+          } catch (err) {
+            reply({ ok: false, error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
         if (frame.t === 'hygiene') {
           // El machineId es el de la conexión, nunca el del frame: un collector
           // autenticado como una máquina no puede declarar por otra.
@@ -1435,7 +1795,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
 
         world.applyCollector(frame, machineId);
         if (frame.t === 'agent' || frame.t === 'agent:new' || frame.t === 'snapshot') {
-          tasks.observe(world.state.agents);
+          missions.observe(world.state.agents);
           // Si un CAPCOM nuevo acaba de aparecer, lo retenido durante la rotación sale ahora.
           capcomRouter.flush();
         }
@@ -1487,6 +1847,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       conn.authed = true;
       if (early.anonymous) warn(`consola aceptada SIN token (loopback, modo dev) desde ${conn.remote}`);
       sendWorld(conn);
+      greetSource(conn);
     } else if (queryToken !== null) {
       // Trajo token y es el equivocado: no hay nada que esperar.
       warn(`consola rechazada desde ${conn.remote}: ${early.reason}`);
@@ -1527,6 +1888,10 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           if (result.anonymous) warn(`consola aceptada SIN token (loopback, modo dev) desde ${conn.remote}`);
           log(`consola conectada: ${conn.id}`);
           sendWorld(conn);
+          // Y qué código corre este hub, en cuanto se sepa: la consola lo
+          // compara con lo suyo para no atribuirle al bundle nuevo lo que hace
+          // un hub viejo.
+          greetSource(conn);
           return;
         }
 
@@ -1555,7 +1920,187 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     });
   }
 
+  /* ── AUTOMEJORA ───────────────────────────────────────────────── */
+
+  /** El tablero y el porqué del reloj, que es lo que el panel enseña. */
+  function improveWire(): Omit<Extract<ServerFrame, { t: 'improve' }>, 't'> {
+    return {
+      state: autonomy.improve.store.state(),
+      verdict: autonomy.improve.verdict(),
+      choice: autonomy.improve.choice(),
+      // Dónde nacería el revisor: es a quien la consola le pide el catálogo.
+      machineId: autonomy.improve.project()?.machineId ?? null,
+    };
+  }
+
+  /**
+   * Lo que el operador hace con una propuesta.
+   *
+   * Contestar es lo único que sale del hub: la respuesta se guarda en el hilo
+   * Y se le pega a CAPCOM, porque una respuesta que sólo se guarda es una
+   * conversación de un solo lado — el operador contesta una pregunta y nadie
+   * la lee nunca. Posponer, descartar y reabrir no molestan a nadie.
+   */
+  function improveAct(
+    proposalId: string, act: 'reply' | 'snooze' | 'dismiss' | 'reopen' | 'seen',
+    text?: string, untilMs?: number,
+  ): import('../shared/improve.ts').ImproveProposal {
+    const improve = autonomy.improve.store;
+    switch (act) {
+      case 'reply': {
+        const p = improve.act(proposalId, { act: 'reply', text: String(text ?? '') });
+        const answer = String(text ?? '').slice(0, 2_000);
+        const prompt = `[ORCA SELF-REVIEW REPLY ${p.id}] The operator answered on your proposal "${p.title}".\n`
+          + (p.question ? `You asked: ${p.question}\n` : '')
+          + `They said: ${answer}\n`
+          + `Answer them with note_improvement(proposal_id="${p.id}", text=…). If this changes the idea, re-file it with `
+          + `report_improvements under key="${p.key}". Do not implement anything: the operator decides what becomes work.`;
+        const sent = capcomRouter.humanSays(prompt, (agentId, message) => {
+          void dispatchLocal({ k: 'say', agentId, text: message }).catch((err) => {
+            log(`improve ${p.id}: reply delivery failed: ${String(err)}`);
+          });
+        }, (reason) => {
+          try { improve.note(p.id, 'system', `Your answer was saved but CAPCOM never took it: ${reason}`); } catch { /* la propuesta pudo podarse */ }
+        });
+        if (sent === false) improve.note(p.id, 'system', 'Saved. No CAPCOM session took it; it will not be delivered on its own.');
+        return improve.get(p.id);
+      }
+      case 'snooze': return improve.act(proposalId, { act: 'snooze', untilMs: Number(untilMs) });
+      case 'dismiss': return improve.act(proposalId, { act: 'dismiss', ...(text ? { text: String(text) } : {}) });
+      case 'reopen': return improve.act(proposalId, { act: 'reopen' });
+      case 'seen': return improve.act(proposalId, { act: 'seen' });
+    }
+  }
+
+  /**
+   * SEND: una propuesta se convierte en trabajo.
+   *
+   * Es el único punto del sistema donde una revisión produce algo más que
+   * texto, y por eso lo dispara una pulsación y no un reloj. Abre una misión
+   * normal —el mismo camino que cualquier otra— con la propuesta entera
+   * dentro, y deja la propuesta atada a ella. La guarda contra el doble envío
+   * está en el almacén (`act: 'sent'`), pero se comprueba también aquí antes
+   * de crear nada: si no, un segundo clic dejaría una misión huérfana.
+   */
+  async function improveSend(proposalId: string, missionId: string): Promise<{ missionId: string; delivery: 'launched' | 'saved'; callsign?: string; detail?: string }> {
+    const improve = autonomy.improve.store;
+    const p = improve.get(proposalId);
+    if (p.missionId) throw new Error(`Already sent as ${p.missionId}`);
+    if (!MISSION_ID.test(missionId)) throw new Error('Invalid mission id');
+
+    /*
+     * La misión primero, el agente después. Hasta el 2026-09-09 esto le
+     * mandaba la propuesta a CAPCOM, y CAPCOM la implementaba él o lanzaba a
+     * alguien: un turno largo del mando por cada automejora, mezclado con las
+     * misiones de los demás proyectos. Ahora ORCA lanza un agente propio sobre
+     * su repositorio como LÍDER de la misión; hace el trabajo, lo verifica y
+     * su último mensaje cae en la misión, y sólo entonces CAPCOM recibe un
+     * turno —corto— para publicarlo. El mando recibe resultados, no trabajo.
+     */
+    missions.create(missionId, proposalMissionTitle(p));
+    missions.message(missionId, 'human', proposalHandoff(p), 'active');
+    improve.act(proposalId, { act: 'sent', missionId });
+
+    const squad = implementerSquad(p);
+    const out = await autonomy.improve.implement({ brief: implementerBrief(p, missionId), squad, mission: proposalMissionTitle(p) });
+    if (!out.ok) {
+      // La misión queda escrita pase lo que pase: es el enlace, y lo que hace
+      // que el trabajo se pueda retomar —a mano, o por CAPCOM cuando el
+      // operador le escriba en la misión, que sin líder va a él.
+      missions.message(missionId, 'system', `Could not launch the implementer: ${out.reason}`);
+      return { missionId, delivery: 'saved', detail: out.reason };
+    }
+    // El squad ata la misión al agente aunque el ack no traiga su id de
+    // sesión todavía: `observe` lo asigna en cuanto aparece con esa etiqueta.
+    missions.bindSquad(missionId, squad);
+    if (out.agentId) missions.assign(missionId, [out.agentId]);
+    world.pushFeed('', [{
+      id: newId('f_improve'), at: Date.now(), level: 'info', source: 'AUTOMEJORA',
+      ...(out.agentId ? { agentId: out.agentId } : {}),
+      text: `${out.callsign ?? 'an agent'} is implementing "${p.title}" on ${out.project.code} as mission ${missionId}`,
+    }]);
+    return { missionId, delivery: 'launched', ...(out.callsign ? { callsign: out.callsign } : {}) };
+  }
+
+  /**
+   * Una línea del operador EN una misión, hacia CAPCOM.
+   *
+   * El camino de siempre: la línea entra en la conversación, la misión vuelve
+   * a `active` si estaba cerrada, y CAPCOM recibe el prompt con el hilo
+   * detrás. Compartido entre `ceo:say` con `missionId` y `mission:say` sin
+   * líder, para que las dos puertas hagan exactamente lo mismo.
+   */
+  function sayInMissionToCapcom(missionId: string, text: string, requestId: string, conn: ConsoleConn, extra: Record<string, unknown> = {}): void {
+    const mission = missions.message(missionId, 'human', text, 'active');
+    const prompt = capcomRouter.contextCutoff() === null ? missionPrompt(mission)
+      : `[ORCA MISSION ${mission.id}] New operator instruction. Use report_mission(mission_id="${mission.id}") for replies. Historical context is not attached.\n${text}`;
+    const cap = capcomRouter.live();
+    if (cap) {
+      void dispatchLocal({ k: 'say', agentId: cap.id, text: prompt }).then(
+        (data) => ackTo(conn.id, requestId, true, undefined, { ...(typeof data === 'object' && data ? data : {}), ...extra }),
+        (err) => {
+          missions.message(mission.id, 'system', `Delivery unconfirmed: ${String(err)}`);
+          ackTo(conn.id, requestId, false, String(err));
+        },
+      );
+    } else if (capcomRouter.inRotation()) {
+      // CAPCOM se está reciclando: el prompt espera a la sesión nueva.
+      capcomRouter.humanSays(prompt, (agentId, message) => {
+        void dispatchLocal({ k: 'say', agentId, text: message }).catch((err) => {
+          missions.message(mission.id, 'system', `Delivery unconfirmed: ${String(err)}`);
+        });
+      }, (reason) => { missions.message(mission.id, 'system', `Delivery failed: ${reason}`); });
+      ackTo(conn.id, requestId, true, 'CAPCOM rotating: queued', { delivery: 'queued', ...extra });
+    } else if (options.onUnrouted) {
+      options.onUnrouted(prompt, hub);
+      ackTo(conn.id, requestId, true, undefined, { delivery: 'accepted', ...extra });
+    } else throw new Error('No CAPCOM connected. Message saved in this mission.');
+  }
+
+  /**
+   * Una línea del operador EN una misión, desde la ventana de la misión.
+   *
+   * Va al LÍDER si la misión tiene uno en pie, y si no a CAPCOM. La regla es
+   * `missionLeadOf`, la misma que usa la ventana para decir de antemano a
+   * quién irá. Al líder le llega a su sesión con la cabecera de la misión, y
+   * la línea queda en la conversación marcada con `to`: no es deuda de CAPCOM
+   * y el despertador no se la recuerda. Y en los dos casos la misión vuelve a
+   * `active`: hasta hoy hablarle al líder de una misión COMPLETED la dejaba
+   * completada mientras el líder trabajaba en lo nuevo, que es el fallo que
+   * el operador vio el 2026-09-09.
+   */
+  function sayInMission(missionId: string, text: string, requestId: string, conn: ConsoleConn): void {
+    const current = missions.get(missionId);
+    const lead = missionLeadOf(current, (id) => world.state.agents[id], Object.values(world.state.agents));
+    if (!lead?.live) {
+      sayInMissionToCapcom(missionId, text, requestId, conn, { to: 'capcom' });
+      return;
+    }
+    const mission = missions.message(missionId, 'human', text, 'active', undefined, lead.agent.id);
+    if (!mission.agentIds.includes(lead.agent.id)) missions.assign(missionId, [lead.agent.id]);
+    const at = Date.now();
+    void dispatchLocal({ k: 'say', agentId: lead.agent.id, text: leadPrompt(mission, text) }).then(
+      (data) => {
+        missions.dispatched(missionId, { agentId: lead.agent.id, callsign: lead.agent.callsign, at, delivered: true });
+        ackTo(conn.id, requestId, true, undefined, { ...(typeof data === 'object' && data ? data : {}), to: 'lead', callsign: lead.agent.callsign });
+      },
+      (err) => {
+        missions.dispatched(missionId, { agentId: lead.agent.id, callsign: lead.agent.callsign, at, delivered: false, detail: String(err) });
+        ackTo(conn.id, requestId, false, String(err));
+      },
+    );
+  }
+
   function handleConsoleFrame(conn: ConsoleConn, frame: ClientFrame): void {
+    /*
+     * La otra mitad de la telemetría de AUTOMEJORA: qué pide la consola.
+     *
+     * El TIPO de frame y nada más — ni el texto, ni el agente, ni la ruta. Con
+     * eso se ve qué partes de ORCA se usan y cuáles no, que es la pregunta; el
+     * contenido no la respondería mejor y es justo lo que no debe guardarse.
+     * Los latidos no cuentan: son el reloj, no un gesto de nadie.
+     */
+    if (frame.t !== 'beat') autonomy.improve.record(`ui:${frame.t}`);
     switch (frame.t) {
       // El hello ya se validó al aceptar la conexión; repetirlo no es un error.
       case 'hello':
@@ -1564,6 +2109,32 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       case 'resync':
         sendWorld(conn);
         return;
+
+      /*
+       * El clic de `SERVER CODE CHANGED`: el operador pide el relevo.
+       *
+       * Primero se avisa a los collectors —cada uno decide, y el suyo es el
+       * proceso que comparte árbol con este— y se les deja medio segundo para
+       * que el frame salga por el cable antes de que aquí se cierre nada.
+       * Después el hub se apaga limpio y sale con el código convenido, que es
+       * lo que `tools/supervise.mjs` entiende como «relánzame». La consola no
+       * espera un ack, porque quien tendría que mandarlo es justo lo que se
+       * está muriendo: lo que verá es el enlace caerse y volver.
+       */
+      case 'restart': {
+        if (!isSupervised()) {
+          send(conn, { t: 'error', message: 'este hub no corre bajo un supervisor: reinícialo a mano (npm run prod)' });
+          return;
+        }
+        log('relevo pedido desde la consola: avisando a los collectors y saliendo');
+        for (const c of collectors.values()) send(c, { t: 'restart' });
+        setTimeout(() => {
+          void hub.close()
+            .catch((err) => warn('cierre sucio antes del relevo:', err))
+            .finally(() => process.exit(RESTART_EXIT_CODE));
+        }, RESTART_GRACE_MS);
+        return;
+      }
 
       case 'beat':
         return;
@@ -1625,61 +2196,121 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         });
         return;
       }
-      case 'task:create': {
+      case 'improve:get': {
+        ackTo(conn.id, frame.id, true, undefined, improveWire());
+        return;
+      }
+      case 'improve:run': {
+        // La ejecución manual: lanza el agente revisor. Contesta con el motivo
+        // cuando no puede —no hay proyecto, ya hay un revisor trabajando, el
+        // spawn falló—, porque un botón que no hace nada y no dice por qué se
+        // pulsa tres veces.
+        void autonomy.improve.run('manual').then(
+          (out) => ackTo(conn.id, frame.id, out.ok, out.ok ? undefined : out.reason, { ...out, ...improveWire() }),
+          (err) => ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)),
+        );
+        return;
+      }
+      case 'improve:cancel': {
+        // Parar la revisión en vuelo: mata al revisor y cierra. El hueco queda
+        // libre en el acto, sin esperar a que el agente termine de morirse.
+        void autonomy.improve.cancel().then(
+          (out) => ackTo(conn.id, frame.id, out.ok, out.reason, { ...out, ...improveWire() }),
+          (err) => ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)),
+        );
+        return;
+      }
+      case 'improve:config': {
         try {
-          if (typeof frame.title !== 'string' || typeof frame.taskId !== 'string') throw new Error('Invalid task');
-          const task = tasks.create(frame.taskId, frame.title);
-          ackTo(conn.id, frame.id, true, undefined, task);
+          const cfg = autonomy.improve.store.setConfig(frame.patch ?? {});
+          ackTo(conn.id, frame.id, true, undefined, { config: cfg, ...improveWire() });
         } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
         return;
       }
-      case 'task:archive': {
+      case 'improve:seen': {
+        const n = autonomy.improve.store.markSeen(Array.isArray(frame.proposalIds) ? frame.proposalIds : undefined);
+        ackTo(conn.id, frame.id, true, undefined, { seen: n, ...improveWire() });
+        return;
+      }
+      case 'improve:act': {
         try {
-          if (typeof frame.taskId !== 'string') throw new Error('Invalid task');
-          const task = tasks.archive(frame.taskId, frame.on !== false);
-          ackTo(conn.id, frame.id, true, undefined, task);
+          if (typeof frame.proposalId !== 'string') throw new Error('Invalid proposal');
+          const p = improveAct(frame.proposalId, frame.act, frame.text, frame.untilMs);
+          ackTo(conn.id, frame.id, true, undefined, { proposal: p, ...improveWire() });
         } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
         return;
       }
-      case 'task:purge': {
+      case 'improve:send': {
+        if (typeof frame.proposalId !== 'string' || typeof frame.missionId !== 'string') { ackTo(conn.id, frame.id, false, 'Invalid send'); return; }
+        void improveSend(frame.proposalId, frame.missionId).then(
+          (out) => ackTo(conn.id, frame.id, true, out.detail, { ...out, ...improveWire() }),
+          (err) => ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)),
+        );
+        return;
+      }
+      case 'mission:say': {
+        const text = typeof frame.text === 'string' ? frame.text : '';
+        if (!text.trim() || typeof frame.missionId !== 'string') { ackTo(conn.id, frame.id, false, 'Invalid mission message'); return; }
+        try { sayInMission(frame.missionId, text, frame.id, conn); }
+        catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
+      case 'mission:create': {
         try {
-          if (typeof frame.taskId !== 'string') throw new Error('Invalid task');
-          tasks.purge(frame.taskId);
-          ackTo(conn.id, frame.id, true, undefined, { purged: frame.taskId });
+          if (typeof frame.title !== 'string' || typeof frame.missionId !== 'string') throw new Error('Invalid mission');
+          const mission = missions.create(frame.missionId, frame.title);
+          ackTo(conn.id, frame.id, true, undefined, mission);
+        } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
+      case 'mission:archive': {
+        try {
+          if (typeof frame.missionId !== 'string') throw new Error('Invalid mission');
+          const mission = missions.archive(frame.missionId, frame.on !== false);
+          ackTo(conn.id, frame.id, true, undefined, mission);
+        } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
+      case 'mission:purge': {
+        try {
+          if (typeof frame.missionId !== 'string') throw new Error('Invalid mission');
+          missions.purge(frame.missionId);
+          ackTo(conn.id, frame.id, true, undefined, { purged: frame.missionId });
+        } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
+        return;
+      }
+      case 'mission:debrief': {
+        /*
+         * El parte de una misión: lo que la flota hizo, no lo que se dijo.
+         *
+         * Sale del diario y no del mundo en memoria a propósito. Un agente
+         * terminado se archiva y con él se van sus métricas; la misión, en
+         * cambio, se abre días después — es para lo que existe. El diario ya
+         * anota cada `launch`, cada `end` y cada `landing` con su missionId,
+         * así que la pregunta ya tenía respuesta, sólo le faltaba puerta.
+         *
+         * Se pide y no se emite: barrer el diario en cada cambio del mundo,
+         * por cada consola conectada, para un panel que nadie está mirando,
+         * sería pagar el coste siempre para servirlo casi nunca.
+         */
+        try {
+          if (typeof frame.missionId !== 'string') throw new Error('Invalid mission');
+          const mission = missions.get(frame.missionId);
+          const entries = autonomy.journal.query({
+            missionId: mission.id, kind: ['launch', 'end', 'landing'], limit: 500, order: 'asc',
+          });
+          ackTo(conn.id, frame.id, true, undefined,
+            buildDebrief(mission, entries, (id) => world.state.agents[id]));
         } catch (err) { ackTo(conn.id, frame.id, false, err instanceof Error ? err.message : String(err)); }
         return;
       }
       case 'ceo:say': {
         const text = typeof frame.text === 'string' ? frame.text : '';
         if (!text.trim()) return;
-        if (frame.taskId !== undefined) {
+        if (frame.missionId !== undefined) {
           const requestId = typeof frame.id === 'string' ? frame.id : newId('cmd');
-          try {
-            const task = tasks.message(frame.taskId, 'human', text, 'active');
-            const prompt = capcomRouter.contextCutoff() === null ? taskPrompt(task)
-              : `[ORCA TASK ${task.id}] New operator instruction. Use report_task(task_id="${task.id}") for replies. Historical context is not attached.\n${text}`;
-            const cap = capcomRouter.live();
-            if (cap) {
-              void dispatchLocal({ k: 'say', agentId: cap.id, text: prompt }).then(
-                (data) => ackTo(conn.id, requestId, true, undefined, data),
-                (err) => {
-                  tasks.message(task.id, 'system', `Delivery unconfirmed: ${String(err)}`);
-                  ackTo(conn.id, requestId, false, String(err));
-                },
-              );
-            } else if (capcomRouter.inRotation()) {
-              // CAPCOM se está reciclando: el prompt espera a la sesión nueva.
-              capcomRouter.humanSays(prompt, (agentId, message) => {
-                void dispatchLocal({ k: 'say', agentId, text: message }).catch((err) => {
-                  tasks.message(task.id, 'system', `Delivery unconfirmed: ${String(err)}`);
-                });
-              }, (reason) => { tasks.message(task.id, 'system', `Delivery failed: ${reason}`); });
-              ackTo(conn.id, requestId, true, 'CAPCOM rotating: queued', { delivery: 'queued' });
-            } else if (options.onUnrouted) {
-              options.onUnrouted(prompt, hub);
-              ackTo(conn.id, requestId, true, undefined, { delivery: 'accepted' });
-            } else throw new Error('No CAPCOM connected. Message saved in this task.');
-          } catch (err) { ackTo(conn.id, requestId, false, err instanceof Error ? err.message : String(err)); }
+          try { sayInMissionToCapcom(frame.missionId, text, requestId, conn); }
+          catch (err) { ackTo(conn.id, requestId, false, err instanceof Error ? err.message : String(err)); }
           return;
         }
         const msg: CeoMessage = {
@@ -1923,6 +2554,8 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     const requested = url.searchParams.get('path') ?? '';
     const roots = [
       join(ORCA_DIR, 'recovery-images'),
+      join(ORCA_DIR, 'uploads'),
+      ...approvedRoots.list(),
       join(ORCA_DIR, 'capcom', 'handoffs'),
       join(ORCA_DIR, 'worker-recovery', 'handoffs'),
       ...Object.values(world.state.projects).map((p) => p.path),
@@ -1945,6 +2578,9 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const mcp: McpHttpDeps = {
     version: `orca ${PROTOCOL_VERSION}`,
     log: (message) => log('mcp:', message),
+    // La mitad de la telemetría de AUTOMEJORA: qué herramientas usa CAPCOM de
+    // verdad. Un nombre y una cuenta, nunca los argumentos.
+    onTool: (name) => autonomy.improve.record(`mcp:${name}`),
     authorize: (r) => {
       const allowed = auth.check(tokenFromRequest(r), remoteOf(r));
       return allowed.ok ? null : (allowed.reason ?? 'falta token');
@@ -1963,21 +2599,81 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     try {
       const url = new URL(req.url ?? '/', 'http://hub.local');
       switch (url.pathname) {
+        case '/api/push': {
+          if (!allowApi(req, res)) return;
+          if (harness) { json(res, 503, { error: 'Push is disabled in the test harness' }); return; }
+          if (req.method === 'GET') { json(res, 200, { publicKey: getPush().publicKey }); return; }
+          if (req.method !== 'POST' && req.method !== 'DELETE') { json(res, 405, { error: 'Method not allowed' }); return; }
+          if (!req.headers['content-type']?.startsWith('application/json')) { json(res, 415, { error: 'JSON required' }); return; }
+          void readBody(req).then(raw => {
+            if (raw.length > 8192) { json(res, 413, { error: 'Subscription too large' }); return; }
+            const value = JSON.parse(raw);
+            if (req.method === 'POST') getPush().add(value);
+            else {
+              if (typeof value?.endpoint !== 'string') throw new Error('Invalid endpoint');
+              getPush().remove(value.endpoint);
+            }
+            json(res, 200, { ok: true });
+          }).catch(() => json(res, 400, { error: 'Invalid push subscription' }));
+          return;
+        }
         case '/api/recovery-images': {
           const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
           if (!allowed.ok) { json(res, 401, { error: 'Image upload requires a valid ORCA access token.' }); return; }
           void uploadRecoveryImage(req, res, join(ORCA_DIR, 'recovery-images'));
           return;
         }
-        case '/api/health':
-          json(res, 200, {
+        // Un archivo soltado en una conversación de la consola. Misma puerta
+        // que las imágenes de recovery; la política vive en uploads.ts.
+        case '/api/uploads': {
+          const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
+          if (!allowed.ok) { json(res, 401, { error: 'Uploads require a valid ORCA access token.' }); return; }
+          void uploadFile(req, res, join(ORCA_DIR, 'uploads'));
+          return;
+        }
+        // Lo que el operador dijo, como audio, a whisper.cpp en esta máquina
+        // con los nombres de la flota en el prompt. Misma puerta; la política
+        // vive en transcribe.ts. GET dice si este hub puede, y con qué modelo.
+        case '/api/transcribe': {
+          const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
+          if (!allowed.ok) { json(res, 401, { error: 'Transcription requires a valid ORCA access token.' }); return; }
+          void transcribeAudio(req, res);
+          return;
+        }
+        case '/api/health': {
+          const full: Record<string, unknown> = {
             ...world.health(),
+            /*
+             * Si este hub admite fixtures, dicho en voz alta. El arnés lo lee
+             * ANTES de conectarse para negarse solo con un mensaje útil, en vez
+             * de estrellarse contra un cierre 4004 sin saber por qué.
+             */
+            harness,
             connections: { collectors: collectors.size, consoles: consoles.size, pendingCommands: pending.size },
             bus: { rev: bus.rev, ...bus.stats },
             protocol: PROTOCOL_VERSION,
+          };
+          if (auth.check(tokenFromRequest(req), remoteOf(req)).ok) { json(res, 200, full); return; }
+          /*
+           * Sin token el hub sólo habla de sí mismo: si está vivo, si es el
+           * arnés y si hay mando. Eso es exactamente lo que `hubPosture()`
+           * necesita para negarse a tocar un hub real —la protección que
+           * impide que el arnés visual tumbe un CAPCOM de verdad— y es todo
+           * lo que se puede dar sin repartir hostnames, proyectos y costes a
+           * cualquiera que pregunte por un puerto expuesto.
+           */
+          const machines = full['machines'] as { total?: number; online?: number } | undefined;
+          json(res, 200, {
+            ok: full['ok'] === true,
+            protocol: PROTOCOL_VERSION,
+            harness,
+            capcom: full['capcom'] ?? null,
+            machines: { total: machines?.total ?? 0, online: machines?.online ?? 0 },
           });
           return;
+        }
         case '/api/world':
+          if (!allowApi(req, res)) return;
           json(res, 200, world.snapshot(bus.rev));
           return;
         case '/api/traffic': {
@@ -1988,6 +2684,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
            * y mirar la escena, que es justo lo que no se puede hacer desde un
            * VPS por ssh a las tres de la mañana.
            */
+          if (!allowApi(req, res)) return;
           const project = url.searchParams.get('project');
           const kind = url.searchParams.get('kind');
           const rawLimit = Number(url.searchParams.get('limit'));
@@ -2101,6 +2798,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
         }
         case '/api/memory': {
           // Útil para ver por qué el CEO decidió no preguntar.
+          if (!allowApi(req, res)) return;
           const q = url.searchParams.get('q');
           json(res, 200, q ? { q, results: mem.recall(q, { limit: 10, threshold: 0 }) } : { size: mem.size, entries: mem.all() });
           return;
@@ -2123,7 +2821,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
             ok: false, error: 'no such route',
             routes: [
               '/api/health', '/api/world', '/api/traffic?project=&kind=&limit=',
-              '/api/memory?q=', '/api/artifact/<id>', '/api/file?path=', 'POST /mcp (fleet command, MCP)',
+              '/api/memory?q=', '/api/artifact/<id>', '/api/file?path=', 'POST /api/uploads', '/api/transcribe (GET status, POST audio/wav?lang=)', 'POST /mcp (fleet command, MCP)',
               '/api/history?from=&to=&step=', '/api/history/summary?since=',
               '/api/fleets (GET, PUT)', 'POST /api/squads/next?base=',
             ],
@@ -2200,8 +2898,6 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   /* ── arranque ───────────────────────────────────────────────────── */
 
   const port = options.port ?? Number(process.env['ORCA_PORT'] ?? PORTS.hub);
-  const host = options.host ?? process.env['ORCA_HOST'] ?? '0.0.0.0';
-
   await new Promise<void>((resolve, reject) => {
     http.once('error', reject);
     http.listen(port, host, () => { http.removeListener('error', reject); resolve(); });
@@ -2211,11 +2907,12 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const actualPort = typeof address === 'object' && address !== null ? address.port : port;
 
   const hub: Hub = {
-    world, bus, store, memory: mem, history, fleets, auth, http,
+    world, bus, store, memory: mem, history, fleets, auth, harness, http,
     port: actualPort,
     url: `http://${host === '0.0.0.0' ? 'localhost' : host}:${actualPort}`,
+    dist: DIST_DIR,
     pushCeoMessage,
-    tasks,
+    missions,
     budgets,
     autonomy,
     broadcast,
@@ -2280,11 +2977,15 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     },
     counts: () => ({ collectors: collectors.size, consoles: consoles.size, pending: pending.size }),
     async close() {
-      for (const timer of taskResultTimers.values()) clearTimeout(timer);
-      taskResultTimers.clear();
+      source?.stop();
+      offPublishOnDone?.();
+      publisher?.stop();
+      for (const timer of missionResultTimers.values()) clearTimeout(timer);
+      missionResultTimers.clear();
       clearInterval(sweepTimer);
       clearInterval(pingTimer);
       clearInterval(pruneTimer);
+      clearInterval(pushTimer);
       capcomRouter.stop();
       autonomy.stop();
       for (const p of pending.values()) clearTimeout(p.timer);
@@ -2319,6 +3020,9 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     console.log(`[hub]   MCP        → http://localhost:${actualPort}/mcp   (las tools de CAPCOM)`);
     console.log(`[hub]   memoria    → ${mem.size} respuestas recordadas`);
     console.log('[hub]   comando    → CAPCOM cuando haya sesión viva; sin ella, nadie');
+    // Un hub de pruebas admite fixtures y hay que poder verlo de un vistazo;
+    // el real no dice nada porque su silencio ES la postura por defecto.
+    if (harness) console.log(`[hub]   arnés      → SÍ (${HARNESS_ENV}): admite máquinas sintéticas`);
   }
 
   return hub;

@@ -53,6 +53,17 @@ interface Deps {
   dir(id?: string): string | null;
   busy?(id: string): boolean;
   wait?(ms: number): Promise<void>;
+  /**
+   * Los modelos que un runtime instalado ofrece, sin preguntárselo a la sesión.
+   *
+   * El catálogo nativo (`choices`) sólo se llena tecleando `/model` en un CLI
+   * ocioso con el prompt limpio, y un CAPCOM que manda una flota rara vez está
+   * en ese instante cuando el operador abre el selector. Sin esto, cambiar de
+   * modelo dentro del mismo proveedor dependía de pescar ese momento; con esto
+   * se acepta la petición y es el menú real, al aplicarla, quien la confirma o
+   * la rechaza. Es la misma fuente con la que ya se cruza de proveedor.
+   */
+  catalog?(runtime: string): ModelChoice[];
 }
 
 export class ModelController {
@@ -102,6 +113,10 @@ export class ModelController {
     return a;
   }
   private idle(a: AgentHandle) { return a.state === 'idle' || (a.state === 'blocked' && a.blockKind === 'error'); }
+  /** ¿Lo ofrece el catálogo del proveedor, aunque esta sesión aún no lo haya confirmado? */
+  private offered(runtime: string, model: string): boolean {
+    try { return (this.deps.catalog?.(runtime) ?? []).some(c => c.id === model); } catch { return false; }
+  }
   private async screen(a: AgentHandle) {
     const r = await this.deps.tmux.capture(a.pane!, 80);
     if (!r.ok) throw new Error(r.detail);
@@ -143,7 +158,14 @@ export class ModelController {
     const a = this.target(id);
     const s = this.state(a);
     if (!s || this.locked(id)) throw new Error('A model change is already being applied.');
-    if (model !== null && !s.choices.some(c => c.id === model)) throw new Error('Refresh models and choose one offered by this CLI.');
+    /*
+     * Dos fuentes valen para encolar: lo que este CLI enseñó en su menú y lo
+     * que el catálogo del proveedor dice que existe. La segunda no es una
+     * promesa de que el menú lo ofrezca —eso lo comprueba `apply` contra la
+     * pantalla real y lo deja en `failed` con su motivo si no—, pero sí basta
+     * para no bloquear una elección legítima porque la sesión estaba ocupada.
+     */
+    if (model !== null && !s.choices.some(c => c.id === model) && !this.offered(a.runtime, model)) throw new Error('Refresh models and choose one offered by this CLI.');
     if (model === s.active) model = null;
     s.requested = model;
     s.phase = model ? 'queued' : 'ready';
@@ -165,7 +187,7 @@ export class ModelController {
       const rows = await this.open(a); menuOpen = true;
       const choice = rows.find(r => r.id === s.requested);
       const current = rows.find(r => r.selected)!;
-      if (!choice) throw new Error('The selected model is no longer offered by this CLI.');
+      if (!choice) throw new Error(`This CLI does not offer ${s.requested} in its model menu. No model was changed.`);
       if (current.id === choice.id) {
         await this.keys(a, ['Escape']); menuOpen = false;
         s.active = choice.id; s.phase = 'ready'; s.requested = null; s.detail = 'This model is already active. Same conversation.'; this.save(s); return;

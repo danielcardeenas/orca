@@ -41,10 +41,14 @@ export default { suite: 'Fresh CAPCOM isolated hub routing', tests: (['clean', '
     consoleSend({ t: 'hello', v: PROTOCOL_VERSION, token: 'fixture-token' });
     await until(() => !!hub.world.state.agents[OLD]);
     hub.missions.create('task_fixture', 'Pending fixture'); hub.missions.message('task_fixture', 'human', 'OLD_TASK_CONVERSATION_SENTINEL');
-    consoleSend({ t: 'cmd', id: 'start-new', cmd: { k: 'capcom:new', agentId: OLD, mode, checkpoint: 'UNTRUSTED_CLIENT_CHECKPOINT' } });
+    // El modelo elegido viaja tal cual: el hub no lo contrasta con ningún
+    // catálogo nativo —que exigiría una sesión ociosa— y es el collector, con
+    // el menú real del CLI, quien lo confirma o lo rechaza.
+    consoleSend({ t: 'cmd', id: 'start-new', cmd: { k: 'capcom:new', agentId: OLD, mode, model: 'gpt-5.6-terra', checkpoint: 'UNTRUSTED_CLIENT_CHECKPOINT' } });
     await until(() => commands.some(f => f.cmd.k === 'capcom:new'));
     const start = commands.find(f => f.cmd.k === 'capcom:new').cmd;
     assert.equal(start.mode, mode); assert.ok(!start.checkpoint.includes('UNTRUSTED_CLIENT_CHECKPOINT'));
+    assert.equal(start.model, 'gpt-5.6-terra', 'the requested model reaches the collector unchanged');
     assert.equal(start.checkpoint.includes('task_fixture'), mode === 'continuity');
     hub.missions.assign('task_fixture', ['worker']);
     const cutoffAt = Date.now();

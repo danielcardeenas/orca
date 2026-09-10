@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ProviderHandoffs } from '../src/collector/provider-handoff.ts';
+import { CapcomResets } from '../src/collector/capcom-reset.ts';
+import { ModelController } from '../src/collector/model-control.ts';
 import { CapcomSession } from '../src/collector/capcom.ts';
 import { readIdentity } from '../src/collector/capcom-identity.ts';
 import { CapcomRouter } from '../src/hub/capcom.ts';
@@ -201,6 +203,63 @@ export default { suite: 'Fresh CAPCOM', tests: [
       assert.deepEqual(r.activated.length, 0, 'nothing activated yet; the point is that it was accepted');
       return ok('a destination that does not exist is refused; staying put needs no catalog', true);
     } finally { r.dispose(); }
+  }),
+  test('a new CAPCOM on the same runtime takes a Claude model nobody listed: the provider catalog admits it and the menu confirms it before /clear', async () => {
+    /*
+     * Lo que fallaba de verdad: un CAPCOM al mando casi nunca está ocioso con
+     * el prompt limpio en el instante en que se abre el selector, así que su
+     * catálogo nativo (`choices`) está vacío y «Opus → Sonnet» no existía como
+     * opción, mientras cruzar a Codex sí. Aquí nadie tecleó `/model` antes: el
+     * relevo se pide con un modelo que sólo conoce el catálogo del proveedor, y
+     * es el menú real del CLI —abierto cuando la sesión ya está ociosa— quien
+     * lo confirma antes de que salga el `/clear`.
+     */
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-fresh-model-'));
+    try {
+      const live = { id: OLD, sessionId: OLD, runtime: 'claude', model: 'opus', pane: `orca-${OLD}`, alive: true, state: 'idle', projectId: 'capcom', transcriptPath: '/tmp/old.jsonl' } as AgentHandle;
+      const ids = ['Opus', 'Sonnet']; let view = 'prompt'; let selection = 0; let current = 0; let confirmed = false;
+      const pasted: string[] = [];
+      const screen = () => view === 'menu'
+        ? `Select model\n${ids.map((id, i) => `${i === selection ? '❯' : ' '} ${i + 1}. ${id}  description`).join('\n')}\ns to use this session only`
+        : `${confirmed ? '⎿ Set model to Sonnet 5 for this session only' : ''}\n❯ `;
+      const good = () => ({ ok: true, stdout: '', detail: '' });
+      const tmux = {
+        capture: async () => ({ ...good(), stdout: screen() }),
+        paste: async (_pane: string, text: string) => { pasted.push(text); if (text === '/model') { view = 'menu'; selection = current; } return good(); },
+        keys: async (_pane: string, keys: string[]) => {
+          for (const key of keys) {
+            if (key === 'Down') selection++; if (key === 'Up') selection--;
+            if (key === 'Escape') view = 'prompt';
+            if (key === 's') { current = selection; confirmed = true; view = 'prompt'; }
+          }
+          return good();
+        },
+        rename: async () => good(),
+      };
+      // El catálogo del proveedor, sin sesión de por medio: lo que `providerModels()` sabe de Claude.
+      const models = new ModelController({ tmux, dir: () => dir, owns: () => true, agent: () => live, wait: async () => {},
+        catalog: runtime => runtime === 'claude' ? ['opus', 'fable', 'sonnet', 'haiku'].map(id => ({ id, label: id[0]!.toUpperCase() + id.slice(1) })) : [] });
+      assert.deepEqual(models.state(live)?.choices, [], 'no one asked this session for its menu');
+      const adopted: string[] = [];
+      const service = new CapcomResets({
+        tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => models.locked(OLD),
+        model: a => models.state(a)?.active ?? a.model ?? null,
+        // Lo mismo que hace `CommandRunner.applyModel`: listar, pedir y esperar al menú.
+        setModel: async (id, model) => {
+          await models.list(id); models.request(id, model);
+          for (let i = 0; i < 50; i++) { models.tick(live); const s = models.state(live); if (s?.phase === 'failed') throw new Error(s.detail); if (s?.phase === 'ready' && s.active === model) return; await Promise.resolve(); }
+          throw new Error('the CLI did not confirm');
+        },
+        discover: async () => ({ ...live, id: NEW, sessionId: NEW }),
+        hold: () => {}, adopt: (_from, to, _mode, _at, model) => adopted.push(`${to}:${model}`), note: () => {},
+      });
+      const out = await service.run(OLD, 'clean', 'sonnet');
+      assert.equal(out.toId, NEW);
+      assert.deepEqual(adopted, [`${NEW}:sonnet`], 'the relay is adopted with the model it was asked for');
+      assert.ok(pasted.indexOf('/model') < pasted.indexOf('/clear'), 'the model is settled before the context is cleared');
+      assert.equal(models.state(live)?.active, 'sonnet');
+      return ok('unlisted same-runtime model: admitted by the catalog, confirmed by the menu, then cleared', true);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }),
   test('after a native /clear the role sticks: the record the watchdog reads points at the new session', async () => {
     const r = rig();

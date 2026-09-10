@@ -23,6 +23,16 @@ mountCommand(commandHost, { openCeo() {}, note: (text: string) => notes.push(tex
  */
 let open: (() => void) | null = null;
 let gate: Promise<void> | null = null;
+/**
+ * ¿La sesión está ocupada cuando se le pregunta por su menú?
+ *
+ * Un CAPCOM al mando casi nunca está ocioso con el prompt limpio en el instante
+ * en que el operador abre la elección, y entonces `model:list` devuelve el
+ * catálogo guardado, que puede estar vacío. Eso es lo que dejaba sin opciones
+ * de Claude a quien quería cambiar de Opus a Sonnet, mientras Codex sí salía.
+ */
+let busy = false;
+export function busySession(on: boolean) { busy = on; }
 export function hold() { gate = new Promise<void>(resolve => { open = resolve; }); }
 export function release() { open?.(); open = null; gate = null; }
 hub.cmd = async cmd => {
@@ -41,12 +51,16 @@ hub.cmd = async cmd => {
   }
   if (cmd.k === 'handoff:status') return structuredClone(plan);
   // Lo que el CLI contesta cuando se le pregunta por su catálogo: la elección
-  // de New CAPCOM lo pide sola al abrirse.
+  // de New CAPCOM lo pide sola al abrirse. Una sesión ocupada contesta lo que
+  // tenía guardado —nada—, porque el menú sólo se abre con el prompt libre.
   if (cmd.k === 'model:list') return { sessionId: 'cap', runtime: 'codex', active: 'gpt-6-astra', requested: null,
-    phase: 'ready', detail: '', events: [], choices: [{ id: 'gpt-6-astra', label: 'gpt-6-astra' }, { id: 'gpt-5.6-luna', label: 'gpt-5.6-luna' }] };
-  // Y el de los proveedores, del que salen los modelos del OTRO runtime.
+    phase: 'ready', detail: '', events: [], choices: busy ? [] : [{ id: 'gpt-6-astra', label: 'gpt-6-astra' }, { id: 'gpt-5.6-luna', label: 'gpt-5.6-luna' }] };
+  // Y el de los proveedores, del que salen los modelos del OTRO runtime — y
+  // los del mismo que la sesión aún no ha confirmado: `gpt-5.6-terra` no está
+  // en el menú de arriba, sólo aquí.
   if (cmd.k === 'handoff:models') return [
     { runtime: 'codex', id: 'gpt-6-astra', label: 'gpt-6-astra', installed: true },
+    { runtime: 'codex', id: 'gpt-5.6-terra', label: 'gpt-5.6-terra', installed: true },
     { runtime: 'claude', id: 'sonnet', label: 'Sonnet', installed: true },
     { runtime: 'claude', id: 'opus', label: 'Opus', installed: false },
   ];

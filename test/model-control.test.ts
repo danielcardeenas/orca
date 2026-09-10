@@ -8,7 +8,7 @@ import type { AgentHandle } from '../src/collector/commands.ts';
 import { test, ok } from './harness.ts';
 import { sanitizeAgentPatch } from '../src/hub/world.ts';
 
-function rig(runtime = 'codex') {
+function rig(runtime = 'codex', catalog?: { id: string; label: string }[]) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-model-'));
   const a = { id: 'capcom', sessionId: 'session-1234', shortId: null, runtime, pane: 'orca-test', alive: true, state: 'idle', model: 'old' } as AgentHandle;
   let view = 'prompt'; let selection = 0; let current = 0; let confirmed = false;
@@ -19,7 +19,7 @@ function rig(runtime = 'codex') {
     : view === 'effort' ? 'Select Reasoning Level for new\n› 1. Medium'
     : `${confirmed ? runtime === 'codex' ? '• Model changed to new medium' : '⎿ Set model to Sonnet 5 for this session only' : ''}\n${runtime === 'codex' ? '› Ask Codex to do anything' : '❯ '}`;
   const good = () => ({ ok: true, detail: '', stdout: '' });
-  const deps = { dir: () => dir, owns: () => true, agent: () => a, wait: async () => {}, tmux: {
+  const deps = { dir: () => dir, owns: () => true, agent: () => a, wait: async () => {}, ...(catalog ? { catalog: () => catalog } : {}), tmux: {
     capture: async () => ({ ...good(), stdout: screen() }),
     paste: async (_pane: string, text: string) => { assert.equal(text, '/model'); writes.push(text); view = 'menu'; selection = current; return good(); },
     keys: async (_pane: string, keys: string[]) => {
@@ -121,6 +121,43 @@ export default { suite: 'CAPCOM model control', tests: [
       assert.equal(r.controller.state(r.a)?.events.length, 0);
       assert.ok(!fs.existsSync(path.join(r.dir, 'model-changes.jsonl')));
       return ok('unconfirmed is not success', true);
+    } finally { r.dispose(); }
+  }),
+  test('a provider-catalog model is accepted while the session is busy, and the CLI menu confirms it once idle', async () => {
+    // Nadie ha tecleado `/model` en esta sesión —está trabajando—, así que
+    // `choices` está vacío. Antes eso bloqueaba cualquier cambio dentro del
+    // mismo proveedor con «Refresh models»: el catálogo del proveedor basta
+    // para encolar, y la verificación de verdad sigue siendo el menú real.
+    const r = rig('claude', [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' }]);
+    try {
+      r.a.state = 'working';
+      assert.deepEqual(r.controller.state(r.a)?.choices, [], 'nothing was listed');
+      const queued = r.controller.request(r.a.id, 'sonnet');
+      assert.equal(queued.phase, 'queued'); assert.equal(queued.requested, 'sonnet');
+      r.controller.tick(r.a);
+      assert.equal(r.writes.length, 0, 'a busy session is not typed into');
+      r.a.state = 'idle'; r.controller.tick(r.a); await r.settle();
+      const state = r.controller.state(r.a)!;
+      assert.equal(state.phase, 'ready'); assert.equal(state.active, 'sonnet');
+      assert.ok(r.writes.includes('/model') && r.writes.includes('s'), 'applied through the native menu, session-only');
+      // Y lo que el catálogo no conoce se sigue rechazando de entrada.
+      assert.throws(() => r.controller.request(r.a.id, 'invented'), /choose one/);
+      return ok('catalog admits, menu confirms', true);
+    } finally { r.dispose(); }
+  }),
+  test('a catalog model this CLI does not offer fails at the menu with its reason, and changes nothing', async () => {
+    // El catálogo dice «haiku»; el menú de este CLI sólo tiene Opus y Sonnet.
+    // La protección real está aquí: se abre el menú, no está, se cierra y
+    // queda «failed» diciendo por qué — nunca se pulsa a ciegas.
+    const r = rig('claude', [{ id: 'haiku', label: 'Haiku' }]);
+    try {
+      r.controller.request(r.a.id, 'haiku'); r.controller.tick(r.a); await r.settle();
+      const state = r.controller.state(r.a)!;
+      assert.equal(state.phase, 'failed');
+      assert.match(state.detail, /does not offer haiku/);
+      assert.equal(state.active, 'old'); assert.equal(state.events.length, 0);
+      assert.deepEqual(r.writes, ['/model', 'Escape'], 'menu opened, nothing selected, menu closed');
+      return ok('unoffered model: clear failure, no keystrokes beyond closing the menu', true);
     } finally { r.dispose(); }
   }),
   test('permission blocks cannot be interrupted by a queued model change', async () => {

@@ -185,11 +185,23 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     const choices = state?.choices ?? [];
     const active = state?.active ?? agent?.model ?? '';
     const others = agent ? freshCatalog.filter(m => m.runtime !== agent!.runtime) : [];
+    /*
+     * Los del MISMO proveedor que esta sesión aún no ha confirmado.
+     *
+     * `choices` sólo se llena tecleando `/model` en un CLI ocioso con el prompt
+     * limpio, y un CAPCOM que manda una flota rara vez está en ese instante. Sin
+     * este bloque, cambiar de Opus a Sonnet no aparecía en ningún sitio mientras
+     * cruzar a Codex sí, porque ese camino lee el catálogo de proveedores. Es la
+     * misma fuente: lo que el CLI instalado ofrece. El relevo nace de todos
+     * modos con la sesión ociosa —vaciar lo exige— y es el menú real quien
+     * confirma el modelo antes del `/clear`, o lo rechaza con su motivo.
+     */
+    const same = agent ? freshCatalog.filter(m => m.runtime === agent!.runtime && !choices.some(c => c.id === m.id)) : [];
     // Antes del corte: lo que prometen los botones depende del modelo elegido,
     // no de si hay que redibujar la lista — y elegir deja el picker abierto un
     // instante, que era justo cuando el corte se comía la actualización.
     paintFreshButtons();
-    const sig = JSON.stringify([choices.map(c => c.id), others.map(o => [o.id, o.installed]), active, freshModel]);
+    const sig = JSON.stringify([choices.map(c => c.id), same.map(o => [o.id, o.installed]), others.map(o => [o.id, o.installed]), active, freshModel]);
     if (sig === freshModelSig || freshPicker?.isOpen()) return;
     freshModelSig = sig;
     freshPicker?.dispose();
@@ -205,7 +217,12 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     const cross = (m: ProviderModel) => ({ value: m.id, label: m.label,
       group: m.runtime === 'claude' ? 'CLAUDE CODE' : 'CODEX', mark: markForRuntime(m.runtime),
       hint: m.installed ? 'prepares and verifies · slower' : 'CLI not installed', disabled: !m.installed });
-    if (!choices.length && !others.length) {
+    // Mismo proveedor, sin confirmar por esta sesión: se vacía en el sitio igual,
+    // y el CLI comprueba el modelo en su menú antes de tocar el contexto.
+    const stay = (m: ProviderModel) => ({ value: m.id, label: m.label,
+      group: (agent?.runtime ?? '').toUpperCase(), mark: markForRuntime(agent?.runtime ?? ''),
+      hint: m.id === active ? 'current · clears in place' : m.installed ? 'clears in place · CLI verifies' : 'CLI not installed', disabled: !m.installed });
+    if (!choices.length && !same.length && !others.length) {
       // Nunca una lista inventada: o la dio el CLI, o se dice por qué no.
       freshModelHost.textContent = freshLoading ? 'Loading models…'
         : freshModelError ? `${active || 'current model'} · ${freshModelError}`
@@ -213,10 +230,10 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
       paintFreshButtons();
       return;
     }
-    freshPicker = pick({ name: 'capcom-fresh-model', value: freshModel || active, search: choices.length + others.length > 6,
+    freshPicker = pick({ name: 'capcom-fresh-model', value: freshModel || active, search: choices.length + same.length + others.length > 6,
       options: [...choices.map(c => ({ value: c.id, label: c.label, group: (agent?.runtime ?? '').toUpperCase(),
         mark: markForRuntime(agent?.runtime ?? ''),
-        hint: c.id === active ? 'current · clears in place' : 'clears in place' })), ...others.map(cross)],
+        hint: c.id === active ? 'current · clears in place' : 'clears in place' })), ...same.map(stay), ...others.map(cross)],
       onChange: id => { freshModel = id === active ? '' : id; freshModelSig = ''; paintFreshModel(); } });
     freshModelHost.replaceChildren(freshPicker.el);
     paintFreshButtons();
@@ -361,17 +378,25 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
       const catalog: ProviderModel[] = validProviders ? providers.value as ProviderModel[] : [];
       if (!validProviders) issues.push(`Provider catalog: ${providers.status === 'rejected' ? reason(providers.reason) : 'invalid response'}.`);
       const choices = validNative?.choices ?? [];
+      /*
+       * Mismo proveedor, sin confirmar por esta sesión. Antes iban deshabilitados
+       * con «retry», y como el catálogo nativo sólo se llena tecleando `/model`
+       * en un CLI ocioso con el prompt limpio —un instante que un CAPCOM al
+       * mando rara vez ofrece—, cambiar entre modelos de Claude era en la
+       * práctica imposible, mientras cruzar a Codex funcionaba. Ahora se piden
+       * igual: el cambio se encola hasta que la sesión esté ociosa y es el menú
+       * real del CLI quien lo confirma o lo deja en «failed» con su motivo.
+       */
       const unverified = catalog.filter(p => p.runtime === agent!.runtime && !choices.some(c => c.id === p.id));
       const alternatives = catalog.filter(p => p.runtime !== agent!.runtime);
-      if (validNative && !choices.length) issues.push(`${agent!.runtime.toUpperCase()} session catalog is not ready. Retry when ${subject} is idle and its terminal prompt is clear.`);
-      else if (unverified.length) issues.push('Some discovered models are not confirmed by this session. Retry when its terminal prompt is clear.');
+      if (validNative && !choices.length && !unverified.length) issues.push(`${agent!.runtime.toUpperCase()} session catalog is not ready. Retry when ${subject} is idle and its terminal prompt is clear.`);
       if (validProviders && !catalog.some(p => p.runtime === 'codex')) issues.push('Codex discovery returned no models. Retry after its local catalog is available.');
       catalogError = issues.join(' ');
       if (state?.phase === 'applying' || state?.phase === 'queued') return;
       if (!choices.length && !catalog.length) { catalogError ||= `No model catalog available. Retry when ${subject} is idle.`; return; }
       picker = pick({ name: 'capcom-model', value: state?.active ?? '', placeholder: 'Choose model', search: true,
         options: [...choices.map(c => ({ value: c.id, label: c.label, group: agent!.runtime.toUpperCase(), mark: markForRuntime(agent!.runtime), hint: c.id === state?.active ? 'active' : 'same session' })),
-          ...unverified.map(p => ({ value: p.id, label: p.label, group: agent!.runtime.toUpperCase(), mark: markForRuntime(agent!.runtime), hint: 'session catalog not ready · retry', disabled: true })),
+          ...unverified.map(p => ({ value: p.id, label: p.label, group: agent!.runtime.toUpperCase(), mark: markForRuntime(agent!.runtime), hint: p.id === state?.active ? 'active' : p.installed ? 'same session · CLI verifies when idle' : 'CLI not installed', disabled: !p.installed })),
           ...alternatives.map(p => ({ value: `${p.runtime}:${p.id}`, label: p.label, group: p.runtime === 'claude' ? 'CLAUDE CODE' : 'CODEX', mark: markForRuntime(p.runtime), hint: p.installed ? 'handoff · review first' : 'CLI not installed', disabled: !p.installed }))],
         onChange: model => { if (model.includes(':')) { const [runtime, id] = model.split(':'); void prepare(runtime!, id!); } else void request(model); } });
       pickerHost.replaceChildren(picker.el);

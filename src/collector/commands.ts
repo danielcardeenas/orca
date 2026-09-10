@@ -237,7 +237,10 @@ export class CommandRunner {
   constructor(deps: CommandDeps) {
     this.deps = deps;
     this.models = new ModelController({ tmux: deps.tmux, agent: deps.agent,
-      owns: a => (!!a.pane || a.origin === 'orca') && !a.subagent, dir: id => id && this.capcomFor(deps.agent(id)) ? deps.capcom!.dir() : path.join(orcaDir(), 'worker-recovery', 'models'), busy: id => this.inputBusy.has(id) || this.handoffs?.locked(id) || this.workers?.handoffs.locked(id) });
+      owns: a => (!!a.pane || a.origin === 'orca') && !a.subagent, dir: id => id && this.capcomFor(deps.agent(id)) ? deps.capcom!.dir() : path.join(orcaDir(), 'worker-recovery', 'models'), busy: id => this.inputBusy.has(id) || this.handoffs?.locked(id) || this.workers?.handoffs.locked(id),
+      // Lo que el proveedor instalado ofrece, para encolar sin que la sesión
+      // esté ociosa: el menú real del CLI lo confirma al aplicar.
+      catalog: runtime => providerModels().filter(m => m.runtime === runtime && m.installed).map(({ id, label }) => ({ id, label })) });
     this.handoffs = new ProviderHandoffs({ agent: deps.agent, owns: a => !!this.capcomFor(a),
       model: a => this.models.state(a)?.active ?? a.model ?? null,
       dir: () => { const dir = deps.capcom?.dir(); if (!dir) throw new Error('CAPCOM is unavailable'); return dir; },
@@ -910,8 +913,9 @@ export class CommandRunner {
    *
    * `ModelController` encola y aplica en su propio tick, que es lo correcto
    * para una petición del operador —espera a que el turno acabe— pero aquí
-   * hace falta saber que terminó antes de vaciar el contexto. `list` primero,
-   * porque `request` sólo acepta un modelo que este CLI haya ofrecido.
+   * hace falta saber que terminó antes de vaciar el contexto. `list` primero
+   * para tener el menú y el modelo activo frescos; `request` acepta además lo
+   * que el catálogo del proveedor ofrece, y es el menú real quien lo confirma.
    */
   private async applyModel(id: string, model: string): Promise<void> {
     await this.models.list(id);

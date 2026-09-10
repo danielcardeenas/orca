@@ -88,6 +88,48 @@ El modelo se cambia **antes** de vaciar, con el selector nativo: el relevo debe
 nacer con el que se pidió, y mientras el contexto viejo sigue en pie un modelo
 sin cuota falla sin haber tocado nada.
 
+## Un modelo del mismo proveedor, sin esperar al instante ocioso
+
+Desde 2026-09-10. El catálogo nativo de una sesión (`choices`) sólo se llena
+tecleando `/model` en un CLI ocioso con el prompt limpio, y un CAPCOM al mando
+casi nunca está en ese instante cuando el operador abre el selector. Con el
+catálogo vacío, **CHANGE MODEL** enseñaba los modelos de Claude deshabilitados
+con «session catalog not ready · retry» y **New CAPCOM** no los enseñaba en
+absoluto, mientras cruzar a Codex sí funcionaba porque ese camino lee el
+catálogo de proveedores (`handoff:models`), que no necesita sesión. Cambiar de
+Opus a Sonnet era, en la práctica, imposible.
+
+Ahora los dos selectores ofrecen los modelos del mismo proveedor desde ese
+mismo catálogo, como opción real:
+
+| Dónde | Confirmado por el menú | Sólo en el catálogo del proveedor |
+| --- | --- | --- |
+| CHANGE MODEL | `same session` | `same session · CLI verifies when idle` |
+| New CAPCOM | `clears in place` | `clears in place · CLI verifies` |
+
+Lo que no cambia es la protección de verdad. `model:set` encola —como siempre—
+hasta que la sesión esté ociosa, y al aplicar abre el menú real del CLI: si el
+modelo no está, cierra el menú sin pulsar nada y queda en `failed` con «This CLI
+does not offer X in its model menu. No model was changed.». El collector acepta
+en `request` lo que el catálogo del proveedor instalado ofrece para ese runtime
+(`ModelController` recibe `catalog`), y sigue rechazando de entrada lo que no
+conoce nadie. En New CAPCOM el orden es el mismo de antes: `list`, `request`,
+menú confirmado, y sólo entonces `/clear`; un modelo que el menú no ofrece deja
+el contexto sin tocar. El hub no contrasta el modelo con ningún catálogo: lo
+pasa tal cual al collector.
+
+Los mensajes de los dos caminos siguen separados: quedarse en el proveedor es
+«clears in place» (segundos, misma sesión) y cruzar es «prepares and verifies ·
+slower» (proceso nuevo, hasta dos minutos). Lo único nuevo es la salvedad de que
+el CLI verifica el modelo que la sesión aún no había confirmado.
+
+Cobertura: `npm test -- model-control capcom-new capcom-new-hub`, `npx tsx
+test/capcom-new.visual.ts` (sesión ocupada con `choices` vacío: el modelo del
+mismo runtime sale del catálogo y viaja en `capcom:new`), `npx tsx
+test/model-catalog.visual.ts` (catálogo nativo vacío: el modelo propio se pide
+con `model:set` en vez de ir deshabilitado). Este último arnés levanta ya su
+propio Vite, como el de New CAPCOM.
+
 ## Qué conserva y qué cambia
 
 Se conserva el **runtime y modelo efectivo**, incluido Codex. No hay fallback a Claude ni a otro modelo. La acción requiere CAPCOM hospedado, vivo, con transcript y modelo conocidos, y sin turno ni cambio de modelo en curso. También admite un bloqueo de error/cuota; la preparación puede fallar por la cuota del mismo modelo y conserva el original.
@@ -229,6 +271,7 @@ npm test -- provider-handoff
 npm test -- worker-recovery
 node --import tsx test/capcom-new.visual.ts
 node --import tsx test/capcom-handoff.visual.ts
+node --import tsx test/model-catalog.visual.ts
 ```
 
 La prueba visual crea su propio servidor Vite sin la configuración/proxy del proyecto ni conexión al hub real. Guarda capturas en `test/shots/capcom-new-{desktop,mobile}.png` y comprueba botón, ambos modos/comandos, alcance, modelo, borrador, fallo/reintento y overflow.

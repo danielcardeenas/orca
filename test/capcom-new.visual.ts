@@ -40,6 +40,9 @@ try {
   assert.match(await page.getByRole('option', { name: /gpt-5\.6-luna/ }).innerText(), /clears in place/);
   assert.match(await page.getByRole('option', { name: /Sonnet/ }).innerText(), /prepares and verifies/);
   assert.match(await page.getByRole('option', { name: /Opus/ }).innerText(), /CLI not installed/);
+  // Un modelo del mismo proveedor que el menú no enseñó pero el catálogo sí
+  // conoce va en el mismo bloque, y dice que lo verifica el CLI.
+  assert.match(await page.getByRole('option', { name: /gpt-5\.6-terra/ }).innerText(), /clears in place · CLI verifies/);
   // Cruzar de proveedor dice lo que cuesta ANTES de pulsar nada.
   await page.getByRole('option', { name: /Sonnet/ }).click();
   await page.getByRole('button', { name: 'Clean context · prepare', exact: true }).waitFor();
@@ -67,6 +70,29 @@ try {
   assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.equal(await page.locator('textarea[data-in]').inputValue(), 'Preserve this operator draft');
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').length), 1);
+  // Lo que fallaba de verdad: la sesión está ocupada cuando se abre la
+  // elección, así que el CLI no tiene menú que dar y `choices` viene vacío.
+  // Antes eso dejaba sin ningún modelo del mismo proveedor —cambiar de Opus a
+  // Sonnet no existía— mientras cruzar a Codex sí salía. Ahora el catálogo del
+  // proveedor los ofrece como opción real, sin esperar a pescar el instante
+  // ocioso, y el relevo se pide con ese modelo.
+  await page.evaluate(async () => { const f = await import('/test/capcom-new.fixture.ts' as string); f.forgetModels(); f.busySession(true); });
+  await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
+  await page.locator('[data-fresh-model] button').waitFor();
+  await page.locator('[data-fresh-model] button').click();
+  await page.getByRole('option', { name: /gpt-5\.6-terra/ }).waitFor();
+  assert.equal(await page.getByRole('option', { name: /gpt-5\.6-luna/ }).count(), 0, 'the busy session listed nothing');
+  assert.match(await page.getByRole('option', { name: /gpt-6-astra/ }).innerText(), /current · clears in place/);
+  assert.match(await page.getByRole('option', { name: /gpt-5\.6-terra/ }).innerText(), /clears in place · CLI verifies/);
+  assert.equal(await page.getByRole('option', { name: /gpt-5\.6-terra/ }).getAttribute('aria-disabled'), null, 'offered for real, not as a disabled reference');
+  await page.getByRole('option', { name: /gpt-5\.6-terra/ }).click();
+  // Mismo proveedor: sigue siendo un vaciado en el sitio, sin «prepare» ni aviso de segundo CLI.
+  await page.getByRole('button', { name: 'Clean context', exact: true }).waitFor();
+  assert.equal(await page.locator('[data-fresh-note]').isVisible(), false);
+  await page.getByRole('button', { name: 'Clean context', exact: true }).click();
+  await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
+  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').at(-1)?.model), 'gpt-5.6-terra');
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).busySession(false));
   // Cruzar de proveedor sí prepara una sesión aparte, y eso se sigue por fases.
   await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
   await page.locator('[data-fresh-model] button').click();
@@ -112,5 +138,5 @@ try {
   await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
   assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.deepEqual(errors, []);
-  console.log('Fresh UI passed: visible modes, scope, chosen model, CHANGING status without invented throughput while the relay lasts, in-place clear receipt without a fake plan, cross-provider plan phases, draft, failure/retry, folded receipt, slash commands that keep the provider, desktop/mobile.');
+  console.log('Fresh UI passed: visible modes, scope, chosen model, same-runtime models offered from the provider catalog while the session is busy, CHANGING status without invented throughput while the relay lasts, in-place clear receipt without a fake plan, cross-provider plan phases, draft, failure/retry, folded receipt, slash commands that keep the provider, desktop/mobile.');
 } finally { await browser.close(); await server.close(); }

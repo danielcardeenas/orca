@@ -67,7 +67,7 @@
  *   agent → dead ............. dead
  *   link up / down ........... link / breach
  *   a new artifact ........... artifact
- *   CAPCOM starts on your line  capcom.thinking   within 30 s of something you sent it
+ *   observed CAPCOM activity   capcom.thinking   opt-in, once per recent outgoing line
  *
  * Everything else is a gesture the console made, not a fact the world
  * reported, so its caller rings it: `getSound()?.play('deck.enter')`. The
@@ -83,7 +83,9 @@
  */
 
 import type { AgentState, EscalationStatus } from '../../shared/types.ts';
-import { turnStarted } from '../../shared/capcom.ts';
+import { capcomOf } from '../../shared/capcom.ts';
+import { capcomFeedback } from '../windows/capcom-feedback.ts';
+import { ThinkingSoundGate } from './capcom-thinking-sound.ts';
 import { store } from '../store.ts';
 
 /* ── The taxonomy ───────────────────────────────────────────────────── */
@@ -91,7 +93,7 @@ import { store } from '../store.ts';
 export type FleetSound =
   | 'interrupt' | 'answer' | 'spawn' | 'launch' | 'squad'
   | 'dead' | 'breach' | 'link' | 'artifact' | 'placed'
-  /** CAPCOM took your line: the turn started moments after you sent it. */
+  /** Observed activity near your outgoing line; never proof of receipt or a reply. */
   | 'capcom.thinking';
 
 export type WindowSound =
@@ -379,6 +381,8 @@ export interface SoundHandle {
   /** Drop every override, back to the current pack, plain. */
   resetMap(): void;
 
+  thinkingVolume(): number;
+  setThinkingVolume(v: number): void;
   volume(): number;
   setVolume(v: number): void;
   muted(): boolean;
@@ -394,6 +398,7 @@ const OVER_KEY = 'orca.sfx.map.v2';
 const PRESETS_KEY = 'orca.sfx.presets.v1';
 const PRESET_KEY = 'orca.sfx.preset.v2';
 const VOL_KEY = 'orca.sfx.vol.v1';
+const THINKING_VOL_KEY = 'orca.sfx.capcom-thinking.vol.v1';
 
 const INDEX = '/sfx/packs/index.json';
 const DIR = '/sfx/';
@@ -441,6 +446,16 @@ export function mountSound(): SoundHandle {
 
   let mute = loadMuted();
   let vol = loadVol();
+  const storedThinking = Number(read(THINKING_VOL_KEY));
+  let thinkingVol = Number.isFinite(storedThinking) && storedThinking >= 0 && storedThinking <= 1 ? storedThinking : 0;
+  let thinkingEpoch = 0;
+  let thinkingSource: AudioBufferSourceNode | null = null;
+  let disposed = false;
+  function cancelThinking() {
+    thinkingEpoch++;
+    try { thinkingSource?.stop(); } catch { /* already ended */ }
+    thinkingSource = null;
+  }
   let packId = loadPack();
   let over = loadOver();
   let presetId = loadPresetId();
@@ -457,7 +472,8 @@ export function mountSound(): SoundHandle {
    * was for. It costs nothing while muted and it is ready when unmuted.
    */
   function unlock() {
-    if (ctx) { void ctx.resume(); return; }
+    if (disposed) return;
+    if (ctx) { void ctx.resume().catch(() => {}); return; }
     const AC: typeof AudioContext | undefined =
       window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) return;
@@ -466,7 +482,7 @@ export function mountSound(): SoundHandle {
       master = ctx.createGain();
       master.gain.value = vol;
       master.connect(ctx.destination);
-      void ctx.resume();
+      void ctx.resume().catch(() => {});
     } catch { ctx = null; master = null; }
   }
   window.addEventListener('pointerdown', unlock, { once: true, passive: true });
@@ -549,19 +565,36 @@ export function mountSound(): SoundHandle {
   }
 
   /** One clip, now, at master × a hair. No pitch shifting: it is the take. */
-  function fire(pack: string, clip: string) {
+  function fire(pack: string, clip: string, thinking = false) {
+    const epoch = thinkingEpoch;
+    const requestedAt = performance.now();
     if (!ctx || !master) return;
-    if (ctx.state === 'suspended') void ctx.resume();
+    if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
     void load(pack, clip).then((buf) => {
-      if (!buf || !ctx || !master) return;
+      if (!buf || !ctx || !master || disposed) return;
+      if (thinking && (epoch !== thinkingEpoch || mute || vol === 0 || thinkingVol === 0
+        || document.hidden || ctx.state !== 'running' || !processing()
+        || performance.now() - requestedAt > 1000)) return;
       const src = ctx.createBufferSource();
       src.buffer = buf;
       const g = ctx.createGain();
-      g.gain.value = Math.pow(10, ((Math.random() * 2 - 1) * VARY_DB) / 20);
+      g.gain.value = thinking ? thinkingVol * 0.25 : Math.pow(10, ((Math.random() * 2 - 1) * VARY_DB) / 20);
+      if (thinking) {
+        // Enveloped and capped even if an operator maps a longer clip.
+        const at = ctx.currentTime;
+        g.gain.setValueAtTime(0, at);
+        g.gain.linearRampToValueAtTime(thinkingVol * 0.25, at + 0.012);
+        g.gain.linearRampToValueAtTime(0, at + 0.16);
+        thinkingSource = src;
+      }
       src.connect(g).connect(master);
-      src.start();
-      src.onended = () => { try { src.disconnect(); g.disconnect(); } catch { /* gone */ } };
-    });
+      if (thinking) src.start(0, 0, Math.min(buf.duration, 0.18));
+      else src.start();
+      src.onended = () => {
+        if (thinkingSource === src) thinkingSource = null;
+        try { src.disconnect(); g.disconnect(); } catch { /* gone */ }
+      };
+    }).catch(() => { /* Audio unavailable: never interrupt the console. */ });
   }
 
   /* ── Resolution ─────────────────────────────────────────────────── */
@@ -600,7 +633,8 @@ export function mountSound(): SoundHandle {
   }
 
   function play(name: SoundName | (string & {})) {
-    if (mute) return;
+    if (mute || disposed) return;
+    if (name === 'capcom.thinking' && (thinkingVol === 0 || vol === 0 || document.hidden || !processing())) return;
     if (!ctx || !master) return; // no gesture yet: silence, never a throw
     // A name no group lists is a caller ringing something this build does not
     // have a sound for yet. That is allowed, and it is quiet.
@@ -610,7 +644,7 @@ export function mountSound(): SoundHandle {
     const ref = refOf(n);
     if (!ref) return;
     const s = splitRef(ref, packId);
-    fire(s.pack, s.clip);
+    fire(s.pack, s.clip, n === 'capcom.thinking');
   }
 
   function preview(ref: string) {
@@ -684,11 +718,14 @@ export function mountSound(): SoundHandle {
 
   function setMuted(on: boolean) {
     mute = on;
+    if (on) cancelThinking();
     write(MUTE_KEY, on ? '1' : '0');
     paint();
   }
   function setVolume(v: number) {
+    if (!Number.isFinite(v)) return;
     vol = Math.min(1, Math.max(0, v));
+    if (vol === 0) cancelThinking();
     write(VOL_KEY, String(vol));
     if (master) master.gain.value = vol;
   }
@@ -734,7 +771,28 @@ export function mountSound(): SoundHandle {
    */
   const real = (x: { machineId: string } | undefined | null) => !!x && !store.fromHarness(x);
 
+  const thinkingGate = new ThinkingSoundGate();
+  function processing() {
+    const a = capcomOf(store.world.agents);
+    return !!a && real(a) && !store.booting && store.linkUp && store.authed()
+      && a.modelControl?.phase !== 'applying'
+      && capcomFeedback({ agents: store.world.agents, linkUp: store.linkUp,
+        authed: store.authed(), seenLink: true, thinking: store.world.ceo.thinking }).kind === 'processing'
+      && (a.state === 'thinking' || a.state === 'working' || (a.state === 'blocked' && a.block?.kind === 'peer'));
+  }
+  function observeThinking(baseline: boolean) {
+    const active = processing();
+    if (!active || baseline) cancelThinking();
+    return thinkingGate.observe({ request: store.outgoing.filter(m => m.agentId === null).at(-1) ?? null,
+      processing: active, baseline, now: Date.now() });
+  }
+  observeThinking(true);
+  const visibility = () => { if (document.hidden) cancelThinking(); };
+  document.addEventListener('visibilitychange', visibility);
   const off = store.on((e) => {
+    const relevant = ['world', 'agents', 'ceo', 'link', 'auth'].includes(e.k);
+    const turn = relevant && observeThinking(store.booting || e.k === 'world' || e.k === 'link' || e.k === 'auth');
+    if (turn && e.k !== 'agents') play('capcom.thinking');
     // The boot owns the screen and has its own rhythm; it does not need a
     // chorus for a fleet that is only now arriving.
     if (store.booting) {
@@ -752,11 +810,7 @@ export function mountSound(): SoundHandle {
         if (e.on && store.pending().some(real)) play('interrupt');
         break;
       case 'agents': {
-        let births = 0, death = false, turn = false;
-        // The last thing the console sent CAPCOM, from any of its mouths —
-        // the command line, the composer, ⌥V. Missions included: CAPCOM
-        // answers those too.
-        const sentAt = store.outgoing.filter((m) => m.agentId === null).at(-1)?.at ?? null;
+        let births = 0, death = false;
         for (const id of e.ids) {
           const a = store.world.agents[id];
           if (!a) { seenAgents.delete(id); agentState.delete(id); continue; }
@@ -769,7 +823,6 @@ export function mountSound(): SoundHandle {
           const before = agentState.get(id);
           agentState.set(id, a.state);
           if (before !== 'dead' && a.state === 'dead' && real(a)) death = true;
-          if (a.role === 'capcom' && real(a) && turnStarted(before, a.state, sentAt, Date.now())) turn = true;
         }
         // Death outranks birth: a patch that carries both should not sound
         // cheerful. One beat per patch either way.
@@ -869,12 +922,22 @@ export function mountSound(): SoundHandle {
       write(OVER_KEY, null);
       goCustom();
     },
+    thinkingVolume: () => thinkingVol,
+    setThinkingVolume(v) {
+      if (!Number.isFinite(v)) return;
+      cancelThinking();
+      thinkingVol = Math.min(1, Math.max(0, v));
+      write(THINKING_VOL_KEY, String(thinkingVol));
+    },
     volume: () => vol,
     setVolume,
     muted: () => mute,
     setMuted,
     toggle() { unlock(); setMuted(!mute); return mute; },
     dispose() {
+      disposed = true;
+      cancelThinking();
+      document.removeEventListener('visibilitychange', visibility);
       off();
       el.remove();
       window.removeEventListener('pointerdown', unlock);

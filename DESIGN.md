@@ -400,7 +400,7 @@ pack answers is silence, never a throw: a caller may ring the future.
 | `wipe` / `check` | `wm.ts` — `closeWith()` | the two confirmations, before the sweep starts |
 | `launch` | `command.ts` — `/launch <preset>` | already wired |
 | `placed` | `main.ts` — `placeArtifact()` | after `field.placeNear` |
-| `capcom.thinking` | `sound.ts` — the store's `agents` patch | CAPCOM going live within 30 s of a line the console sent it (`turnStarted` in `shared/capcom.ts`); a turn it starts on its own is silent. The command line shows the same turn (`.cmd__turn`). |
+| `capcom.thinking` | `sound.ts` — observed CAPCOM activity via `capcomOf` / `capcomFeedback` | Opt-in, at most once per recent outgoing message (30 s), ten seconds apart. Activity only: never receipt, delivery or a finished reply. Snapshots and reconnections establish a silent baseline. |
 | `bookmark.save` / `bookmark.go` / `back` | `bookmarks.ts` — `save()` / `go()` / `back()` | rung on the branch that succeeded |
 | `frame` | `main.ts` — the `F` key and the selbar's FRAME | before `field.frameAll()` |
 | `tilt.on` / `tilt.off` | `main.ts` — the `O` key | on the value it sets |
@@ -442,6 +442,15 @@ is the exception: `deck.tick` and `replay.step` may fire six times a second,
 at most eight per slide, and they do not spend the global budget. 250 ms of
 quiet starts a new slide. `prefers-reduced-motion` is about motion, not audio,
 and silences nothing.
+
+CAPCOM activity has its own persisted level (`orca.sfx.capcom-thinking.vol.v1`),
+off at zero by default, also subject to master level and mute. Its existing
+`tick` is capped at 180 ms with a 12 ms attack and fade to zero at 160 ms;
+peak gain is a quarter of the selected relative level. No loop or replay.
+Loss of confirmed activity, ready/error/waiting states, disconnection, hidden
+tab, mute and disposal cancel active or pending cues. Decode older than one
+second is discarded. Audio supplements the existing visual status; reduced
+motion does not substitute for the explicit sound preference.
 
 ### The window
 

@@ -3,8 +3,9 @@
  *
  * Four decks, top to bottom:
  *
- *   1. the instrument — PRESET, PACK, the ten-step master, the mute, and the
- *      two buttons that make a preset out of what you are hearing;
+ *   1. the instrument — PRESET, PACK, the ten-step master, the CAPCOM
+ *      thinking level, the mute, and the two buttons that make a preset out
+ *      of what you are hearing;
  *   2. the events, grouped FLEET / WINDOWS / NAVIGATION / DECK / REPLAY, one
  *      row each: what it means, which clip answers it, and a ▶;
  *   3. the packs, one row each: a sample, the count, and the voice in a line.
@@ -18,6 +19,14 @@
  * speaking. Everything else is `sound.ts`'s state; this window only turns its
  * knobs. RESET drops the overrides and leaves the pack alone.
  *
+ * The THINK row is the one level that is off by default: a soft tick when
+ * CAPCOM is observed starting to process, at a fraction of the master. It
+ * says that CAPCOM is busy and nothing more — never that a line arrived, never
+ * that an answer is coming — and the copy under the row says exactly that, so
+ * the operator who turns it on knows what they are turning on. There is no ▶
+ * for it: `preview` plays a clip at master level, and a level the operator
+ * sets for the tick should not audition louder than the tick will ever be.
+ *
  * Wiring (main.ts — not this file's to change):
  *
  *   import { mountSfx } from './windows/kinds/sfx.ts';
@@ -30,7 +39,7 @@
 
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
-import { pick, toggle, type PickHandle, type PickOption, type ToggleHandle } from '../../controls.ts';
+import { level, pick, toggle, type LevelHandle, type PickHandle, type PickOption, type ToggleHandle } from '../../controls.ts';
 import {
   getSound, CLIP_OF, SOUND_GROUPS,
   type PackClip, type PackInfo, type SoundName,
@@ -49,7 +58,7 @@ const WHAT: Record<SoundName, string> = {
   link: 'THE LINK CAME BACK',
   artifact: 'AN ARTIFACT ARRIVED',
   placed: 'AN ARTIFACT WENT ON THE FIELD',
-  'capcom.thinking': 'CAPCOM TOOK YOUR LINE',
+  'capcom.thinking': 'OBSERVED CAPCOM ACTIVITY',
 
   'open.agent': 'AN AGENT WINDOW',
   'open.interrupt': 'A QUESTION OPENED ITSELF',
@@ -96,6 +105,22 @@ const WHAT: Record<SoundName, string> = {
 /** How many steps the master has. Ten is a level, not a curve. */
 const VOL_STEPS = 10;
 
+/**
+ * What the THINK row says under itself. Activity, and only activity: the
+ * tick fires when CAPCOM is observed starting to process, and says nothing
+ * about a line being received or an answer being on its way — those have
+ * their own signals.
+ */
+const THINK_WHAT = 'A SOFT TICK WHEN CAPCOM STARTS PROCESSING. ACTIVITY ONLY; NO REPLY CONFIRMED.';
+
+/** `0` → OFF, `0.3` → 30 %. The word, not `0%`: off is the default, not a low setting. */
+const thinkText = (v: number) => (v === 0 ? 'OFF' : `${Math.round(v * 100)}%`);
+/**
+ * What the screen reader says for the same value. An activity level, not a
+ * gain: `sound.ts` keeps a ceiling of its own under the master on top of it.
+ */
+const thinkSpoken = (v: number) => (v === 0 ? 'silent' : `${Math.round(v * 100)} percent activity level`);
+
 /** `0.6` → `0.60 s`. A clip's only fact that its name does not carry. */
 const secs = (n: number) => `${n.toFixed(2)} s`;
 
@@ -115,6 +140,8 @@ export function mountSfx(ctx: WinCtx, c: Console) {
         <label class="sfx__lab px px--tiny">PRESET</label><div data-c="preset"></div>
         <label class="sfx__lab px px--tiny">PACK</label><div data-c="pack"></div>
         <label class="sfx__lab px px--tiny">LEVEL</label><div class="sfx__vol" data-c="vol"></div>
+        <label class="sfx__lab px px--tiny">THINK</label><div data-c="think"></div>
+        <p class="px px--tiny sfx__what" id="sfx-think-what" style="grid-column:2;margin-top:-2px">${esc(THINK_WHAT)}</p>
       </div>
       <div class="row row--split sfx__acts">
         <div data-c="mute"></div>
@@ -225,6 +252,28 @@ export function mountSfx(ctx: WinCtx, c: Console) {
     else if (e.key === 'End') { e.preventDefault(); setStep(VOL_STEPS); }
   });
   paintVol();
+
+  /* ── The CAPCOM thinking level, off until the operator says so ──── */
+
+  const think: LevelHandle = level({
+    value: snd.thinkingVolume(),
+    label: 'CAPCOM thinking level',
+    format: thinkText,
+    onChange: (v) => { snd!.setThinkingVolume(v); speakThink(); },
+  });
+  const thinkBar = think.el.querySelector<HTMLElement>('[role="slider"]')!;
+  // THINK is what fits the deck's label column; the name says whose thinking.
+  thinkBar.setAttribute('aria-describedby', 'sfx-think-what');
+  /** `aria-valuenow` is a step; the word beside it is what the level means. */
+  function speakThink() { thinkBar.setAttribute('aria-valuetext', thinkSpoken(think.get())); }
+  speakThink();
+  slot('think').appendChild(think.el);
+
+  // Like the mute: somebody else may have moved it, and this row must agree.
+  const syncThink = window.setInterval(() => {
+    const v = snd!.thinkingVolume();
+    if (think.get() !== v) { think.set(v); speakThink(); }
+  }, 400);
 
   /* ── PRESET and PACK ────────────────────────────────────────────── */
 
@@ -446,6 +495,7 @@ export function mountSfx(ctx: WinCtx, c: Console) {
     dispose() {
       gone = true;
       clearInterval(sync);
+      clearInterval(syncThink);
       presetPick?.dispose();
       packPick?.dispose();
       for (const h of perPack) h.dispose();

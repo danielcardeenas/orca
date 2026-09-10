@@ -11,8 +11,8 @@ import { uploadRecoveryImage } from './recovery-images.ts';
 import { uploadFile } from './uploads.ts';
 import { transcribeHandler, vocabulary, whisperConfig } from './transcribe.ts';
 import { FILE_ROOTS_FILE, FileRoots } from './file-roots.ts';
-import { MISSION_ID, leadPrompt, missionLeadOf, missionPrompt, type CapcomMission } from '../shared/missions.ts';
-import { implementerBrief, implementerSquad, proposalHandoff, proposalMissionTitle } from '../shared/improve.ts';
+import { leadPrompt, missionLeadOf, missionPrompt, type CapcomMission } from '../shared/missions.ts';
+import { dispatchForge } from './forge.ts';
 import { normalizeGestures } from '../shared/gestures.ts';
 import { buildDebrief } from '../shared/debrief.ts';
 /**
@@ -1992,43 +1992,12 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
    * de crear nada: si no, un segundo clic dejaría una misión huérfana.
    */
   async function improveSend(proposalId: string, missionId: string): Promise<{ missionId: string; delivery: 'launched' | 'saved'; callsign?: string; detail?: string }> {
-    const improve = autonomy.improve.store;
-    const p = improve.get(proposalId);
-    if (p.missionId) throw new Error(`Already sent as ${p.missionId}`);
-    if (!MISSION_ID.test(missionId)) throw new Error('Invalid mission id');
-
-    /*
-     * La misión primero, el agente después. Hasta el 2026-09-09 esto le
-     * mandaba la propuesta a CAPCOM, y CAPCOM la implementaba él o lanzaba a
-     * alguien: un turno largo del mando por cada automejora, mezclado con las
-     * misiones de los demás proyectos. Ahora ORCA lanza un agente propio sobre
-     * su repositorio como LÍDER de la misión; hace el trabajo, lo verifica y
-     * su último mensaje cae en la misión, y sólo entonces CAPCOM recibe un
-     * turno —corto— para publicarlo. El mando recibe resultados, no trabajo.
-     */
-    missions.create(missionId, proposalMissionTitle(p));
-    missions.message(missionId, 'human', proposalHandoff(p), 'active');
-    improve.act(proposalId, { act: 'sent', missionId });
-
-    const squad = implementerSquad(p);
-    const out = await autonomy.improve.implement({ brief: implementerBrief(p, missionId), squad, mission: proposalMissionTitle(p) });
-    if (!out.ok) {
-      // La misión queda escrita pase lo que pase: es el enlace, y lo que hace
-      // que el trabajo se pueda retomar —a mano, o por CAPCOM cuando el
-      // operador le escriba en la misión, que sin líder va a él.
-      missions.message(missionId, 'system', `Could not launch the implementer: ${out.reason}`);
-      return { missionId, delivery: 'saved', detail: out.reason };
-    }
-    // El squad ata la misión al agente aunque el ack no traiga su id de
-    // sesión todavía: `observe` lo asigna en cuanto aparece con esa etiqueta.
-    missions.bindSquad(missionId, squad);
-    if (out.agentId) missions.assign(missionId, [out.agentId]);
-    world.pushFeed('', [{
+    const out = await dispatchForge({ improve: autonomy.improve, missions }, proposalId, missionId);
+    if (out.delivery === 'launched') world.pushFeed('', [{
       id: newId('f_improve'), at: Date.now(), level: 'info', source: 'AUTOMEJORA',
-      ...(out.agentId ? { agentId: out.agentId } : {}),
-      text: `${out.callsign ?? 'an agent'} is implementing "${p.title}" on ${out.project.code} as mission ${missionId}`,
+      text: `FORGE · ${out.callsign ?? 'a mission lead'} coordinates ${missionId}; CAPCOM retains final review and publication`,
     }]);
-    return { missionId, delivery: 'launched', ...(out.callsign ? { callsign: out.callsign } : {}) };
+    return out;
   }
 
   /**

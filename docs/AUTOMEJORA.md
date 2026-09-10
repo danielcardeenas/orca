@@ -83,13 +83,17 @@ la **misión** (ver [Lo que la misión le devuelve](#lo-que-la-misión-le-devuel
   misión** sobre el repositorio de ORCA (`ImproveApi.implement`, con el brief
   de `implementerBrief`: qué implementar, cómo se verifica aquí —`npm run
   typecheck`, `npm test -- --changed`— y que su último mensaje es el informe).
-  **CAPCOM no trabaja en ella**: no implementa, no prueba, no lanza a nadie.
-  Recibe un turno cuando el líder termina, y sólo para `report_mission` y
-  ofrecer `land`. Antes la propuesta se le mandaba a CAPCOM como una misión
-  más, y cada automejora era un turno largo del mando mezclado con las misiones
-  de los demás proyectos. **Un segundo envío se niega en el hub**, no en el
-  botón: hay dos caminos hasta ahí y una regla escrita dos veces acaba
-  discrepando. Un id de misión inválido se rechaza *antes* de escribir nada.
+  El líder es **FORGE**, coordinador especializado por propuesta aprobada:
+  asigna, sigue, resuelve bloqueos operativos, verifica y consolida. **CAPCOM
+  conserva control final, decisiones de seguridad, cierre y publicación**.
+  FORGE usa los contratos existentes de misión y squad, sin estados propios.
+  Su aprobación queda como evento de sistema, no como pregunta pendiente a
+  CAPCOM. El squad se vincula antes del spawn. Se rechazan envíos repetidos,
+  ids inválidos o ya ocupados y propuestas descartadas o aún pospuestas.
+  Líder e hijos usan permisos `auto` para trabajo rutinario y escalan acciones
+  elevadas o ambiguas a CAPCOM; terminar un squad `forge-…` no dispara
+  el publicador automático. El detalle del flujo y sus límites está en
+  [FORGE](FORGE.md).
   Si el agente no se puede lanzar —el repo de ORCA no es un proyecto de la
   flota, o no hay máquina— la misión queda escrita con una línea de ORCA que
   dice por qué, y la consola lo avisa; escribirle a esa misión va a CAPCOM,
@@ -451,3 +455,5 @@ acciones, que una enviada enseñe su misión y no un SEND, que una terminada
 diga DONE y conserve la marca de misión mientras la archivada no está ni
 detrás del pliegue, la geometría contra mástil, reloj, panel de misiones y
 radar, y el pliegue. Se corre solo: `npx tsx test/hud-improve.shots.ts`.
+
+Filtros de cobertura de FORGE: `forge`, `improve`, `missions`, `mission-stall`, `wake`, `spawns`, `publisher`.

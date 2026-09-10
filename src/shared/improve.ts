@@ -62,6 +62,7 @@
  * guarda.
  */
 
+import { FORGE_EXECUTION_POLICY, FORGE_SQUAD_PREFIX } from './forge.ts';
 import type { CapcomMission } from './missions.ts';
 
 /* ── vocabulario ──────────────────────────────────────────────────── */
@@ -1125,7 +1126,7 @@ export function proposalMissionTitle(p: ImproveProposal): string {
  * sesión. Válido para `squadName`: letras, dígitos y guiones.
  */
 export function implementerSquad(p: ImproveProposal): string {
-  return `auto-${p.id.replace(/[^A-Za-z0-9]/g, '').slice(-12).toLowerCase()}`;
+  return `${FORGE_SQUAD_PREFIX}${p.id.replace(/[^A-Za-z0-9]/g, '').slice(-12).toLowerCase()}`;
 }
 
 /**
@@ -1144,7 +1145,8 @@ export function implementerBrief(p: ImproveProposal, missionId: string): string 
   return [
     `[ORCA MISSION ${missionId}] ${proposalMissionTitle(p)}`,
     '',
-    'You lead this mission on ORCA\'s own repository. Implement the proposal below end to end:',
+    'You are FORGE, the specialized self-improvement coordinator and lead of this mission on ORCA\'s own repository.',
+    'Coordinate the approved scope end to end; CAPCOM retains final control, safety decisions and publication:',
     'read the code it points at, make the change, and verify it before you call it done.',
     '',
     proposalHandoff(p),
@@ -1152,7 +1154,25 @@ export function implementerBrief(p: ImproveProposal, missionId: string): string 
     'How to verify here: `npm run typecheck` and `npm test -- --changed`. If the change is visual, `npm run visual`.',
     'A "sin suite que los cubra" warning means nothing tests what you touched: write the test, or say so in your report.',
     '',
-    'Commit on your branch when it passes. Your deliverable is the commit and a final report in your last message:',
+    'Operational workflow:',
+    '1. Proposal and approval: the console gesture approved only the proposal below. Do not approve new scope yourself.',
+    '2. Assignment: inspect architecture and AGENTS.md; define acceptance criteria, file ownership and dependencies.',
+    '   Delegate bounded tasks only when useful. Give every member these same safety and verification constraints.',
+    '3. Follow-up: use the existing squad mailbox and mission crew; read member reports before deciding.',
+    '   Reuse mission IDs, agent states, dispatch receipts and recovery incidents; do not maintain a parallel status ledger.',
+    '4. Blockers: resolve technical questions inside the squad. Inspect exact quota incidents before a bounded recovery;',
+    '   never blindly retry an exhausted option. Resolve routine execution locally; escalate elevated or ambiguous actions to CAPCOM.',
+    '5. Verification: inspect and consolidate the actual diffs, including work left by members without a report.',
+    '   Run the required checks on the consolidated tree. A spawn receipt, a member saying done, or an idle agent is not proof.',
+    '6. Report: include proposal and mission IDs, decisions, files, exact checks and results, uncovered code, risks and limits.',
+    '',
+    'Safety: verify you are on an isolated branch/worktree before editing; if absent, create an isolated worktree first.',
+    'Never test against real sessions, live hub state or production data. Use temporary stores and synthetic agents.',
+    'Do not bypass native permission prompts, approve human decisions, publish, deploy, merge, reload services or run destructive actions.',
+    FORGE_EXECUTION_POLICY,
+    'If scope or authority is insufficient, return a precise blocker to CAPCOM; do not widen approval yourself.',
+    '',
+    'Commit only your authorized files on your isolated branch when checks pass. Your final message is the consolidated report:',
     'what changed (files), what you ran and what it said, what is left. ORCA carries that last message into the',
     'mission conversation; CAPCOM publishes it and offers to land your branch. Do not message CAPCOM yourself,',
     'do not ask the operator unless nothing else can decide it, and do not report "done" without the verification output.',

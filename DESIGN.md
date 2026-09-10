@@ -257,8 +257,10 @@ back to the work.
 
 **It proposes; the operator decides.** The reviewer has no edit tools —
 removed at launch, not asked for in prose — so the only thing that turns a
-proposal into work is `SEND TO CAPCOM`, which opens an ordinary mission with
-the proposal inside and links the two. A proposal that is already a mission
+proposal into work is `IMPLEMENT`, which opens an ordinary mission with
+the proposal inside and links the two. FORGE leads that mission using the
+existing crew, conversation and blocker views; CAPCOM retains final review,
+closure and publication. A proposal that is already a mission
 cannot become a second one. `⌥I` and `/improve` bring the section forward; on a
 phone the section bar does (`docs/MISSIONS.md`). See `docs/AUTOMEJORA.md`.
 

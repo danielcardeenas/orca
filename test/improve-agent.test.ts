@@ -251,6 +251,30 @@ async function launch(r: Rig, n = 1): Promise<Agent> {
 /* ── pruebas ──────────────────────────────────────────────────────── */
 
 const tests = [
+  test('FORGE: approval launches an auto mission lead and only its report reaches CAPCOM', () => withRig(async (r) => {
+    const id = r.hub.autonomy.improve.store.file('review_fixture', [DRAFT]).proposals[0]!.id;
+    const asked = r.console.ask({ t: 'improve:send', proposalId: id, missionId: 'mission_forge_wire' });
+    await until(() => spawns(r).length === 1, 5_000, 'FORGE spawn');
+    const spawn = spawns(r)[0]!;
+    const squad = String(spawn.cmd['squad']);
+    const beforeAck = r.hub.missions.get('mission_forge_wire');
+    const agent = r.machine.accept(spawn.id, { id: 'forge_fixture', callsign: 'F1', squad, lead: true });
+    const ack = await asked;
+    r.machine.patch(agent.id, { state: 'done', lastSay: 'Verified fixture; CAPCOM review pending.' });
+    await until(() => r.hub.missions.get('mission_forge_wire').messages.some((m) => m.role === 'agent'), 5_000, 'FORGE report');
+    const mission = r.hub.missions.get('mission_forge_wire');
+    return ok('existing mission, routine auto permissions, consolidated report and no automatic closure',
+      ack.ok && squad.startsWith('forge-') && beforeAck.squads?.includes(squad) === true
+      && spawn.cmd['permissionMode'] === 'auto' && spawn.cmd['parentId'] === null
+      && spawn.cmd['lead'] === true && spawn.cmd['review'] !== true
+      && String(spawn.cmd['prompt']).includes('You are FORGE')
+      && String(spawn.cmd['prompt']).includes('Before elevated or ambiguous actions')
+      && String(spawn.cmd['prompt']).includes('Execution permission does not grant publication permission')
+      && String(spawn.cmd['prompt']).includes('Never test against real sessions')
+      && mission.agentIds.includes(agent.id) && mission.status === 'active'
+      && mission.messages.some((m) => m.role === 'agent' && m.text.includes('CAPCOM review pending')));
+  })),
+
   test('launch: the console asks, a real spawn crosses the wire, the agent is the review', () => withRig(async (r) => {
     const agent = await launch(r);
     const spawn = r.machine.spawn()!;

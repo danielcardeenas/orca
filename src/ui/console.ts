@@ -31,7 +31,12 @@ export interface Console {
    * or `~/…`; `line`/`col` scroll a text file there. One window per path
    * unless `fresh`, which is what ⌘click asks for.
    */
-  openFile(file: { path: string; line?: number | null; col?: number | null; agentId?: string | null }, opts?: { fresh?: boolean; at?: At }): void;
+  openFile(file: { path: string; line?: number | null; col?: number | null; agentId?: string | null; project?: string | null }, opts?: { fresh?: boolean; at?: At }): void;
+  /**
+   * The project's folder on disk, browsed with vim keys (kinds/files.ts).
+   * Read-only; one window per project. From the project's context menu.
+   */
+  openFiles(projectId: string, at?: At): void;
   openProject(projectId: string, at?: At): void;
   openMachine(machineId: string, at?: At): void;
   openGroup(agentIds: string[], at?: At): void;

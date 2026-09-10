@@ -44,10 +44,10 @@
  * vídeo y audio. Sólo un rango, sin listas: es lo que piden los navegadores.
  */
 
-import { createReadStream, lstatSync, realpathSync, statSync } from 'node:fs';
+import { createReadStream, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
-import { basename, extname, isAbsolute, resolve, sep } from 'node:path';
+import { basename, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { MAX_ARTIFACT_BYTES } from '../shared/protocol.ts';
 
 /* ── Tipos de contenido ───────────────────────────────────────────── */
@@ -163,14 +163,18 @@ function within(real: string, root: string): boolean {
   return real === root || real.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
+type Contained =
+  | { ok: true; real: string; realRoots: string[] }
+  | { ok: false; status: 400 | 403 | 404; reason: string };
+
 /**
- * Decide si `requested` se puede servir bajo `roots`.
+ * La contención, común a servir un archivo y a listar una carpeta.
  *
- * La contención va en dos pasos porque un archivo inexistente no tiene
- * realpath: primero la ruta léxica (normalizada, sin `..`) contra las raíces
- * léxicas, para poder decir 404 a "está dentro pero no existe"; después la
- * real contra las reales, que es la que manda. Las raíces léxicas incluyen
- * sus formas canónicas y los aliases macOS comprobados en disco. Un `..` que se sale del
+ * Va en dos pasos porque un archivo inexistente no tiene realpath: primero la
+ * ruta léxica (normalizada, sin `..`) contra las raíces léxicas, para poder
+ * decir 404 a "está dentro pero no existe"; después la real contra las
+ * reales, que es la que manda. Las raíces léxicas incluyen sus formas
+ * canónicas y los aliases macOS comprobados en disco. Un `..` que se sale del
  * proyecto o un symlink que apunta fuera terminan aquí los dos con 403.
  *
  * `~/` se expande a la home del hub: la consola no sabe dónde vive cada
@@ -178,14 +182,7 @@ function within(real: string, root: string): boolean {
  * mismo. Expandir no abre nada: la ruta expandida sigue teniendo que caer
  * bajo una raíz.
  */
-export function resolveServedPath(
-  requested: string,
-  roots: Iterable<string>,
-  opts: { home?: string; maxBytes?: number } = {},
-): Resolution {
-  const home = opts.home ?? homedir();
-  const max = opts.maxBytes ?? MAX_ARTIFACT_BYTES;
-
+function containPath(requested: string, roots: Iterable<string>, home: string): Contained {
   let raw = requested.trim();
   if (!raw) return { ok: false, status: 400, reason: 'falta path' };
   if (raw.includes('\0')) return { ok: false, status: 400, reason: 'path con NUL' };
@@ -224,6 +221,22 @@ export function resolveServedPath(
   if (privatePath(real) || !realRoots.some((r) => within(real, r))) {
     return { ok: false, status: 403, reason: 'la ruta apunta fuera de las raíces (symlink)' };
   }
+  return { ok: true, real, realRoots };
+}
+
+/** Decide si `requested` se puede servir como archivo bajo `roots`. Ver `containPath`. */
+export function resolveServedPath(
+  requested: string,
+  roots: Iterable<string>,
+  opts: { home?: string; maxBytes?: number } = {},
+): Resolution {
+  const home = opts.home ?? homedir();
+  const max = opts.maxBytes ?? MAX_ARTIFACT_BYTES;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+
+  const c = containPath(requested, roots, home);
+  if (!c.ok) return c;
+  const real = c.real;
 
   let st: ReturnType<typeof statSync>;
   try { st = statSync(real); } catch { return { ok: false, status: 404, reason: 'no existe' }; }
@@ -232,6 +245,89 @@ export function resolveServedPath(
   if (st.size > max) return { ok: false, status: 413, reason: `pesa ${st.size}B, por encima del límite de ${max}B` };
 
   return { ok: true, path: real, size: st.size, mime: fileMime(real) };
+}
+
+/* ── Carpetas ─────────────────────────────────────────────────────── */
+
+/**
+ * Una fila del listado de `/api/dir`. `other` es lo que el navegador enseña
+ * pero no abre: un symlink que apunta fuera de las raíces, un fifo, un
+ * socket, algo de otro usuario. Se lista para que el operador vea que está
+ * ahí; abrirlo lo rechazaría `resolveServedPath` igualmente.
+ */
+export interface DirEntry {
+  name: string;
+  kind: 'dir' | 'file' | 'other';
+  size: number | null;
+  mtime: number | null;
+}
+
+export type DirResolution =
+  | { ok: true; path: string; entries: DirEntry[]; truncated: boolean }
+  | { ok: false; status: 400 | 403 | 404; reason: string };
+
+/** Más filas que esto no se leen de una: es un navegador, no un índice. */
+export const MAX_DIR_ENTRIES = 2000;
+
+/** Carpetas primero, y dentro de cada grupo por nombre, sin distinguir mayúsculas. */
+function byKindThenName(a: DirEntry, b: DirEntry): number {
+  const ka = a.kind === 'dir' ? 0 : 1;
+  const kb = b.kind === 'dir' ? 0 : 1;
+  if (ka !== kb) return ka - kb;
+  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * Lista una carpeta que cae bajo `roots`: la misma contención que un archivo
+ * (`containPath`), y después cada entrada pasa por lo mismo que pasaría al
+ * pedirla: lo que `privatePath` excluye no aparece (`.git`, `.env`, claves),
+ * y un symlink se mira por lo que apunta —fuera de las raíces es `other`.
+ */
+export function resolveServedDir(
+  requested: string,
+  roots: Iterable<string>,
+  opts: { home?: string; max?: number } = {},
+): DirResolution {
+  const home = opts.home ?? homedir();
+  const max = opts.max ?? MAX_DIR_ENTRIES;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+
+  const c = containPath(requested, roots, home);
+  if (!c.ok) return c;
+  const real = c.real;
+
+  let st: ReturnType<typeof statSync>;
+  try { st = statSync(real); } catch { return { ok: false, status: 404, reason: 'no existe' }; }
+  if (!st.isDirectory()) return { ok: false, status: 404, reason: 'no es una carpeta' };
+  if (uid !== null && st.uid !== uid) return { ok: false, status: 403, reason: 'carpeta de otro usuario' };
+
+  let names: import('node:fs').Dirent[];
+  try { names = readdirSync(real, { withFileTypes: true }); } catch { return { ok: false, status: 403, reason: 'no se puede leer' }; }
+
+  const entries: DirEntry[] = [];
+  for (const d of names) {
+    const full = join(real, d.name);
+    if (privatePath(full)) continue;
+    let kind: DirEntry['kind'] = 'other';
+    let size: number | null = null;
+    let mtime: number | null = null;
+    try {
+      let target = full;
+      if (d.isSymbolicLink()) {
+        target = realpathSync(full);
+        if (privatePath(target) || !c.realRoots.some((r) => within(target, r))) { entries.push({ name: d.name, kind: 'other', size: null, mtime: null }); continue; }
+      }
+      const ts = statSync(target);
+      if (uid !== null && ts.uid !== uid) kind = 'other';
+      else if (ts.isDirectory()) kind = 'dir';
+      else if (ts.isFile()) { kind = 'file'; size = ts.size; }
+      mtime = ts.mtimeMs;
+    } catch { /* symlink roto o inaccesible: other */ }
+    entries.push({ name: d.name, kind, size, mtime });
+  }
+  entries.sort(byKindThenName);
+  const truncated = entries.length > max;
+  return { ok: true, path: real, entries: truncated ? entries.slice(0, max) : entries, truncated };
 }
 
 /* ── Cabeceras y servido ──────────────────────────────────────────── */

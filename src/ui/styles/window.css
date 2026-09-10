@@ -1779,3 +1779,33 @@ kbd.key.is-echo { color: var(--lime); }
    scrolls or focuses under a hand that is only trying to move a stamp. */
 .win.is-far .win__body { pointer-events: none; user-select: none; }
 .win__btn[hidden] { display: none; }
+
+/* ── files: a project browsed with vim keys (kinds/files.ts) ─────────── */
+.fb-workspace { display: flex; flex-direction: column; }
+.fb__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); min-width: 0; }
+.fb__bar .row { flex: none; gap: 6px; align-items: center; }
+.fb__bar .btn { height: 26px; padding: 0 8px; }
+.fb__bar .btn.is-dim { opacity: 0.45; }
+.fb__path { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; min-width: 0; }
+.fb__path b { font-weight: 400; color: var(--ink); }
+.fb__rel { color: var(--ink-mid); }
+.fb__find { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-bottom: 1px solid var(--line-soft); background: var(--screen-in); }
+.fb__slash { color: var(--lime); font-size: 12px; }
+.fb__input { flex: 1; min-width: 0; height: 22px; font-size: 12px; color: var(--ink); background: transparent; border: 0; outline: 0; }
+.fb__input::placeholder { color: var(--ink-dimmer); }
+.fb__list { flex: 1; min-height: 0; overflow: auto; background: var(--screen); font-size: 12px; line-height: 20px; padding: 4px 0; outline: 0; }
+.fb__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 12px; cursor: default; user-select: none; border-left: 2px solid transparent; }
+.fb__row .fb__name { color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.fb__row.is-dir .fb__name { color: var(--ink); }
+.fb__row.is-other .fb__name { color: var(--ink-dimmer); text-decoration: line-through; }
+.fb__row .fb__side { flex: none; font-size: 10px; letter-spacing: 0.08em; color: var(--ink-dimmer); }
+.fb__row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.fb__row.is-cur { border-left-color: var(--lime); background: color-mix(in srgb, var(--lime) 10%, transparent); }
+.fb__row.is-cur .fb__name { color: var(--lime); }
+.fb__row.is-cur .fb__side { color: var(--ink-dim); }
+.fb__row.is-hit { animation: fb-hit 0.32s ease-out; }
+@keyframes fb-hit { from { background: color-mix(in srgb, var(--lime) 35%, transparent); } }
+.fb__msg { padding: 14px 12px; color: var(--ink-dim); }
+.fb__msg.is-warn { color: var(--amber); }
+.fb__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 5px 10px; border-top: 1px solid var(--line-soft); color: var(--ink-dimmer); }
+.fb__foot kbd { font-family: var(--font-mono, monospace); font-size: 10px; letter-spacing: 0; color: var(--ink-dim); background: color-mix(in srgb, var(--ink) 8%, transparent); border-radius: 2px; padding: 0 4px; margin-right: 2px; }

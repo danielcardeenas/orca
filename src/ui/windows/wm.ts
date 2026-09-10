@@ -1545,7 +1545,7 @@ function normKey(spec: string): string {
  * arrives as `ç` — and ⇧ ruins on the digit row. So a base that is not a plain
  * ASCII letter or digit is read off `e.code` instead, which is physical.
  */
-function keyToken(e: KeyboardEvent): string {
+export function keyToken(e: KeyboardEvent): string {
   const k = e.key.toLowerCase();
   if (DEAD_KEYS.has(k)) return '';
   let base: string;
@@ -1677,6 +1677,9 @@ function defaultSize(kind: WinKind): { w: number; h: number } {
     case 'music': return { w: 420, h: 560 };
     case 'terminal': return { w: 760, h: 480 };
     case 'file': return { w: 680, h: 540 };
+    // Una columna de nombres: estrecha, y alta para que quepa una carpeta de
+    // un repo sin desplazar a la tercera fila.
+    case 'files': return { w: 460, h: 560 };
     // Tall and narrow: it is a column of rows read top to bottom, one machine
     // after another, and every row is a label and a number.
     case 'hygiene': return { w: 460, h: 620 };

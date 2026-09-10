@@ -165,6 +165,8 @@ function projectMenu(d: CtxDeps, id: string, at: At) {
   const live = agents.filter(alive);
   const items: MenuItem[] = [
     { label: 'OPEN PROJECT', key: 'o', run: () => c.openProject(id, at) },
+    // The folder on disk, read-only, with vim keys (kinds/files.ts).
+    { label: 'BROWSE FILES', hint: 'VIM KEYS', key: 'b', run: () => c.openFiles(id, at) },
     { label: 'FRAME', key: 'f', run: () => { c.pushView(); c.field.frameProject(id); } },
     { label: 'SELECT ALL HERE', hint: String(agents.length), key: 'm', off: !agents.length, run: () => c.field.select(agents.map((a) => a.id)) },
     { sep: true },

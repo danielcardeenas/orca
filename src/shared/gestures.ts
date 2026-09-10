@@ -53,7 +53,7 @@ export const MAX_GESTURE_N = 1_000;
  */
 export const WIN_KINDS = [
   'agent', 'interrupt', 'queue', 'ceo', 'feed', 'fleet', 'spawn', 'artifact', 'breach', 'help', 'settings',
-  'gallery', 'launch', 'timeline', 'sfx', 'music', 'terminal', 'file', 'hygiene', 'mission',
+  'gallery', 'launch', 'timeline', 'sfx', 'music', 'terminal', 'file', 'files', 'hygiene', 'mission',
 ] as const;
 
 const DETAIL = /^[a-z0-9][a-z0-9_.-]{0,39}$/;

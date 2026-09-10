@@ -41,8 +41,8 @@ function bytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** What the hub said when it refused, as a line the operator can act on. */
-function refusal(status: number, body: string): string {
+/** What the hub said when it refused, as a line the operator can act on. Shared with the browser (files.ts). */
+export function refusal(status: number, body: string): string {
   switch (status) {
     case 401: return 'NOT AUTHORISED · the console has no token for this hub';
     case 403: return 'OUTSIDE THE PROJECT ROOTS · the hub serves known projects, the agents\' scratchpad and folders you allow';

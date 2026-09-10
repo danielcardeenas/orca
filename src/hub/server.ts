@@ -78,7 +78,7 @@ import { parseHandoff, handoffText, HANDOFF_NOTICE_PREFIX } from '../shared/hand
 import { BudgetBook, budgetConfig, type BudgetEvent } from './budgets.ts';
 import type { CapcomTimer } from './capcom.ts';
 import { serveMcp } from './mcp.ts';
-import { envRoots, resolveServedPath, scratchpadRoots, streamFile } from './files.ts';
+import { envRoots, resolveServedDir, resolveServedPath, scratchpadRoots, streamFile } from './files.ts';
 import type { McpHttpDeps } from './mcp.ts';
 import { hubContext } from '../agents/context.ts';
 import { AgentLifecycle } from './lifecycle.ts';
@@ -2543,15 +2543,8 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
    * Las raíces se recalculan por petición a propósito: un proyecto que acaba
    * de aparecer en el mundo es servible en cuanto aparece, sin reiniciar.
    */
-  function serveFile(url: URL, req: IncomingMessage, res: ServerResponse): void {
-    const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
-    if (!allowed.ok) {
-      text(res, 401, `no autorizado (${allowed.reason ?? 'falta token'}). `
-        + 'Añade ?token=<ORCA_TOKEN> a la url, igual que hace el websocket.');
-      return;
-    }
-    const requested = url.searchParams.get('path') ?? '';
-    const roots = [
+  function servedRoots(): string[] {
+    return [
       join(ORCA_DIR, 'recovery-images'),
       join(ORCA_DIR, 'uploads'),
       ...approvedRoots.list(),
@@ -2562,9 +2555,36 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       ...envRoots(),
       ...fileRoots,
     ];
-    const r = resolveServedPath(requested, roots);
+  }
+
+  /** La misma puerta para `/api/file` y `/api/dir`: el token, o nada. */
+  function fileGate(req: IncomingMessage, res: ServerResponse): boolean {
+    const allowed = auth.check(tokenFromRequest(req), remoteOf(req));
+    if (allowed.ok) return true;
+    text(res, 401, `no autorizado (${allowed.reason ?? 'falta token'}). `
+      + 'Añade ?token=<ORCA_TOKEN> a la url, igual que hace el websocket.');
+    return false;
+  }
+
+  function serveFile(url: URL, req: IncomingMessage, res: ServerResponse): void {
+    if (!fileGate(req, res)) return;
+    const r = resolveServedPath(url.searchParams.get('path') ?? '', servedRoots());
     if (!r.ok) { text(res, r.status, r.reason); return; }
     streamFile(req, res, r);
+  }
+
+  /**
+   * Una carpeta de un proyecto, para el navegador de archivos de la consola
+   * (kinds/files.ts). `GET /api/dir?path=/abs/carpeta[&token=…]` devuelve sus
+   * entradas ordenadas, carpetas primero. Las mismas raíces y la misma
+   * contención que `/api/file`: lo que no se serviría no se lista, y una
+   * carpeta fuera de las raíces es 403 aunque exista.
+   */
+  function serveDir(url: URL, req: IncomingMessage, res: ServerResponse): void {
+    if (!fileGate(req, res)) return;
+    const r = resolveServedDir(url.searchParams.get('path') ?? '', servedRoots());
+    if (!r.ok) { text(res, r.status, r.reason); return; }
+    json(res, 200, { ok: true, path: r.path, entries: r.entries, truncated: r.truncated });
   }
 
   /**
@@ -2795,6 +2815,10 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           serveFile(url, req, res);
           return;
         }
+        case '/api/dir': {
+          serveDir(url, req, res);
+          return;
+        }
         case '/api/memory': {
           // Útil para ver por qué el CEO decidió no preguntar.
           if (!allowApi(req, res)) return;
@@ -2820,7 +2844,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
             ok: false, error: 'no such route',
             routes: [
               '/api/health', '/api/world', '/api/traffic?project=&kind=&limit=',
-              '/api/memory?q=', '/api/artifact/<id>', '/api/file?path=', 'POST /api/uploads', '/api/transcribe (GET status, POST audio/wav?lang=)', 'POST /mcp (fleet command, MCP)',
+              '/api/memory?q=', '/api/artifact/<id>', '/api/file?path=', '/api/dir?path=', 'POST /api/uploads', '/api/transcribe (GET status, POST audio/wav?lang=)', 'POST /mcp (fleet command, MCP)',
               '/api/history?from=&to=&step=', '/api/history/summary?since=',
               '/api/fleets (GET, PUT)', 'POST /api/squads/next?base=',
             ],

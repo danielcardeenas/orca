@@ -46,6 +46,7 @@ import { mountLaunch } from './windows/kinds/launch.ts';
 import { mountTimeline } from './windows/kinds/timeline.ts';
 import { mountTerminal } from './windows/kinds/terminal.ts';
 import { mountFile, projectCodeOf } from './windows/kinds/file.ts';
+import { mountFiles } from './windows/kinds/files.ts';
 import { bindFileLinks } from './windows/file-links.ts';
 import { clock } from './util.ts';
 import { mountMast } from './hud/mast.ts';
@@ -66,7 +67,7 @@ import { mountHandshake } from './handshake.ts';
 import { mountMissions } from './hud/missions.ts';
 import { mountImprove } from './hud/improve.ts';
 import { mountSections } from './hud/sections.ts';
-import type { Console } from './console.ts';
+import type { At, Console } from './console.ts';
 import { esc } from './util.ts';
 import { keyHold, typing as typingIn } from './keys.ts';
 import { applyToRoot, gsapDefaults } from './motion.ts';
@@ -237,6 +238,18 @@ mountHandshake();
 
 /* ── The console object: everything crosses here ──────────────────── */
 
+/**
+ * El navegador de una carpeta (kinds/files.ts). Un proyecto ata su ventana
+ * por id, para que abrirlo dos veces sea volver a la misma; una carpeta
+ * suelta —el arnés visual— va por su ruta.
+ */
+function openFilesAt(root: string, opts: { project?: string; key?: string; at?: At } = {}) {
+  const params: Record<string, string> = { root };
+  if (opts.project) params.project = opts.project;
+  const at = opts.at;
+  wm.open({ kind: 'files', key: opts.key ?? `files:${root}`, callsign: opts.project ?? 'FILES', project: opts.project ? 'FILES' : undefined, title: root.split('/').pop() || root, at: at && { x: at.x, y: at.y }, params });
+}
+
 const c: Console = {
   field, wm, voice,
   openAgent(agentId, at) {
@@ -281,10 +294,15 @@ const c: Console = {
     if (line !== null) params.line = String(line);
     if (file.col != null) params.col = String(file.col);
     if (file.agentId) params.agentId = file.agentId;
-    const project = projectCodeOf(file.agentId);
+    const project = file.project ?? projectCodeOf(file.agentId);
     if (project) params.project = project;
     const at = opts?.at;
     wm.open({ kind: 'file', key, project, title: file.path.split('/').pop() ?? file.path, at: at && { x: at.x, y: at.y }, params });
+  },
+  openFiles(projectId, at) {
+    const p = store.world.projects[projectId];
+    if (!p) return;
+    openFilesAt(p.path, { project: p.code, key: `files:${projectId}`, at });
   },
   openProject(projectId, at) {
     const p = store.world.projects[projectId];
@@ -462,6 +480,7 @@ wm.register('sfx', (ctx) => mountSfx(ctx, c));
 wm.register('music', (ctx) => mountMusic(ctx, c));
 wm.register('terminal', (ctx) => mountTerminal(ctx, c));
 wm.register('file', (ctx) => mountFile(ctx, c));
+wm.register('files', (ctx) => mountFiles(ctx, c));
 // A path in any transcript, feed line or CAPCOM reply opens the file viewer.
 bindFileLinks(document.body, c);
 
@@ -956,6 +975,8 @@ void start();
   fly: (id: string) => c.go(id),
   /** El visor de un archivo, para el arnés visual: igual que pinchar una ruta en una conversación. */
   openFile: (path: string, at?: { x: number; y: number }) => c.openFile({ path }, { at }),
+  /** El navegador de una carpeta, para el arnés visual: la flota sintética no tiene carpetas de verdad. */
+  openFiles: (root: string, at?: { x: number; y: number }) => openFilesAt(root, { at }),
   openKind: (k: string) => { ({ ceo: c.openCeo, queue: c.openQueue, feed: c.openFeed, fleet: c.openFleet, help: c.openHelp } as Record<string, () => void>)[k]?.(); },
   tilt: (on: boolean) => field.setTilt(on),
   stats: () => field.stats(),

@@ -58,11 +58,9 @@ import { dismissNotice, noticeDismissed, setNoticeOpen } from '../notice.ts';
 import { handoffText } from '../../../shared/handoff.ts';
 import { bindComposer, composerHint } from '../composer.ts';
 import { mountCapcomModel } from '../capcom-model.ts';
+import { capcomFeedback } from '../capcom-feedback.ts';
 import type { HistoryPage } from '../../../shared/provider-handoff.ts';
 
-
-/** No CAPCOM session on this machine: what the API loop is, in one line. */
-const API_NOTE = 'API COMMAND · no CAPCOM session on this machine · start one with orca capcom';
 
 /** Nothing above this many entries is worth the memory or the scroll. */
 export const CAPCOM_LOG_MAX = 200;
@@ -208,6 +206,8 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     <div class="band" data-band></div>
     <div data-handoff hidden></div>
     <div class="win__scroll scroll" data-log></div>
+    <div class="capcom__feedback" data-feedback role="status" aria-live="polite" aria-atomic="true"></div>
+    <div class="capcom__delivery mono" data-delivery role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div class="capcom__status" data-status></div>
     <div class="ceo__in">
       <textarea class="input" rows="2" data-in aria-label="Message capcom" placeholder="${esc(composerHint('message capcom'))}"></textarea>
@@ -245,7 +245,13 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   }, true);
   const band = body.querySelector<HTMLElement>('[data-band]')!;
   const status = body.querySelector<HTMLElement>('[data-status]')!;
+  const feedback = body.querySelector<HTMLElement>('[data-feedback]')!;
+  feedback.id = `${key}-feedback`;
+  let feedbackSig = '';
+  let deliverySig = '';
+  let seenLink = store.linkUp;
   const input = body.querySelector<HTMLTextAreaElement>('[data-in]')!;
+  input.setAttribute('aria-describedby', feedback.id);
   // The unsent line, per conversation, survives a reload (drafts.ts).
   const draft = drafts.bind(input, draftKey('capcom'));
   draft.restore();
@@ -446,6 +452,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
    * it stays out; thinking has no step until the block closes, so it shows.
    */
   function liveHtml(a: Agent, stepShowing = false): string {
+    if (!store.linkUp || !store.authed() || modelControl.transition()) return '';
     // What the pane shows it typing, if the collector can read the pane. The
     // finished block replaces it the moment the transcript has it.
     const typing = store.world.talkLive?.[a.id];
@@ -475,7 +482,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
       </div>`;
     }
     if (a.state === 'blocked' && a.block) {
-      return `<div class="block">
+      return `<div class="block${a.block.kind === 'peer' ? ' capcom__peer' : a.block.kind === 'error' ? ' capcom__error' : ''}">
         <div class="block__k"><span>${esc(a.block.kind)} · ${ago(a.block.since, now)}</span></div>
         <div class="block__q mono">${esc(a.block.summary)}</div>
       </div>`;
@@ -542,7 +549,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     const esca = a.state === 'blocked' ? escalationFor(a) : undefined;
     const live = a.state === 'thinking' || a.state === 'working' || a.state === 'booting';
     const s = JSON.stringify([
-      'talk', a.id, a.state, a.tool, a.toolDetail, esca?.id, esca?.status,
+      'talk', store.linkUp, store.authed(), modelControl.transition(), a.id, a.state, a.block, a.tool, a.toolDetail, esca?.id, esca?.status,
       items.length, items[items.length - 1]?.id,
       echo.map((m) => [m.id, m.status, m.elapsedMs]),
       groups.filter((g) => g.escalationId).map((g) => store.world.escalations[g.escalationId!]?.status),
@@ -565,7 +572,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     ]);
     const body = groups.length || echo.length
       ? `<div class="talk">${talk}${liveHtml(a, stepShowing)}</div>`
-      : `<div class="ceo__empty mono">Nothing said yet. CAPCOM commands the fleet on your behalf — it surveys, spawns agents with real briefs, unblocks them, and absorbs the questions they raise so you only see the ones that need you.${
+      : `<div class="ceo__empty mono">No conversation received yet. CAPCOM commands the fleet on your behalf — it surveys, spawns agents with real briefs, unblocks them, and absorbs the questions they raise so you only see the ones that need you.${
         items.length === 0 && a.lastSay ? '<br/><br/><span style="color:var(--ink-dimmer)">This collector does not send the conversation yet · restart it to see the transcript here.</span>' : ''}</div>`;
     log.dataset.fileAgent = a.id;
     const archive = `<div class="capcom__archive">${historyNext !== null ? `<button type="button" class="chip" data-earlier ${historyLoading ? 'disabled' : ''}>${historyLoading ? 'LOADING HISTORY…' : historyText ? 'LOAD EARLIER MESSAGES' : 'LOAD PREVIOUS CONVERSATION'}</button>` : '<span class="mono">Beginning of saved conversation</span>'}${historyError ? `<p class="mono">${esc(historyError)}</p>` : ''}${historyText ? `<div class="md capcom__archive-text">${mdLite(historyText)}</div><div class="mono capcom__archive-boundary">CURRENT SESSION</div>` : ''}</div>`;
@@ -644,44 +651,44 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   /* ── The strip ──────────────────────────────────────────────────── */
 
   function renderStatus(a: Agent | undefined) {
-    const ceo = store.world.ceo;
-    const parts: string[] = [];
-    let s: string;
-    // Un relevo en marcha manda sobre el estado de la sesión: la que se va está
-    // ociosa mientras se prepara la que llega, y anunciar IDLE durante los dos
-    // minutos que eso dura es lo que hace pensar que no está pasando nada.
-    const moving = modelControl.transition();
-    if (a) {
-      const peer = a.state === 'blocked' && a.block?.kind === 'peer';
-      const now = moving ?? (a.state === 'working' && a.tool ? `${toolLabel(a.tool)} · ${a.toolDetail ?? ''}` : a.state === 'thinking' ? 'composing' : a.state === 'blocked' ? a.block?.summary ?? 'blocked' : '');
-      s = JSON.stringify(['cap', a.state, now, Math.round(a.metrics.tokensPerSec), a.metrics.costUSD.toFixed(2), a.pane, store.linkUp, moving]);
-      if (s === statusSig) return;
-      statusSig = s;
-      parts.push(`<span class="status ${moving ? 'is-on' : a.state === 'blocked' && !peer ? 'is-alert' : a.state === 'working' || a.state === 'thinking' ? 'is-on' : a.state === 'dead' ? 'is-dead' : ''}">${esc(moving ? 'CHANGING' : stateWord(a))}</span>`);
-      if (now) parts.push(`<span class="capcom__now mono" title="${esc(now)}">${esc(now)}</span>`);
-      parts.push(`<span class="px px--tiny capcom__stat">${Math.round(a.metrics.tokensPerSec)} TOK/S</span>`);
-      parts.push(`<span class="px px--tiny capcom__stat">${esc(money(a.metrics.costUSD))}</span>`);
-      parts.push(`<span class="capcom__acts"><button class="chip" type="button" data-term title="${a.pane ? 'The CLI itself: the whole conversation, live, and a keyboard into it' : 'No pane: this CAPCOM runs with --bg (no tmux on its machine)'}">TERM</button><button class="chip" type="button" data-fly>FLY</button></span>`);
-      if (!store.linkUp) parts.push('<span class="px px--tiny" style="color:var(--red)">LINK DOWN</span>');
-      band.hidden = false;
-      band.classList.toggle('is-off', !moving && a.state !== 'working' && a.state !== 'thinking');
-      band.style.setProperty('--band-t', `${Math.max(0.35, 1.6 - Math.min(1, a.metrics.tokensPerSec / 80) * 1.2)}s`);
-      ctx.setCallsign('CAPCOM', store.world.projects[a.projectId]?.code);
-      ctx.setState(a.state === 'blocked' && !peer ? 'blocked' : a.state === 'dead' ? 'dead' : null, stateVar(a));
-    } else {
-      s = JSON.stringify(['api', ceo.thinking, store.linkUp, moving]);
-      if (s === statusSig) return;
-      statusSig = s;
-      // El hueco del relevo: la sesión vieja ya no está y la nueva aún no se
-      // ha publicado. Sin esto la ventana pasa a hablar de la API, como si no
-      // hubiera mando — justo en el minuto en que se está fabricando uno.
-      if (moving) parts.push(`<span class="status is-on">CHANGING</span><span class="capcom__now mono">${esc(moving)}</span>`);
-      else parts.push(`<span class="px px--tiny">${API_NOTE}</span>`);
-      band.hidden = !moving;
-      band.classList.toggle('is-off', !moving);
-      ctx.setCallsign('CAPCOM');
-      ctx.setState(null, ceo.thinking ? 'var(--st-thinking)' : 'var(--lime)');
+    seenLink ||= store.linkUp;
+    const next = capcomFeedback({ agents: store.world.agents, linkUp: store.linkUp,
+      authed: store.authed(), seenLink, thinking: store.world.ceo.thinking,
+      transition: modelControl.transition(), transitionError: modelControl.failure(), transitionUnconfirmed: modelControl.uncertain() });
+    const fs = JSON.stringify(next);
+    if (fs !== feedbackSig) {
+      feedbackSig = fs;
+      feedback.dataset.state = next.kind;
+      feedback.style.setProperty('--feedback-color', next.color);
+      feedback.innerHTML = `<b class="px">${esc(next.label)}</b><span class="mono">${esc(next.detail)}</span>`;
     }
+    sendBtn.disabled = !store.linkUp || !store.authed();
+    const outgoing = echoes(a ? store.world.talk?.[a.id] ?? [] : []).at(-1);
+    const delivery = body.querySelector<HTMLElement>('[data-delivery]')!;
+    const ds = JSON.stringify(outgoing ?? null);
+    if (ds !== deliverySig) {
+      deliverySig = ds;
+      delivery.hidden = !outgoing;
+      delivery.textContent = outgoing ? `${echoLabel(outgoing)} · ${outgoing.status === 'failed'
+        ? 'Check TALK before resending; it may have arrived. Review your message in TALK.'
+        : 'This is delivery status, not a CAPCOM reply.'}` : '';
+    }
+    const active = store.linkUp && store.authed() && next.kind === 'processing' && a?.state === 'working' && !modelControl.transition();
+    band.hidden = !active;
+    band.classList.toggle('is-off', !active);
+    if (a) band.style.setProperty('--band-t', `${Math.max(0.35, 1.6 - Math.min(1, a.metrics.tokensPerSec / 80) * 1.2)}s`);
+    ctx.setCallsign('CAPCOM', a ? store.world.projects[a.projectId]?.code : undefined);
+    ctx.setState(next.kind === 'waiting' ? 'blocked' : next.kind === 'error' ? 'dead' : null, next.color);
+    const s = JSON.stringify([a?.id, a?.pane, a?.metrics.tokensPerSec, a?.metrics.costUSD, store.linkUp, store.authed()]);
+    if (s === statusSig) return;
+    statusSig = s;
+    const parts: string[] = [];
+    if (a) {
+      if (store.linkUp && store.authed()) parts.push(`<span class="px px--tiny capcom__stat">${Math.round(a.metrics.tokensPerSec)} TOK/S</span>`);
+      parts.push(`<span class="px px--tiny capcom__stat">${esc(money(a.metrics.costUSD))}</span>`);
+      parts.push('<span class="capcom__acts"><button class="chip" type="button" data-term>TERM</button><button class="chip" type="button" data-fly>FLY</button></span>');
+    }
+    status.hidden = !a;
     status.innerHTML = parts.join('');
     const termBtn = status.querySelector<HTMLElement>('[data-term]');
     termBtn?.addEventListener('click', () => {
@@ -698,7 +705,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   function render() {
     refs = refIndex(store.world.agents);
     const a = capcomOf();
-    modelControl.update(a, store.linkUp);
+    modelControl.update(a, store.linkUp && store.authed());
     const handoff = (store.world.capcomHandoffs ?? []).filter((h) => !a || h.toId === a.id)
       .filter((h) => !noticeDismissed(`handoff:${h.id}`)).at(-1);
     handoffHost.hidden = !handoff || tab !== 'talk';
@@ -733,13 +740,13 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   function send(text: string) {
     const t = text.trim();
     if (!t) return false;
-    if (!store.linkUp) { c.note('link down · CAPCOM cannot hear you', 'warn'); return false; }
+    if (!store.linkUp || !store.authed()) { c.note('link down · CAPCOM cannot hear you', 'warn'); return false; }
     hub.say(t);
     pinned = true;
     if (tab !== 'talk') setTab('talk');
     return true;
   }
-  const sendBtn = body.querySelector<HTMLElement>('[data-send]')!;
+  const sendBtn = body.querySelector<HTMLButtonElement>('[data-send]')!;
   // §6.2: the slab inverts to ink for a frame as the line leaves. The echo in
   // TALK carries the collector's receipt independently of the reply.
   const sent = () => { input.value = ''; draft.clear(); };
@@ -751,7 +758,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
   const unbindAttach = bindAttach(input, { key: draftKey('capcom'), upload: uploadFile, note: c.note });
 
   const off = store.on((e) => {
-    if (e.k === 'missions' || e.k === 'ceo' || e.k === 'world' || e.k === 'link' || e.k === 'agents' || e.k === 'traffic'
+    if (e.k === 'auth' || e.k === 'missions' || e.k === 'ceo' || e.k === 'world' || e.k === 'link' || e.k === 'agents' || e.k === 'traffic'
       || e.k === 'feed' || e.k === 'escalations' || e.k === 'talk' || e.k === 'delivery') render();
   });
   // One second: the live row counts seconds while CAPCOM works, and the

@@ -52,6 +52,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   let poll: number | undefined;
   let restore: { id: string; agentId: string } | null = null;
   let restoring = false;
+  let restoreAfter = 0;
   let agent: Agent | undefined;
   let state: ModelControl | undefined;
   let busy = false;
@@ -60,8 +61,13 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   let picker: PickHandle | undefined;
   let connected = false;
   let disposed = false;
+  const forgetStatus = document.createElement('button');
+  forgetStatus.type = 'button'; forgetStatus.className = 'chip'; forgetStatus.textContent = 'DISMISS SAVED STATUS'; forgetStatus.hidden = true;
+  forgetStatus.title = 'Stops tracking this saved receipt in this browser. Does not cancel or resend a session change.';
+  host.appendChild(forgetStatus);
+  forgetStatus.addEventListener('click', () => { restore = null; error = ''; localStorage.removeItem(storageKey); paint(); });
   function paint() {
-    host.hidden = !agent || !['codex', 'claude'].includes(agent.runtime) || (!!options && (!agent.pane || !!agent.subagent));
+    host.hidden = (!agent && !plan && !moving && !restore) || (!!agent && !['codex', 'claude'].includes(agent.runtime)) || (!!options && (!agent?.pane || !!agent.subagent));
     /*
      * La misma marca que la lista, en la línea que se ve con el menú CERRADO.
      * Dentro del selector la marca separa dos bloques; aquí dice de quién es el
@@ -69,22 +75,24 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
      * abrir nada. El nombre del runtime sigue escrito al lado: la marca
      * acompaña al texto, no lo sustituye —un dibujo de 18px no es un nombre.
      */
-    const runtime = agent?.runtime === 'codex' ? 'codex' : 'claude';
+    const runtime = agent?.runtime ?? '';
     active.textContent = '';
-    const amark = markSVG(markForRuntime(runtime));
+    const amark = runtime ? markSVG(markForRuntime(runtime)) : '';
     if (amark) active.insertAdjacentHTML('beforeend', amark);
     active.insertAdjacentText('beforeend',
-      `${runtime.toUpperCase()} · ${state?.active ?? agent?.model ?? 'model unknown'}`);
+      agent ? `${runtime.toUpperCase()} · ${state?.active ?? agent.model ?? 'model unknown'}` : 'SESSION STATUS · no active session confirmed');
     active.classList.toggle('has-mark', !!amark);
     const pending = state?.phase === 'queued' || state?.phase === 'applying' || plan?.phase === 'preparing';
-    load.disabled = busy || !!pending || !connected;
+    forgetStatus.hidden = !restore || !error;
+    forgetStatus.disabled = restoring;
+    load.disabled = busy || !!pending || !connected || !agent;
     fresh.disabled = busy || !!pending || !connected || !agent?.pane || !(agent.state === 'idle' || (agent.state === 'blocked' && agent.block?.kind === 'error'));
     fresh.title = fresh.disabled ? 'Wait until CAPCOM is connected and finishes its current turn.' : 'Create a new session with the same provider and model';
     freshChoice.querySelectorAll<HTMLButtonElement>('button').forEach(b => { b.disabled = busy || !!pending || !connected; });
     load.textContent = busy ? 'LOADING…' : catalogError ? 'RETRY MODELS' : 'CHANGE MODEL';
     cancel.hidden = state?.phase !== 'queued'; cancel.disabled = busy || !connected;
     open.hidden = !error && state?.phase !== 'failed';
-    detail.textContent = error || [resetNote || (pending ? `${state?.requested} · ${state?.detail}` : state?.detail ?? 'Same provider · keeps this conversation'), catalogError].filter(Boolean).join(' ');
+    let nextDetail = error || [resetNote || (pending ? [state?.requested, state?.detail].filter(Boolean).join(' · ') : state?.detail ?? 'Same provider · keeps this conversation'), catalogError].filter(Boolean).join(' ');
     review.hidden = !plan;
     continued.hidden = !options || plan?.phase !== 'complete' || !plan.toId;
     if (plan) {
@@ -106,8 +114,9 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
       transferText.textContent = `${plan.fromRuntime}/${plan.fromModel ?? 'current model'} → ${plan.runtime}/${plan.model}. ${plan.phase === 'review' ? 'Sends the saved conversation and pending-work checkpoint to a new session. Current session stays until the destination confirms. Model context limits apply.' : plan.detail} Backup: ${(plan.bytes / 1024).toFixed(0)} KB.`;
       confirm.hidden = plan.phase !== 'review'; confirm.disabled = busy || !connected;
       dismiss.hidden = plan.phase === 'preparing'; dismiss.textContent = plan.phase === 'review' ? 'CANCEL' : 'CLOSE';
-      if (plan.phase === 'preparing') detail.textContent = plan.contextMode === 'clean' ? 'CAPCOM · preparing clean context' : `HANDOFF IN PROGRESS · ${subject} is preparing a continuation`;
+      if (plan.phase === 'preparing') nextDetail = !connected || error ? 'Handoff status unconfirmed. Checking again automatically when connected.' : plan.contextMode === 'clean' ? 'CAPCOM · preparing clean context' : `HANDOFF IN PROGRESS · ${subject} is preparing a continuation`;
     }
+    if (detail.textContent !== nextDetail) detail.textContent = nextDetail;
   }
   /**
    * Lo que dice el vaciado en el sitio, que no tiene plan que enseñar.
@@ -286,7 +295,8 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   }
   async function check() {
     if (!plan || disposed) return;
-    try { plan = await command({ k: 'handoff:status', agentId: agent?.id ?? plan.fromId, planId: plan.id }) as ProviderHandoffPlan; }
+    if (!connected) { poll = window.setTimeout(() => { void check(); }, 2000); return; }
+    try { plan = await command({ k: 'handoff:status', agentId: agent?.id ?? plan.fromId, planId: plan.id }) as ProviderHandoffPlan; error = ''; }
     catch (e) { error = e instanceof Error ? e.message : String(e); }
     if (disposed) return;
     paint();
@@ -373,6 +383,13 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   cancel.addEventListener('click', () => { void request(null); });
   open.addEventListener('click', () => { if (agent) terminal(agent.id); });
   return {
+    uncertain(): boolean { return !!restore || restoring || (!!error && plan?.phase === 'preparing'); },
+    /** Read failures are uncertainty, not proof that a session change failed. */
+    failure(): string | null {
+      if (plan?.phase === 'failed') return plan.detail || 'Session change failed. Review the handoff details.';
+      if (error && (plan?.phase === 'preparing' || restoring || restore)) return null;
+      return error || null;
+    },
     /**
      * Qué cambio de mando está en marcha, para quien pinta la ventana.
      *
@@ -384,17 +401,19 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
      */
     transition(): string | null {
       if (moving) return moving;
+      if (restoring || restore) return 'Restoring saved handoff status. No session change is being resent.';
       if (plan?.phase !== 'preparing') return null;
+      if (error) return 'Handoff status unavailable. Checking again automatically; completion is unconfirmed.';
       return `preparing ${plan.runtime}/${plan.model}${plan.contextMode === 'clean' ? ' · clean context' : ''}`;
     },
     update(next: Agent | undefined, link: boolean) {
       if (agent?.id !== next?.id) { state = undefined; error = ''; catalogError = ''; picker?.dispose(); picker = undefined; pickerHost.replaceChildren(); }
       agent = next; connected = link;
-      if (restore && connected && agent && !restoring) {
+      if (restore && connected && !restoring && Date.now() >= restoreAfter) {
         restoring = true;
-        void command({ k: 'handoff:status', agentId: agent.id, planId: restore.id }).then(result => {
-          if (disposed) return; restore = null; plan = result as ProviderHandoffPlan; paint(); if (plan.phase === 'preparing') void check();
-        }).catch(e => { error = e instanceof Error ? e.message : String(e); restore = null; }).finally(() => { restoring = false; });
+        void command({ k: 'handoff:status', agentId: agent?.id ?? restore.agentId, planId: restore.id }).then(result => {
+          if (disposed) return; restore = null; error = ''; plan = result as ProviderHandoffPlan; paint(); if (plan.phase === 'preparing') void check();
+        }).catch(e => { error = e instanceof Error ? e.message : String(e); restoreAfter = Date.now() + 2000; }).finally(() => { restoring = false; if (!disposed) paint(); });
       }
       if (!busy && next?.modelControl) state = next.modelControl;
       paint();

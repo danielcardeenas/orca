@@ -21,3 +21,7 @@ orca-selftest/
 # Worktrees que abren los agentes para trabajar aislados: copias enteras del
 # repo con su propio historial, no archivos de este.
 .claude/worktrees/
+
+# Caché y configuración del detector de diseño (impeccable) que usa algún
+# agente al revisar la UI. Estado local de una sesión, no código del proyecto.
+.impeccable/

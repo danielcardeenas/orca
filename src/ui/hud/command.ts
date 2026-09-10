@@ -29,7 +29,7 @@
 import gsap from 'gsap';
 import type { Agent, Project } from '../../shared/types.ts';
 import { store } from '../store.ts';
-import { capcomTurn } from '../../shared/capcom.ts';
+import { capcomFeedback } from '../windows/capcom-feedback.ts';
 import { toolLabel } from '../windows/talk.ts';
 import { hub } from '../net/client.ts';
 import type { Console } from '../console.ts';
@@ -89,7 +89,7 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
   el.innerHTML = `
     <span class="cmd__prompt">&gt;</span>
     <input class="cmd__in mono" data-in autocomplete="off" spellcheck="false" placeholder="talk to capcom · @K9 to an agent · @LZ to a project · @audit-01 to a squad · / for commands · ⌘K" />
-    <span class="cmd__turn px" data-turn hidden><i class="cmd__turn-dot" aria-hidden="true"></i><span data-turn-t></span></span>
+    <span class="cmd__turn px" data-turn role="status" aria-live="polite" aria-atomic="true" hidden><i class="cmd__turn-dot" aria-hidden="true"></i><span data-turn-t></span></span>
     <span class="cmd__target is-ceo" data-target>CAPCOM</span>
     <i class="cmd__wipe mono" data-wipe aria-hidden="true"></i>
     <div class="cmd__menu" data-menu></div>
@@ -435,21 +435,24 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
   const turnEl = el.querySelector<HTMLElement>('[data-turn]')!;
   const turnText = el.querySelector<HTMLElement>('[data-turn-t]')!;
   let turnWas = '';
+  let seenCapcomLink = store.linkUp;
   function paintTurn() {
-    const t = capcomTurn(store.world.agents, store.world.ceo);
-    const word = t.kind === 'thinking' ? 'THINKING'
-      : t.kind === 'working' ? (t.tool ? `${toolLabel(t.tool)}` : 'WORKING')
-      : t.kind === 'waiting' ? 'WAITING ON YOU' : '';
-    const now = `${t.kind} ${word}`;
+    seenCapcomLink ||= store.linkUp;
+    const t = capcomFeedback({ agents: store.world.agents, linkUp: store.linkUp,
+      authed: store.authed(), seenLink: seenCapcomLink, thinking: store.world.ceo.thinking });
+    const now = JSON.stringify(t);
     if (now === turnWas) return;
     turnWas = now;
-    turnEl.hidden = t.kind === 'idle';
-    turnText.textContent = word;
+    turnEl.hidden = t.kind === 'ready' || t.kind === 'unavailable';
+    turnText.textContent = t.label;
+    turnEl.title = t.detail;
+    turnEl.style.color = t.color;
     turnEl.classList.toggle('is-waiting', t.kind === 'waiting');
-    el.classList.toggle('is-turn', t.kind !== 'idle');
+    turnEl.classList.toggle('is-quiet', t.kind !== 'processing');
+    el.classList.toggle('is-turn', t.kind === 'processing');
   }
 
-  store.on((e) => { if (e.k === 'agents' || e.k === 'world') { paintTarget(); paintTurn(); } else if (e.k === 'ceo') paintTurn(); });
+  store.on((e) => { if (e.k === 'agents' || e.k === 'world') { paintTarget(); paintTurn(); } else if (e.k === 'ceo' || e.k === 'link' || e.k === 'auth') paintTurn(); });
   paintTarget();
   paintTurn();
 

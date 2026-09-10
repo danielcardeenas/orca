@@ -55,15 +55,15 @@ try {
   await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).hold());
   await page.getByRole('button', { name: 'Clean context', exact: true }).click();
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').at(-1)?.model), 'gpt-5.6-luna');
-  await page.locator('.capcom__status', { hasText: 'CHANGING' }).waitFor();
-  assert.match(await page.locator('.capcom__status').innerText(), /clearing context/);
-  assert.equal(await page.locator('.band').evaluate(b => b.classList.contains('is-off')), false);
+  await page.locator('.capcom__feedback', { hasText: 'CHANGING' }).waitFor();
+  assert.match(await page.locator('.capcom__feedback').innerText(), /clearing context/);
+  assert.equal(await page.locator('.band').isVisible(), false);
   await page.locator('[data-detail]', { hasText: /clearing context…/ }).waitFor();
   await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).release());
   // Quedarse en el proveedor vacía en el sitio: hay recibo, no traspaso. Darlo
   // por plan pintaba `undefined/undefined`, `NaN KB` y un «Invalid handoff id».
   await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
-  await page.locator('.capcom__status', { hasText: 'IDLE' }).waitFor();
+  await page.locator('.capcom__feedback', { hasText: 'READY' }).waitFor();
   assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.equal(await page.locator('textarea[data-in]').inputValue(), 'Preserve this operator draft');
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').length), 1);
@@ -75,8 +75,8 @@ try {
   assert.equal(await page.getByRole('button', { name: 'New CAPCOM', exact: true }).isDisabled(), true);
   assert.match(await page.locator('[data-transfer-text]').innerText(), /codex\/gpt-6-astra → claude\/sonnet/);
   // Preparar tarda hasta dos minutos: la ventana entera lo dice, no sólo el panel.
-  await page.locator('.capcom__status', { hasText: 'CHANGING' }).waitFor();
-  assert.match(await page.locator('.capcom__status').innerText(), /preparing claude\/sonnet · clean context/);
+  await page.locator('.capcom__feedback', { hasText: 'CHANGING' }).waitFor();
+  assert.match(await page.locator('.capcom__feedback').innerText(), /preparing claude\/sonnet · clean context/);
   await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).fail());
   await page.getByRole('button', { name: 'CLOSE', exact: true }).waitFor();
   assert.match(await page.locator('[data-transfer-text]').innerText(), /Original CAPCOM retained/);
@@ -112,5 +112,5 @@ try {
   await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
   assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.deepEqual(errors, []);
-  console.log('Fresh UI passed: visible modes, scope, chosen model, CHANGING status and running band while the relay lasts, in-place clear receipt without a fake plan, cross-provider plan phases, draft, failure/retry, folded receipt, slash commands that keep the provider, desktop/mobile.');
+  console.log('Fresh UI passed: visible modes, scope, chosen model, CHANGING status without invented throughput while the relay lasts, in-place clear receipt without a fake plan, cross-provider plan phases, draft, failure/retry, folded receipt, slash commands that keep the provider, desktop/mobile.');
 } finally { await browser.close(); await server.close(); }

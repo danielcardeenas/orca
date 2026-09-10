@@ -913,6 +913,15 @@ select.input option { background: var(--shell); color: var(--ink); }
   flex-shrink: 0; min-height: 30px; overflow: hidden; white-space: nowrap;
 }
 .capcom__status .status { align-self: center; padding: 3px 8px; font-size: 9px; }
+.capcom__status[hidden] { display: none; }
+.capcom__feedback { flex-shrink: 0; padding: 8px 10px; border-top: 1px solid var(--line-soft); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.capcom__feedback b { color: var(--feedback-color); }
+.capcom__feedback .mono { color: var(--ink-mid); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; min-width: 0; }
+.capcom__delivery { flex-shrink: 0; padding: 4px 10px; color: var(--ink-mid); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.capcom__peer { border-color: var(--st-thinking); background: var(--screen-in); }
+.capcom__peer .block__k, .capcom__peer .block__q { color: var(--st-thinking); }
+.capcom__error { border-color: var(--red); background: var(--screen-in); }
+.capcom__error .block__k, .capcom__error .block__q { color: var(--red); }
 .capcom__now { color: var(--ink-mid); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
 .capcom__stat { white-space: nowrap; }
 .capcom__acts { display: flex; gap: 4px; margin-left: auto; }

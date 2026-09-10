@@ -198,6 +198,7 @@ body.is-speaking .tool[data-t="talk"] { color: var(--cyan); border-color: var(--
   max-width: 180px; overflow: hidden; text-overflow: ellipsis;
 }
 .cmd__turn[hidden] { display: none; }
+.cmd__turn.is-quiet .cmd__turn-dot { animation: none; background: currentColor; box-shadow: none; }
 .cmd__turn-dot {
   width: 6px; height: 6px; border-radius: 50%; flex: none;
   background: var(--cyan); box-shadow: 0 0 8px var(--cyan-glow);

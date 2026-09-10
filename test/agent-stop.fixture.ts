@@ -1,0 +1,24 @@
+import { requestAgentStop } from '../src/ui/hud/agent-stop.ts';
+import { showContext } from '../src/ui/hud/context.ts';
+import { store } from '../src/ui/store.ts';
+import { hub } from '../src/ui/net/client.ts';
+import type { Agent } from '../src/shared/types.ts';
+import type { Console } from '../src/ui/console.ts';
+export const agent = { id: 'test-stop', callsign: 'TEST STOP', runtime: 'codex', state: 'working', pane: true, projectId: 'test', machineId: 'test', metrics: {}, childIds: [], updatedAt: 1 } as unknown as Agent;
+store.world.agents[agent.id] = agent;
+store.setLink(true);
+export const commands: unknown[] = [];
+export const notes: string[] = [];
+let resolve: (value: unknown) => void;
+let reject: (error: Error) => void;
+hub.cmd = async command => {
+  commands.push(command);
+  return await new Promise((yes, no) => { resolve = yes; reject = no; });
+};
+export const ack = () => resolve({ detail: 'synthetic collector acknowledgement' });
+export const fail = () => reject(new Error('synthetic timeout'));
+const c = { note: (s: string) => notes.push(s), field: { spotOf: () => null }, wm: { all: () => [{ id: 'test-window', mode: 'front', spec: { kind: 'agent', params: { agentId: agent.id } }, el: document.createElement('div') }] } } as unknown as Console;
+export const open = () => requestAgentStop(c, agent.id);
+export const menu = (window = false) => showContext({ c, sayTo() {}, toggleTilt() {} }, window ? { kind: 'window', winId: 'test-window' } : { kind: 'agent', id: agent.id }, { x: 40, y: 40 });
+export const disconnect = () => store.setLink(false);
+export const connect = () => store.setLink(true);

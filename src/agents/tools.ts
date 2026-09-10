@@ -2313,7 +2313,7 @@ async function interruptAgent(ctx: CeoContext, input: Record<string, unknown>): 
 async function stopAgent(ctx: CeoContext, input: Record<string, unknown>): Promise<ToolOutcome> {
   const a = findAgent(ctx, String(input.agent_id ?? ''));
   if (!a) return { result: 'no such agent', summary: 'stop failed', isError: true };
-  await ctx.dispatch(a.machineId, { k: 'stop', agentId: a.id });
+  await ctx.dispatch(a.machineId, { k: 'stop', agentId: a.id, reason: String(input.reason ?? '').trim() });
   return {
     result: JSON.stringify({ ok: true }),
     summary: `stopped ${a.callsign}: ${String(input.reason ?? '')}`.slice(0, 120),

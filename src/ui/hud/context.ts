@@ -1,3 +1,4 @@
+import { requestAgentStop, stopUnavailable } from './agent-stop.ts';
 /**
  * What can be done to a thing, from wherever it is pointed at.
  *
@@ -124,8 +125,8 @@ function agentMenu(d: CtxDeps, id: string, selection: string[], at: At) {
     if (!(a.role === 'capcom' && alive(a))) {
       items.push({ label: 'DISMISS', hint: 'HIDE FROM THE FIELD', key: 'h', run: () => { store.dismiss([id]); c.note(`dismissed ${a.callsign} · SETTINGS shows it again`); } });
     }
-    items.push({ label: 'STOP', tone: 'red', key: 'x', off: !alive(a), hint: alive(a) ? undefined : stateWord(a), run: () => void c.stop(id) });
   }
+  items.push({ sep: true }, { label: 'STOP…', tone: 'red', key: group ? undefined : 'x', off: !!stopUnavailable(id), hint: stopUnavailable(id) ?? 'KEEPS CONVERSATION', run: () => requestAgentStop(c, id) });
   return { title: group ? `${group.length} AGENTS` : a.callsign, sub: group ? undefined : `${p?.code ?? ''} · ${stateWord(a)}`, items };
 }
 
@@ -254,7 +255,7 @@ function ownRows(d: CtxDeps, win: Win, at: At): MenuItem[] {
       return [
         { label: 'FLY TO', hint: a.callsign, key: 'f', run: () => c.go(a.id) },
         { label: 'SAY…', key: 's', off: !alive(a), run: () => d.sayTo([a.id]) },
-        { label: 'STOP', tone: 'red', key: 'x', off: !alive(a), run: () => void c.stop(a.id) },
+        { label: 'STOP…', tone: 'red', key: 'x', off: !!stopUnavailable(a.id), hint: stopUnavailable(a.id) ?? 'KEEPS CONVERSATION', run: () => requestAgentStop(c, a.id) },
       ];
     }
     case 'fleet': {

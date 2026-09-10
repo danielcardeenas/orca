@@ -1,3 +1,4 @@
+import { requestAgentStop, stopUnavailable } from '../../hud/agent-stop.ts';
 import { mountCapcomModel } from '../capcom-model.ts';
 import { mountAgentRecovery } from '../agent-recovery.ts';
 import { agentOrigin, originLabel } from '../../../shared/origin.ts';
@@ -115,7 +116,6 @@ export function mountAgent(ctx: WinCtx, c: Console) {
   draft.restore();
   const stopBtn = body.querySelector<HTMLButtonElement>('[data-stop]')!;
 
-  let armed = 0;
   let logsOpen = false;
   let logsText = '';
   let sig = '';
@@ -133,6 +133,8 @@ export function mountAgent(ctx: WinCtx, c: Console) {
 
   function render() {
     const a = agent();
+    stopBtn.disabled = !!stopUnavailable(id);
+    stopBtn.title = stopUnavailable(id) ?? 'Stop with confirmation · conversation kept';
     models.update(a, store.linkUp); recovery.update(a, store.linkUp);
     const successor = Object.values(store.world.agents).find(other => other.continuation?.fromId === id);
     const successorButton = body.querySelector<HTMLButtonElement>('[data-successor]')!; successorButton.hidden = !successor; successorButton.onclick = () => { if (successor) c.openAgent(successor.id); };
@@ -333,7 +335,7 @@ export function mountAgent(ctx: WinCtx, c: Console) {
    * the correction, which is the whole point — cancelling to then type the
    * fix is two actions where the operator meant one, and the two runtimes
    * need the two halves in opposite orders anyway (shared/interrupt.ts).
-   * Unlike STOP it is not armed: interrupting by accident costs a turn, and
+   * Unlike STOP it needs no confirmation: interrupting by accident costs a turn, and
    * making the operator click twice costs the seconds the correction was for.
    */
   const intBtn = body.querySelector<HTMLButtonElement>('[data-interrupt]')!;
@@ -383,27 +385,11 @@ export function mountAgent(ctx: WinCtx, c: Console) {
     }
     sig = ''; render();
   });
-  /**
-   * At rest STOP is one more button in the secondary row. Armed, it becomes
-   * the red slab — the console's one destructive colour, and the only place
-   * it appears in this window.
-   */
-  const disarm = () => { armed = 0; stopBtn.className = 'btn'; stopBtn.textContent = 'STOP'; };
-  stopBtn.addEventListener('click', async () => {
-    // Two clicks: STOP arms, STOP again fires. An unarmed stop on a live agent is a lost hour.
-    if (armed && Date.now() - armed < 4000) {
-      disarm();
-      await c.stop(id);
-      return;
-    }
-    armed = Date.now();
-    stopBtn.className = 'slab-btn slab-btn--red slab-btn--sm slab-btn--fit';
-    stopBtn.textContent = 'STOP · SURE?';
-    setTimeout(() => { if (armed) disarm(); }, 4000);
-  });
+  // Every manual STOP uses the same confirmation and eligibility as the context menu.
+  stopBtn.addEventListener('click', () => requestAgentStop(c, id));
 
   const off = store.on((e) => {
-    if (e.k === 'link' || e.k === 'world' || (e.k === 'agents' && e.ids.includes(id)) || e.k === 'escalations' || e.k === 'traffic' || (e.k as string) === 'artifacts') render();
+    if (e.k === 'link' || e.k === 'world' || (e.k === 'agents' && e.ids.includes(id)) || e.k === 'missions' || e.k === 'escalations' || e.k === 'traffic' || (e.k as string) === 'artifacts') render();
   });
   const tick = window.setInterval(render, 5000);
   render();

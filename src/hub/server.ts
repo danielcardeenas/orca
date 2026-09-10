@@ -1,3 +1,4 @@
+import { agentStopReason } from '../shared/agent-stop.ts';
 import { PushService } from './push.ts';
 import { quotaIncident } from '../shared/recovery.ts';
 import { freshCapcomCheckpoint } from './capcom-checkpoint.ts';
@@ -415,7 +416,7 @@ function describeCommand(cmd: Command): string {
     case 'say': return `say ${cmd.agentId}`;
     case 'interrupt': return `interrupt ${cmd.agentId}${cmd.text ? ' +message' : ''}`;
     case 'permit': return `permit ${cmd.agentId} allow=${cmd.allow}`;
-    case 'stop': return `stop ${cmd.agentId}`;
+    case 'stop': return `stop ${cmd.agentId}${cmd.reason ? `: ${cmd.reason.slice(0, 500)}` : ''}`;
     case 'resume': return `resume ${cmd.agentId}`;
     case 'remove': return `remove ${cmd.agentId}`;
     case 'answer': return `answer ${cmd.escalationId}`;
@@ -1266,6 +1267,13 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     // Esperar al `dead` del collector es lo que dejaba a dos escuadrones
     // muertos avisando durante horas: la sesión de tmux ya no existía y el
     // estado nunca llegó.
+    if (cmd.k === 'stop' && (consoleId !== null || cmd.reason !== undefined)) {
+      const why = agentStopReason(world.state.agents[cmd.agentId], Object.values(missions.all()));
+      if (why || (cmd.reason !== undefined && (typeof cmd.reason !== 'string' || !cmd.reason.trim()))) {
+        ackTo(consoleId, cmdId, false, why ?? 'A stop reason is required');
+        return;
+      }
+    }
     if (cmd.k === 'stop') budgets.retire(cmd.agentId);
     if (cmd.k === 'files:allow') {
       const request = cmd;

@@ -1,0 +1,17 @@
+.agent-stop {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 0;
+  color: var(--ink);
+  background: var(--screen);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+}
+.agent-stop::backdrop { background: var(--bezel); opacity: .8; }
+.agent-stop h2 { margin: 0 0 12px; }
+.agent-stop p { margin: 0 0 16px; line-height: 1.5; }
+.agent-stop label { display: block; margin-bottom: 8px; }
+.agent-stop textarea { width: 100%; box-sizing: border-box; margin-bottom: 12px; }
+.agent-stop [data-status]:empty { display: none; }
+.agent-stop .row { justify-content: flex-end; flex-wrap: wrap; }

@@ -290,7 +290,7 @@ export type Command =
   | { k: 'interrupt'; agentId: string; text: string | null }
   /** Answer a permission prompt. */
   | { k: 'permit'; agentId: string; allow: boolean; scope: 'once' | 'session' }
-  | { k: 'stop'; agentId: string }
+  | { k: 'stop'; agentId: string; reason?: string }
   | { k: 'resume'; agentId: string }
   /** Remove a finished session and its worktree when safe. */
   | { k: 'remove'; agentId: string }

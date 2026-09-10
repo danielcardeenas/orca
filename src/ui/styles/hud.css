@@ -263,6 +263,10 @@ body.is-speaking .tool[data-t="talk"] { color: var(--cyan); border-color: var(--
 .tray .tile { width: 58px; height: 44px; flex: none; }
 .tray .tile span { position: absolute; top: 5px; left: 7px; }
 .tray .tile small { position: absolute; bottom: 5px; left: 7px; font-size: 8px; letter-spacing: 0.12em; color: currentColor; opacity: 0.7; }
+/* `off view`: the window is on the canvas with none of it on the glass, and
+   this line is the only place that says so. It carries the tile's own colour
+   at full strength — no new accent, just the one word that is doing work. */
+.tray .tile.is-away small { opacity: 1; }
 .tray .tile:hover { filter: brightness(1.2); }
 .tray__sep { width: 1px; height: 30px; background: var(--line); flex: none; margin: 0 2px; }
 

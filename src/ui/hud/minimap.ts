@@ -2,9 +2,9 @@
  * The minimap: the whole field as the comp's radar, bottom-right.
  *
  * Regions as thin outlines with their codes, agents as dots in their state
- * colour, the viewport as a lime rectangle you can drag. Click anywhere to
- * fly there. It exists because at a thousand agents the field is a landscape,
- * and a landscape needs a map.
+ * colour, canvas windows as rectangles, the viewport as a lime rectangle you
+ * can drag. Click anywhere to fly there. It exists because at a thousand
+ * agents the field is a landscape, and a landscape needs a map.
  */
 
 import type { AgentState } from '../../shared/types.ts';
@@ -47,8 +47,14 @@ export function mountMinimap(host: HTMLElement, c: Console): MinimapHandle {
   function fit() {
     const b = c.field.layout().bounds;
     const v = c.field.viewRect();
-    const minX = Math.min(b.minX, v.minX), maxX = Math.max(b.maxX, v.maxX);
-    const minY = Math.min(b.minY, v.minY), maxY = Math.max(b.maxY, v.maxY);
+    let minX = Math.min(b.minX, v.minX), maxX = Math.max(b.maxX, v.maxX);
+    let minY = Math.min(b.minY, v.minY), maxY = Math.max(b.maxY, v.maxY);
+    // A window sitting outside the fleet is exactly the one worth finding, so
+    // the map grows to hold it rather than cropping it out.
+    for (const s of c.wm.seats()) {
+      minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x + s.w);
+      minY = Math.min(minY, s.y - s.h); maxY = Math.max(maxY, s.y);
+    }
     const w = Math.max(4, maxX - minX), h = Math.max(4, maxY - minY);
     const s = Math.min((W - PAD * 2) / w, (H - PAD * 2) / h);
     sx = s; sy = -s;
@@ -92,6 +98,22 @@ export function mountMinimap(host: HTMLElement, c: Console): MinimapHandle {
       g.fillRect(x, y, 2, 2);
     }
     for (const d of late) { g.fillStyle = d.col; g.fillRect(d.x - 1, d.y - 1, 3, 3); }
+    /*
+     * Windows. A window on the canvas is a place in the world like a region
+     * is, and the only one the field does not draw for itself — send one out
+     * of view and the glass says nothing about where it went. Dashed while it
+     * is on screen (you can see it; this is a reminder), solid once it is
+     * not (this is the answer). The one holding the keyboard is drawn in ink
+     * so it can be picked out of a row of them; lime stays the viewport's.
+     */
+    for (const s of c.wm.seats()) {
+      const x = Math.round(mx(s.x)), y = Math.round(my(s.y));
+      const w = Math.max(2, Math.round(s.w * sx)), h = Math.max(2, Math.round(s.h * -sy));
+      g.strokeStyle = s.focused ? '#e6e9e2' : '#7a8078';
+      g.setLineDash(s.off ? [] : [2, 2]);
+      g.strokeRect(x + 0.5, y + 0.5, w, h);
+    }
+    g.setLineDash([]);
     // Viewport.
     g.strokeStyle = '#c0f94a';
     g.strokeRect(Math.round(mx(v.minX)) + 0.5, Math.round(my(v.maxY)) + 0.5, Math.round((v.maxX - v.minX) * sx), Math.round((v.maxY - v.minY) * -sy));
@@ -126,7 +148,8 @@ export function mountMinimap(host: HTMLElement, c: Console): MinimapHandle {
       if (!on) return;
       const now = performance.now();
       const v = c.field.viewRect();
-      const key = `${v.minX.toFixed(1)}|${v.minY.toFixed(1)}|${v.maxX.toFixed(1)}|${store.world.rev}`;
+      // `wm.stamp()`: windows move without the camera or the world moving.
+      const key = `${v.minX.toFixed(1)}|${v.minY.toFixed(1)}|${v.maxX.toFixed(1)}|${store.world.rev}|${c.wm.stamp()}`;
       if (key === lastKey && now - lastDraw < 500) return;
       if (key !== lastKey || now - lastDraw > 250) { lastKey = key; lastDraw = now; draw(); }
     },

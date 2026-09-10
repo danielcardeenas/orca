@@ -142,8 +142,9 @@ una cámara que se mueve durante el vuelo no deja la ventana atrás. Con
 
 `npm run typecheck` y `npm test -- window-canvas` terminaron correctamente.
 La prueba abre una segunda página con movimiento permitido —la del arnés lo
-tiene desactivado—, manda al mundo una ventana cuyo asiento queda fuera del
-borde izquierdo y comprueba que a mitad de vuelo la carcasa está entre el
+tiene desactivado—, manda al mundo una ventana con el asiento en la esquina
+inferior izquierda y a media escala de cámara —un viaje largo y diagonal,
+entero en pantalla— y comprueba que a mitad de vuelo la carcasa está entre el
 cristal y el asiento y aún es más grande de lo que la dejará la cámara, que
 aterriza justo en el asiento y devuelve `transform`; con movimiento reducido,
 que ya está en el asiento sin volar. La muestra de mitad de vuelo la toma la

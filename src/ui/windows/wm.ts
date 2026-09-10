@@ -46,7 +46,8 @@
  * **Tray mode.** `` ` `` gives the tray row the keyboard instead of cycling
  * blind: the row lifts, a lime cursor lands on the active window, and
  * `←/→` (or `H/L`), `Home/End` and `1…9` walk it, `Enter` throws the switch
- * and leaves, `-` folds or unfolds under the cursor, `Backspace`/`Delete`/`x`
+ * and leaves, `-` folds or unfolds under the cursor, `+` brings it to the
+ * front and leaves, `Backspace`/`Delete`/`x`
  * closes it, `v` reveals an anchored one, `Escape` leaves. `` ` `` again
  * inside the mode is the fast path: it raises as it walks. While the mode is
  * on, every one of those keys is consumed — `main.ts` never sees them.
@@ -86,9 +87,10 @@
  * `windows/composer.ts`. A one-line `<input>` —an escalation answer, a word to
  * a fleet— keeps Enter as its send: there is no line to break.
  *
- * Universal, with a window active: `Esc` returns from front, otherwise closes, `-` folds (and hands the
- * keyboard down the stack), `v` reveals an anchored window's tile when it is
- * off screen, and `` ` `` opens tray mode.
+ * Universal, with a window active: `Esc` returns from front, otherwise closes,
+ * `-` folds (and hands the keyboard down the stack), `+` is its pair and
+ * brings a canvas window up to the front, `v` reveals an anchored window's
+ * tile when it is off screen, and `` ` `` opens tray mode.
  *
  * ── Every moment has a gesture (IDENTITY §6.1) ──────────────────────────
  *
@@ -354,8 +356,9 @@ export class WindowManager {
     this.place(win);
     // Even a window that opens in front learns its place on the canvas now, so
     // `CANVAS` later drops it beside its tile at reading scale instead of
-    // wherever the glass happened to hold it.
-    this.captureCanvas(win);
+    // wherever the glass happened to hold it. Nobody chose that seat, so it
+    // gets out of the way of the seats somebody did choose.
+    this.captureCanvas(win, true);
     ((this.ev.plane && !MOBILE() && win.mode === 'canvas') ? this.canvasLayer : this.layer).appendChild(el);
     this.wins.set(id, win);
     this.byKey.set(spec.key, win);
@@ -516,7 +519,12 @@ export class WindowManager {
     this.emitStack();
   }
 
-  private captureCanvas(win: Win) {
+  /**
+   * `free`: the manager chose this seat, so it may be pushed off the ones
+   * already taken (`clearOf`). A seat that came from the operator's hand
+   * never is.
+   */
+  private captureCanvas(win: Win, free = false) {
     // Every window gets world coordinates, whatever mode it is wearing: they
     // are what `CANVAS` returns to, and `reproject` needs them to tell a
     // screen-fixed window from one that follows its tile.
@@ -534,6 +542,53 @@ export class WindowManager {
     }
     win.canvas = { ...(this.ev.unproject?.(win.x, win.y) ?? { x: (win.x - p.origin.x) / p.ppu, y: (p.origin.y - win.y) / p.ppu }),
       ppu: win.canvas?.ppu ?? p.ppu };
+    if (free) this.clearOf(win);
+  }
+
+  /**
+   * Push a seat off the ones already taken.
+   *
+   * Only for a seat the manager chose — a window opening, or one dropped here
+   * because its old seat had gone out of view. A seat the operator chose with
+   * their hand is never moved: dropping a window exactly on top of another is
+   * a thing people do on purpose, and a canvas that rearranges itself under a
+   * drag is a canvas fighting the hand.
+   *
+   * The push is to the right of whatever it lands on, one window at a time.
+   * The world has no edges to run out of, so there is always somewhere to go;
+   * the cap on tries is only there because a cycle of seats that keep pushing
+   * each other must not become a frame that never ends.
+   */
+  private clearOf(win: Win): void {
+    if (!win.canvas) return;
+    const gap = 12 / win.canvas.ppu;
+    const w = win.w / win.canvas.ppu, h = win.h / win.canvas.ppu;
+    const others = [...this.wins.values()].filter((o) =>
+      o !== win && !o.minimized && o.mode === 'canvas' && o.canvas);
+    for (let tries = 0; tries < 8; tries++) {
+      const hit = others.find((o) => {
+        const c = o.canvas!;
+        const ow = o.w / c.ppu, oh = o.h / c.ppu;
+        return win.canvas!.x < c.x + ow && win.canvas!.x + w > c.x
+          && win.canvas!.y > c.y - oh && win.canvas!.y - h < c.y;
+      });
+      if (!hit) return;
+      win.canvas.x = hit.canvas!.x + hit.w / hit.canvas!.ppu + gap;
+    }
+  }
+
+  /**
+   * Is the seat this window would return to still somewhere the operator can
+   * see? Same reading as `offView`, asked of the world coordinates rather
+   * than of where the housing is right now.
+   */
+  private seatOffView(win: Win): boolean {
+    const p = this.ev.plane?.();
+    if (!p || !win.canvas || MOBILE()) return false;
+    const at = this.ev.project?.(win.canvas.x, win.canvas.y)
+      ?? { x: p.origin.x + win.canvas.x * p.ppu, y: p.origin.y - win.canvas.y * p.ppu };
+    const s = p.ppu / win.canvas.ppu;
+    return outsideViewport({ x: at.x, y: at.y, w: win.w * s, h: win.h * s });
   }
 
   /** On the canvas and below reading scale: too small to read, only to move. */
@@ -626,7 +681,16 @@ export class WindowManager {
     // here to there so the operator sees which way it went.
     const from = win.el.getBoundingClientRect();
     win.mode = 'canvas';
-    if (!win.canvas) this.captureCanvas(win);
+    /*
+     * A window keeps the seat it had, which is the whole point of the canvas:
+     * things stay where they were put. But the operator can travel a long way
+     * with a window held in front, and a seat left behind three regions ago
+     * is not a place any more — sending the window there is sending it
+     * nowhere, and the tray becomes the only way back. So a seat that has
+     * gone out of view is given up and the window lands here, in the view the
+     * operator chose, clear of whatever is already sitting in it.
+     */
+    if (!win.canvas || this.seatOffView(win)) this.captureCanvas(win, true);
     win.focused = false; win.el.classList.remove('is-focus');
     if (win.el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
     if (hadFocus) this.ev.onFocus(null);
@@ -859,6 +923,15 @@ export class WindowManager {
           this.emitStack();
         }
         return eat();
+      case '=': case '+': case 'shift+=': case 'shift++':
+        // The other direction, and it leaves: bringing one to the front is
+        // asking to work in it, and the row has nothing left to say.
+        if (win) {
+          if (win.minimized) this.restore(win, false);
+          this.bringForward(win);
+          this.exitTrayMode();
+        }
+        return eat();
       case 'backspace': case 'delete': case 'x': {
         if (!win) return eat();
         const at = row.findIndex((w) => w.id === win.id);
@@ -928,6 +1001,14 @@ export class WindowManager {
     switch (tok) {
       case 'escape': e.preventDefault(); if (win.mode === 'front') this.returnToCanvas(win); else this.close(win); return true;
       case '-': case 'shift+_': case '_': e.preventDefault(); this.minimize(win); return true;
+      // The pair `-` had been missing: one puts the window away, the other
+      // brings it up to reading size. `Esc` is the way back out to the canvas.
+      case '=': case '+': case 'shift+=': case 'shift++':
+        // Only from the canvas: a window already on the glass has nowhere to
+        // be brought to, and swallowing the key there would be a key that
+        // does nothing. `PIN` is its own button.
+        if (win.mode !== 'canvas' || !this.ev.plane || MOBILE()) return false;
+        e.preventDefault(); this.bringForward(win); return true;
       case 'v':
         if (win.spec.anchor) { e.preventDefault(); this.ev.onReveal?.(win.spec.anchor); return true; }
         return false;
@@ -1052,6 +1133,7 @@ export class WindowManager {
       if (r && r.visible && !outsideViewport(r)) paths += this.tetherPath(g, r);
     }
     if (this.tether.innerHTML !== paths) this.tether.innerHTML = paths;
+    if (crossed) this.emitStack();
   }
 
   /**

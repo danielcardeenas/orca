@@ -65,11 +65,27 @@ function lit(w: Win, active: boolean): string {
     : live ? 'is-on' : '';
 }
 
+/**
+ * The placement line under the callsign: `canvas`, `front`, `fixed`,
+ * `folded` — and `off view` for a canvas window the camera has left behind.
+ *
+ * That last one is not a fifth mode, it is the same `canvas` seen from the
+ * operator's side: the window is somewhere in the world with nothing of it on
+ * the glass, and this tile is the only evidence it is open at all. Saying
+ * `canvas` there is true and useless, which is the kind of true this console
+ * tries not to be.
+ */
+function place(w: Win, off: boolean): string {
+  if (w.minimized) return 'folded';
+  if (w.mode === 'pinned') return 'fixed';
+  return off ? 'off view' : w.mode;
+}
+
 /** What goes inside the button. Only the first nine can be jumped to. */
-function inner(w: Win, index: number, mode: boolean): string {
+function inner(w: Win, index: number, mode: boolean, off: boolean): string {
   const label = w.spec.callsign ?? w.spec.kind.toUpperCase();
   const cap = mode && index <= 9 ? `<kbd class="key tile__n">${index}</kbd>` : '';
-  return `<span>${esc(label.slice(0, 6))}</span><small>${esc(w.minimized ? 'folded' : w.mode === 'pinned' ? 'fixed' : w.mode)}</small>${cap}`;
+  return `<span>${esc(label.slice(0, 6))}</span><small>${esc(place(w, off))}</small>${cap}`;
 }
 
 export function mountTray(host: HTMLElement, wm: WindowManager, onContext?: (w: Win, x: number, y: number) => void): { render(list?: Win[]): void } {
@@ -147,12 +163,13 @@ export function mountTray(host: HTMLElement, wm: WindowManager, onContext?: (w: 
       let slot = slots.get(it.w.id);
       if (!slot) { slot = make(); slots.set(it.w.id, slot); born.push(slot); }
       const btn = slot.firstElementChild as HTMLElement;
-      const cls = `tile ${lit(it.w, it.on)}`.trimEnd();
+      const off = wm.offView(it.w);
+      const cls = ['tile', lit(it.w, it.on), off ? 'is-away' : ''].filter(Boolean).join(' ');
       if (btn.className !== cls) btn.className = cls;
       if (btn.dataset.w !== it.w.id) btn.dataset.w = it.w.id;
-      const title = `${it.w.spec.title ?? it.w.spec.kind} · ${it.w.minimized ? 'Open window' : it.on ? 'Minimize or locate window' : 'Open window'}`;
+      const title = `${it.w.spec.title ?? it.w.spec.kind} · ${it.w.minimized ? 'Open window' : off ? 'Fly to window' : it.on ? 'Minimize or locate window' : 'Open window'}`;
       if (btn.title !== title) btn.title = title;
-      const html = inner(it.w, i + 1, mode);
+      const html = inner(it.w, i + 1, mode, off);
       if (btn.innerHTML !== html) btn.innerHTML = html;
       slot.classList.toggle('is-cursor', it.w.id === cursor);
       if (i === sepAt) order.push(sep);

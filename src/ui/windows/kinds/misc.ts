@@ -64,9 +64,11 @@ Backspace · back          \` · walk the window stack
 in a window: the letter on each button
 FRONT · bring to front   CANVAS · return to its place
 PIN · fix the foreground window to the screen
-Esc · return from front, otherwise close   - · fold   V · reveal the source
+Esc · return from front, otherwise close   - · fold   + · bring to front
+V · reveal the source
 tray click / Enter · open or minimize; fly to distant windows
-in the tray (\`): ← → · Backspace closes · 1…9 jump</div></div>
+in the tray (\`): ← → · - folds · + brings forward · Backspace closes · 1…9 jump
+a tile reads off view when its window is out on the canvas, off screen</div></div>
     <div class="sec"><div class="sec__k px">THE COMMAND LINE</div><div class="mono sec__v" style="line-height:1.7">anything · talk to CAPCOM
 @K9 fix the tests · talk to an agent
 @LZ stop and report · talk to a project

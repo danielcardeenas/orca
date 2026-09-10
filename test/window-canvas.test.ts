@@ -96,7 +96,14 @@ export default {
       await page.locator('.tray [data-w]').click(); await page.waitForTimeout(100); assert.equal((await state()).mode, 'pinned');
       assert.equal((await state()).minimized, false);
       await page.getByRole('button', { name: 'Return to canvas', exact: true }).click();
-      assert.equal((await state()).mode, 'canvas'); assert((await state()).x < -1000);
+      // Three thousand units of panning ago that seat was somewhere the
+      // operator could see. It is not any more, and a window sent to a place
+      // nobody is looking at is a window the tray has to rescue. So the stale
+      // seat is given up and the window lands in the view they chose.
+      const dropped = await state();
+      assert.equal(dropped.mode, 'canvas');
+      assert(dropped.x > 0 && dropped.x < 1200, `A stale seat is given up, not flown to: ${dropped.x}`);
+      assert.notDeepEqual(dropped.canvas, initial.canvas, 'and taking the current view means taking a new seat');
       await page.locator('.tray [data-w]').click(); await page.waitForTimeout(100);
       assert.equal(await page.getByRole('textbox', { name: 'Draft' }).inputValue(), 'Unsent work');
       assert.equal(await page.frameLocator('iframe').locator('input').inputValue(), 'Iframe work');
@@ -112,7 +119,14 @@ export default {
       await change(f => { f.wm.minimize(f.win); f.wm.bringForward(f.win); });
       assert.equal((await state()).mode, 'front'); assert.equal((await state()).minimized, false);
       await page.getByRole('button', { name: 'Return to canvas', exact: true }).click();
-      await change(f => { f.plane.origin.x = 600; f.plane.origin.y = 400; f.plane.ppu = 40; });
+      // Camera and seat both back to where the suite started; the seat by
+      // hand, because the window gave up the original one two steps ago.
+      await page.evaluate((c) => {
+        const f = (window as any).fixture as BrowserFixture;
+        f.plane.origin.x = 600; f.plane.origin.y = 400; f.plane.ppu = 40;
+        f.win.canvas = c!; f.wm.reproject();
+      }, initial.canvas);
+      await page.waitForTimeout(80);
       assert.equal((await state()).x, initial.x); assert.deepEqual((await state()).canvas, initial.canvas);
       const head = await page.locator('.win__head').boundingBox(); assert(head);
       await page.mouse.move(head.x + 70, head.y + 14); await page.mouse.down(); await page.mouse.move(head.x + 130, head.y + 44); await page.mouse.up();
@@ -174,6 +188,73 @@ export default {
       await change(f => { f.tile.ahead = false; });
       assert.equal(await tether(), null, 'No pipe to a tile behind the camera');
       await change(f => { f.tile.x = 250; f.tile.visible = true; f.tile.ahead = true; });
+
+      /* ── Out of view: the tray is the only witness ───────────────────
+         A window on the canvas leaves the screen the moment the camera walks
+         away from it, and nothing on the glass says where it went. Its tile
+         does — and it notices on its own, under a pan, with nothing clicked. */
+      await change(f => {
+        for (const w of f.wm.all()) f.wm.close(w);
+        f.plane.origin.x = 600; f.plane.origin.y = 400; f.plane.ppu = 40;
+        f.wm.returnToCanvas(f.wm.open({ kind: 'help', key: 'away-1', callsign: 'AWAY', w: 320, h: 240 }));
+      });
+      const placed = () => page.locator('.tray [data-w] small').first().textContent();
+      const isAway = () => page.locator('.tray [data-w]').first().evaluate(e => e.classList.contains('is-away'));
+      assert.equal(await placed(), 'canvas'); assert.equal(await isAway(), false);
+      await change(f => { f.plane.origin.x -= 4000; });
+      assert.equal(await placed(), 'off view', 'The tray says it, without being asked');
+      assert.equal(await isAway(), true);
+      await change(f => { f.plane.origin.x += 4000; });
+      assert.equal(await placed(), 'canvas', 'and takes it back when the camera returns');
+
+      /* ── `+` is the pair of `-` ──────────────────────────────────── */
+      const first = () => page.evaluate(() => {
+        const f = (window as any).fixture as BrowserFixture, w = f.wm.all()[0]!;
+        return { mode: w.mode, minimized: w.minimized, seats: f.wm.seats() };
+      });
+      await change(f => {
+        const w = f.wm.all()[0]!;
+        f.wm.focus(w);
+        f.wm.handleKey(new KeyboardEvent('keydown', { key: '=' }));
+      });
+      assert.equal((await first()).mode, 'front', '`+` brings a canvas window up to reading size');
+      await change(f => { f.wm.handleKey(new KeyboardEvent('keydown', { key: 'Escape' })); });
+      assert.equal((await first()).mode, 'canvas', 'and `Esc` is still the way back out');
+      // In the tray row it does the same and leaves the row, unlike `-`.
+      await change(f => {
+        f.wm.enterTrayMode();
+        f.wm.handleKey(new KeyboardEvent('keydown', { key: '+', shiftKey: true }));
+      });
+      assert.equal((await first()).mode, 'front');
+      assert.equal(await page.evaluate(() => (window as any).fixture.wm.trayMode()), false);
+
+      /* ── Two windows dropped home do not land on each other ───────── */
+      await change(f => {
+        for (const w of f.wm.all()) f.wm.close(w);
+        const a = f.wm.open({ kind: 'help', key: 'seat-1', callsign: 'ONE', w: 320, h: 240 });
+        const b = f.wm.open({ kind: 'help', key: 'seat-2', callsign: 'TWO', w: 320, h: 240 });
+        f.wm.bringForward(a); f.wm.bringForward(b);
+        // Both are centred on the glass now, and both seats are stale, so both
+        // are about to be dropped in the same place.
+        f.plane.origin.x -= 4000;
+        f.wm.returnToCanvas(a); f.wm.returnToCanvas(b);
+      });
+      const overlap = (s: { x: number; y: number; w: number; h: number }[]) =>
+        s[0]!.x < s[1]!.x + s[1]!.w && s[0]!.x + s[0]!.w > s[1]!.x
+        && s[0]!.y > s[1]!.y - s[1]!.h && s[0]!.y - s[0]!.h < s[1]!.y;
+      const dropped2 = (await first()).seats;
+      assert.equal(dropped2.length, 2);
+      assert.equal(overlap(dropped2), false, `A seat the manager chose gets out of the way: ${JSON.stringify(dropped2)}`);
+      // A seat the operator chooses is never moved: dropping one window on
+      // top of another is something people do on purpose.
+      const boxes = await page.locator('.win').evaluateAll(els => els.map(e => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; }));
+      assert.equal(boxes.length, 2);
+      const head2 = await page.locator('.win').nth(1).locator('.win__head').boundingBox(); assert(head2);
+      await page.mouse.move(head2.x + 40, head2.y + 10); await page.mouse.down();
+      await page.mouse.move(boxes[0]!.x + 40 + (head2.x - boxes[1]!.x), boxes[0]!.y + 10 + (head2.y - boxes[1]!.y), { steps: 4 });
+      await page.mouse.up(); await page.waitForTimeout(120);
+      assert.equal(overlap((await first()).seats), true, 'Dragged onto another window, it stays where the hand left it');
+      await change(f => { for (const w of f.wm.all()) f.wm.close(w); });
       // The flight out to the canvas, on a page that allows motion — this
       // suite's own page asks for none. Sending a window to the world moves it
       // to a world coordinate that may be nowhere near the glass, and the
@@ -192,13 +273,17 @@ export default {
         await p2.evaluate(() => { const f = (window as any).fixture as BrowserFixture; f.wm.bringForward(f.win); });
         await p2.waitForTimeout(120);
         const from = await p2.evaluate(() => Math.round((window as any).fixture.win.el.getBoundingClientRect().x));
-        // Push the world first, so the seat it is about to take is off the left
-        // edge. The mid-flight sample is taken by the page itself: the tween is
-        // `T.quick` and a round trip through the driver could easily land after
-        // it, which would read as "it never flew".
+        // Give it a seat in the bottom-left corner at half the camera's scale,
+        // so the trip is long, diagonal and entirely on screen — a seat out of
+        // view would be given up rather than flown to, which is the previous
+        // test. The mid-flight sample is taken by the page itself: the tween
+        // is `T.quick` and a round trip through the driver could easily land
+        // after it, which would read as "it never flew".
         const flying = await p2.evaluate(() => new Promise<{ x: number; w: number; seat: number; seatW: number }>((resolve) => {
           const f = (window as any).fixture as BrowserFixture;
-          f.plane.origin.x -= 900; f.plane.ppu = 22; f.wm.returnToCanvas(f.win);
+          const p = f.plane;
+          f.win.canvas = { x: (40 - p.origin.x) / p.ppu, y: (p.origin.y - 520) / p.ppu, ppu: p.ppu * 2 };
+          f.wm.returnToCanvas(f.win);
           setTimeout(() => {
             const r = f.win.el.getBoundingClientRect();
             resolve({ x: Math.round(r.x), w: Math.round(r.width), seat: Math.round(f.win.x), seatW: Math.round(f.win.w * f.win.scale) });

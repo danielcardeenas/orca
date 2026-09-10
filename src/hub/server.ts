@@ -411,6 +411,7 @@ function describeCommand(cmd: Command): string {
   switch (cmd.k) {
     case 'model:list': return `model:list ${cmd.agentId}`;
     case 'model:set': return `model:set ${cmd.agentId} ${cmd.model ?? 'cancel'}`;
+    case 'capcom:new:cancel': return `capcom:new:cancel ${cmd.agentId}`;
     case 'spawn': return `spawn ${cmd.projectId}`
       + (cmd.squad ? ` [${cmd.squad}${cmd.lead ? ' lead' : ''}]` : '');
     case 'say': return `say ${cmd.agentId}`;
@@ -444,7 +445,7 @@ function isCommand(v: unknown): v is Command {
   return typeof k === 'string' && [
     'spawn', 'say', 'interrupt', 'permit', 'stop', 'resume', 'remove', 'answer', 'deliver',
     'reply', 'key:set', 'key:remove', 'artifact:read', 'resync', 'logs', 'autonomy',
-    'recovery:settings', 'recovery:status', 'recovery:decide', 'files:allow', 'land', 'discard', 'model:list', 'model:set', 'capcom:new', 'handoff:models', 'handoff:prepare', 'handoff:commit', 'handoff:status', 'handoff:history',
+    'recovery:settings', 'recovery:status', 'recovery:decide', 'files:allow', 'land', 'discard', 'model:list', 'model:set', 'capcom:new', 'capcom:new:cancel', 'handoff:models', 'handoff:prepare', 'handoff:commit', 'handoff:status', 'handoff:history',
     // La consola puede pedir limpiar restos. Sigue sin ser un `kill` genérico:
     // el collector sólo obedece sobre lo que su propio escáner reconoció como
     // huérfano de ORCA, y lo revalida antes de mandar una señal.

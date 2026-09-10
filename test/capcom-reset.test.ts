@@ -11,8 +11,12 @@
  */
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { CapcomResets, RESET_RECEIPT, resetContext, resetPrompt } from '../src/collector/capcom-reset.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
+import { sanitizeAgentPatch } from '../src/hub/world.ts';
 import { test, ok, type TestModule } from './harness.ts';
 
 const OLD = '11111111-2222-4333-8444-555555555555';
@@ -113,7 +117,7 @@ export default {
         discover: async () => agent({ id: NEW, sessionId: NEW, model: live.model }),
         hold: (_id, on, _at, mode) => holds.push([on, mode]),
         adopt: (from, to) => adopted.push([from, to]),
-        note: () => {},
+        note: () => {}, dir: () => null,
       });
       const out = await service.run(OLD, 'continuity', 'gpt-5.6-luna', 'PENDING WORK');
       assert.deepEqual(models, ['gpt-5.6-luna'], 'the model is set while the old context still exists');
@@ -136,7 +140,7 @@ export default {
         agent: () => agent(c as Partial<AgentHandle>), owns: () => true, busy: () => false,
         model: a => a.model ?? null, setModel: async () => {},
         discover: async () => agent({ id: NEW, sessionId: NEW }),
-        hold: () => {}, adopt: () => {}, note: () => {},
+        hold: () => {}, adopt: () => {}, note: () => {}, dir: () => null,
       });
       await assert.rejects(service.run(OLD, 'clean', 'gpt-6-astra'), c.error);
       assert.deepEqual(p.pasted, []);
@@ -152,12 +156,156 @@ export default {
         model: a => a.model ?? null,
         setModel: async () => { throw new Error('quota exhausted'); },
         discover: async () => agent({ id: NEW, sessionId: NEW }),
-        hold: (_id, on) => holds.push(on), adopt: () => { throw new Error('must not adopt'); }, note: () => {},
+        hold: (_id, on) => holds.push(on), adopt: () => { throw new Error('must not adopt'); }, note: () => {}, dir: () => null,
       });
       await assert.rejects(service.run(OLD, 'clean', 'other-model'), /quota exhausted/);
       assert.deepEqual(p.pasted, [], 'the context is only cleared once the model is settled');
       assert.deepEqual(holds, [true, false], 'and the mail is released');
       return ok('the context survives a model change that could not be made', true);
+    }),
+
+    /*
+     * `request()`/`tick()`/`cancel()`: el mismo patrón encolado que
+     * `ModelController`, para que NEW CAPCOM deje de fallar duro por pescar
+     * mal el instante en que CAPCOM está idle con el prompt limpio.
+     */
+    test('queued while busy, applied automatically once CAPCOM is idle — the same tick that ModelController already uses', async () => {
+      const p = pane();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-queue-'));
+      try {
+        let live = agent({ state: 'working' });
+        const adopted: [string, string][] = [];
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW }),
+          hold: () => {}, adopt: (from, to) => adopted.push([from, to]), note: () => {}, dir: () => dir,
+        });
+        const queued = service.request(OLD, 'clean', 'gpt-6-astra');
+        assert.equal(queued.phase, 'queued');
+        service.tick(live);
+        assert.equal(service.state(live)?.phase, 'queued', 'still working: nothing sent yet');
+        assert.deepEqual(p.pasted, []);
+        live = agent({ state: 'idle' });
+        service.tick(live);
+        for (let i = 0; i < 100 && service.state(live)?.phase === 'applying'; i++) await Promise.resolve();
+        assert.equal(service.state(live)?.phase, 'ready');
+        assert.deepEqual(adopted, [[OLD, NEW]]);
+        assert.equal(p.pasted[0], '/clear');
+        assert.match(p.pasted[1]!, new RegExp(RESET_RECEIPT));
+        assert.match(service.state(live)!.detail, new RegExp(NEW));
+        return ok('queued while working, applied on its own once idle — no re-click needed', true);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('a queued NEW CAPCOM that never sees CAPCOM idle fails with a clear reason instead of waiting forever', async () => {
+      const p = pane();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-timeout-'));
+      try {
+        let clock = 0;
+        const live = agent({ state: 'working' });
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW }),
+          hold: () => {}, adopt: () => { throw new Error('must not adopt'); }, note: () => {}, dir: () => dir,
+          now: () => clock,
+        });
+        service.request(OLD, 'clean', 'gpt-6-astra');
+        service.tick(live);
+        assert.equal(service.state(live)?.phase, 'queued');
+        clock += 11 * 60_000; // más de los 10 minutos de espera
+        service.tick(live);
+        const s = service.state(live);
+        assert.equal(s?.phase, 'failed');
+        assert.match(s!.detail, /did not go idle within/);
+        assert.deepEqual(p.pasted, [], 'never touched the terminal');
+        return ok('never idle: fails loud with a reason, no silent retry forever', true);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('a queued NEW CAPCOM fails instead of waiting forever once the pane is gone', async () => {
+      const p = pane();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-nopane-'));
+      try {
+        let live = agent({ state: 'working' });
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW }),
+          hold: () => {}, adopt: () => { throw new Error('must not adopt'); }, note: () => {}, dir: () => dir,
+        });
+        service.request(OLD, 'clean', 'gpt-6-astra');
+        live = agent({ state: 'idle', pane: null });
+        service.tick(live);
+        const s = service.state(live);
+        assert.equal(s?.phase, 'failed');
+        assert.match(s!.detail, /no longer hosted/);
+        return ok('a pane that vanished while queued fails instead of hanging', true);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('a queued NEW CAPCOM cancels cleanly, with no /clear left pending', async () => {
+      const p = pane();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-cancel-'));
+      try {
+        const live = agent({ state: 'working' });
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW }),
+          hold: () => {}, adopt: () => { throw new Error('must not adopt'); }, note: () => {}, dir: () => dir,
+        });
+        service.request(OLD, 'clean', 'gpt-6-astra');
+        assert.equal(service.state(live)?.phase, 'queued');
+        const cancelled = service.cancel(OLD);
+        assert.equal(cancelled.phase, 'ready');
+        service.tick(live); // ready: tick no tiene nada que reintentar
+        assert.equal(service.state(live)?.phase, 'ready');
+        assert.deepEqual(p.pasted, []);
+        assert.equal(service.cancel(OLD).phase, 'ready', 'canceling with nothing queued is a harmless no-op');
+        return ok('canceled while queued: nothing sent, cleanly back to ready', true);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('the hub retains bounded reset state and rejects malformed metadata, same as modelControl', async () => {
+      const p = pane();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-sanitize-'));
+      try {
+        const live = agent({ state: 'working' });
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW }),
+          hold: () => {}, adopt: () => {}, note: () => {}, dir: () => dir,
+        });
+        const state = service.request(OLD, 'clean', 'gpt-6-astra');
+        assert.deepEqual(sanitizeAgentPatch({ resetControl: state }).resetControl, state);
+        assert.equal(sanitizeAgentPatch({ resetControl: { ...state, phase: 'invented' } }).resetControl, undefined);
+        assert.equal(sanitizeAgentPatch({ resetControl: { ...state, sessionId: '../escape' } }).resetControl, undefined);
+        return ok('wire state survives validation, a hostile shape does not', true);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }),
+
+    test('cancel refuses once the reset already started applying: too late, a /clear may be in flight', async () => {
+      const p = pane();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-reset-cancel-late-'));
+      try {
+        let live = agent({ state: 'working' });
+        const service = new CapcomResets({
+          tmux: p.tmux, wait: async () => {}, agent: () => live, owns: () => true, busy: () => false,
+          model: a => a.model ?? null, setModel: async () => {},
+          discover: async () => agent({ id: NEW, sessionId: NEW }),
+          hold: () => {}, adopt: () => {}, note: () => {}, dir: () => dir,
+        });
+        service.request(OLD, 'clean', 'gpt-6-astra');
+        live = agent({ state: 'idle' });
+        service.tick(live); // sincrónico hasta el primer await: ya queda 'applying'
+        assert.equal(service.state(live)?.phase, 'applying');
+        assert.throws(() => service.cancel(OLD), /already started/);
+        for (let i = 0; i < 100 && service.locked(OLD); i++) await Promise.resolve();
+        return ok('once applying, cancel is refused instead of racing the /clear', true);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }),
   ],
 } satisfies TestModule;

@@ -259,6 +259,7 @@ export class CommandRunner {
       hold: (id, on, cutoffAt, mode) => deps.transfer?.hold(id, on, on ? { contextMode: mode, at: cutoffAt } as never : undefined),
       adopt: (_from, to, mode, cutoffAt, model) => { deps.capcom?.adoptCleared(to, mode, cutoffAt, model); },
       note: text => log('info', SCOPE, text),
+      dir: () => deps.capcom?.dir() ?? null,
     });
     this.bin = resolveClaudeBin();
     if (!this.bin) {
@@ -270,8 +271,8 @@ export class CommandRunner {
 
   async execute(cmd: Command): Promise<CommandResult> {
     const service = 'agentId' in cmd && !this.capcomFor(this.deps.agent(cmd.agentId)!) ? this.workers.handoffs : this.handoffs;
-    const inputId = 'agentId' in cmd && !cmd.k.startsWith('handoff:') && cmd.k !== 'model:list' && cmd.k !== 'model:set' && cmd.k !== 'capcom:new' ? cmd.agentId : null;
-    if ('agentId' in cmd && cmd.k !== 'capcom:new' && !cmd.k.startsWith('handoff:') && (this.handoffs.locked(cmd.agentId) || this.workers.handoffs.locked(cmd.agentId))) return { ok: false, detail: 'CAPCOM handoff preparation is in progress. Your current session is preserved.' };
+    const inputId = 'agentId' in cmd && !cmd.k.startsWith('handoff:') && cmd.k !== 'model:list' && cmd.k !== 'model:set' && cmd.k !== 'capcom:new' && cmd.k !== 'capcom:new:cancel' ? cmd.agentId : null;
+    if ('agentId' in cmd && cmd.k !== 'capcom:new' && cmd.k !== 'capcom:new:cancel' && !cmd.k.startsWith('handoff:') && (this.handoffs.locked(cmd.agentId) || this.workers.handoffs.locked(cmd.agentId))) return { ok: false, detail: 'CAPCOM handoff preparation is in progress. Your current session is preserved.' };
     if (inputId && this.models.locked(inputId)) return { ok: false, detail: 'CAPCOM model selection is in progress; retry after it finishes.' };
     if (inputId) this.inputBusy.set(inputId, (this.inputBusy.get(inputId) ?? 0) + 1);
     try {
@@ -279,6 +280,7 @@ export class CommandRunner {
         case 'recovery:settings': case 'recovery:status': case 'recovery:decide': throw new Error('Recovery decisions must run through the hub');
         case 'files:allow': throw new Error('File roots live in the hub, which serves the files');
         case 'capcom:new': return { ok: true, data: await this.freshCapcom(cmd) };
+        case 'capcom:new:cancel': return { ok: true, data: this.reset.cancel(cmd.agentId) };
         case 'handoff:models': return { ok: true, data: providerModels() };
         case 'models:list': return { ok: true, data: providerModels() };
         case 'handoff:prepare': return { ok: true, data: service.review(cmd.agentId, cmd.runtime, cmd.model, typeof cmd.checkpoint === 'string' ? cmd.checkpoint : '') };
@@ -966,7 +968,10 @@ export class CommandRunner {
       if (model !== current) throw new Error('Choosing a model needs the native reset; unset ORCA_CAPCOM_PREPARED_RESET or change the model first.');
       return this.handoffs.fresh(cmd.agentId, cmd.mode, cmd.checkpoint);
     }
-    return this.reset.run(cmd.agentId, cmd.mode, model, cmd.checkpoint ?? '');
+    // Encolado: el operador rara vez pescará el instante exacto en que CAPCOM
+    // está idle con el prompt limpio, así que esto sólo pide el cambio —
+    // `CommandRunner.tick()` lo aplica de verdad cuando el pane lo permite.
+    return this.reset.request(cmd.agentId, cmd.mode, model, cmd.checkpoint ?? '');
   }
 
   /**

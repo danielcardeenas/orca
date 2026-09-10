@@ -52,30 +52,52 @@ try {
   await page.getByRole('option', { name: /gpt-5\.6-luna/ }).click();
   await page.getByRole('button', { name: 'Clean context', exact: true }).waitFor();
   assert.equal(await page.locator('[data-fresh-note]').isVisible(), false);
-  // Con el vaciado retenido se ve lo que la ventana dice MIENTRAS pasa: la
-  // sesión que se va está ociosa, y anunciar IDLE durante el relevo es lo que
-  // hacía pensar que no estaba pasando nada.
-  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).hold());
+  // Con el vaciado ENCOLADO se ve lo que la ventana dice mientras pasa. A
+  // diferencia del `/clear` que hoy corre en el sitio, este click ya no
+  // espera a que CAPCOM esté idle: contesta YA con la cola, y de ahí en más
+  // el estado se sigue por el snapshot, igual que CHANGE MODEL.
   await page.getByRole('button', { name: 'Clean context', exact: true }).click();
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').at(-1)?.model), 'gpt-5.6-luna');
-  await page.locator('.capcom__feedback', { hasText: 'CHANGING' }).waitFor();
-  assert.match(await page.locator('.capcom__feedback').innerText(), /clearing context/);
+  await page.locator('.capcom__feedback', { hasText: 'NEW CAPCOM QUEUED' }).waitFor();
+  assert.match(await page.locator('.capcom__feedback').innerText(), /Waiting for CAPCOM to be idle/);
   assert.equal(await page.locator('.band').isVisible(), false);
-  await page.locator('[data-detail]', { hasText: /clearing context…/ }).waitFor();
-  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).release());
+  await page.locator('[data-detail]', { hasText: /NEW CAPCOM QUEUED/ }).waitFor();
+  // Encolado, se cancela limpio: nada se tocó todavía, así que no hay ningún
+  // `/clear` pendiente que dejar flotando.
+  await page.getByRole('button', { name: 'CANCEL NEW CAPCOM', exact: true }).click();
+  await page.locator('.capcom__feedback', { hasText: 'READY' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'CANCEL NEW CAPCOM', exact: true }).isVisible(), false);
+  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new:cancel').length), 1);
+  // Pedido otra vez y esta vez se deja aplicar — lo que en la máquina real
+  // hace el `tick()` del collector en cuanto CAPCOM queda idle, aquí lo
+  // dispara la prueba a mano.
+  await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
+  await page.getByRole('button', { name: 'Clean context', exact: true }).click();
+  await page.locator('[data-detail]', { hasText: /NEW CAPCOM QUEUED/ }).waitFor();
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).applyQueuedReset());
   // Quedarse en el proveedor vacía en el sitio: hay recibo, no traspaso. Darlo
   // por plan pintaba `undefined/undefined`, `NaN KB` y un «Invalid handoff id».
-  await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
+  await page.locator('[data-detail]', { hasText: /Context cleared; now 99999999/ }).waitFor();
   await page.locator('.capcom__feedback', { hasText: 'READY' }).waitFor();
   assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.equal(await page.locator('textarea[data-in]').inputValue(), 'Preserve this operator draft');
-  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').length), 1);
+  assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').length), 2);
+  // Un pedido que nunca ve a CAPCOM idle falla con un motivo claro, no en
+  // silencio ni reintentando para siempre.
+  await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
+  await page.getByRole('button', { name: 'Clean context', exact: true }).click();
+  await page.locator('[data-detail]', { hasText: /NEW CAPCOM QUEUED/ }).waitFor();
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).failQueuedReset());
+  await page.locator('.capcom__feedback', { hasText: 'NEW CAPCOM ERROR' }).waitFor();
+  assert.match(await page.locator('.capcom__feedback').innerText(), /did not go idle within 10 minutes/);
+  await page.locator('[data-detail]', { hasText: /NEW CAPCOM ERROR/ }).waitFor();
+  assert.ok(await page.getByRole('button', { name: 'OPEN TERMINAL', exact: true }).isVisible());
   // Lo que fallaba de verdad: la sesión está ocupada cuando se abre la
   // elección, así que el CLI no tiene menú que dar y `choices` viene vacío.
   // Antes eso dejaba sin ningún modelo del mismo proveedor —cambiar de Opus a
   // Sonnet no existía— mientras cruzar a Codex sí salía. Ahora el catálogo del
   // proveedor los ofrece como opción real, sin esperar a pescar el instante
-  // ocioso, y el relevo se pide con ese modelo.
+  // ocioso, y el relevo se pide con ese modelo, encolado hasta que esté idle.
   await page.evaluate(async () => { const f = await import('/test/capcom-new.fixture.ts' as string); f.forgetModels(); f.busySession(true); });
   await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
   await page.locator('[data-fresh-model] button').waitFor();
@@ -90,8 +112,10 @@ try {
   await page.getByRole('button', { name: 'Clean context', exact: true }).waitFor();
   assert.equal(await page.locator('[data-fresh-note]').isVisible(), false);
   await page.getByRole('button', { name: 'Clean context', exact: true }).click();
-  await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
+  await page.locator('[data-detail]', { hasText: /NEW CAPCOM QUEUED/ }).waitFor();
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string}) => c.k === 'capcom:new').at(-1)?.model), 'gpt-5.6-terra');
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).applyQueuedReset());
+  await page.locator('[data-detail]', { hasText: /Context cleared; now 99999999/ }).waitFor();
   await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).busySession(false));
   // Cruzar de proveedor sí prepara una sesión aparte, y eso se sigue por fases.
   await page.getByRole('button', { name: 'New CAPCOM', exact: true }).click();
@@ -131,12 +155,14 @@ try {
   // El slash promete «mismo proveedor y modelo»: la elección que quedó en el
   // panel —Sonnet, de otro runtime— no puede cruzar de proveedor a su espalda.
   await input.fill('/capcom-new continuity'); await input.press('Enter');
-  await page.locator('[data-detail]', { hasText: /continuity active · 99999999/ }).waitFor();
+  await page.locator('[data-detail]', { hasText: /NEW CAPCOM QUEUED/ }).waitFor();
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string, mode?: string}) => c.k === 'capcom:new').at(-1)?.mode), 'continuity');
   assert.equal(await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).calls.filter((c: {k: string, model?: string}) => c.k === 'capcom:new').at(-1)?.model), undefined);
+  await page.evaluate(async () => (await import('/test/capcom-new.fixture.ts' as string)).applyQueuedReset());
+  await page.locator('[data-detail]', { hasText: /Context cleared; now 99999999/ }).waitFor();
   await input.fill('/capcom-new clean'); await input.press('Enter');
-  await page.locator('[data-detail]', { hasText: /clean context active · 99999999/ }).waitFor();
+  await page.locator('[data-detail]', { hasText: /NEW CAPCOM QUEUED/ }).waitFor();
   assert.equal(await page.locator('[data-transfer-details]').isVisible(), false);
   assert.deepEqual(errors, []);
-  console.log('Fresh UI passed: visible modes, scope, chosen model, same-runtime models offered from the provider catalog while the session is busy, CHANGING status without invented throughput while the relay lasts, in-place clear receipt without a fake plan, cross-provider plan phases, draft, failure/retry, folded receipt, slash commands that keep the provider, desktop/mobile.');
+  console.log('Fresh UI passed: visible modes, scope, chosen model, same-runtime models offered from the provider catalog while the session is busy, NEW CAPCOM QUEUED status without invented throughput while it waits for idle, clean cancellation, a clear timeout failure, in-place clear receipt without a fake plan, cross-provider plan phases, draft, failure/retry, folded receipt, slash commands that keep the provider, desktop/mobile.');
 } finally { await browser.close(); await server.close(); }

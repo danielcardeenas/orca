@@ -113,6 +113,7 @@ export type AgentRole = 'agent' | 'capcom';
 export interface Agent {
   continuation?: import('./continuation.ts').Continuation;
   modelControl?: import('./model-control.ts').ModelControl;
+  resetControl?: import('./capcom-reset-control.ts').CapcomResetControl;
   id: string;
   machineId: string;
   projectId: string;

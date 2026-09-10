@@ -33,6 +33,7 @@ import { squadName } from '../shared/squads.ts';
 import { capcomOf } from '../shared/capcom.ts';
 import type { ExcludedWorkspace } from '../shared/workspaces.ts';
 import { parseModelControl } from '../shared/model-control.ts';
+import { parseCapcomResetControl } from '../shared/capcom-reset-control.ts';
 import {
   MAX_ARCHIVED, archiveBy, archiveCandidates, tombstone,
   type ArchiveFilter, type ArchiveOutcome, type ArchivedAgent,
@@ -375,6 +376,7 @@ export function sanitizeAgentPatch(raw: unknown): Partial<Agent> {
   if (has(o, 'model')) p.model = sOrNull(o['model'], 80);
   if (has(o, 'continuation')) p.continuation = parseContinuation(o['continuation']);
   if (has(o, 'modelControl')) p.modelControl = parseModelControl(o['modelControl']);
+  if (has(o, 'resetControl')) p.resetControl = parseCapcomResetControl(o['resetControl']);
   if (has(o, 'tool')) p.tool = sOrNull(o['tool'], 64);
   if (has(o, 'toolDetail')) p.toolDetail = sOrNull(o['toolDetail']);
   if (has(o, 'lastPrompt')) p.lastPrompt = sOrNull(o['lastPrompt'], MAX_TEXT);
@@ -431,6 +433,7 @@ export function sanitizeAgent(raw: unknown, machineId: string): Agent | null {
     model: sOrNull(o['model'], 80),
     continuation: parseContinuation(o['continuation']),
     modelControl: parseModelControl(o['modelControl']),
+    resetControl: parseCapcomResetControl(o['resetControl']),
     tool: sOrNull(o['tool'], 64),
     toolDetail: sOrNull(o['toolDetail']),
     lastPrompt: sOrNull(o['lastPrompt'], MAX_TEXT),

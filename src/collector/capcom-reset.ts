@@ -37,10 +37,13 @@
  * otro binario, y ahí verificar antes de retirar al anterior vale lo que cuesta.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import type { AgentHandle } from './commands.ts';
 import type { TmuxHost } from './tmux.ts';
 import { paneName } from './tmux.ts';
 import { modelPromptReady, resumedPromptReady } from './model-control.ts';
+import { parseCapcomResetControl, type CapcomResetControl } from '../shared/capcom-reset-control.ts';
 
 /** Lo que el relevo debe devolver para darse por vivo. */
 export const RESET_RECEIPT = 'ORCA_CONTEXT_READY';
@@ -148,6 +151,8 @@ export interface ResetServiceDeps extends ResetDeps {
   /** El rol se muda al id nuevo, y con él el registro que lo readopta. */
   adopt(from: string, to: string, mode: 'clean' | 'continuity', cutoffAt: number, model: string): void;
   note(text: string): void;
+  /** Dónde persistir la cola, igual que `ModelController`. */
+  dir(id: string): string | null;
 }
 
 /**
@@ -159,12 +164,130 @@ export interface ResetServiceDeps extends ResetDeps {
  * segundos, no dos minutos — y que no hay nada que cancelar si sale mal, porque
  * no se ha arrancado nada.
  */
+/** Estado interno: lo mismo que `CapcomResetControl`, más lo que no se manda por el cable. */
+interface ResetState extends CapcomResetControl { checkpoint: string }
+
+/** Cuánto se espera encolado a que CAPCOM quede idle antes de fallar con un motivo. */
+const QUEUE_TIMEOUT_MS = 10 * 60_000;
+
 export class CapcomResets {
   private running: string | null = null;
   private last: ResetOutcome | null = null;
+  private states = new Map<string, ResetState>();
+  private loaded = new Set<string>();
   constructor(private deps: ResetServiceDeps) {}
   locked(id: string): boolean { return this.running === id; }
   latest(): ResetOutcome | null { return this.last; }
+
+  private file(id: string): string {
+    const dir = this.deps.dir(id);
+    if (!dir || !/^[A-Za-z0-9_-]{4,72}$/.test(id)) throw new Error('agent control directory unavailable');
+    return path.join(dir, `capcom-reset-${id}.json`);
+  }
+  private save(s: ResetState) {
+    const file = this.file(s.sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    this.states.set(s.sessionId, structuredClone(s));
+  }
+  /** Carga de disco una sola vez por sesión; una `applying` interrumpida nunca se reintenta sola. */
+  private load(a: AgentHandle): ResetState {
+    const id = a.sessionId;
+    if (!this.loaded.has(id)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(this.file(id), 'utf8')) as Record<string, unknown>;
+        const parsed = parseCapcomResetControl(raw);
+        const checkpoint = typeof raw['checkpoint'] === 'string' ? raw['checkpoint'] : '';
+        if (parsed && parsed.sessionId === id && parsed.runtime === a.runtime) {
+          const saved: ResetState = { ...parsed, checkpoint };
+          if (saved.phase === 'applying') { saved.phase = 'failed'; saved.detail = 'Change unconfirmed after restart. Check the terminal before retrying.'; }
+          this.states.set(id, saved);
+        }
+      } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') { /* estado corrupto: se ignora, no se propaga */ } }
+      this.loaded.add(id);
+    }
+    let s = this.states.get(id);
+    if (!s) {
+      s = { sessionId: id, runtime: a.runtime, mode: 'clean', model: '', checkpoint: '', phase: 'ready', detail: '', requestedAt: 0 };
+      this.states.set(id, s);
+    }
+    return s;
+  }
+  private publicView(s: ResetState): CapcomResetControl {
+    const { checkpoint: _checkpoint, ...pub } = s;
+    return pub;
+  }
+  /** El único gate de existencia: un CAPCOM que no está no se espera, se rechaza ya. */
+  private target(id: string): AgentHandle {
+    const a = this.deps.agent(id);
+    if (!a || !this.deps.owns(a) || !a.pane || !a.alive) throw new Error('An active hosted CAPCOM is required.');
+    if (!['claude', 'codex'].includes(a.runtime)) throw new Error('Unknown CAPCOM runtime; nothing was cleared.');
+    return a;
+  }
+  private idle(a: AgentHandle) { return a.state === 'idle' || (a.state === 'blocked' && a.blockKind === 'error'); }
+
+  /** Estado de cola para la consola, igual que `ModelController.state()`. */
+  state(a: AgentHandle): CapcomResetControl | undefined {
+    if (!this.deps.owns(a) || !['claude', 'codex'].includes(a.runtime)) return;
+    return this.publicView(this.load(a));
+  }
+
+  /**
+   * Encola un NEW CAPCOM en vez de exigir el instante exacto en que CAPCOM
+   * está idle con el prompt limpio. `tick()` reintenta hasta aplicarlo (o
+   * hasta fallar con un motivo), el mismo patrón que `ModelController`.
+   */
+  request(id: string, mode: 'clean' | 'continuity', model: string, checkpoint = ''): CapcomResetControl {
+    if (!['clean', 'continuity'].includes(mode)) throw new Error('Choose clean or continuity explicitly.');
+    if (!model.trim()) throw new Error('A model is required.');
+    const a = this.target(id);
+    if (this.locked(id)) throw new Error('A CAPCOM reset is already in progress.');
+    const s: ResetState = { sessionId: a.sessionId, runtime: a.runtime, mode, model, checkpoint,
+      phase: 'queued', detail: 'Waiting for CAPCOM to be idle.', requestedAt: (this.deps.now ?? Date.now)() };
+    this.save(s);
+    this.deps.note(`New CAPCOM (${mode}/${model}) queued; applying once idle.`);
+    return this.publicView(s);
+  }
+
+  /** Cancela limpiamente mientras nada se ha tocado todavía; una vez en marcha, ya no. */
+  cancel(id: string): CapcomResetControl {
+    const a = this.target(id);
+    const s = this.load(a);
+    if (s.phase === 'applying') throw new Error('The context reset already started and cannot be canceled.');
+    if (s.phase === 'queued') { s.phase = 'ready'; s.detail = ''; s.model = ''; this.save(s); }
+    return this.publicView(s);
+  }
+
+  /**
+   * Reintenta un pedido encolado. Llamado desde el mismo ciclo que ya llama
+   * a `ModelController.tick()`. No hace nada mientras la sesión sigue ocupada
+   * o el pane no ha vuelto a un prompt limpio; sólo entonces llama a `run()`,
+   * que es quien de verdad manda el `/clear`.
+   */
+  tick(a: AgentHandle): void {
+    if (!this.deps.owns(a) || !['claude', 'codex'].includes(a.runtime)) return;
+    const s = this.load(a);
+    if (s.phase !== 'queued' || this.running) return;
+    if (!a.pane || !a.alive) {
+      s.phase = 'failed'; s.detail = 'CAPCOM is no longer hosted; the queued context reset was canceled.';
+      this.save(s); return;
+    }
+    const now = (this.deps.now ?? Date.now)();
+    if (now - s.requestedAt > QUEUE_TIMEOUT_MS) {
+      s.phase = 'failed'; s.detail = `CAPCOM did not go idle within ${Math.round(QUEUE_TIMEOUT_MS / 60_000)} minutes. The context was not cleared.`;
+      this.save(s); return;
+    }
+    if (this.deps.busy(a.sessionId) || !this.idle(a)) return;
+    s.phase = 'applying'; s.detail = 'Clearing context.'; this.save(s);
+    void this.run(a.sessionId, s.mode, s.model, s.checkpoint)
+      .then(out => { s.phase = 'ready'; s.detail = `Context cleared; now ${out.toId}.`; this.save(s); })
+      .catch(e => {
+        s.phase = 'failed'; s.detail = e instanceof Error ? e.message : String(e);
+        try { this.save(s); } catch { this.states.set(s.sessionId, structuredClone(s)); }
+      });
+  }
 
   async run(id: string, mode: 'clean' | 'continuity', model: string, checkpoint = ''): Promise<ResetOutcome> {
     if (!['clean', 'continuity'].includes(mode)) throw new Error('Choose clean or continuity explicitly.');

@@ -84,6 +84,26 @@ export default {
         modelControl: { sessionId: 'capcom-1', runtime: 'claude', active: null,
           choices: [], phase: 'queued', requested: null, detail: '', events: [] },
       }).label), ['MODEL CHANGE QUEUED', 'PROCESSING', 'WAITING ON YOU']),
+    // NEW CAPCOM encolado: mismas tres fases que `modelControl`, mismo lugar en la prioridad.
+    () => eq('a queued NEW CAPCOM never sees an idle instant fail hard; it shows queued until applied or timed out',
+      withAgent({ resetControl: { sessionId: 'capcom-1', runtime: 'claude', mode: 'clean', model: 'sonnet',
+        phase: 'queued', detail: 'Waiting for CAPCOM to be idle.', requestedAt: 100 } }).label,
+      'NEW CAPCOM QUEUED'),
+    () => eq('applying NEW CAPCOM waits for the CLI and clears once it is ready again',
+      (['applying', 'ready'] as const).map(phase => withAgent({ resetControl: {
+        sessionId: 'capcom-1', runtime: 'claude', mode: 'clean', model: 'sonnet', phase,
+        detail: '', requestedAt: 100,
+      } }).label), ['CLEARING CONTEXT', 'READY']),
+    () => eq('a NEW CAPCOM that never went idle in time fails loud, even if the agent looks idle again',
+      withAgent({ resetControl: { sessionId: 'capcom-1', runtime: 'claude', mode: 'clean', model: 'sonnet',
+        phase: 'failed', detail: 'CAPCOM did not go idle within 10 minutes. The context was not cleared.', requestedAt: 100 } }).label,
+      'NEW CAPCOM ERROR'),
+    () => eq('a queued NEW CAPCOM does not hide active work or human input either',
+      (['working', 'blocked'] as const).map(state => withAgent({ state,
+        block: state === 'blocked' ? { kind: 'permission', summary: 'Approve tool', since: 100 } : null,
+        resetControl: { sessionId: 'capcom-1', runtime: 'claude', mode: 'clean', model: 'sonnet',
+          phase: 'queued', detail: '', requestedAt: 100 },
+      }).label), ['PROCESSING', 'WAITING ON YOU']),
     () => {
       const a = agent();
       a.metrics.compactions = 4;

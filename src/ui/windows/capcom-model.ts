@@ -1,6 +1,7 @@
 import { quotaIncident } from '../../shared/recovery.ts';
 import type { Agent } from '../../shared/types.ts';
 import { parseModelControl, type ModelControl } from '../../shared/model-control.ts';
+import type { CapcomResetControl } from '../../shared/capcom-reset-control.ts';
 import type { Command } from '../../shared/protocol.ts';
 import { pick, type PickHandle } from '../controls.ts';
 import { markForRuntime, markSVG } from '../gfx/marks.ts';
@@ -11,7 +12,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   const storageKey = options ? `orca.agent.handoff.${options.scope}` : 'orca.capcom.handoff';
   const subject = options ? 'agent' : 'CAPCOM';
   host.className = 'capcom__model';
-  host.innerHTML = '<div class="capcom__model-row"><span class="mono" data-active></span><button type="button" class="chip" data-load>CHANGE MODEL</button><button type="button" class="chip" data-capcom-new>New CAPCOM</button><div data-picker></div><button type="button" class="chip" data-cancel hidden>CANCEL CHANGE</button><button type="button" class="chip" data-terminal hidden>OPEN TERMINAL</button></div><div class="mono capcom__model-detail" role="status" aria-live="polite" data-detail></div>';
+  host.innerHTML = '<div class="capcom__model-row"><span class="mono" data-active></span><button type="button" class="chip" data-load>CHANGE MODEL</button><button type="button" class="chip" data-capcom-new>New CAPCOM</button><div data-picker></div><button type="button" class="chip" data-cancel hidden>CANCEL CHANGE</button><button type="button" class="chip" data-cancel-new hidden>CANCEL NEW CAPCOM</button><button type="button" class="chip" data-terminal hidden>OPEN TERMINAL</button></div><div class="mono capcom__model-detail" role="status" aria-live="polite" data-detail></div>';
   const fresh = host.querySelector<HTMLButtonElement>('[data-capcom-new]')!;
   fresh.hidden = !!options;
   const freshChoice = document.createElement('section');
@@ -23,6 +24,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   const detail = host.querySelector<HTMLElement>('[data-detail]')!;
   const load = host.querySelector<HTMLButtonElement>('[data-load]')!;
   const cancel = host.querySelector<HTMLButtonElement>('[data-cancel]')!;
+  const cancelNew = host.querySelector<HTMLButtonElement>('[data-cancel-new]')!;
   const open = host.querySelector<HTMLButtonElement>('[data-terminal]')!;
   const pickerHost = host.querySelector<HTMLElement>('[data-picker]')!;
   const review = document.createElement('section'); review.className = 'capcom__transfer'; review.hidden = true;
@@ -55,6 +57,8 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
   let restoreAfter = 0;
   let agent: Agent | undefined;
   let state: ModelControl | undefined;
+  /** El NEW CAPCOM encolado del lado del collector, cuando queda a la espera de que CAPCOM esté idle. */
+  let resetState: CapcomResetControl | undefined;
   let busy = false;
   let error = '';
   let catalogError = '';
@@ -82,7 +86,8 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     active.insertAdjacentText('beforeend',
       agent ? `${runtime.toUpperCase()} · ${state?.active ?? agent.model ?? 'model unknown'}` : 'SESSION STATUS · no active session confirmed');
     active.classList.toggle('has-mark', !!amark);
-    const pending = state?.phase === 'queued' || state?.phase === 'applying' || plan?.phase === 'preparing';
+    const resetPending = resetState?.phase === 'queued' || resetState?.phase === 'applying';
+    const pending = state?.phase === 'queued' || state?.phase === 'applying' || plan?.phase === 'preparing' || resetPending;
     forgetStatus.hidden = !restore || !error;
     forgetStatus.disabled = restoring;
     load.disabled = busy || !!pending || !connected || !agent;
@@ -91,8 +96,19 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     freshChoice.querySelectorAll<HTMLButtonElement>('button').forEach(b => { b.disabled = busy || !!pending || !connected; });
     load.textContent = busy ? 'LOADING…' : catalogError ? 'RETRY MODELS' : 'CHANGE MODEL';
     cancel.hidden = state?.phase !== 'queued'; cancel.disabled = busy || !connected;
-    open.hidden = !error && state?.phase !== 'failed';
-    let nextDetail = error || [resetNote || (pending ? [state?.requested, state?.detail].filter(Boolean).join(' · ') : state?.detail ?? 'Same provider · keeps this conversation'), catalogError].filter(Boolean).join(' ');
+    cancelNew.hidden = resetState?.phase !== 'queued'; cancelNew.disabled = busy || !connected;
+    open.hidden = !error && state?.phase !== 'failed' && resetState?.phase !== 'failed';
+    /*
+     * Lo que dice el NEW CAPCOM encolado, antes que el recibo local: mientras
+     * `resetState` tenga algo que contar (queued/applying/failed), es más
+     * cierto que `resetNote` — que sólo sabe lo que pasó en el instante del
+     * click, no lo que el collector hizo después.
+     */
+    const resetText = resetState?.phase === 'queued' ? `NEW CAPCOM QUEUED · ${resetState.detail || 'waiting for CAPCOM to be idle'}`
+      : resetState?.phase === 'applying' ? `NEW CAPCOM · ${resetState.detail || 'clearing context'}`
+      : resetState?.phase === 'failed' ? `NEW CAPCOM ERROR · ${resetState.detail}`
+      : resetState?.phase === 'ready' && resetState.detail ? resetState.detail : '';
+    let nextDetail = error || [resetText || resetNote || (pending ? [state?.requested, state?.detail].filter(Boolean).join(' · ') : state?.detail ?? 'Same provider · keeps this conversation'), catalogError].filter(Boolean).join(' ');
     review.hidden = !plan;
     continued.hidden = !options || plan?.phase !== 'complete' || !plan.toId;
     if (plan) {
@@ -137,6 +153,11 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     const p = v as Partial<ProviderHandoffPlan> | null;
     return !!p && typeof p.id === 'string' && typeof p.phase === 'string' && typeof p.runtime === 'string';
   }
+  /** ¿O el estado de cola de un vaciado en el sitio, que ya no espera a que CAPCOM esté idle para contestar? */
+  function isResetControl(v: unknown): v is CapcomResetControl {
+    const p = v as Partial<CapcomResetControl> | null;
+    return !!p && typeof p.sessionId === 'string' && typeof p.phase === 'string' && typeof p.mode === 'string';
+  }
   async function newCapcom(mode: 'clean' | 'continuity') {
     if (!agent || fresh.disabled || options) return;
     const id = agent.id;
@@ -148,15 +169,17 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     try {
       const result = await command({ k: 'capcom:new', agentId: id, mode, ...(model ? { model } : {}) });
       if (isPlan(result)) {
-        resetNote = ''; moving = null; plan = result;
+        resetNote = ''; moving = null; plan = result; resetState = undefined;
         localStorage.setItem(storageKey, JSON.stringify({ id: plan.id, agentId: id }));
         window.clearTimeout(poll);
         poll = window.setTimeout(() => { void check(); }, 1500);
+      } else if (isResetControl(result)) {
+        // Encolado: nada que seguir a mano, `agent.resetControl` lo cuenta
+        // solo en el próximo snapshot, aplique o falle.
+        resetNote = ''; plan = undefined; localStorage.removeItem(storageKey);
+        resetState = result;
       } else {
-        // Vaciado en el sitio: no hay nada que seguir ni que confirmar.
         plan = undefined; localStorage.removeItem(storageKey);
-        const to = (result as { toId?: unknown } | null)?.toId;
-        resetNote = `CAPCOM · ${mode === 'clean' ? 'clean context' : 'continuity'} active${typeof to === 'string' ? ` · ${to.slice(0, 8)}` : ''}`;
       }
     } catch (e) { resetNote = ''; error = e instanceof Error ? e.message : String(e); }
     finally { busy = false; moving = null; if (!disposed) paint(); }
@@ -406,6 +429,14 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
     finally { busy = false; if (!disposed) paint(); }
   });
   cancel.addEventListener('click', () => { void request(null); });
+  cancelNew.addEventListener('click', async () => {
+    const id = agent?.id;
+    if (!id || cancelNew.disabled) return;
+    busy = true; error = ''; paint();
+    try { resetState = await command({ k: 'capcom:new:cancel', agentId: id }) as CapcomResetControl; }
+    catch (e) { if (agent?.id === id) error = e instanceof Error ? e.message : String(e); }
+    finally { busy = false; if (!disposed) paint(); }
+  });
   open.addEventListener('click', () => { if (agent) terminal(agent.id); });
   return {
     uncertain(): boolean { return !!restore || restoring || (!!error && plan?.phase === 'preparing'); },
@@ -432,7 +463,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
       return `preparing ${plan.runtime}/${plan.model}${plan.contextMode === 'clean' ? ' · clean context' : ''}`;
     },
     update(next: Agent | undefined, link: boolean) {
-      if (agent?.id !== next?.id) { state = undefined; error = ''; catalogError = ''; picker?.dispose(); picker = undefined; pickerHost.replaceChildren(); }
+      if (agent?.id !== next?.id) { state = undefined; resetState = undefined; error = ''; catalogError = ''; picker?.dispose(); picker = undefined; pickerHost.replaceChildren(); }
       agent = next; connected = link;
       if (restore && connected && !restoring && Date.now() >= restoreAfter) {
         restoring = true;
@@ -441,6 +472,7 @@ export function mountCapcomModel(host: HTMLElement, command: (cmd: Command) => P
         }).catch(e => { error = e instanceof Error ? e.message : String(e); restoreAfter = Date.now() + 2000; }).finally(() => { restoring = false; if (!disposed) paint(); });
       }
       if (!busy && next?.modelControl) state = next.modelControl;
+      if (!busy && next?.resetControl) resetState = next.resetControl;
       paint();
     },
     dispose() { window.removeEventListener('orca:capcom-new', requestedFresh); disposed = true; window.clearTimeout(poll); picker?.dispose(); freshPicker?.dispose(); },

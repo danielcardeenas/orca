@@ -775,7 +775,7 @@ export function mountSound(): SoundHandle {
   function processing() {
     const a = capcomOf(store.world.agents);
     return !!a && real(a) && !store.booting && store.linkUp && store.authed()
-      && a.modelControl?.phase !== 'applying'
+      && a.modelControl?.phase !== 'applying' && a.resetControl?.phase !== 'applying'
       && capcomFeedback({ agents: store.world.agents, linkUp: store.linkUp,
         authed: store.authed(), seenLink: true, thinking: store.world.ceo.thinking }).kind === 'processing'
       && (a.state === 'thinking' || a.state === 'working' || (a.state === 'blocked' && a.block?.kind === 'peer'));

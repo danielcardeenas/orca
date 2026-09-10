@@ -251,7 +251,7 @@ export default { suite: 'Fresh CAPCOM', tests: [
           throw new Error('the CLI did not confirm');
         },
         discover: async () => ({ ...live, id: NEW, sessionId: NEW }),
-        hold: () => {}, adopt: (_from, to, _mode, _at, model) => adopted.push(`${to}:${model}`), note: () => {},
+        hold: () => {}, adopt: (_from, to, _mode, _at, model) => adopted.push(`${to}:${model}`), note: () => {}, dir: () => dir,
       });
       const out = await service.run(OLD, 'clean', 'sonnet');
       assert.equal(out.toId, NEW);

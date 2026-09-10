@@ -28,7 +28,9 @@ export function capcomFeedback(input: {
   if (input.transition) return state('processing', 'CHANGING SESSION', input.transition);
   const a = capcomOf(input.agents);
   if (a?.modelControl?.phase === 'failed') return state('error', 'MODEL ERROR', a.modelControl.detail || 'Open the model controls or terminal to review the failure.', 'var(--red)');
+  if (a?.resetControl?.phase === 'failed') return state('error', 'NEW CAPCOM ERROR', a.resetControl.detail || 'Open the model controls or terminal to review the failure.', 'var(--red)');
   if (a?.modelControl?.phase === 'applying') return state('processing', 'CHANGING MODEL', a.modelControl.detail || 'Waiting for the CLI to confirm the model change.');
+  if (a?.resetControl?.phase === 'applying') return state('processing', 'CLEARING CONTEXT', a.resetControl.detail || 'Waiting for the CLI to confirm the new session.');
   if (a?.state === 'blocked' && a.block?.kind === 'error') return state('error', 'CAPCOM ERROR', a.block.summary, 'var(--red)');
   if (a?.state === 'booting') return state('loading', 'STARTING', 'Waiting for CAPCOM activity. No reply confirmed yet.');
   const turn = capcomTurn(input.agents, { thinking: input.thinking });
@@ -37,6 +39,7 @@ export function capcomFeedback(input: {
   if (turn.kind === 'thinking') return state('processing', 'THINKING', 'CAPCOM is processing. A reply has not finished.');
   if (turn.kind === 'waiting') return state('waiting', 'WAITING ON YOU', a?.block?.summary || 'CAPCOM needs your input.', 'var(--amber)');
   if (a?.modelControl?.phase === 'queued') return state('processing', 'MODEL CHANGE QUEUED', a.modelControl.detail || 'Waiting for the current turn to finish.');
+  if (a?.resetControl?.phase === 'queued') return state('processing', 'NEW CAPCOM QUEUED', a.resetControl.detail || 'Waiting for CAPCOM to be idle.');
   if (a) return state('ready', 'READY', 'CAPCOM is idle. Ready for a message.', 'var(--lime)');
   return state('unavailable', 'NO ACTIVE SESSION', 'Waiting for CAPCOM to appear. Start one with orca capcom if needed.', 'var(--ink-dim)');
 }

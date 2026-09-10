@@ -1253,7 +1253,9 @@ class Collector {
       const snap = this.markHidden(d.snapshot(now), d.id);
       const handle = this.handleOf(d);
       this.runner.models.tick(handle);
+      this.runner.reset.tick(handle);
       snap.modelControl = this.runner.models.state(handle);
+      snap.resetControl = this.runner.reset.state(handle);
       Object.assign(snap, this.runner.workers.snapshotState(d.id));
       all.push(snap);
       const list = byProject.get(snap.projectId);
@@ -1620,7 +1622,7 @@ class Collector {
 
   private sendSnapshot(): void {
     const now = Date.now();
-    const agents = [...this.derivers.values()].map((d) => this.markHidden({ ...d.snapshot(now), ...this.runner.workers.snapshotState(d.id), modelControl: this.runner.models.state(this.handleOf(d)) }, d.id));
+    const agents = [...this.derivers.values()].map((d) => this.markHidden({ ...d.snapshot(now), ...this.runner.workers.snapshotState(d.id), modelControl: this.runner.models.state(this.handleOf(d)), resetControl: this.runner.reset.state(this.handleOf(d)) }, d.id));
     for (const a of agents) this.sent.set(a.id, a);
     const projects = this.projects.all();
     for (const p of projects) this.sentProjects.set(p.id, JSON.stringify(p));
@@ -1662,7 +1664,7 @@ class Collector {
     this.send({
       t: 'snapshot', machineId: this.machineId,
       projects: this.projects.all(),
-      agents: [...this.derivers.values()].map((d) => this.markHidden({ ...d.snapshot(), ...this.runner.workers.snapshotState(d.id), modelControl: this.runner.models.state(this.handleOf(d)) }, d.id)),
+      agents: [...this.derivers.values()].map((d) => this.markHidden({ ...d.snapshot(), ...this.runner.workers.snapshotState(d.id), modelControl: this.runner.models.state(this.handleOf(d)), resetControl: this.runner.reset.state(this.handleOf(d)) }, d.id)),
       keys: this.keys.list(),
     });
   }
@@ -2072,6 +2074,7 @@ export function diffAgent(prev: Agent, next: Agent): Partial<Agent> | null {
   if (JSON.stringify(prev.block) !== JSON.stringify(next.block)) set('block');
   if (JSON.stringify(prev.continuation) !== JSON.stringify(next.continuation)) set('continuation');
   if (JSON.stringify(prev.modelControl) !== JSON.stringify(next.modelControl)) set('modelControl');
+  if (JSON.stringify(prev.resetControl) !== JSON.stringify(next.resetControl)) set('resetControl');
   if (JSON.stringify(prev.childIds) !== JSON.stringify(next.childIds)) set('childIds');
 
   // Las métricas se mandan sólo cuando se mueven de forma perceptible: uptimeMs

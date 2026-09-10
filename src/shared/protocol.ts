@@ -163,6 +163,8 @@ export type Command =
   | { k: 'recovery:decide'; agentId: string; decision: import('./recovery.ts').RecoveryRequest }
   /** `model` opcional: sin él, el relevo nace con el modelo que ya corría. */
   | { k: 'capcom:new'; agentId: string; mode: 'continuity' | 'clean'; checkpoint?: string; model?: string }
+  /** Cancela un `capcom:new` todavía encolado; una vez aplicándose, ya no. */
+  | { k: 'capcom:new:cancel'; agentId: string }
   | { k: 'handoff:models'; agentId: string }
   /**
    * El catálogo de modelos de UNA MÁQUINA, sin pasar por un agente.

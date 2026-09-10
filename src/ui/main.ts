@@ -632,7 +632,7 @@ store.on((e) => {
   // `improve` entra en la lista porque el campo lee del tablero quién es
   // revisor: el agente y su tablero llegan por caminos distintos, y el que
   // llegue segundo tiene que repintar el tile.
-  if (e.k === 'world' || e.k === 'agents' || e.k === 'projects' || e.k === 'traffic' || e.k === 'artifacts' || e.k === 'escalations' || e.k === 'improve') field.feed();
+  if (e.k === 'world' || e.k === 'agents' || e.k === 'projects' || e.k === 'traffic' || e.k === 'artifacts' || e.k === 'escalations' || e.k === 'improve' || e.k === 'missions') field.feed();
   if (e.k === 'world') { restoreArtifactPlacements(); field.feed(); }
   if (e.k === 'escalations') { closeAnswered(e.ids); autoOpenInterrupts(); }
   if (e.k === 'artifacts') autoOpenArtifacts(e.ids);

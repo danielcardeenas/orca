@@ -175,7 +175,11 @@ const FRAG = /* glsl */ `
      * violeta sólo dice quién es. Corre en Claude Code, así que su trama es
      * la sólida por serlo, no por ser 8.
      */
-    float isRev = step(7.5, rt) * step(rt, 8.5);
+    // FORGE uses 4–7: the existing self-improvement outline, with
+    // the actual runtime preserved in the low two bits.
+    float isForge = step(3.5, rt) * step(rt, 7.5);
+    float isRev = max(isForge, step(7.5, rt) * step(rt, 8.5));
+    rt -= isForge * 4.0;
     float capTurn = isCap * uCap.x;
     float capWait = isCap * uCap.y;
     float capPulse = isCap * uCap.z;

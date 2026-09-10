@@ -262,6 +262,12 @@
 .rgn--capcom .rgn__code { color: var(--cyan); text-shadow: 0 0 6px var(--cyan-glow); }
 .rgn--capcom .rgn__name { color: var(--cyan); opacity: 0.7; }
 .rgn--capcom:hover { border-color: var(--cyan); box-shadow: 0 0 8px var(--cyan-glow); }
+.rgn--forge { border-color: var(--auto, #b47cff); background: rgba(11,10,13,0.75); max-width: calc(100% - 16px); z-index: 1; }
+.rgn--forge .rgn__code, .rgn--forge .rgn__name { color: var(--auto, #b47cff); }
+.rgn--forge .rgn__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rgn--forge:hover, .rgn--forge:focus-visible { border-color: var(--auto, #b47cff); }
+.rgn--forge.is-inactive { border-color: var(--line); }
+.rgn--forge.is-inactive .rgn__code, .rgn--forge.is-inactive .rgn__name { color: var(--ink-dim); }
 
 /*
  * Fuera de la flota: el directorio del mando, sus runtimes de relevo y los

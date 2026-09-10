@@ -20,7 +20,8 @@
  * forgotten, and honoured again the moment the field comes back.
  */
 
-import { squadName } from '../../shared/squads.ts';
+import { squadName, squadsOf } from '../../shared/squads.ts';
+import { isForgeSquad } from '../../shared/forge.ts';
 import { HARNESS_LABEL, harnessHostSlug, harnessIsland, isHarnessIsland } from '../../shared/synthetic.ts';
 import { OFF_FLEET_LABEL, islandOf, isOffFleet } from '../../shared/workspaces.ts';
 import type { Agent, AgentState, Placement, Project } from '../../shared/types.ts';
@@ -107,6 +108,9 @@ export const BLOCK_PAD = 0.08;
 export const CAPCOM_SCALE = 1.4;
 /** Air CAPCOM keeps from any region or pinned tile: about a gutter and a half. */
 export const CAPCOM_CLEAR = 0.4;
+/** FORGE's labels and separate instances need more air than ordinary tiles. */
+export const FORGE_CLEAR_X = 0.8;
+export const FORGE_CLEAR_Y = 0.9;
 /**
  * Air the harness enclosure keeps from the island it came out of, and from
  * anything else it has to dodge. Wider than a gutter on purpose: it is a
@@ -289,6 +293,17 @@ export function layoutFleet(
   const regions: Region[] = [];
   const trays: Tray[] = [];
 
+  // FORGE is the existing squad lead, never a second agent. Test agents stay
+  // inside their harness enclosure, and deck mode above keeps its uniform grid.
+  const capcom = agents.find((a) => a.role === 'capcom') ?? null;
+  const forge = agents.filter((a) => a.role !== 'capcom' && isLead(a)
+    && isForgeSquad(squadOf(a)) && !harness.has(a.machineId)).sort(tieBreak);
+  const commands = [...(capcom ? [capcom] : []), ...forge];
+  const commandIds = new Set(commands.map((a) => a.id));
+  const forgeLeads = new Map(squadsOf(agents.filter((a) => !harness.has(a.machineId)))
+    .filter((s) => isForgeSquad(s.name) && s.leaderId && commandIds.has(s.leaderId))
+    .map((s) => [s.name, s.leaderId!]));
+
   /*
    * Folded children (`blocks.ts`) do not take a grid cell: they stand in
    * their parent's tray. A child the operator pinned by hand is a tile
@@ -298,7 +313,7 @@ export function layoutFleet(
   const folded = new Set<string>();
   for (const a of agents) {
     const pid = absorbed.get(a.id);
-    if (!pid || placements.get(a.id)?.pinned) continue;
+    if (!pid || placements.get(a.id)?.pinned || commandIds.has(a.id) || commandIds.has(pid)) continue;
     folded.add(a.id);
     const k = kidsOf.get(pid);
     if (k) k.push(a); else kidsOf.set(pid, [a]);
@@ -312,19 +327,17 @@ export function layoutFleet(
    * home, not a repo, so it never earns a region of its own; a worker that
    * strayed in there still does, which is how a stray shows.
    */
-  const capcom = agents.find((a) => a.role === 'capcom') ?? null;
-
   const island = (a: Agent) => islandIn(harness, a);
 
   /* ── Group by project, lineage order inside ─────────────────────── */
   const byProject = new Map<string, Agent[]>();
   for (const a of agents) {
-    if (folded.has(a.id) || a === capcom) continue;
+    if (folded.has(a.id) || commandIds.has(a.id)) continue;
     const list = byProject.get(island(a));
     if (list) list.push(a); else byProject.set(island(a), [a]);
   }
   const countOf = new Map<string, number>();
-  for (const a of agents) if (a !== capcom) countOf.set(island(a), (countOf.get(island(a)) ?? 0) + 1);
+  for (const a of agents) if (!commandIds.has(a.id)) countOf.set(island(a), (countOf.get(island(a)) ?? 0) + 1);
   // Projects that have gone quiet keep their slot; new ones take the next.
   const ids = [...byProject.keys()].sort((p, q) => (projects.get(p)?.name ?? p).localeCompare(projects.get(q)?.name ?? q));
   // El recinto del arnés no toma slot: se planta junto a su anfitrión y se va
@@ -553,8 +566,10 @@ export function layoutFleet(
       region.squads.push({
         name,
         projectId: s.id,
-        count: b.n,
-        leadId: b.lead,
+        // The frame encloses workers, but its roster still includes the real
+        // command lead when that lead belongs to this same project.
+        count: b.n + forge.filter((a) => squadOf(a) === name && island(a) === s.id).length,
+        leadId: (!region.harness && forgeLeads.get(name)) || b.lead,
         cx: (b.minX + b.maxX) / 2 + (off?.dx ?? 0),
         cy: (b.minY + b.maxY) / 2 + (off?.dy ?? 0),
         hw: (b.maxX - b.minX) / 2 + TILE_W / 2 + SQUAD_PAD,
@@ -567,38 +582,57 @@ export function layoutFleet(
     minY = Math.min(minY, cy - s.h / 2); maxY = Math.max(maxY, cy + s.h / 2);
   }
 
-  if (capcom) {
+  for (const command of commands) {
     /*
-     * The origin is CAPCOM's. The spiral never reaches it (slot 0 is a ring
-     * out), but a region or a tile the operator dragged can: then CAPCOM
-     * steps out of the way, straight up, to the first clear spot — it stands
+     * CAPCOM takes the origin. FORGE stands beside ORCA's right edge, using
+     * its own project when ORCA is absent, and leaves room for labels. Regions,
+     * moved workers and command tiles reserve their space. On collision a
+     * command steps straight up to the first clear spot — it stands
      * beside the fleet, never inside a project or a squad. Pinned by hand it
      * goes where the hand left it: a placement the operator made always wins.
      */
-    const placed = placements.get(capcom.id);
+    const placed = placements.get(command.id);
     const pinned = placed?.pinned === true;
-    const hw = TILE_W / 2 * CAPCOM_SCALE + CAPCOM_CLEAR, hh = TILE_H / 2 * CAPCOM_SCALE + CAPCOM_CLEAR;
+    const isForge = command !== capcom;
+    const home = isForge ? regions.find((r) => !r.harness && !r.offFleet && projects.get(r.id)?.slug === 'orca')
+      ?? regions.find((r) => r.id === island(command)) : undefined;
+    const hw = TILE_W / 2 * CAPCOM_SCALE + (isForge ? FORGE_CLEAR_X : CAPCOM_CLEAR);
+    const hh = TILE_H / 2 * CAPCOM_SCALE + (isForge ? FORGE_CLEAR_Y : CAPCOM_CLEAR);
     const boxes: { minX: number; minY: number; maxX: number; maxY: number }[] = regions
       .map((r) => ({ minX: r.cx - r.hw, minY: r.cy - r.hh, maxX: r.cx + r.hw, maxY: r.cy + r.hh }));
     for (const sp of spots.values()) {
-      if (!sp.pinned) continue;
-      boxes.push({ minX: sp.tx - TILE_W / 2, minY: sp.ty - TILE_H / 2, maxX: sp.tx + TILE_W / 2, maxY: sp.ty + TILE_H / 2 });
+      boxes.push({ minX: sp.tx - TILE_W / 2 * sp.scale, minY: sp.ty - TILE_H / 2 * sp.scale,
+        maxX: sp.tx + TILE_W / 2 * sp.scale, maxY: sp.ty + TILE_H / 2 * sp.scale });
     }
+    // Reserve pinned commands before placing any automatic one.
+    for (const other of commands) {
+      const p = placements.get(other.id);
+      if (other.id === command.id || !p?.pinned) continue;
+      boxes.push({ minX: p.x - TILE_W / 2 * CAPCOM_SCALE, minY: p.y - TILE_H / 2 * CAPCOM_SCALE,
+        maxX: p.x + TILE_W / 2 * CAPCOM_SCALE, maxY: p.y + TILE_H / 2 * CAPCOM_SCALE });
+    }
+    // Contact at the promised clearance is not overlap. A subtraction such
+    // as (home.cx + home.hw + hw) - hw can round below the region edge.
+    const epsilon = 1e-9;
     const covering = (x: number, y: number) =>
-      boxes.filter((b) => x + hw > b.minX && x - hw < b.maxX && y + hh > b.minY && y - hh < b.maxY);
-    let tx = pinned ? placed!.x : 0, ty = pinned ? placed!.y : 0;
+      boxes.filter((b) => x + hw > b.minX + epsilon && x - hw < b.maxX - epsilon
+        && y + hh > b.minY + epsilon && y - hh < b.maxY - epsilon);
+    // A lone FORGE still keeps its distance from CAPCOM; no empty region is
+    // invented just to supply an anchor. Operator placements always win.
+    let tx = pinned ? placed!.x : home ? home.cx + home.hw + hw : isForge ? 3.6 : 0;
+    let ty = pinned ? placed!.y : home?.cy ?? 0;
     if (!pinned) {
-      for (let i = 0; i < 32; i++) {
+      for (let i = 0; i <= boxes.length; i++) {
         const hit = covering(tx, ty);
         if (hit.length === 0) break;
         ty = Math.max(...hit.map((b) => b.maxY)) + hh;
       }
     }
-    const tz = depthOf(capcom);
-    const old = prev.spots.get(capcom.id);
-    spots.set(capcom.id, old
-      ? { ...old, tx, ty, tz, pinned, projectId: island(capcom), scale: CAPCOM_SCALE, trayOf: null }
-      : { id: capcom.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(capcom), scale: CAPCOM_SCALE, trayOf: null });
+    const tz = depthOf(command);
+    const old = prev.spots.get(command.id);
+    spots.set(command.id, old
+      ? { ...old, tx, ty, tz, pinned, projectId: island(command), scale: CAPCOM_SCALE, trayOf: null }
+      : { id: command.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(command), scale: CAPCOM_SCALE, trayOf: null });
     minX = Math.min(minX, tx - hw); maxX = Math.max(maxX, tx + hw);
     minY = Math.min(minY, ty - hh); maxY = Math.max(maxY, ty + hh);
   }

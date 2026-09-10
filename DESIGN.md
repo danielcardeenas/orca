@@ -264,6 +264,16 @@ closure and publication. A proposal that is already a mission
 cannot become a second one. `⌥I` and `/improve` bring the section forward; on a
 phone the section bar does (`docs/MISSIONS.md`). See `docs/AUTOMEJORA.md`.
 
+**FORGE on the field.** Its real `forge-*` squad lead stands outside the project
+outline, close to ORCA's right edge and apart from CAPCOM, at CAPCOM's tile scale,
+with a permanent FORGE label naming the lead
+and observed activity. Existing lineage and squad pipes connect its workers.
+A violet affiliation pipe connects the project perimeter to the lead, and
+multiple instances keep vertical clearance for their labels and tiles.
+The active mission gives it the reviewer's violet identity; state and runtime
+keep their own marks. There is one tile per real lead, no synthetic agent or
+second lifecycle. Deck mode and operator placements retain their usual rules.
+
 ## The command line
 
 One input, bottom centre, always there. Plain text talks to CAPCOM.

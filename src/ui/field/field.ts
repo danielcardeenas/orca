@@ -44,6 +44,7 @@ import { squadsOf, type Squad } from '../../shared/squads.ts';
 import { HARNESS_LABEL, harnessHome, harnessIsland } from '../../shared/synthetic.ts';
 import { OFF_FLEET_LABEL, islandOf } from '../../shared/workspaces.ts';
 import { store } from '../store.ts';
+import { forgeViews } from './forge.ts';
 import { reviewerIds } from '../../shared/improve.ts';
 import { esc, STATE_HEX, STATE_VAR } from '../util.ts';
 import { CAPCOM_BITS, sigilBits, sigilHTML } from '../gfx/sigil.ts';
@@ -258,6 +259,7 @@ const HARNESS_WALL = 0.22;
 const C_AMBER = new THREE.Color(0xf5a524);
 /** A command tie: CAPCOM's cyan at 60 %, so the post stays the brightest cyan thing. */
 const C_CYAN_DIM = new THREE.Color(0x4fe3ff).multiplyScalar(0.6);
+const C_FORGE_DIM = new THREE.Color(0xb47cff).multiplyScalar(0.6);
 const C_BLUE = new THREE.Color(0x8fb8ff);
 const C_RED = new THREE.Color(0xff2a12);
 const C_WHITE = new THREE.Color(0xf2f4f0);
@@ -467,6 +469,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
    * por fotograma: `runtimeOf` lo consulta una vez por tile y por paint.
    */
   let reviewers = reviewerIds(store.improve);
+  let forge = forgeViews([], {});
   /** Block keys we have already drawn, so a new squadron traces itself once. */
   const seenSquads = new Set<string>();
   /**
@@ -506,6 +509,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
    */
   function runtimeOf(a: Agent): number {
     if (a.role === 'capcom') return 9;
+    if (forge.get(a.id)?.active) return 4 + (RUNTIME_ID[a.runtime] ?? 3);
     if (reviewers.has(a.id)) return 8;
     return RUNTIME_ID[a.runtime] ?? 3;
   }
@@ -671,6 +675,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     // Quién es revisor sale del tablero de AUTOMEJORA, que cambia cada varias
     // horas: se relee con el mundo y no por fotograma.
     reviewers = reviewerIds(store.improve);
+    forge = forgeViews(agents, w.missions ?? {});
+    syncForgeLabels();
 
     const placements = new Map<string, Placement>();
     for (const [id, p] of Object.entries(w.placements ?? {})) placements.set(id, p);
@@ -919,6 +925,33 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     if (cap) ev.onOpen(cap.id, e.clientX, e.clientY);
   });
   regionsLayer.appendChild(capcomEl);
+
+  // The label belongs to the real lead, just like CAPCOM's. No second node
+  // or selection identity: every gesture opens the existing agent window.
+  const forgeEls = new Map<string, HTMLButtonElement>();
+  function syncForgeLabels() {
+    for (const [id, el] of forgeEls) {
+      if (!forge.has(id)) { el.remove(); forgeEls.delete(id); }
+    }
+    for (const [id, view] of forge) {
+      let el = forgeEls.get(id);
+      if (!el) {
+        el = document.createElement('button');
+        el.type = 'button';
+        el.className = 'rgn rgn--forge';
+        el.style.pointerEvents = 'auto';
+        el.addEventListener('pointerdown', (e) => e.stopPropagation());
+        el.addEventListener('click', (e) => { e.stopPropagation(); if (byId.has(id)) ev.onOpen(id, e.clientX, e.clientY); });
+        regionsLayer.appendChild(el);
+        forgeEls.set(id, el);
+      }
+      const callsign = byId.get(id)?.callsign ?? id;
+      const html = `<span class="rgn__code">FORGE</span><span class="rgn__name">LEAD ${esc(callsign)} · ${esc(view.label)}</span>`;
+      if (el.innerHTML !== html) el.innerHTML = html;
+      el.setAttribute('aria-label', `FORGE · lead ${callsign} · ${view.label}`);
+      el.classList.toggle('is-inactive', !view.active);
+    }
+  }
   /** One rótulo per squad block, keyed the same way `squadBlocks` is. */
   const squadEls = new Map<string, HTMLElement>();
   /**
@@ -975,8 +1008,10 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     // The squadron's patch: seeded on the *name*, so it is the same glyph every
     // member wears on its tile (§1.1) — the block is a body before the outline
     // even resolves. `.sigil--lg` is column A's double size.
+    const forgeView = lead ? forge.get(lead.id) : undefined;
     const sig = sigilHTML(sigilBits(q.name));
     let html = `<span class="squad__sigil sigil--lg">${sig}</span><span class="squad__roster">${roster}</span>`;
+    if (forgeView) html += `<span class="squad__k">FORGE · ${esc(forgeView.label)}</span>`;
     if (tier >= 2) {
       html += `<span class="squad__k">${esc(q.name)} · ${groupOrigin(agents.filter((a) => island(a) === q.projectId && squadOf(a) === q.name))}</span><span class="squad__n">${q.count}</span>`;
     }
@@ -1175,6 +1210,16 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         capcomEl.style.transform = `translate3d(${Math.round(p.x)}px, ${Math.round(cy)}px, 0) translate(-50%, -50%)`;
       }
     }
+    for (const [id, el] of forgeEls) {
+      const sp = layout.spots.get(id);
+      const p = sp ? camera.project(sp.x, sp.y + TILE_H / 2 * sp.scale, sp.z) : null;
+      if (!sp || !p?.visible || lmode.kind === 'deck') { el.style.display = 'none'; continue; }
+      el.style.display = '';
+      el.style.opacity = '1';
+      const half = el.offsetWidth / 2;
+      const x = Math.max(half + 8, Math.min(root.clientWidth - half - 8, p.x));
+      el.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(p.y - 13)}px, 0) translate(-50%, -50%)`;
+    }
     // YOU labels ride their node, not the region's corner, and never yield to
     // a collision: the count is the one number worth the overlap.
     for (const [id, el] of youEls) {
@@ -1224,6 +1269,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
    * need the routes below and not `routeGutterMsg`.
    */
   function regionOf(p: Pt): Region | undefined {
+    if ((p as Partial<Spot>).scale === CAPCOM_SCALE) return undefined;
     const pid = (p as Partial<Spot>).projectId;
     return pid ? regionById.get(pid) : undefined;
   }
@@ -1310,6 +1356,12 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   }
 
   const lineageRoute = (p: Pt, c: Pt, seed: string): Pt[] => {
+    const childRegion = regionOf(c);
+    if (forge.has((p as Spot).id) && (p as Spot).scale === CAPCOM_SCALE && childRegion
+      && !(c as Spot).pinned && !insideRegion(childRegion, p)) {
+      const edge = { x: p.x + (c.x >= p.x ? 1 : -1) * TILE_W * CAPCOM_SCALE / 2, y: p.y };
+      return landOn(exitRegion(c, childRegion, p, laneOf(seed)), edge).reverse();
+    }
     if (offGrid(p, c)) return routeLineage(p, c);
     const rp = regionOf(p), rc = regionOf(c);
     if (rp && rc && rp !== rc) return crossRegion(p, c, rp, rc, laneOf(seed));
@@ -1586,6 +1638,25 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         }
       }
     }
+    // Project affiliation is visible without putting FORGE inside its box.
+    // Ports meet the existing region perimeter and the real lead's tile.
+    // This is a presentation edge, never mission or approval state.
+    if (lmode.kind !== 'deck') for (const [id, view] of forge) {
+      const a = byId.get(id), p = layout.spots.get(id);
+      if (!a || !p || p.scale !== CAPCOM_SCALE) continue;
+      const r = layout.regions.find((r) => !r.harness && !r.offFleet && projects.get(r.id)?.slug === 'orca') ?? regionById.get(island(a));
+      if (!r || insideRegion(r, p)) continue;
+      const edge = { x: Math.max(r.cx - r.hw, Math.min(r.cx + r.hw, p.x)), y: Math.max(r.cy - r.hh, Math.min(r.cy + r.hh, p.y)) };
+      const horizontal = Math.abs(p.x - edge.x) >= Math.abs(p.y - edge.y);
+      const end = horizontal
+        ? { x: p.x - Math.sign(p.x - edge.x) * TILE_W * p.scale / 2, y: p.y }
+        : { x: p.x, y: p.y - Math.sign(p.y - edge.y) * TILE_H * p.scale / 2 };
+      const corner = horizontal ? { x: end.x, y: edge.y } : { x: edge.x, y: end.y };
+      const pts = [edge, corner, end];
+      const color = view.active ? C_FORGE_DIM : C_INK_DIM;
+      pipes.add(pts, p.z - 0.065, color, 'command', view.active ? 1 : 0.35, 0.7, selected.has(id) ? 1 : 0, 1);
+      pipes.port(edge.x, edge.y, p.z - 0.06, color, 1, 0);
+    }
     /*
      * Squad ties. Lineage already draws the lead→child pipes; a member the
      * lead did not spawn gets the same pipe, thinner, because it is the same
@@ -1806,7 +1877,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       dragId = rgn;
       downOnOpen = !!target?.closest?.('.rgn__open');
       dragSet = [];
-      for (const sp of layout.spots.values()) if (sp.projectId === rgn) dragSet.push(sp.id);
+      for (const sp of layout.spots.values()) if (sp.projectId === rgn && sp.scale !== CAPCOM_SCALE) dragSet.push(sp.id);
       return;
     }
     const rotulo = target?.closest?.<HTMLElement>('.squad')?.dataset.key ?? null;
@@ -2290,7 +2361,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         const q = camera.project(s.x + TILE_W / 2 * scale, s.y - TILE_H / 2 * scale, s.z);
         const bw = q.x - p.x, bh = q.y - p.y;
         if (p.visible && bw >= LABEL_PX && bh > 2) {
-          labelItems.push({ agent: a, sx: p.x, sy: p.y, w: bw, h: bh, sel: isSel || near, selected: isSel, amber: alert >= 0.75 });
+          labelItems.push({ agent: a, forge: forge.get(a.id), sx: p.x, sy: p.y, w: bw, h: bh, sel: isSel || near, selected: isSel, amber: alert >= 0.75 });
         }
       }
     }

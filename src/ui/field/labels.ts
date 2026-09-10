@@ -52,12 +52,14 @@ import { originLabel } from '../../shared/origin.ts';
  * numbers, then the status pill and the machine it runs on.
  */
 
+import type { ForgeView } from './forge.ts';
 import type { Agent } from '../../shared/types.ts';
 import { islandOf } from '../../shared/workspaces.ts';
 import { esc, money, nameOf, plain, runtimeCode, tokens } from '../util.ts';
 
 export interface LabelItem {
   agent: Agent;
+  forge?: ForgeView;
   /** Top-left of the tile on screen, and its screen size. */
   sx: number; sy: number; w: number; h: number;
   /** True when focus mode must spare this label: selected, or a neighbour. */
@@ -269,7 +271,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
    * until the tile is selected — far cheaper than rewriting five hundred
    * interiors every time the selection moves.
    */
-  function content(a: Agent, tier: number, from: number, m: MidText): string {
+  function content(a: Agent, tier: number, from: number, m: MidText, forge?: ForgeView): string {
     const rt = runtimeCode(a);
     const s = stepper(from);
 
@@ -283,14 +285,15 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
     // CAPCOM belongs to no project and is named by what it is: CAPCOM, then
     // its callsign and COMMAND where a worker shows its project and origin.
     const cap = a.role === 'capcom';
-    const where = cap ? `${esc(a.callsign)} · COMMAND` : `${esc(projectCode(a))} · ${originLabel(a)}`;
-    top += `<div class="lbl__row"${s(1)}><span class="lbl__cs">${cap ? 'CAPCOM' : esc(a.callsign)}</span>`
+    const where = forge ? `${esc(a.callsign)} · ${esc(projectCode(a))}` : cap ? `${esc(a.callsign)} · COMMAND` : `${esc(projectCode(a))} · ${originLabel(a)}`;
+    top += `<div class="lbl__row"${s(1)}><span class="lbl__cs">${forge ? 'FORGE' : cap ? 'CAPCOM' : esc(a.callsign)}</span>`
       + `<span class="lbl__pj">${where}</span>`
       + (tier >= 2 && tier < 5 && rt !== 'CL' ? `<span class="lbl__rt"${s(2)}>${rt}</span>` : '')
       + `</div>`;
 
     /* ── Middle band: 31–68 %, x 7–66 % — the bite lives here. ─────── */
     let mid = '';
+    if (forge && tier >= 2) mid += `<div class="lbl__mission"${s(2)}>${esc(forge.label)}</div>`;
     if (m.head) mid += `<div class="lbl__title"${s(2)}>${esc(m.head)}</div>`;
     if (m.sub) mid += `<div class="lbl__mission"${s(4)}>${esc(m.sub)}</div>`;
 
@@ -332,7 +335,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
         // transform and the box run every frame; this does not. The project's
         // name and code are in it too — they decide whether the title is an
         // echo, and they can land after the label already exists.
-        const sig = `${a.origin}|${a.role}|${tier}|${unit}|${amber ? 'A' : ''}|${a.state}|${a.block?.kind ?? ''}|${a.title}|${a.mission}|${a.tool}|${a.toolDetail}|${a.lastSay}|${a.callsign}|${projectCode(a)}|${names.get(islandOf(a)) ?? ''}`
+        const sig = `${it.forge?.label ?? ''}|${a.origin}|${a.role}|${tier}|${unit}|${amber ? 'A' : ''}|${a.state}|${a.block?.kind ?? ''}|${a.title}|${a.mission}|${a.tool}|${a.toolDetail}|${a.lastSay}|${a.callsign}|${projectCode(a)}|${names.get(islandOf(a)) ?? ''}`
           + (tier >= 4 ? `|${a.metrics.costUSD.toFixed(2)}|${Math.round(a.metrics.tokensPerSec)}|${Math.round(a.uptimeMs / 1000)}|${a.metrics.turns}` : '')
           + (tier >= 5 ? `|${a.model}|${a.machineId}` : '');
         if (sig !== rec.sig) {
@@ -343,7 +346,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
           const mid = midText(a, tier);
           rec.sig = sig;
           rec.tier = tier;
-          rec.el.innerHTML = content(a, tier, from, mid);
+          rec.el.innerHTML = content(a, tier, from, mid, it.forge);
           rec.base = 'lbl'
             + ` t-${tier}`
             + (a.role === 'capcom' ? ' is-capcom' : '')

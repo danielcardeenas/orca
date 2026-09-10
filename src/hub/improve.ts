@@ -44,6 +44,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { newId, type Command, type SpawnAck } from '../shared/protocol.ts';
+import { isForgeSquad } from '../shared/forge.ts';
 import { TERMINAL_STATES, type Agent, type Project } from '../shared/types.ts';
 import {
   IMPROVE_DEFAULTS, MAX_COUNTERS, MAX_NOTE, MAX_NOTES, MAX_PER_REPORT, MAX_PROPOSALS,
@@ -1059,7 +1060,8 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
       parentId: null,
       mission: input.mission,
       background: true,
-      permissionMode: 'auto',
+      // Routine execution is separate from CAPCOM's publication authority.
+      permissionMode: isForgeSquad(input.squad) ? 'auto' : 'manual',
       squad: input.squad,
       lead: true,
       runtime: with_.runtime,

@@ -35,6 +35,7 @@
  * silencio.
  */
 
+import { isForgeSquad } from '../shared/forge.ts';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -73,12 +74,14 @@ export function isOwnRepo(projectPath: string | null | undefined, root = REPO_RO
  * propio, que es la regla que gobierna todo esto.
  */
 export function finishedOwnWork(
-  change: { to: string; agent: { role?: string | null; projectId?: string | null } },
+  change: { to: string; agent: { role?: string | null; squad?: string | null; projectId?: string | null } },
   projectPath: string | null | undefined,
   root = REPO_ROOT,
 ): boolean {
   if (change.to !== 'done') return false;
   if (change.agent.role === 'capcom') return false;
+  // FORGE results await CAPCOM review, including results from its members.
+  if (isForgeSquad(change.agent.squad)) return false;
   return isOwnRepo(projectPath, root);
 }
 

@@ -128,7 +128,7 @@ export function planChild(
       ...(squad ? { squad, lead: false } : {}),
       ...(req.model ? { model: req.model } : {}),
       background: true,
-      // `auto`: que no se quede colgado en un prompt que nadie mira.
+      // Execution posture is independent of the publisher's squad exclusion.
       permissionMode: 'auto',
     },
   };

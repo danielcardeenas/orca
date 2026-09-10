@@ -30,6 +30,8 @@
  *    "you are part of a great team" is noise that costs tokens on every turn.
  */
 
+import { FORGE_EXECUTION_POLICY, isForgeSquad } from '../shared/forge.ts';
+
 /** Fence around the footer, so an agent can see where its own brief ended. */
 const RULE = '---';
 
@@ -138,7 +140,8 @@ export function squadBrief(
   squad: string | null, lead: boolean, leadCallsign: string | null,
 ): string | null {
   if (!squad) return null;
-  return lead ? leadBrief(squad) : memberBrief(squad, leadCallsign);
+  const brief = lead ? leadBrief(squad) : memberBrief(squad, leadCallsign);
+  return isForgeSquad(squad) ? withBrief(brief, FORGE_EXECUTION_POLICY) : brief;
 }
 
 /* ── CAPCOM ───────────────────────────────────────────────────────── */

@@ -192,11 +192,27 @@ async function main() {
 
     const geo = await page.evaluate(() => {
       const box = (s: string) => document.querySelector(s)?.getBoundingClientRect().toJSON() ?? null;
-      return { missions: box('.missions'), clock: box('.mast__clock'), mast: box('.mast'), marks: box('.bmarks') };
-    }) as { missions: DOMRect; clock: DOMRect; mast: DOMRect; marks: DOMRect | null };
+      // Lo que el mástil dispone en filas, pieza a pieza: la fila de
+      // herramientas se lee botón a botón y la telemetría por su texto, que
+      // es lo único de ella que se ve (`main.ts`, `railTop`).
+      const mast = document.querySelector<HTMLElement>('.mast')!;
+      const pieces = [...mast.querySelectorAll<HTMLElement>(':scope > :not(.mast__tools):not(.tele), :scope > .mast__tools > *')]
+        .map((el) => ({ what: el.className || el.tagName, ...el.getBoundingClientRect().toJSON() as DOMRect }));
+      const tele = mast.querySelector('.tele');
+      if (tele) { const r = document.createRange(); r.selectNodeContents(tele); pieces.push({ what: 'tele', ...r.getBoundingClientRect().toJSON() as DOMRect }); }
+      return { missions: box('.missions'), clock: box('.mast__clock'), mast: box('.mast'), marks: box('.bmarks'), pieces };
+    }) as { missions: DOMRect; clock: DOMRect; mast: DOMRect; marks: DOMRect | null; pieces: (DOMRect & { what: string })[] };
     assert.ok(geo.clock, 'the mast clock is there');
     assert.ok(geo.missions.left < 200, `the panel is on the left, not the right (left ${geo.missions.left})`);
-    assert.ok(geo.missions.top >= geo.mast.bottom, 'the panel starts below the mast');
+    // Debajo de lo que el mástil tiene ENCIMA de la columna, no del mástil
+    // entero: a 1440 el mástil envuelve y lo que cae a la segunda fila cae a la
+    // derecha, así que el panel sube por debajo de la primera fila de
+    // herramientas —sin pisar ninguna pieza— y no espera a la telemetría.
+    const over = geo.pieces.filter((p) => p.width > 0 && p.height > 0 && p.right > geo.missions.left && p.left < geo.missions.right);
+    assert.ok(over.length > 0, 'the mast has something over the column');
+    for (const p of over) assert.ok(geo.missions.top >= p.bottom, `the panel clears every mast piece over it (${p.what} ends at ${Math.round(p.bottom)}, panel starts at ${Math.round(geo.missions.top)})`);
+    const lowest = Math.max(...over.map((p) => p.bottom));
+    assert.ok(geo.missions.top - lowest <= 16, `and starts right under the lowest one, not under the whole mast (gap ${Math.round(geo.missions.top - lowest)}px, mast ends at ${Math.round(geo.mast.bottom)})`);
     assert.ok(geo.missions.top >= geo.clock.bottom, 'and clears the clock, which is part of the mast');
     if (geo.marks) assert.ok(geo.missions.top >= geo.marks.bottom, 'and clears the bookmarks under the mast');
 

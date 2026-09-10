@@ -35,13 +35,19 @@
  * El carril no atrapa el ratón: lo que se pulsa son las secciones, y el hueco
  * entre ellas es campo. Y no impone alto a nadie —cada sección trae el suyo—
  * pero sí un techo: dos listas largas no pueden empujarse por debajo del dock.
+ *
+ * Empieza en `--col-top`, que es lo que el mástil tiene encima de ESTA
+ * columna (`main.ts`, `railTop`), y no en `--hud-top`, que es el borde del
+ * mástil entero: cuando el mástil envuelve, lo que cae a la segunda fila cae a
+ * la derecha, y esperar a que pase dejaba 70 px de campo vacío sobre MISSIONS.
+ * Sin la medida —táctil, donde el carril no tiene caja— vale `--hud-top`.
  */
 .hud__col {
   position: absolute;
-  top: calc(var(--hud-top, 58px) + 4px);
+  top: calc(var(--col-top, var(--hud-top, 58px)) + 4px);
   left: 62px;
   width: 380px;
-  max-height: calc(100vh - var(--hud-top, 58px) - 120px);
+  max-height: calc(100vh - var(--col-top, var(--hud-top, 58px)) - 120px);
   display: flex; flex-direction: column; gap: 8px;
   min-height: 0;
   pointer-events: none;

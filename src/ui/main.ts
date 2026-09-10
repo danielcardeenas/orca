@@ -475,9 +475,56 @@ const minimap = mountMinimap(hudEl, c);
 {
   const mastEl = hudEl.querySelector<HTMLElement>('.mast');
   if (mastEl) {
-    const ro = new ResizeObserver(() => app.style.setProperty('--hud-top', `${Math.round(mastEl.offsetTop + mastEl.offsetHeight + 8)}px`));
-    ro.observe(mastEl);
+    const measure = () => {
+      app.style.setProperty('--hud-top', `${Math.round(mastEl.offsetTop + mastEl.offsetHeight + 8)}px`);
+      app.style.setProperty('--col-top', `${Math.round(railTop(mastEl))}px`);
+    };
+    new ResizeObserver(measure).observe(mastEl);
+    // La fuente de pantalla puede llegar después del primer pintado y mover
+    // dónde envuelve la fila de herramientas sin cambiar el alto del mástil.
+    document.fonts?.ready.then(measure).catch(() => { /* sin fuentes: la medida del primer pintado vale */ });
   }
+}
+/*
+ * Dónde empieza el carril de la izquierda: debajo de lo que hay ENCIMA de él,
+ * no debajo del mástil entero.
+ *
+ * A 1440 px el mástil envuelve —SFX y ? caen a una segunda fila de
+ * herramientas y la telemetría a una tercera, las dos pegadas a la derecha— y
+ * su borde inferior queda 70 px por debajo de lo último que de verdad hay
+ * sobre la columna. Las misiones arrancaban ahí, con un hueco de campo vacío
+ * entre FLEET y su cabecera. Se mide pieza a pieza: cada una que pise la
+ * franja horizontal del carril lo empuja; las que quedan a la derecha, no.
+ *
+ * Las piezas son lo que el mástil dispone en filas: sus hijos directos menos
+ * los dos que son contenedores de anchura completa (la fila de herramientas,
+ * que se lee botón a botón, y la telemetría, que ocupa todo el ancho pero
+ * escribe a la derecha, así que se mide su texto). En táctil el carril es
+ * `display: contents` —no tiene caja— y aquí no hay nada que medir: las hojas
+ * siguen `--hud-top`.
+ */
+function railTop(mastEl: HTMLElement): number {
+  const rail = hudEl.querySelector<HTMLElement>('.hud__col')?.getBoundingClientRect();
+  const origin = hudEl.getBoundingClientRect().top;
+  const fallback = mastEl.offsetTop + mastEl.offsetHeight + 8;
+  if (!rail || rail.width === 0) return fallback;
+  const rects: DOMRect[] = [];
+  for (const el of mastEl.querySelectorAll<HTMLElement>(':scope > :not(.mast__tools):not(.tele), :scope > .mast__tools > *')) {
+    rects.push(el.getBoundingClientRect());
+  }
+  const tele = mastEl.querySelector('.tele');
+  if (tele) {
+    const r = document.createRange();
+    r.selectNodeContents(tele);
+    rects.push(r.getBoundingClientRect());
+  }
+  let bottom = 0;
+  for (const r of rects) {
+    if (r.width === 0 || r.height === 0) continue;
+    if (r.right <= rail.left || r.left >= rail.right) continue;
+    bottom = Math.max(bottom, r.bottom - origin);
+  }
+  return bottom > 0 ? bottom + 8 : fallback;
 }
 /*
  * El carril de la izquierda: las dos secciones, una debajo de otra.

@@ -231,6 +231,16 @@ Pruebas nuevas:
   depende de que el mock llene el diario: comprueba que no lo llena y siembra
   entradas reales.
 
+Después del commit (`e842052`, encima de `3c26898` del otro worker):
+`npm test -- --since=HEAD~1` sobre el `HEAD` combinado, 12 archivos → 36
+suites, **572/572, exit 0**. Lo que marca `sin suite que los cubra` son los
+dos documentos y `test/run.ts`. `test/run.ts` es el propio runner: ninguna
+suite lo importa, pero se ejecuta en cada corrida. Lo que demuestra su cambio
+es que toda la suite pasó con la guarda puesta: sin el `ORCA_HOME` temporal,
+los hubs en proceso de `serve`, `term` y `files` se habrían negado a
+arrancar. Además, los shims reales de `~/.orca/shims` siguieron intactos
+después de correr la suite completa desde un worktree que después se borró.
+
 Qué queda sin prueba automática: el efecto de `test/visual.ts`. `visual-ports`
 importa el archivo, pero no ejercita `ensureServers`, porque haría falta
 levantar hub y Vite. Lo cubre la comprobación a mano de arriba y, de rebote,

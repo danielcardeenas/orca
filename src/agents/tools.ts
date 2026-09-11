@@ -34,6 +34,7 @@ import type { Command, SpawnAck } from '../shared/protocol.ts';
 import { MAX_SQUAD_NAME, squadName, squadsOf, type Squad } from '../shared/squads.ts';
 import { findPreset, squadStem, type Preset } from '../shared/fleets.ts';
 import { TERMINAL_STATES } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import { CAMERA_PENDING_MS, findAgentRef, type CameraDirective, type CameraWhat } from '../shared/camera.ts';
 import { archivableState, parseAge, type ArchiveFilter, type ArchiveOutcome } from '../shared/archive.ts';
 import { excludedWorkspace, refusalFor } from '../shared/workspaces.ts';
@@ -440,7 +441,7 @@ export const CEO_TOOLS: ToolSpec[] = [
         },
         budget_tokens: {
           type: ['number', 'null'],
-          description: 'Consumption ceiling for this agent in TOKENS — input + output + cache read, its own and every Task subagent it launches. This is the default unit, because the operator pays in subscription quota and not in dollars. At 80% you get a [BUDGET 80%] line; at 100% the hub stops it if it has made no progress lately, and only warns you if it is still working. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or no limit.',
+          description: 'Consumption ceiling for this agent in TOKENS — input + output + cache writes (cache reads do not count), its own and every Task subagent it launches. This is the default unit, because the operator pays in subscription quota and not in dollars. At 80% you get a [BUDGET 80%] line; at 100% the hub stops it if it has made no progress lately, and only warns you if it is still working. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or no limit.',
         },
         budget_usd: {
           type: ['number', 'null'],
@@ -513,7 +514,7 @@ export const CEO_TOOLS: ToolSpec[] = [
           enum: ['auto', 'acceptEdits', 'plan', 'bypassPermissions', null],
           description: 'How much every agent of the squad may do without asking. Null or "auto" (the default): it never leaves a prompt waiting — Claude decides for itself, Codex runs with approvals and sandbox off. "plan": read-only. "acceptEdits": shell commands ask — only with the operator at the terminal. "bypassPermissions": never asks, no sandbox; on Codex it is what "auto" already does.',
         },
-        budget_tokens: { type: ['number', 'null'], description: 'Token ceiling for EACH agent of the squad, lead included — input + output + cache read, its own and its Task subagents\'. The default unit. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or none.' },
+        budget_tokens: { type: ['number', 'null'], description: 'Token ceiling for EACH agent of the squad, lead included — input + output + cache writes (cache reads do not count), its own and its Task subagents\'. The default unit. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or none.' },
         budget_usd: { type: ['number', 'null'], description: 'Dollar ceiling for EACH agent. Stored always, evaluated only with ORCA_BUDGET_MONEY=1. Null: the ORCA_DEFAULT_BUDGET_USD default, or none.' },
         budget_min: { type: ['number', 'null'], description: 'Ceiling in minutes seen WORKING for EACH agent, not wall clock. Null: the default, or none.' },
         squad_budget_tokens: { type: ['number', 'null'], description: 'Token ceiling for the WHOLE squad, summed over every member and their Task subagents. At 100% the members that have gone quiet are stopped; the ones still working are reported. Null: none.' },
@@ -619,7 +620,7 @@ export const CEO_TOOLS: ToolSpec[] = [
         agent_id: { type: ['string', 'null'], description: 'Agent id or callsign. Null unless this is an agent budget.' },
         squad: { type: ['string', 'null'], description: 'Squad label, e.g. "audit-01". Null unless this is a squad budget.' },
         mission_id: { type: ['string', 'null'], description: 'ORCA mission id, e.g. "mission_ab12". Null unless this is a mission budget.' },
-        budget_tokens: { type: ['number', 'null'], description: 'Tokens (input + output + cache read), or null for no token limit. The default unit.' },
+        budget_tokens: { type: ['number', 'null'], description: 'Tokens (input + output + cache writes; cache reads do not count), or null for no token limit. The default unit.' },
         budget_usd: { type: ['number', 'null'], description: 'Dollars, or null. Stored always; evaluated only with ORCA_BUDGET_MONEY=1.' },
         budget_min: { type: ['number', 'null'], description: 'Minutes seen WORKING, or null for no time limit. Never wall clock since launch.' },
       },
@@ -1233,7 +1234,7 @@ function lineageOf(ctx: CeoContext, a: Agent): {
   const node = (x: Agent, generation: number): LineageNode => ({
     id: x.id, callsign: x.callsign, state: x.state, generation,
     subagent: x.subagent === true,
-    tokens: (x.metrics.inputTokens ?? 0) + (x.metrics.outputTokens ?? 0) + (x.metrics.cacheReadTokens ?? 0),
+    tokens: ceilingTokens(x.metrics),
     tool: x.tool,
   });
 

@@ -75,6 +75,7 @@ import {
   activeReview, effectiveStatus, heldReason, openProposals, sortProposals,
   type ImproveGrade, type ImproveProposal, type ImproveReview, type ImproveState, type ImproveStatus,
 } from '../../shared/improve.ts';
+import { ceilingTokens } from '../../shared/tokens.ts';
 import { stateVar, stateWord } from '../util.ts';
 import { isSendChord } from '../windows/composer.ts';
 import { gesture } from '../gestures.ts';
@@ -586,7 +587,7 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     goBtn.textContent = name;
     goBtn.disabled = !a;
     goBtn.title = a ? `fly to ${name} and open it` : 'the session has not appeared yet';
-    const spent = a ? a.metrics.inputTokens + a.metrics.outputTokens + a.metrics.cacheReadTokens : 0;
+    const spent = a ? ceilingTokens(a.metrics) : 0;
     const cap = live.budgetTokens ?? state?.budgetTokens ?? 0;
     // Cuánto lleva, cuánto ha gastado y de cuánto: el gasto de una revisión no
     // puede ser algo que se descubra después.
@@ -711,8 +712,9 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
      * Lo que va a pasar, en una línea.
      *
      * Dice las tres cosas que un operador necesita para decidir si el número
-     * del presupuesto es el adecuado: qué se cuenta (entrada, salida Y lectura
-     * de caché — la caché es la mayor parte de una revisión que lee código), y
+     * del presupuesto es el adecuado: qué se cuenta (entrada, salida y
+     * escritura de caché; la LECTURA de caché no, que es la mayor parte de una
+     * revisión que lee código y cuesta una décima — ver shared/tokens.ts), y
      * que el techo es un FRENO y no un muro, así que un rebase es posible.
      */
     const cap = state.budgetTokens;
@@ -729,7 +731,7 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     effectiveEl.textContent = catalogError
       ? `COULD NOT READ THE MODEL CATALOGUE · ${catalogError}`
       : `NEXT REVIEWER · ${effRuntime}${effModel ? `/${effModel}` : ' · CLI DEFAULT MODEL'}`
-        + ` · ${tok(cap)} TOKENS = INPUT + OUTPUT + CACHE READ`
+        + ` · ${tok(cap)} TOKENS = INPUT + OUTPUT + CACHE WRITES · CACHE READS NOT COUNTED`
         + ' · A BRAKE, NOT A HARD CEILING: IT CAN OVERSHOOT BEFORE ORCA SEES IT';
     effectiveEl.title = choice
       ? `runtime from the ${choice.from.runtime}, model from the ${choice.from.model}`

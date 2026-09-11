@@ -11,8 +11,11 @@ actuar sobre él.
 
 ## 1 · La unidad: tokens, no dólares
 
-**Decisión: la unidad por defecto son TOKENS — entrada + salida + lectura de
-caché.** El dinero sigue en el modelo de datos, apagado.
+**Decisión: la unidad por defecto son TOKENS — entrada + salida + escritura de
+caché; la lectura de caché no cuenta** (desde el 2026-09-11; antes contaba, ver
+abajo). El dinero sigue en el modelo de datos, apagado. La regla vive en una
+sola función, `ceilingTokens` (`src/shared/tokens.ts`), que usan todos los
+techos.
 
 ### Por qué
 
@@ -27,10 +30,22 @@ y encima lo pedía mal — ver §2.
   y lee muchísimo. Un techo en tokens de salida habría hecho parecer barato al
   agente que consumió el equivalente a $74: es exactamente la forma del
   incidente que hay que frenar.
-- **Sí los de lectura de caché.** Son la mayor parte del volumen de un agente
-  con contexto grande, y ése es precisamente el modo en que una sesión larga
-  quema cuota: reenviar un contexto enorme en cada turno. Contarlos hace que un
-  contexto hinchado se note, que es lo que se quiere.
+- **No los de lectura de caché** (revertido el 2026-09-11). La primera versión
+  los contaba con este argumento: son la mayor parte del volumen de un agente
+  con contexto grande, y reenviar un contexto enorme en cada turno es como una
+  sesión larga quema cuota. En la práctica medían otra cosa: un CLI con un
+  prompt de sistema grande relee todo su prefijo cacheado en cada llamada, y
+  eso suma cientos de miles de tokens que cuestan la décima parte y no son
+  trabajo nuevo. El revisor de AUTOMEJORA cruzaba su techo de 400k en el
+  primer minuto sin haber archivado nada (AJ: 227.946 leídos de caché contra
+  12 de entrada y 2.657 de salida). Un contexto que crece se sigue notando:
+  lo que entra nuevo al contexto es escritura de caché, y ésa sí cuenta.
+- **Sí los de escritura de caché.** En Claude son casi toda la entrada:
+  `input_tokens` sale en unidades porque el resto entra por
+  `cache_creation_input_tokens`. Sin ellos el techo de un agente de Claude no
+  mediría casi nada. En Codex la escritura ya viene dentro de la entrada.
+- **Entrada es lo que no salió de caché, en los dos CLI.** Claude ya lo reporta
+  así; Codex incluye lo cacheado en `input_tokens` y su adaptador lo resta.
 - **No los de razonamiento.** Vienen ya dentro de los de salida
   (`output_tokens_details.thinking_tokens`); sumarlos sería contarlos dos veces.
 

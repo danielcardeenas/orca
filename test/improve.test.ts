@@ -724,6 +724,32 @@ const tests = [
     } finally { api.stop(); r.done(); }
   }),
 
+  test('the ceiling does not count cache reads: AJ\'s first minute no longer stops it', async () => {
+    const r = rig();
+    const api = improveApi(r);
+    try {
+      await api.run('manual');
+      const a = worker();
+      r.arrive(a);
+      // AJ a los 46 s (rev_mtw8cgp3dupemnnh), con la lectura de caché inflada
+      // a lo que el collector llegó a ver: con la regla vieja eran 451k de 400k.
+      r.move(a, 'thinking', {
+        metrics: { ...a.metrics, inputTokens: 12, outputTokens: 2_657, cacheReadTokens: 445_426, cacheWriteTokens: 111_339, costUSD: 1.29 },
+      });
+      const alive = api.store.state().reviews[0]!;
+      // Lo que entra nuevo sí cuenta: un revisor que se desboca se sigue parando.
+      r.move(a, 'working', {
+        metrics: { ...a.metrics, inputTokens: 40, outputTokens: 60_000, cacheReadTokens: 4_000_000, cacheWriteTokens: 360_000 },
+      });
+      const stopped = api.store.state().reviews[0]!;
+      return ok('cache reads alone never trip it; new tokens still do',
+        alive.outcomeAt === undefined && r.stopped.length === 0
+        && stopped.status === 'overbudget' && stopped.tokens === 420_040
+        && (stopped.note ?? '').includes('420k of a 400k ceiling'),
+        `${alive.status} → ${stopped.status} · ${stopped.note}`);
+    } finally { api.stop(); r.done(); }
+  }),
+
   test('cancelled before its agent exists closes at once: there is nobody to wait for', async () => {
     const r = rig();
     r.ack = { agentId: null, callsign: null, shortId: null };

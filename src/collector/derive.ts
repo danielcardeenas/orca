@@ -134,6 +134,12 @@ export interface ProducedFile { path: string; at: number; }
  * agente que generó mil fotogramas no puede materializarse entero aquí dentro.
  */
 const MAX_PRODUCED = 64;
+/**
+ * Ids de mensaje recordados para no sumar dos veces su `usage`. Las líneas de
+ * un mismo mensaje llegan seguidas, así que basta con los últimos; esto sólo
+ * impide que una sesión de días crezca sin techo.
+ */
+const MAX_COUNTED_IDS = 4_096;
 
 /**
  * What the collector needs from a session, whichever CLI wrote it. Claude's
@@ -212,6 +218,20 @@ export class SessionDeriver {
   private costBase: Partial<AgentMetrics> = {};
   /** Lo acumulado por nosotros DESPUÉS de ese cost-state. */
   private since = zeroCounters();
+  /**
+   * Los mensajes cuyo `usage` ya se sumó.
+   *
+   * Claude Code escribe UNA línea por bloque de contenido (thinking, texto,
+   * cada tool_use) y todas llevan el mismo `message.id` y el mismo `usage`
+   * completo. Sumar por línea contaba un mensaje dos, tres o cuatro veces:
+   * medido en la revisión AJ (2026-09-11), 451.269 tokens por línea contra
+   * 230.615 por mensaje, que es lo que dijo después el cost-state. De ahí los
+   * «saltos» de la cifra viva que documenta `REVIEWER_BUDGET_TOKENS`.
+   *
+   * No se vacía con un cost-state: una línea que llegue después de él con un
+   * id ya sumado sigue siendo el mismo mensaje, y ya está dentro del total.
+   */
+  private counted = new Set<string>();
   private toolCalls = 0;
   private turns = 0;
   /**
@@ -343,12 +363,13 @@ export class SessionDeriver {
 
   private applyCostState(l: Record<string, unknown>): void {
     const usage = isRecord(l['modelUsage']) ? l['modelUsage'] : {};
-    let input = 0, output = 0, cacheRead = 0, thinking = 0;
+    let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, thinking = 0;
     for (const v of Object.values(usage)) {
       if (!isRecord(v)) continue;
       input += num(v['inputTokens']);
       output += num(v['outputTokens']);
       cacheRead += num(v['cacheReadInputTokens']);
+      cacheWrite += num(v['cacheCreationInputTokens']);
       thinking += num(v['thinkingTokens']);
     }
     this.costBase = {
@@ -356,6 +377,7 @@ export class SessionDeriver {
       inputTokens: input,
       outputTokens: output,
       cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
       thinkingTokens: thinking,
       linesAdded: num(l['totalLinesAdded']),
       linesRemoved: num(l['totalLinesRemoved']),
@@ -366,6 +388,21 @@ export class SessionDeriver {
     this.since = zeroCounters();
     const start = num(l['startTime']);
     if (start > 0 && (this.startedAt === 0 || start < this.startedAt)) this.startedAt = start;
+  }
+
+  /**
+   * True la primera vez que se ve este mensaje. Sin id —un CLI viejo, una
+   * línea sintética— se cuenta cada línea, que es lo que se hacía antes.
+   */
+  private firstSightOf(msgId: string | undefined): boolean {
+    if (!msgId) return true;
+    if (this.counted.has(msgId)) return false;
+    this.counted.add(msgId);
+    if (this.counted.size > MAX_COUNTED_IDS) {
+      const oldest = this.counted.values().next().value;
+      if (oldest !== undefined) this.counted.delete(oldest);
+    }
+    return true;
   }
 
   private assistant(l: Record<string, unknown>, at: number): void {
@@ -393,14 +430,18 @@ export class SessionDeriver {
     this.lastStopReason = typeof stop === 'string' ? stop : null;
     if (this.lastStopReason === 'end_turn') this.endedCleanly = true;
 
+    const msgId = str(msg['id']) ?? undefined;
     const usage = isRecord(msg['usage']) ? msg['usage'] : null;
     if (usage) {
+      this.contextTokens = num(usage['input_tokens']) + num(usage['cache_creation_input_tokens'])
+        + num(usage['cache_read_input_tokens']);
+    }
+    if (usage && this.firstSightOf(msgId)) {
       const out = num(usage['output_tokens']);
       this.since.inputTokens += num(usage['input_tokens']);
       this.since.outputTokens += out;
       this.since.cacheReadTokens += num(usage['cache_read_input_tokens']);
-      this.contextTokens = num(usage['input_tokens']) + num(usage['cache_creation_input_tokens'])
-        + num(usage['cache_read_input_tokens']);
+      this.since.cacheWriteTokens += num(usage['cache_creation_input_tokens']);
       const details = isRecord(usage['output_tokens_details']) ? usage['output_tokens_details'] : null;
       this.since.thinkingTokens += details ? num(details['thinking_tokens']) : 0;
       if (out > 0) this.samples.push({ at: this.lastAssistantAt, tokens: out });
@@ -408,7 +449,6 @@ export class SessionDeriver {
 
     const content = Array.isArray(msg['content']) ? msg['content'] : [];
     const lineId = str(l['uuid']);
-    const msgId = str(msg['id']) ?? undefined;
     content.forEach((raw, i) => {
       if (!isRecord(raw)) return;
       const bt = raw['type'];
@@ -686,6 +726,7 @@ export class SessionDeriver {
       inputTokens: num(b.inputTokens) + this.since.inputTokens,
       outputTokens: num(b.outputTokens) + this.since.outputTokens,
       cacheReadTokens: num(b.cacheReadTokens) + this.since.cacheReadTokens,
+      cacheWriteTokens: num(b.cacheWriteTokens) + this.since.cacheWriteTokens,
       thinkingTokens: num(b.thinkingTokens) + this.since.thinkingTokens,
       tokensPerSec: this.tokensPerSec(now),
       linesAdded: num(b.linesAdded),
@@ -806,7 +847,7 @@ function resultText(c: unknown): string {
 }
 
 function zeroCounters() {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, thinkingTokens: 0 };
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 };
 }
 
 function round(v: number, places: number): number {

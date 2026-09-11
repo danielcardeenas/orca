@@ -26,6 +26,7 @@ import { stableCallsign, isInside, safeJson, oneLine } from '../src/collector/ut
 import { TranscriptWatcher, parseLines } from '../src/collector/watch.ts';
 import type { LineBatch, TranscriptRef } from '../src/collector/watch.ts';
 import type { Agent } from '../src/shared/types.ts';
+import { ceilingTokens } from '../src/shared/tokens.ts';
 
 export interface TestResult { name: string; pass: boolean; detail: string; }
 
@@ -320,6 +321,72 @@ const testCostState: Test = () => check('derive: cost-state es autoritativo y re
   // Lo que llegue DESPUÉS del cost-state sí se suma.
   d.ingest(batch(r, [assistantLine({ at: now + 1000, stop: 'end_turn', outputTokens: 100 })]));
   assert.strictEqual(d.metrics(now + 1000).outputTokens, 9100);
+});
+
+/**
+ * La forma real de un mensaje de Claude Code: una línea por bloque de
+ * contenido, todas con el mismo `message.id` y el mismo `usage` completo. Las
+ * cifras son las de AJ (`rev_mtw8cgp3dupemnnh`) en su primer mensaje con
+ * herramientas.
+ */
+function blockLines(at: number, id: string, usage: Record<string, unknown>): Record<string, unknown>[] {
+  const blocks = [
+    { type: 'thinking', thinking: 'mmm' },
+    { type: 'text', text: 'leo el repo' },
+    { type: 'tool_use', id: `${id}_t`, name: 'Bash', input: { command: 'ls' } },
+  ];
+  return blocks.map((b, i) => ({
+    type: 'assistant', uuid: `${id}_${i}`, timestamp: new Date(at).toISOString(), sessionId: SID, cwd: '/tmp/proj',
+    message: { id, model: 'claude-opus-5', stop_reason: i === blocks.length - 1 ? 'tool_use' : null, content: [b], usage },
+  }));
+}
+
+const testUsagePerMessage: Test = () => check('derive: el usage se suma una vez por mensaje, no una por línea', () => {
+  const now = Date.now();
+  const r = ref(SID, '/tmp/x.jsonl');
+  const d = new SessionDeriver(r, 'm1', 'p1');
+  const usage = {
+    input_tokens: 12, output_tokens: 2657, cache_read_input_tokens: 227_946,
+    cache_creation_input_tokens: 111_339, output_tokens_details: { thinking_tokens: 1349 },
+  };
+  d.ingest(batch(r, blockLines(now, 'msg_1', usage)));
+  const m = d.metrics(now);
+  assert.strictEqual(m.inputTokens, 12, 'tres líneas, un mensaje');
+  assert.strictEqual(m.outputTokens, 2657);
+  assert.strictEqual(m.cacheReadTokens, 227_946);
+  assert.strictEqual(m.cacheWriteTokens, 111_339, 'la escritura de caché llega a las métricas');
+  assert.strictEqual(m.thinkingTokens, 1349);
+  // Lo que se compara con un techo: sin la lectura de caché.
+  assert.strictEqual(ceilingTokens(m), 12 + 2657 + 111_339);
+  // Un mensaje nuevo sí suma; releer líneas del primero, no.
+  d.ingest(batch(r, [...blockLines(now + 1000, 'msg_2', { input_tokens: 3, output_tokens: 100, cache_creation_input_tokens: 900 }),
+    ...blockLines(now + 1000, 'msg_1', usage)]));
+  const m2 = d.metrics(now + 1000);
+  assert.strictEqual(m2.outputTokens, 2757);
+  assert.strictEqual(m2.cacheWriteTokens, 112_239);
+});
+
+const testCostStateCacheWrite: Test = () => check('derive: el cost-state trae la escritura de caché, y lo ya sumado no vuelve a entrar', () => {
+  const now = Date.now();
+  const r = ref(SID, '/tmp/x.jsonl');
+  const d = new SessionDeriver(r, 'm1', 'p1');
+  const usage = { input_tokens: 12, output_tokens: 2657, cache_read_input_tokens: 227_946, cache_creation_input_tokens: 111_339 };
+  d.ingest(batch(r, [
+    ...blockLines(now, 'msg_1', usage).slice(0, 2),
+    {
+      type: 'cost-state', sessionId: SID, totalCostUSD: 1.29,
+      modelUsage: { 'claude-opus-5': {
+        inputTokens: 12, outputTokens: 2657, thinkingTokens: 1349,
+        cacheReadInputTokens: 227_946, cacheCreationInputTokens: 111_339, costUSD: 1.29,
+      } },
+    },
+    // La última línea del mismo mensaje llega DESPUÉS del total: ya está dentro.
+    ...blockLines(now, 'msg_1', usage).slice(2),
+  ]));
+  const m = d.metrics(now);
+  assert.strictEqual(m.cacheWriteTokens, 111_339);
+  assert.strictEqual(m.cacheReadTokens, 227_946);
+  assert.strictEqual(m.outputTokens, 2657);
 });
 
 const testTokensPerSec: Test = () => check('derive: tokens/s es una media móvil suave que decae a 0', () => {
@@ -1016,7 +1083,7 @@ const TESTS: Test[] = [
   testBooting, testThinking, testWorking, testWorkingToIdle,
   testBlockedByAsk, testBlockedByPermission, testAcceptEditsStillGatesBash, testNotBlockedInAutoMode,
   testBlockedByEscalation, testDoneVsDead, testNoPrematureReap,
-  testCostState, testTokensPerSec, testTurnsAndUptime, testToolDetail,
+  testCostState, testUsagePerMessage, testCostStateCacheWrite, testTokensPerSec, testTurnsAndUptime, testToolDetail,
   testCallsigns,
   testParseLines, testIncrementalTail, testWatcherDiscovery,
   testVaultRoundTrip, testVaultTamper, testVaultSecretChange, testVaultCorrupt,

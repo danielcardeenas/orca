@@ -25,8 +25,8 @@ En `SETUP` de la sección AUTOMEJORA hay dos filas nuevas y una casilla:
 EVERY 6H [CHANGE] · MAX PER DAY 4 [CHANGE] · MIN SIGNAL 40 [CHANGE]
 REVIEWER BUDGET 400K [CHANGE] · [OR TYPE ONE][SET]
 RUNTIME [CLAUDE ▾]   MODEL [OPUS ▾]
-NEXT REVIEWER · claude/opus · 400K TOKENS = INPUT + OUTPUT + CACHE READ
-· A BRAKE, NOT A HARD CEILING: IT CAN OVERSHOOT BEFORE ORCA SEES IT
+NEXT REVIEWER · claude/opus · 400K TOKENS = INPUT + OUTPUT + CACHE WRITES
+· CACHE READS NOT COUNTED · A BRAKE, NOT A HARD CEILING: IT CAN OVERSHOOT BEFORE ORCA SEES IT
 ```
 
 - **RUNTIME** — `claude` o `codex`. La primera opción es `INHERIT · <lo que
@@ -89,9 +89,11 @@ que es exactamente el comportamiento anterior a esta entrega
 
 ## 3. El presupuesto: qué cuenta y qué no promete
 
-`400K TOKENS = INPUT + OUTPUT + CACHE READ`. Es la suma que ORCA lee del
-contador del agente, la misma que ve `BudgetBook`; no es «tokens de respuesta»
-ni «contexto».
+`400K TOKENS = INPUT + OUTPUT + CACHE WRITES · CACHE READS NOT COUNTED`. Es la
+suma que ORCA lee del contador del agente, la misma que ve `BudgetBook`
+(`ceilingTokens`, `src/shared/tokens.ts`); no es «tokens de respuesta» ni
+«contexto». Hasta el 2026-09-11 la lectura de caché contaba, y un revisor
+cruzaba los 400K en su primer minuto: ver `docs/ENTREGA-AUTOMEJORA-TECHO-Y-VENTANA-2026-09-11.md`.
 
 Y es **un freno, no un techo**. El texto de la UI lo dice con esas palabras
 porque la corrida real de `rev_mtschaq0u83g1or2` lo demostró: 570.858 tokens

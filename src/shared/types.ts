@@ -262,9 +262,26 @@ export interface Agent {
 
 export interface AgentMetrics {
   costUSD: number;
+  /**
+   * Input tokens NOT served from the prompt cache. Every adapter reports it
+   * that way: Claude's `input_tokens` already excludes the cache, and Codex's
+   * `input_tokens` includes `cached_input_tokens`, so its adapter subtracts them.
+   */
   inputTokens: number;
+  /** Output tokens, reasoning/thinking included (both CLIs report it inside). */
   outputTokens: number;
   cacheReadTokens: number;
+  /**
+   * Input tokens written to the prompt cache that are NOT inside `inputTokens`
+   * (Claude's `cache_creation_input_tokens`). Zero for an adapter whose cache
+   * writes already count as input (Codex).
+   *
+   * Absent means a collector older than the field: it could not tell writes
+   * apart, and `ceilingTokens` falls back to the old sum for it. See
+   * shared/tokens.ts.
+   */
+  cacheWriteTokens?: number;
+  /** A part of `outputTokens`, not an addition to it. */
   thinkingTokens: number;
   /** Rolling output tokens/sec — drives motion amplitude in the 3D scene. */
   tokensPerSec: number;

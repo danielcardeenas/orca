@@ -319,6 +319,9 @@ function metrics(raw: unknown): AgentMetrics {
     inputTokens: n(o['inputTokens']),
     outputTokens: n(o['outputTokens']),
     cacheReadTokens: n(o['cacheReadTokens']),
+    // Ausente ≠ cero: ausente es un collector que no sabe separarlo, y
+    // `ceilingTokens` cuenta distinto para él. Ver shared/tokens.ts.
+    ...(has(o, 'cacheWriteTokens') ? { cacheWriteTokens: n(o['cacheWriteTokens']) } : {}),
     thinkingTokens: n(o['thinkingTokens']),
     tokensPerSec: n(o['tokensPerSec']),
     linesAdded: n(o['linesAdded']),

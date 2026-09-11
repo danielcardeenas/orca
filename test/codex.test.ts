@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { CodexDeriver } from '../src/collector/codex.ts';
+import { ceilingTokens } from '../src/shared/tokens.ts';
 import { codexArgv, CODEX_TITLE_CONFIG } from '../src/collector/commands.ts';
 import { TranscriptWatcher, codexRef, type LineBatch } from '../src/collector/watch.ts';
 import { ok, eq, test, sleep, type TestModule } from './harness.ts';
@@ -137,8 +138,11 @@ const tests = [
     d.ingest(batch([META, STARTED, PROMPT, SAY, CALL, OUT, TOKENS, DONE]));
     const m = d.snapshot().metrics;
     return ok('codex: los tokens vienen de token_count y el costo es cero (suscripción)',
-      m.inputTokens === 19172 && m.cacheReadTokens === 11904 && m.outputTokens === 145 && m.thinkingTokens === 7 && m.costUSD === 0 && m.toolCalls === 1,
-      JSON.stringify({ in: m.inputTokens, cached: m.cacheReadTokens, out: m.outputTokens, think: m.thinkingTokens, cost: m.costUSD, tools: m.toolCalls }));
+      // Codex mete lo cacheado DENTRO de input_tokens; ORCA entiende por
+      // entrada lo que no salió de caché, como en Claude: 19172 − 11904.
+      m.inputTokens === 7268 && m.cacheReadTokens === 11904 && m.outputTokens === 145 && m.thinkingTokens === 7 && m.costUSD === 0 && m.toolCalls === 1
+      && m.cacheWriteTokens === 0 && ceilingTokens(m) === 7268 + 145,
+      JSON.stringify({ in: m.inputTokens, cached: m.cacheReadTokens, out: m.outputTokens, think: m.thinkingTokens, cost: m.costUSD, tools: m.toolCalls, ceiling: ceilingTokens(m) }));
   }),
 
   test('codex: las compactaciones se cuentan y la ventana se mide con el último prompt, no con el acumulado', () => {
@@ -155,7 +159,7 @@ const tests = [
     d.ingest(batch([META, STARTED, PROMPT, SAY, COMPACTED, FULL, { ...COMPACTED, timestamp: ts(46) }, DONE]));
     const m = d.snapshot().metrics;
     return ok('codex: compactaciones contadas y ventana medida por el último turno',
-      m.compactions === 2 && m.contextTokens === 122_651 && m.contextWindow === 258_400 && m.inputTokens === 2_045_906,
+      m.compactions === 2 && m.contextTokens === 122_651 && m.contextWindow === 258_400 && m.inputTokens === 2_045_906 - 1_393_536,
       `${m.compactions} compactaciones · ${m.contextTokens}/${m.contextWindow} en la ventana · ${m.inputTokens} acumulados`);
   }),
 

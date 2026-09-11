@@ -418,7 +418,7 @@ async function main() {
     assert.ok(choice.input, 'a budget can also be typed, not only stepped');
     // Lo que evita leer «400K» como una garantía.
     assert.match(choice.note, /NEXT REVIEWER · claude\/opus/i);
-    assert.match(choice.note, /INPUT \+ OUTPUT \+ CACHE READ/i, 'what the budget counts is said');
+    assert.match(choice.note, /INPUT \+ OUTPUT \+ CACHE WRITES · CACHE READS NOT COUNTED/i, 'what the budget counts is said');
     assert.match(choice.note, /BRAKE, NOT A HARD CEILING/i, 'and that it can overshoot');
 
     // Los modelos que ofrece son los de la máquina, con su runtime.

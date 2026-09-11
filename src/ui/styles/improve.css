@@ -162,8 +162,8 @@
 /*
  * Qué va a pasar de verdad, en una línea entera para ella sola: dice el
  * runtime y el modelo resueltos, qué cuenta el presupuesto —entrada, salida y
- * lectura de caché— y que es un freno y no un muro. Es la frase que evita que
- * alguien lea «400K» como una garantía.
+ * escritura de caché, sin la lectura— y que es un freno y no un muro. Es la
+ * frase que evita que alguien lea «400K» como una garantía.
  */
 .improve__note {
   flex-basis: 100%;

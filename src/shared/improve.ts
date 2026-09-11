@@ -444,10 +444,19 @@ export const REVIEWER_IDLE_MS = 60_000;
 /**
  * El techo de tokens de UN revisor, y qué garantiza exactamente.
  *
- * 400.000 de entrada + salida + lectura de caché. Una pasada de revisión es
- * leer un informe de una pantalla, mirar el repo un rato y escribir media
- * docena de propuestas; en la flota de este repo un worker que lee y escribe
- * media hora se mueve entre 150k y 350k.
+ * 400.000 de entrada + salida + escritura de caché; la LECTURA de caché no
+ * cuenta (`ceilingTokens`, shared/tokens.ts). Una pasada de revisión es leer
+ * un informe de una pantalla, mirar el repo un rato y escribir media docena de
+ * propuestas.
+ *
+ * Hasta el 2026-09-11 la lectura contaba, y ninguna revisión pudo terminar:
+ * un CLI con un prompt de sistema grande relee su prefijo cacheado en cada
+ * llamada. AJ (`rev_mtw8cgp3dupemnnh`) se paró a los 46 s «at 451k of a 400k
+ * ceiling» con 0 propuestas; por mensaje eran 230.615, de los que 227.946 eran
+ * lectura de caché. Con la regla de ahora esa misma corrida llevaba 114.008, y
+ * la sesión entera de AJ —hasta archivar sus ocho propuestas— 224.040: el
+ * techo de 400k le deja terminar y sigue parando lo que se desboca, así que no
+ * se ha movido.
  *
  * ── Lo que NO es ───────────────────────────────────────────────────
  *
@@ -459,7 +468,10 @@ export const REVIEWER_IDLE_MS = 60_000;
  *   1. **La medida llega tarde y da saltos.** El consumo se deriva del
  *      transcript que el collector relee; en esa misma sesión la cifra pasó por
  *      201k, 1.116.804 y 622.319 antes de asentarse. Nadie puede frenar en un
- *      punto que todavía no ha visto.
+ *      punto que todavía no ha visto. (Los saltos hacia arriba eran además un
+ *      error de cuenta: el collector sumaba el `usage` de cada línea, y Claude
+ *      Code repite el del mensaje en cada bloque. Corregido en
+ *      collector/derive.ts el 2026-09-11; lo tardío sigue siendo cierto.)
  *   2. **Frenar es mandar un comando.** `stop` viaja al collector y puede
  *      tardar o fallar; entre que se decide y que el proceso muere hay turnos.
  *   3. **Una llamada a un modelo no se puede partir por la mitad.** Un solo

@@ -427,9 +427,14 @@ export class CodexDeriver {
   metrics(now = Date.now()): AgentMetrics {
     return {
       costUSD: 0,
-      inputTokens: this.usage.input,
+      // Codex cuenta lo cacheado DENTRO de `input_tokens` (total_tokens =
+      // input + output); ORCA entiende por entrada lo que no salió de caché,
+      // como Claude. Sin restarlo, la lectura de caché contaría dos veces.
+      inputTokens: Math.max(0, this.usage.input - this.usage.cached),
       outputTokens: this.usage.output,
       cacheReadTokens: this.usage.cached,
+      // Lo que Codex escribe a caché ya está dentro de `input_tokens`.
+      cacheWriteTokens: 0,
       thinkingTokens: this.usage.reasoning,
       tokensPerSec: this.tokensPerSec(now),
       linesAdded: 0, linesRemoved: 0,

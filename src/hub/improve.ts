@@ -46,6 +46,7 @@ import { fileURLToPath } from 'node:url';
 import { newId, type Command, type SpawnAck } from '../shared/protocol.ts';
 import { isForgeSquad } from '../shared/forge.ts';
 import { TERMINAL_STATES, type Agent, type Project } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import {
   IMPROVE_DEFAULTS, MAX_COUNTERS, MAX_NOTE, MAX_NOTES, MAX_PER_REPORT, MAX_PROPOSALS,
   BUDGET_MAX, BUDGET_MIN, MAX_REVIEWS, REVIEWER_BUDGET_TOKENS, REVIEWER_IDLE_MS, REVIEW_MAX_MS,
@@ -897,8 +898,9 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
     }
   }
 
+  /** Lo que se compara con el techo: sin la lectura de caché. Ver shared/tokens.ts. */
   function tokensOf(a: Agent): number {
-    return a.metrics.inputTokens + a.metrics.outputTokens + a.metrics.cacheReadTokens;
+    return ceilingTokens(a.metrics);
   }
 
   /**
@@ -951,7 +953,7 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
   function closeFor(r: ImproveReview, a: Agent): void {
     const spend = {
       costUSD: a.metrics.costUSD,
-      tokens: a.metrics.inputTokens + a.metrics.outputTokens + a.metrics.cacheReadTokens,
+      tokens: tokensOf(a),
     };
     // Un final que ya se ganó no lo deshace la muerte del agente: una revisión
     // que archivó siguió siendo `reported`, y una que el operador paró sigue

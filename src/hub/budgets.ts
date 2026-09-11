@@ -10,14 +10,19 @@
  * pide que reaccione a un número que no paga. Lo que sí se agota es cuota, y
  * la cuota se mide en tokens.
  *
- * Tokens de ENTRADA + SALIDA + LECTURA DE CACHÉ. No sólo los de salida: un
- * agente que lanza veinte subagentes escribe poco y lee muchísimo, que es
- * exactamente la forma del incidente que este archivo existe para frenar. Los
- * de razonamiento no se suman porque ya vienen dentro de los de salida
- * (`output_tokens_details.thinking_tokens`) y contarlos sería contarlos dos
- * veces. Y son MEDIDOS: salen del transcript, no de una tarifa inventada, así
- * que la cifra no puede quedarse corta como se quedaba la estimación en
- * dólares.
+ * Tokens de ENTRADA + SALIDA + ESCRITURA DE CACHÉ; la LECTURA de caché no
+ * cuenta (`ceilingTokens`, shared/tokens.ts, la misma regla para todos los
+ * techos). No sólo los de salida: un agente que lanza veinte subagentes
+ * escribe poco y lee muchísimo, que es exactamente la forma del incidente que
+ * este archivo existe para frenar. Pero la lectura de caché se quedó fuera el
+ * 2026-09-11: un CLI con un prompt de sistema grande relee su prefijo en cada
+ * llamada, y eso sumaba cientos de miles de tokens que cuestan la décima parte
+ * y no son trabajo nuevo — el revisor de AUTOMEJORA cruzaba su techo en el
+ * primer minuto sin haber hecho nada. Los de razonamiento no se suman porque
+ * ya vienen dentro de los de salida (`output_tokens_details.thinking_tokens`)
+ * y contarlos sería contarlos dos veces. Y son MEDIDOS: salen del transcript,
+ * no de una tarifa inventada, así que la cifra no puede quedarse corta como se
+ * quedaba la estimación en dólares.
  *
  * El dinero sigue en el modelo de datos, apagado: `ORCA_BUDGET_MONEY=1` lo
  * enciende para un proyecto que sí consuma API de pago. Apagado, un techo en
@@ -92,6 +97,7 @@ import path from 'node:path';
 
 import type { Agent } from '../shared/types.ts';
 import { TERMINAL_STATES } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import type { CapcomMission } from '../shared/missions.ts';
 import { adviceFor, CONSUMING_STATES, isLiveAgent, type LivenessView } from './liveness.ts';
 
@@ -99,7 +105,7 @@ import { adviceFor, CONSUMING_STATES, isLiveAgent, type LivenessView } from './l
 
 /** A ceiling: null means "no limit on this axis". */
 export interface BudgetLimit {
-  /** Tokens in + out + cache read. The default unit. */
+  /** Tokens in + out + cache writes, cache reads excluded (`ceilingTokens`). The default unit. */
   tokens: number | null;
   /** Dollars. Inert unless ORCA_BUDGET_MONEY=1. */
   usd: number | null;
@@ -147,8 +153,7 @@ export const DEFAULT_MAX_DEPTH = 2;
 /**
  * Una lectura de caché no cuesta lo que una de entrada; para la ESTIMACIÓN en
  * dólares se pondera a la décima parte, que es la proporción que cobran los
- * proveedores. El eje en tokens no pondera nada: ahí la pregunta es cuánta
- * cuota se ha movido, y un token leído de caché se movió igual.
+ * proveedores. El eje en tokens no la cuenta: ver `ceilingTokens`.
  */
 const CACHE_USD_WEIGHT = 0.1;
 
@@ -214,7 +219,7 @@ function normalizeLimit(l: Partial<BudgetLimit> | null | undefined): BudgetLimit
 
 /** The consumption of a set of agents, in every unit the book knows. */
 export interface Consumption {
-  /** Input + output + cache-read tokens. Measured, never estimated. */
+  /** `ceilingTokens`: input + output + cache writes. Measured, never estimated. */
   tokens: number;
   spent_usd: number;
   /**
@@ -451,17 +456,17 @@ export class BudgetBook {
     return this.cfg.money ? limit : { tokens: limit.tokens, usd: null, min: limit.min };
   }
 
-  /** Tokens this agent has pushed through a model: in + out + cache read. */
+  /** The tokens this agent's ceiling is measured in. See shared/tokens.ts. */
   tokensOf(a: Agent): number {
-    const m = a.metrics;
-    return (m.inputTokens ?? 0) + (m.outputTokens ?? 0) + (m.cacheReadTokens ?? 0);
+    return ceilingTokens(a.metrics);
   }
 
   /** Dollars this agent has spent, estimated from tokens when the CLI has not said. */
   spend(a: Agent): { usd: number; estimated: boolean } {
     const m = a.metrics;
     if (m.costUSD > 0) return { usd: m.costUSD, estimated: false };
-    const weighted = (m.inputTokens ?? 0) + (m.outputTokens ?? 0) + (m.cacheReadTokens ?? 0) * CACHE_USD_WEIGHT;
+    const weighted = (m.inputTokens ?? 0) + (m.outputTokens ?? 0) + (m.cacheWriteTokens ?? 0)
+      + (m.cacheReadTokens ?? 0) * CACHE_USD_WEIGHT;
     if (weighted <= 0) return { usd: 0, estimated: false };
     return { usd: (weighted / 1_000_000) * this.cfg.usdPerMTok, estimated: true };
   }

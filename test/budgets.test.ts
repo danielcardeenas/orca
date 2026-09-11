@@ -129,12 +129,32 @@ const thresholds = test('80 % avisa una vez, 100 % avisa una vez, y en medio no 
   return results.find((r) => !r.pass) ?? ok('umbrales', true, `${results.length} checks`);
 });
 
-const tokenUnit = test('la unidad suma entrada, salida y lectura de caché, y no cuenta el razonamiento dos veces', () => {
+const tokenUnit = test('la unidad suma entrada, salida y escritura de caché; ni la lectura de caché ni el razonamiento', () => {
   const b = book({}, () => T0);
-  const a = agent({ id: 'k9', metrics: { inputTokens: 1000, outputTokens: 400, cacheReadTokens: 9000, thinkingTokens: 300 } });
-  const r = eq('in + out + cache read', b.tokensOf(a), 10_400);
-  if (!r.pass) return r;
-  return eq('legible de un vistazo', [fmtTokens(12_400_000), fmtTokens(840_000), fmtTokens(912)], ['12.4M', '840k', '912']);
+  const a = agent({ id: 'k9', metrics: { inputTokens: 1000, outputTokens: 400, cacheReadTokens: 9000, cacheWriteTokens: 2000, thinkingTokens: 300 } });
+  // Un collector anterior a `cacheWriteTokens` no sabe separarla: para él se
+  // mantiene la suma vieja, porque la nueva sin la escritura no mediría nada.
+  const old = agent({ id: 'l2', metrics: { inputTokens: 1000, outputTokens: 400, cacheReadTokens: 9000, thinkingTokens: 300 } });
+  const results = [
+    eq('in + out + cache write, sin cache read', b.tokensOf(a), 3_400),
+    eq('collector viejo: in + out + cache read', b.tokensOf(old), 10_400),
+    eq('legible de un vistazo', [fmtTokens(12_400_000), fmtTokens(840_000), fmtTokens(912)], ['12.4M', '840k', '912']),
+  ];
+  return results.find((r) => !r.pass) ?? ok('unidad', true, `${results.length} checks`);
+});
+
+const cacheReadsNoBudget = test('un agente que sólo relee su caché no se acerca a su techo', () => {
+  let now = T0;
+  const b = book({}, () => now);
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: 400_000 }));
+  // La forma de AJ a los 46 s: casi todo lectura de caché.
+  const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 12, outputTokens: 2_657, cacheReadTokens: 900_000, cacheWriteTokens: 111_339 } }) };
+  const quiet = b.tick(fleet, {}, (now += 1000));
+  fleet.k9.metrics.cacheWriteTokens = 340_000;
+  const warn = b.tick(fleet, {}, (now += 1000));
+  return ok('900k leídos de caché no avisan; 343k nuevos sí, y el aviso da esa cifra',
+    quiet.length === 0 && warn.length === 1 && /343k of 400k tokens \(86%\)/.test(warn[0]!.text),
+    warn[0]?.text ?? `${quiet.length} events`);
 });
 
 /* ── 2 · el progreso reciente evita la parada ─────────────────────── */
@@ -654,7 +674,7 @@ const throughTheHub = test('set_budget pone el techo, inspect_agent enseña el �
 const mod: TestModule = {
   suite: 'Budgets',
   tests: [
-    thresholds, tokenUnit, progressSpares, linesCountAsProgress, actionWarn,
+    thresholds, tokenUnit, cacheReadsNoBudget, progressSpares, linesCountAsProgress, actionWarn,
     activeTime, idleIsSilent, retiredStaysQuiet, progressIsNotInvented,
     ghostsAreSilent, adviceIsExecutable,
     envDefaults, squadShared, missionBudget,

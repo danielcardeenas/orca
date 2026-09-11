@@ -112,3 +112,88 @@ eso importa el reinicio.
 - `test/codex.test.ts`: la entrada de Codex sale sin lo cacheado (19172 −
   11904), con escritura 0.
 - `test/hud-improve.shots.ts`: la línea `NEXT REVIEWER` dice qué cuenta.
+
+## 2 · La ventana de uso no se vacía al leerla
+
+### El bug
+
+`ImproveStore.usage()` reemplazaba la ventana entera por una vacía (con
+`since = ahora − 24 h`) cuando tenía más de 48 h, en vez de recortar lo que
+había salido. El informe del revisor se compone al lanzar la revisión, así que
+era esa lectura la que la vaciaba, y el revisor veía ceros: herramientas de
+CAPCOM 0, peticiones de la consola 0, gestos 0. El `improve.json` real lo
+confirma: `usage.since` es 2026-09-10T00:40:33.927Z, exactamente 24 h antes
+del lanzamiento de AJ (`rev_mtw8cgp3dupemnnh`, 2026-09-11T00:40:33.927Z).
+
+Además `record()` no escribía a disco, y el hub se reinicia a menudo: otra
+parte de las cuentas se perdía ahí sin que nadie lo dijera.
+
+### Lo que cambia
+
+- **Un anillo de 24 cubos horarios** (`UsageHour`, `src/shared/improve.ts`).
+  `record()` suma en el cubo de la hora en curso. Leer (`usage()`) sólo suelta
+  los cubos que ya salieron del anillo y pliega el resto (`foldHours`). La
+  ventana se desliza de hora en hora. El tope de nombres distintos
+  (`MAX_COUNTERS`) es de la ventana entera, no de cada hora.
+- **Se guarda con temporizador.** `flush()` escribe si hay cuentas nuevas. Lo
+  llama un intervalo de `USAGE_SAVE_MS` (60 s), esté la revisión encendida o
+  no, y también el cierre del hub (`stop()`). No avisa a las consolas, porque
+  unas cuentas más no cambian lo que enseña el panel. `signal` se guarda con
+  ellas.
+- **El informe dice desde cuándo cuenta.** Antes de los contadores va una línea
+  nueva:
+  `usage counters below: window since 2026-09-11T00:40Z (0.4h of the last 24h); a zero means none since then`.
+  `since` es lo más tarde entre el principio del cubo más viejo que cabe y el
+  momento en que el almacén empezó a contar.
+- **Fichero.** `usage` sigue yendo plegado, para que un hub anterior lo lea
+  igual. El anillo va en `usageHours` y el inicio de la cuenta en
+  `usageSince`. Un fichero anterior al anillo no se tira: lo que también está
+  en `signal` va a la hora de la última revisión, y el resto a la hora más
+  vieja que pueda ser suya. Si todo lo contado está en `signal`, la ventana
+  cuenta desde la última revisión y no desde un `since` que pudo ser el de un
+  vaciado. Con el fichero de hoy, eso conserva las 281 cuentas desde las
+  00:40Z.
+- `findDuplicate` y `activeReview` aceptan sólo la parte del estado que leen:
+  el almacén ya no guarda `usage` dentro de `data`, y `state()` la pliega al
+  pedirla.
+
+### Pruebas (`test/improve.test.ts`)
+
+- Una lectura a las 49 h conserva lo de las últimas 24 h (lo de la hora 47) y
+  suelta lo de la hora 0. Leer dos veces no cambia nada. `since` es el
+  principio del cubo más viejo.
+- La ventana se desliza: una cuenta sale 24 h después de su hora, y la de cinco
+  horas más tarde se queda.
+- Las cuentas sobreviven a recargar el store: el temporizador las guarda, y lo
+  que llega después del último tic lo guarda el cierre. `signal` también.
+- Un fichero con la forma de hoy (ventana plana, vaciada) se pliega al anillo
+  con sus cuentas, fechado desde la última revisión, y al guardarlo lleva las
+  dos formas.
+- Una revisión lanzada 50 h después del primer gesto ve las cuentas recientes
+  en su informe, con la línea `window since … (Nh of the last 24h)`.
+
+## 3 · Estado al entregar
+
+- **Hub:** corre `tsx src/orca.ts` bajo `tools/supervise.mjs`, **sin**
+  `tsx watch` (PID 7317). No se recarga solo, así que el cambio no está en el
+  hub vivo. Lo toma en el próximo relevo: el botón `SERVER CODE CHANGED` de la
+  consola, o `npm run prod`. Ese relevo reinicia también los collectors
+  (`server.ts` les manda `restart`), y con eso entran el uso por mensaje, la
+  escritura de caché y la entrada de Codex sin lo cacheado. No lancé ese
+  relevo: la misión prohíbe reiniciar el collector.
+- Hasta ese reinicio, el hub viejo sigue con la regla vieja y con la ventana
+  que se vacía. El hub nuevo con un collector viejo vuelve a la suma vieja para
+  los agentes cuyo collector no manda `cacheWriteTokens` (ver §1).
+- No se lanzó ninguna revisión, y `paused: true` sigue como estaba.
+
+## Cómo verificarlo
+
+```
+npm run typecheck
+npm test -- budgets improve collector codex gestures
+npm test -- --changed
+npx tsx test/hud-improve.shots.ts   la línea NEXT REVIEWER
+```
+
+Filtros que cubren esta entrega: `budgets`, `improve`, `collector`, `codex`,
+`gestures`.

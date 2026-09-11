@@ -321,10 +321,52 @@ export const IMPROVE_DEFAULTS: Readonly<ImproveConfig> = {
  * y qué no, que es la pregunta, y con el contenido no se vería mejor.
  */
 export interface ImproveUsage {
-  /** Desde cuándo cuentan estos números. */
+  /**
+   * Desde cuándo cuentan estos números. En la ventana de uso es el principio
+   * del cubo horario más viejo que sigue dentro, o el momento en que el hub
+   * empezó a contar si es más tarde: un cero con esta fecha delante dice
+   * «nada desde entonces», no «nada nunca».
+   */
   since: number;
   counts: Record<string, number>;
   total: number;
+}
+
+/**
+ * Una hora de contadores: un cubo del anillo de la ventana de uso.
+ *
+ * La ventana no se vacía de golpe: se va la hora más vieja y entra la nueva.
+ * `hour` es el principio de la hora en ms, alineado a la hora de reloj.
+ */
+export interface UsageHour {
+  hour: number;
+  counts: Record<string, number>;
+  total: number;
+}
+
+export const HOUR_MS = 3_600_000;
+/** Cubos del anillo: las 24 horas que se le enseñan al revisor. */
+export const USAGE_HOURS = 24;
+
+/** El principio de la hora de reloj en la que cae `t`. */
+export function hourOf(t: number): number {
+  return Math.floor(t / HOUR_MS) * HOUR_MS;
+}
+
+/**
+ * Los cubos, sumados en una sola ventana. `since` es lo más tarde entre el
+ * principio del cubo más viejo que CABE (aunque esté vacío) y el momento en que
+ * se empezó a contar.
+ */
+export function foldHours(hours: UsageHour[], now: number, countingSince: number, windowHours = USAGE_HOURS): ImproveUsage {
+  const first = hourOf(now) - (windowHours - 1) * HOUR_MS;
+  const out: ImproveUsage = { since: Math.max(first, countingSince), counts: {}, total: 0 };
+  for (const h of hours) {
+    if (h.hour < first || h.hour > now) continue;
+    for (const [name, n] of Object.entries(h.counts)) out.counts[name] = (out.counts[name] ?? 0) + n;
+    out.total += h.total;
+  }
+  return out;
 }
 
 export interface ImproveState {
@@ -748,7 +790,7 @@ export function normalizeDraft(raw: ProposalDraft): { ok: true; value: Omit<Impr
  * vuelva a la mañana siguiente es la forma más rápida de que el operador deje
  * de mirar la sección.
  */
-export function findDuplicate(state: ImproveState, key: string, title: string): ImproveProposal | null {
+export function findDuplicate(state: Pick<ImproveState, 'proposals'>, key: string, title: string): ImproveProposal | null {
   const byKey = Object.values(state.proposals).find((p) => p.key === key);
   if (byKey) return byKey;
   const slug = improveKey(title);
@@ -832,7 +874,7 @@ export function openQuestions(state: ImproveState, now: number): ImproveProposal
  * dio por perdida, y quien la mire desde fuera tiene que ver el hueco libre
  * aunque el hub todavía no haya pasado por ella para marcarla.
  */
-export function activeReview(state: ImproveState, now: number): ImproveReview | null {
+export function activeReview(state: Pick<ImproveState, 'reviews'>, now: number): ImproveReview | null {
   /*
    * Por `endedAt` y por nada más.
    *

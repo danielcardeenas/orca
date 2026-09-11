@@ -25,7 +25,7 @@ import type { CapcomTimer } from '../src/hub/capcom.ts';
 import { AgentLifecycle } from '../src/hub/lifecycle.ts';
 import type { JournalStats } from '../src/hub/journal.ts';
 import {
-  ImproveStore, IMPROVE_DIR, IMPROVE_FILE, IMPROVE_TICK_MS, ORCA_ROOT, buildDigest, createImprove,
+  ImproveStore, IMPROVE_DIR, IMPROVE_FILE, IMPROVE_TICK_MS, ORCA_ROOT, USAGE_SAVE_MS, buildDigest, createImprove,
   improveCounts, reviewProject,
 } from '../src/hub/improve.ts';
 import {
@@ -44,6 +44,7 @@ import { eq, ok, test, type TestModule } from './harness.ts';
 /* ── fixtures ─────────────────────────────────────────────────────── */
 
 const T0 = 1_700_000_000_000;
+const HOUR = 3_600_000;
 
 function draft(over: Partial<ProposalDraft> = {}): ProposalDraft {
   return {
@@ -1154,6 +1155,120 @@ const tests = [
       return ok('one launch, and no second one out of its own noise',
         signal === 0 && r.sent.filter((c) => c.k === 'spawn').length === 1,
         `signal=${signal} spawns=${r.sent.length}`);
+    } finally { api.stop(); r.done(); }
+  }),
+
+  test('a read after more than 48 h keeps the last 24 h instead of emptying the window', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-improve-'));
+    try {
+      let now = T0;
+      const store = new ImproveStore(dir, () => now);
+      for (let i = 0; i < 5; i++) store.record('ui:cmd');
+      now = T0 + 47 * HOUR;
+      for (let i = 0; i < 3; i++) store.record('mcp:spawn_agent');
+      store.record('gesture:win:agent');
+      now = T0 + 49 * HOUR;
+      // Antes, esta lectura reemplazaba la ventana por una vacía: el revisor
+      // veía cero herramientas, cero peticiones y cero gestos.
+      const first = store.usage();
+      const again = store.usage();
+      const expectSince = Math.floor(now / HOUR) * HOUR - 23 * HOUR;
+      return ok('the old hour leaves, the recent ones stay, and reading twice changes nothing',
+        first.counts['mcp:spawn_agent'] === 3 && first.counts['gesture:win:agent'] === 1
+        && first.counts['ui:cmd'] === undefined && first.total === 4
+        && first.since === expectSince
+        && JSON.stringify(again) === JSON.stringify(first),
+        JSON.stringify(first));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('the window slides an hour at a time: a count leaves 24 h after its hour, not all at once', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-improve-'));
+    try {
+      let now = Math.floor(T0 / HOUR) * HOUR + 10 * 60_000;   // hh:10
+      const start = now;
+      const store = new ImproveStore(dir, () => now);
+      store.record('mcp:a');
+      now = start + 5 * HOUR;
+      store.record('mcp:b');
+      now = start + 23 * HOUR + 40 * 60_000;                    // la hora 23: todo dentro
+      const full = store.usage().total;
+      now = start + 24 * HOUR;                                  // sale la hora de `a`, no la de `b`
+      const slid = store.usage();
+      return ok('24 buckets, oldest out first',
+        full === 2 && slid.counts['mcp:a'] === undefined && slid.counts['mcp:b'] === 1,
+        `${full} → ${JSON.stringify(slid.counts)}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('the counts survive reloading the store: the timer saves them, and so does the shutdown', async () => {
+    const r = rig({ ORCA_IMPROVE_PAUSED: '1' });
+    const api = improveApi(r);
+    let stopped = false;
+    try {
+      for (let i = 0; i < 4; i++) api.record('mcp:spawn_agent');
+      api.record('ui:improve:get');
+      const beforeTimer = new ImproveStore(r.dir, r.clock.now).usage().total;
+      r.clock.advance(USAGE_SAVE_MS);
+      const afterTimer = new ImproveStore(r.dir, r.clock.now).usage();
+      // Lo que llegó después del último tic lo guarda el cierre del hub.
+      api.record('mcp:ask_human');
+      api.stop(); stopped = true;
+      const afterStop = new ImproveStore(r.dir, r.clock.now);
+      const u = afterStop.usage();
+      return ok('nothing recorded is lost to a restart, the signal included',
+        beforeTimer === 0 && afterTimer.counts['mcp:spawn_agent'] === 4 && afterTimer.total === 5
+        && u.counts['mcp:ask_human'] === 1 && u.total === 6 && afterStop.signal().total === 6
+        && u.since === afterTimer.since,
+        `timer ${beforeTimer} → ${afterTimer.total} · stop ${u.total}`);
+    } finally { if (!stopped) api.stop(); r.done(); }
+  }),
+
+  test('an old file with one flat window is folded into the ring, not thrown away', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-improve-'));
+    try {
+      const now = T0 + 30 * 60_000;
+      const lastReview = T0 - 20 * 60_000;
+      mkdirSync(join(dir, IMPROVE_DIR), { recursive: true });
+      // La forma del fichero real de hoy: la ventana vaciada al lanzar la
+      // revisión (since = lanzamiento − 24 h) y todo lo contado después está
+      // también en `signal`.
+      writeFileSync(join(dir, IMPROVE_DIR, IMPROVE_FILE), JSON.stringify({
+        ...emptyState(T0),
+        usage: { since: lastReview - 24 * HOUR, counts: { 'mcp:spawn_agent': 4, 'ui:cmd': 7 }, total: 11 },
+        signal: { since: lastReview, counts: { 'mcp:spawn_agent': 4, 'ui:cmd': 7 }, total: 11 },
+      }));
+      const store = new ImproveStore(dir, () => now);
+      const u = store.usage();
+      // Y al volver a guardarlo, un hub anterior sigue encontrando su `usage`.
+      store.record('ui:cmd');
+      store.flush();
+      const onDisk = JSON.parse(readFileSync(join(dir, IMPROVE_DIR, IMPROVE_FILE), 'utf8')) as ImproveState & { usageHours: unknown[] };
+      return ok('the counts stay, dated from the last review, and the file keeps both shapes',
+        u.counts['mcp:spawn_agent'] === 4 && u.counts['ui:cmd'] === 7 && u.total === 11
+        && u.since === lastReview
+        && onDisk.usage.counts['ui:cmd'] === 8 && Array.isArray(onDisk.usageHours) && onDisk.usageHours.length >= 1,
+        JSON.stringify(u));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }),
+
+  test('the report dates its counters, and a review launched after a quiet stretch still sees them', async () => {
+    const r = rig({ ORCA_IMPROVE_PAUSED: '1' });
+    const api = improveApi(r);
+    try {
+      for (let i = 0; i < 3; i++) api.record('mcp:spawn_agent');
+      r.clock.advance(49 * HOUR);
+      for (let i = 0; i < 2; i++) api.record('mcp:ask_human');
+      api.record('ui:improve:get');
+      r.clock.advance(HOUR);
+      await api.run('manual');
+      const prompt = spawnOf(r)?.prompt ?? '';
+      const line = prompt.split('\n').find((l) => l.includes('window since')) ?? '';
+      return ok('the brief says since when, and the counts are there',
+        /window since \d{4}-\d\d-\d\dT\d\d:\d\dZ \(\d+(\.\d)?h of the last 24h\); a zero means none since then/.test(line)
+        && prompt.includes('capcom tool calls (2): ask_human 2')
+        && prompt.includes('console requests to the hub (1)'),
+        line.trim());
     } finally { api.stop(); r.done(); }
   }),
 

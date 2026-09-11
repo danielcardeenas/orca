@@ -52,9 +52,9 @@ import {
   BUDGET_MAX, BUDGET_MIN, MAX_REVIEWS, REVIEWER_BUDGET_TOKENS, REVIEWER_IDLE_MS, REVIEW_MAX_MS,
   STOP_ATTEMPTS, STOP_BACKOFF_MS, activeReview, dueForReview, effectiveChoice, validateChoice,
   MISSION_STATUSES, effectiveStatus, emptyState, emptyUsage, findDuplicate, linkedStatus, normalizeDraft, openProposals,
-  redact, reviewerBrief, topCounters,
+  redact, reviewerBrief, topCounters, HOUR_MS, USAGE_HOURS, foldHours, hourOf,
   type ImproveConfig, type ImproveProposal, type ImproveReview, type ImproveState,
-  type ImproveUsage, type ProposalDraft, type ReviewStatus, type TelemetryDigest,
+  type ImproveUsage, type ProposalDraft, type ReviewStatus, type TelemetryDigest, type UsageHour,
 } from '../shared/improve.ts';
 import type { CapcomMission } from '../shared/missions.ts';
 import { GESTURE_FAMILY_LABELS, GESTURE_PREFIX, foldGesture, gesturesByFamily, windowKindsNeverOpened } from '../shared/gestures.ts';
@@ -76,8 +76,13 @@ export const IMPROVE_FILE = 'improve.json';
  * y acorta el rebase.
  */
 export const IMPROVE_TICK_MS = 20_000;
-/** La ventana de telemetría que se le enseña al revisor. */
-export const DIGEST_WINDOW_MS = 24 * 3_600_000;
+/** La ventana de telemetría que se le enseña al revisor: el anillo entero. */
+export const DIGEST_WINDOW_MS = USAGE_HOURS * HOUR_MS;
+/**
+ * Cada cuánto se guardan las cuentas nuevas. Un minuto: lo peor que pierde un
+ * reinicio es ese minuto, y escribir el fichero más a menudo no compra nada.
+ */
+export const USAGE_SAVE_MS = 60_000;
 /** Tope del fichero. Muy por debajo de lo que 60 propuestas ocupan. */
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 
@@ -145,8 +150,74 @@ export type ImproveAct =
 /** Quién archivó unas propuestas, cuando fue un agente y no una herramienta. */
 export interface Reporter { agentId?: string; callsign?: string }
 
+/**
+ * Lo que va al fichero: el estado, con la ventana plegada en `usage` (lo que
+ * lee un hub anterior) y el anillo del que sale en `usageHours`.
+ */
+type StoredImprove = Omit<ImproveState, 'degraded'> & { usageHours: UsageHour[]; usageSince: number };
+
+function isHour(v: unknown): v is UsageHour {
+  if (!v || typeof v !== 'object') return false;
+  const h = v as Partial<UsageHour>;
+  return Number.isFinite(h.hour) && Number.isFinite(h.total) && !!h.counts && typeof h.counts === 'object'
+    && Object.values(h.counts).every((n) => Number.isFinite(n));
+}
+
+/**
+ * El anillo, tal como lo dejó el fichero.
+ *
+ * Un fichero anterior al anillo trae UNA ventana sin horas (`usage`). No se
+ * tira: lo que también está en `signal` pasó después de la última revisión y
+ * va a esa hora; el resto va a la hora más vieja que pueda ser suya. Así nada
+ * se queda más de lo que le toca. Y si todo lo contado está en `signal`, la
+ * ventana cuenta desde la última revisión y no desde el `since` viejo, que
+ * pudo ser el de un vaciado.
+ */
+function loadRing(loaded: Partial<StoredImprove>, signal: ImproveUsage, now: number): { hours: UsageHour[]; since: number } {
+  const first = hourOf(now) - (USAGE_HOURS - 1) * HOUR_MS;
+  const since = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+  if (Array.isArray(loaded.usageHours)) {
+    return {
+      hours: loaded.usageHours.filter(isHour).filter((h) => h.hour >= first && h.hour <= now).sort((a, b) => a.hour - b.hour),
+      since: since(loaded.usageSince, since(loaded.usage?.since, now)),
+    };
+  }
+  const old = loaded.usage;
+  if (!old?.counts) return { hours: [], since: now };
+  const oldSince = since(old.since, now);
+  const byHour = new Map<number, UsageHour>();
+  const put = (at: number, name: string, n: number): void => {
+    const hour = Math.max(first, hourOf(Math.min(at, now)));
+    const h = byHour.get(hour) ?? { hour, counts: {}, total: 0 };
+    h.counts[name] = (h.counts[name] ?? 0) + n;
+    h.total += n;
+    byHour.set(hour, h);
+  };
+  const signalInside = signal.since >= oldSince;
+  let all = 0, recent = 0;
+  for (const [name, raw] of Object.entries(old.counts)) {
+    const n = Number.isFinite(raw) ? raw : 0;
+    if (n <= 0) continue;
+    const late = signalInside ? Math.min(n, signal.counts[name] ?? 0) : 0;
+    if (late > 0) put(signal.since, name, late);
+    if (n - late > 0) put(oldSince, name, n - late);
+    all += n; recent += late;
+  }
+  return {
+    hours: [...byHour.values()].sort((a, b) => a.hour - b.hour),
+    since: signalInside && all > 0 && recent === all ? signal.since : oldSince,
+  };
+}
+
 export class ImproveStore {
-  private data: ImproveState;
+  /** Todo menos la ventana de uso, que vive en `hours` y se pliega al leerla. */
+  private data: Omit<ImproveState, 'usage' | 'degraded'>;
+  /** El anillo de la ventana de uso: un cubo por hora, el más viejo primero. */
+  private hours: UsageHour[] = [];
+  /** Desde cuándo cuenta este almacén, para que un cero tenga fecha. */
+  private usageSince: number;
+  /** Hay cuentas en memoria que el disco todavía no tiene. Ver `flush`. */
+  private usageDirty = false;
   private filePath: string;
   /** Por qué no se puede guardar, cuando no se puede. Viaja hasta el panel. */
   private degraded: string | null = null;
@@ -173,7 +244,9 @@ export class ImproveStore {
     try { fs.mkdirSync(home, { recursive: true }); }
     catch (err) { this.degraded = `cannot write ${home}: ${err instanceof Error ? err.message : String(err)}`; }
     this.filePath = path.join(home, IMPROVE_FILE);
-    this.data = emptyState(this.now());
+    const { usage: _empty, ...empty } = emptyState(this.now());
+    this.data = empty;
+    this.usageSince = this.now();
     if (defaults) {
       this.data.config = { paused: defaults.paused, everyMin: defaults.everyMin, perDay: defaults.perDay, minSignal: defaults.minSignal };
       this.data.budgetTokens = defaults.budgetTokens ?? REVIEWER_BUDGET_TOKENS;
@@ -182,7 +255,7 @@ export class ImproveStore {
       // Un fichero ilegible no puede tumbar el hub: la sección arranca vacía y
       // lo dice. Lo que se pierde son propuestas, no la flota.
       try {
-        const loaded = JSON.parse(fs.readFileSync(this.filePath, 'utf8')) as Partial<ImproveState>;
+        const loaded = JSON.parse(fs.readFileSync(this.filePath, 'utf8')) as Partial<StoredImprove>;
         this.data = {
           config: { ...IMPROVE_DEFAULTS, ...(defaults ?? {}), ...(loaded.config ?? {}) },
           budgetTokens: loaded.budgetTokens ?? this.data.budgetTokens,
@@ -193,15 +266,17 @@ export class ImproveStore {
           model: typeof loaded.model === 'string' ? loaded.model : null,
           proposals: loaded.proposals && typeof loaded.proposals === 'object' ? loaded.proposals : {},
           reviews: Array.isArray(loaded.reviews) ? loaded.reviews : [],
-          usage: loaded.usage?.counts ? loaded.usage : emptyUsage(this.now()),
           signal: loaded.signal?.counts ? loaded.signal : emptyUsage(this.now()),
         };
+        const ring = loadRing(loaded, this.data.signal, this.now());
+        this.hours = ring.hours;
+        this.usageSince = ring.since;
       } catch { /* se queda el vacío */ }
     }
   }
 
   state(): ImproveState {
-    return { ...structuredClone(this.data), ...(this.degraded ? { degraded: this.degraded } : {}) };
+    return { ...structuredClone(this.data), usage: this.usage(), ...(this.degraded ? { degraded: this.degraded } : {}) };
   }
   config(): ImproveConfig { return { ...this.data.config }; }
 
@@ -260,9 +335,10 @@ export class ImproveStore {
    * cero en momentos distintos, y un solo contador no puede responder a las
    * dos preguntas.
    *
-   * No escribe a disco: son miles al día y el fichero se guarda cuando pasa
-   * algo que importa. Lo peor que puede perder un reinicio es un puñado de
-   * cuentas, y ninguna decisión depende de una.
+   * No escribe a disco en cada llamada —son miles al día—: marca que hay
+   * cuentas nuevas y `flush`, con su temporizador, las guarda. Antes no se
+   * guardaban hasta que pasara algo que importara, y el hub se reinicia a
+   * menudo: la ventana que veía el revisor salía corta sin decirlo.
    *
    * Un gesto de la interfaz (`gesture:…`) pasa además por su techo de familia
    * (`foldGesture`): pasado `MAX_GESTURE_NAMES` nombres distintos en una
@@ -274,23 +350,70 @@ export class ImproveStore {
   record(name: string, n = 1): void {
     if (!/^[a-z]+:[A-Za-z0-9_:.-]{1,60}$/.test(name)) return;
     if (!Number.isFinite(n) || n <= 0) return;
+    const window = this.usage().counts;
     if (name.startsWith(GESTURE_PREFIX)) {
-      const folded = foldGesture(name, this.data.usage.counts);
+      const folded = foldGesture(name, window);
       if (!folded) return;
       name = folded;
     }
-    for (const bucket of [this.data.usage, this.data.signal]) {
-      if (bucket.counts[name] === undefined && Object.keys(bucket.counts).length >= MAX_COUNTERS) continue;
+    // El tope de nombres distintos es de la VENTANA, no de cada hora: si no,
+    // veinticuatro horas podrían juntar veinticuatro veces el tope.
+    if (window[name] !== undefined || Object.keys(window).length < MAX_COUNTERS) {
+      const bucket = this.hourNow();
       bucket.counts[name] = (bucket.counts[name] ?? 0) + n;
       bucket.total += n;
+      this.usageDirty = true;
+    }
+    const signal = this.data.signal;
+    if (signal.counts[name] !== undefined || Object.keys(signal.counts).length < MAX_COUNTERS) {
+      signal.counts[name] = (signal.counts[name] ?? 0) + n;
+      signal.total += n;
+      this.usageDirty = true;
     }
   }
 
-  /** La ventana de telemetría, recortada a `windowMs` si se quedó vieja. */
+  /**
+   * La ventana de telemetría: las últimas `windowMs`, en cubos de una hora.
+   *
+   * Leerla recorta lo que ya salió del anillo y NADA MÁS. Antes, una ventana
+   * de más de 48 h se reemplazaba entera por una vacía, y como el informe se
+   * compone al lanzar la revisión, era esa lectura la que la vaciaba: el
+   * revisor veía cero herramientas, cero peticiones y cero gestos.
+   */
   usage(windowMs = DIGEST_WINDOW_MS): ImproveUsage {
     const now = this.now();
-    if (now - this.data.usage.since > windowMs * 2) this.data.usage = emptyUsage(now - windowMs);
-    return structuredClone(this.data.usage);
+    this.trimHours(now);
+    return foldHours(this.hours, now, this.usageSince, Math.max(1, Math.ceil(windowMs / HOUR_MS)));
+  }
+
+  /**
+   * Guarda si hay cuentas que el disco no tiene. Lo llama un temporizador
+   * (`USAGE_SAVE_MS`) y el cierre del hub; no avisa a las consolas, porque
+   * unas cuentas más no cambian nada de lo que el panel enseña.
+   */
+  flush(): boolean {
+    if (!this.usageDirty) return false;
+    this.save(false);
+    return true;
+  }
+
+  /** El cubo de la hora en curso, creado si hace falta. */
+  private hourNow(): UsageHour {
+    const now = this.now();
+    const hour = hourOf(now);
+    const last = this.hours[this.hours.length - 1];
+    if (last && last.hour === hour) return last;
+    this.trimHours(now);
+    const bucket: UsageHour = { hour, counts: {}, total: 0 };
+    this.hours.push(bucket);
+    this.hours.sort((a, b) => a.hour - b.hour);
+    return bucket;
+  }
+
+  /** Suelta los cubos que ya salieron del anillo. */
+  private trimHours(now: number): void {
+    const first = hourOf(now) - (USAGE_HOURS - 1) * HOUR_MS;
+    if (this.hours.length && this.hours[0]!.hour < first) this.hours = this.hours.filter((h) => h.hour >= first);
   }
 
   signal(): ImproveUsage { return structuredClone(this.data.signal); }
@@ -647,20 +770,28 @@ export class ImproveStore {
     }
   }
 
-  private save(): void {
-    const json = JSON.stringify(this.data);
-    if (Buffer.byteLength(json) > MAX_FILE_BYTES) { this.prune(); }
+  /**
+   * Escribe el fichero. `usage` va plegado, para que un hub anterior que lea
+   * este fichero siga viendo su ventana; el anillo va aparte, en `usageHours`.
+   */
+  private save(notify = true): void {
+    const stored = (): StoredImprove => {
+      this.trimHours(this.now());
+      return { ...this.data, usage: this.usage(), usageHours: this.hours, usageSince: this.usageSince };
+    };
+    if (Buffer.byteLength(JSON.stringify(stored())) > MAX_FILE_BYTES) { this.prune(); }
     try {
       const temp = `${this.filePath}.tmp`;
-      fs.writeFileSync(temp, JSON.stringify(this.data), { mode: 0o600 });
+      fs.writeFileSync(temp, JSON.stringify(stored()), { mode: 0o600 });
       fs.renameSync(temp, this.filePath);
       this.degraded = null;
+      this.usageDirty = false;
     } catch (err) {
       // Lo de memoria sigue siendo correcto para este proceso; lo que se
       // pierde es el reinicio, y el panel lo enseña en vez de callarlo.
       this.degraded = `not saved: ${err instanceof Error ? err.message : String(err)}`;
     }
-    this.changed();
+    if (notify) this.changed();
   }
 }
 
@@ -668,6 +799,7 @@ export class ImproveStore {
 
 function money(n: number): string { return `$${n.toFixed(2)}`; }
 function mins(ms: number | null): string { return ms === null ? '—' : `${Math.round(ms / 60_000)}m`; }
+function hoursOf(ms: number): string { return `${Math.round(Math.max(0, ms) / 360_000) / 10}h`; }
 
 /**
  * El diario y los contadores, en líneas que un modelo puede leer y un humano
@@ -684,6 +816,8 @@ export function buildDigest(input: {
   usage: ImproveUsage;
   fleet: { agents: number; blocked: number; missionsOpen: number; missionsOwed: number };
   windowMs: number;
+  /** Para decir cuántas horas lleva la ventana. Sin él, sólo desde cuándo. */
+  now?: number;
 }): TelemetryDigest {
   const { stats, usage, fleet } = input;
   const lines: string[] = [];
@@ -698,6 +832,14 @@ export function buildDigest(input: {
   const projects = stats.byProject.slice(0, 5)
     .map((p) => `${p.project ?? p.projectId ?? '?'} ${p.launches}L ${p.dead}✝ ${money(p.totalCostUSD)}`);
   if (projects.length) lines.push(`by project: ${projects.join(' · ')}`);
+
+  /*
+   * Desde cuándo cuentan los contadores de aquí abajo. Un cero sin fecha no se
+   * distingue de un contador que se acaba de vaciar, y eso fue exactamente lo
+   * que vio el revisor: ceros que eran un vaciado y parecían desuso.
+   */
+  const covered = input.now === undefined ? '' : ` (${hoursOf(input.now - usage.since)} of the last ${hoursOf(input.windowMs)})`;
+  lines.push(`usage counters below: window since ${new Date(usage.since).toISOString().slice(0, 16)}Z${covered}; a zero means none since then`);
 
   const tools = topCounters({ ...usage, counts: Object.fromEntries(Object.entries(usage.counts).filter(([k]) => k.startsWith('mcp:'))) }, 10);
   const ui = topCounters({ ...usage, counts: Object.fromEntries(Object.entries(usage.counts).filter(([k]) => k.startsWith('ui:'))) }, 10);
@@ -1127,6 +1269,7 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
       usage: store.usage(DIGEST_WINDOW_MS),
       fleet: hooks.fleet(),
       windowMs: DIGEST_WINDOW_MS,
+      now,
     });
     const open = openProposals(state, now);
     const answered = Object.values(state.proposals)
@@ -1276,6 +1419,9 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
   const timer: CapcomTimer | null = env.enabled
     ? deps.setInterval(() => { sweep(); if (verdict().due) void run('auto'); }, IMPROVE_TICK_MS)
     : null;
+  // Las cuentas de uso se guardan con su propio reloj, esté o no encendida la
+  // revisión: se cuentan igual, y un reinicio no debe llevárselas.
+  const saver = deps.setInterval(() => { store.flush(); }, USAGE_SAVE_MS);
   // Al arrancar, lo primero es cerrar lo que el hub anterior dejó abierto.
   sweep();
 
@@ -1285,7 +1431,7 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
     run, cancel, report, verdict, sweep, implement,
     choice: () => effectiveChoice(store.state(), { runtime: env.runtime, model: env.model }),
     project: () => reviewProject(deps.projects(), env.project),
-    stop() { timer?.cancel(); offState(); offSpend(); offNew(); },
+    stop() { timer?.cancel(); saver.cancel(); store.flush(); offState(); offSpend(); offNew(); },
   };
 }
 

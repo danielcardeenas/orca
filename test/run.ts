@@ -31,10 +31,33 @@ process.env['ORCA_LOG'] ??= 'warn';
 process.env['ORCA_HARNESS'] ??= '1';
 
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { isRealOrcaHome } from '../src/hub/harness.ts';
 import { affected } from './affected.ts';
 import { runSuite, type TestFn, type TestModule, type TestResult } from './harness.ts';
+
+/*
+ * Y lo dice desde su propio ORCA_HOME.
+ *
+ * Un hub de pruebas no arranca sobre el directorio del operador (ver
+ * `harnessHomeRefusal` en src/hub/harness.ts), y aquí es donde deja de
+ * hacerlo: una suite que levantaba un hub sin darle almacén —serve, term,
+ * files— escribía su diario y sus misiones en ~/.orca/hub, y el collector de
+ * las suites reescribía los shims de ~/.orca/shims apuntando a este checkout.
+ * Una corrida entera comparte uno temporal, que se tira al salir. Un
+ * ORCA_HOME que alguien fijó a propósito en otro sitio se respeta.
+ *
+ * Va después de los imports y basta: ninguno de los de arriba lee ORCA_HOME
+ * al cargarse, y las suites se importan más abajo, ya con él puesto.
+ */
+if (!process.env['ORCA_HOME'] || isRealOrcaHome(process.env['ORCA_HOME'])) {
+  const home = mkdtempSync(join(tmpdir(), 'orca-test-home-'));
+  process.env['ORCA_HOME'] = home;
+  process.on('exit', () => { try { rmSync(home, { recursive: true, force: true }); } catch { /* ya no estaba */ } });
+}
 
 /**
  * Acepta las tres formas que han aparecido en este repo:

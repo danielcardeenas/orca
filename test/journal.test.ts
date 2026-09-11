@@ -12,7 +12,7 @@
  * le da.
  */
 
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,7 +25,7 @@ import {
 import { TOOLS, run, queryOf, compact, briefingLines } from '../src/agents/tools-journal.ts';
 import { EXTENSION_TOOLS, duplicateToolNames } from '../src/agents/extensions.ts';
 import { CEO_TOOLS, type CeoContext } from '../src/agents/tools.ts';
-import type { Agent, Project } from '../src/shared/types.ts';
+import type { Agent, Machine, Project } from '../src/shared/types.ts';
 import type { CapcomMission } from '../src/shared/missions.ts';
 import { eq, ok, test, type TestModule } from './harness.ts';
 
@@ -52,6 +52,8 @@ interface Box {
   deps: AutonomyDeps;
   lifecycle: AgentLifecycle;
   agents: Map<string, Agent>;
+  /** Las máquinas que el diario puede consultar. Sin entrada, real. */
+  machines: Map<string, Machine>;
   missions: Record<string, CapcomMission>;
   clock: { now: number };
   timers: { fn: () => void; ms: number; cancelled: boolean }[];
@@ -64,6 +66,7 @@ function box(env: Record<string, string> = {}): Box {
   const dir = mkdtempSync(join(tmpdir(), 'orca-journal-'));
   const lifecycle = new AgentLifecycle();
   const agents = new Map<string, Agent>();
+  const machines = new Map<string, Machine>();
   const missions: Record<string, CapcomMission> = {};
   const clock = { now: 10_000 };
   const timers: Box['timers'] = [];
@@ -71,6 +74,7 @@ function box(env: Record<string, string> = {}): Box {
   const deps: AutonomyDeps = {
     agents: () => [...agents.values()],
     agent: (id) => agents.get(id),
+    machine: (id) => machines.get(id),
     projects: () => projects,
     project: (id) => projects.find((p) => p.id === id),
     missions: () => structuredClone(missions),
@@ -88,7 +92,7 @@ function box(env: Record<string, string> = {}): Box {
   const journal = createJournal(deps);
   const ctx = { autonomy: { journal } } as unknown as CeoContext;
   return {
-    dir, deps, lifecycle, agents, missions, clock, timers, journal, ctx,
+    dir, deps, lifecycle, agents, machines, missions, clock, timers, journal, ctx,
     async close() { journal.stop?.(); await journal.flush(); rmSync(dir, { recursive: true, force: true }); },
   };
 }
@@ -506,9 +510,21 @@ tests.push(test('orca journal: one line per entry, --stats, --json, and a window
   });
   const fleet = startFakeFleet({ hub: `ws://127.0.0.1:${hub.port}`, token: 'test-token-journal', quiet: true, speed: 6 });
   try {
-    // La flota falsa entra por snapshot: es el barrido el que la anota.
-    const ready = await until(() => { hub.autonomy.journal.sweep(); return hub.autonomy.journal.query({ kind: 'launch' }).length >= 3; }, 8000, 100);
-    if (!ready) throw new Error('the fake fleet never produced three launches');
+    // La flota falsa entra, pero es del arnés y el diario no la anota: lo que
+    // el subcomando imprime lo pone aquí una máquina real, a mano.
+    const fleetIn = await until(() => Object.keys(hub.world.state.agents).length > 5, 8000, 100);
+    if (!fleetIn) throw new Error('the fake fleet never came in');
+    if (hub.autonomy.journal.sweep() !== 0) throw new Error('the sweep journaled the fake fleet');
+    for (const [i, id] of ['r1', 'r2', 'r3'].entries()) {
+      hub.autonomy.journal.record({
+        kind: 'launch', at: Date.now() - 3_000 + i, agentId: id, callsign: id.toUpperCase(), machineId: 'm-real',
+        projectId: 'p_real', project: 'RL', squad: null, missionId: null, by: 'human', brief: `Real work ${id}.`,
+      });
+    }
+    hub.autonomy.journal.record({
+      kind: 'end', agentId: 'r1', callsign: 'R1', machineId: 'm-real', projectId: 'p_real', project: 'RL',
+      squad: null, missionId: null, state: 'done', costUSD: 0.5, durationMs: 60_000,
+    });
     await hub.autonomy.journal.flush();
     const plain = await cliRun(hub.port, ['journal', '--kind', 'launch', '--limit', '3']);
     const asJson = await cliRun(hub.port, ['journal', '--json', '--limit', '2', '--asc']);
@@ -529,5 +545,109 @@ tests.push(test('orca journal: one line per entry, --stats, --json, and a window
     rmSync(dir, { recursive: true, force: true });
   }
 }));
+
+/* ── el arnés fuera del diario ────────────────────────────────────── */
+
+tests.push(test('a synthetic machine leaves nothing in the journal; a real one next to it does', async () => {
+  const b = box();
+  try {
+    b.machines.set('fx', { id: 'fx', synthetic: true } as Machine);
+    b.machines.set('m1', { id: 'm1' } as Machine);
+    // Un CAPCOM del arnés primero: si contara, el de verdad sería una rotación.
+    arrive(b, agent({ id: 'fxcap', role: 'capcom', machineId: 'fx' }));
+    arrive(b, agent({ id: 'cap', role: 'capcom', projectId: 'p_or' }));
+    arrive(b, agent({ id: 'fx1', machineId: 'fx' }));
+    arrive(b, agent({ id: 'w1' }));
+    b.lifecycle.feed({ at: 20_000, kind: 'escalation:new', machineId: 'fx', agentId: 'fx1', projectId: 'p_ax', text: 'three.js 0.185?', data: { id: 'esc_fx' } }, b.agents.get('fx1'));
+    b.lifecycle.feed({ at: 21_000, kind: 'escalation:answered', machineId: 'fx', agentId: 'fx1', projectId: 'p_ax', text: 'three.js 0.185?', data: { id: 'esc_fx', answer: 'no', by: 'human' } }, b.agents.get('fx1'));
+    b.clock.now = 30_000;
+    move(b, 'fx1', 'done');
+    move(b, 'w1', 'done');
+    // Uno que sólo el barrido ve, terminado, del arnés.
+    b.agents.set('fx2', agent({ id: 'fx2', machineId: 'fx', state: 'dead' }));
+    const swept = b.journal.sweep();
+    const landed = b.journal.landed({ agentId: 'fx1', branch: 'orca/fx1', target: 'main', ok: true });
+    const recorded = b.journal.record({ kind: 'launch', agentId: 'x', callsign: null, machineId: 'fx', projectId: null, project: null, squad: null, missionId: null });
+    await b.journal.flush();
+    const all = lines(b.dir);
+    const summary = all.map((e) => `${e.kind}:${e.agentId}`).join(' ');
+    return ok('the harness stays out of the journal',
+      summary === 'launch:w1 end:w1' && swept === 0 && landed === null && recorded === null,
+      `${summary} · sweep ${swept} · landed ${String(landed)} · record ${String(recorded)}`);
+  } finally { await b.close(); }
+}));
+
+tests.push(test('the fixture definition names its machines and their replicas, and nothing else', async () => {
+  const { isFixtureMachineId, scaleFleet } = await import('./fake-collector.ts');
+  const fleet = [...scaleFleet(0), ...scaleFleet(2_000)].map((m) => m.id);
+  const others = ['a303610cd6985e46f05a53366923d07a', 'orca-visual', 'orca-visual-squad', 'm-term',
+    'mac-cascabel-r0', 'mac-cascabel-r', 'mac-cascabel-rx', 'mac-cascabel-r01', 'xvps-nue2', 'vps-nue2x'];
+  const missed = fleet.filter((id) => !isFixtureMachineId(id));
+  const wrong = others.filter((id) => isFixtureMachineId(id));
+  return ok('isFixtureMachineId', fleet.length > 3 && missed.length === 0 && wrong.length === 0,
+    `${fleet.length} fixture ids · missed ${missed.join(',') || '-'} · wrongly claimed ${wrong.join(',') || '-'}`);
+}));
+
+/** Un diario sucio como el del 2026-09-11: rotado y vivo, reales y del fixture mezclados. */
+function dirtyJournal(): { dir: string; files: Record<string, string>; real: string[]; fixture: string[] } {
+  const dir = mkdtempSync(join(tmpdir(), 'orca-journal-sanitize-'));
+  const line = (id: string, machineId: string | null): string => JSON.stringify({ id, at: 1, kind: 'launch', agentId: id, callsign: null, machineId, projectId: null, project: null, squad: null, missionId: null });
+  const rotated = [line('r1', 'mreal'), line('f1', 'vps-nue2'), line('f2', 'mac-cascabel-r3'), line('r2', null)];
+  const live = [line('f3', 'vps-fra1'), line('r3', 'mreal'), '{ not json', line('f4', 'mac-cascabel')];
+  const files = {
+    'journal.20260908-052540.000011.jsonl': `${rotated.join('\n')}\n`,
+    [JOURNAL_FILE]: `${live.join('\n')}\n`,
+    'state.json': '{"lastBriefingAt":5,"rotations":12}',
+  };
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  return {
+    dir, files,
+    real: [rotated[0]!, rotated[3]!, live[1]!],
+    fixture: [rotated[1]!, rotated[2]!, live[0]!, live[3]!],
+  };
+}
+
+tests.push(test('sanitize: backup first, fixture entries set aside byte for byte, nothing lost, a second pass is a no-op', async () => {
+  const { sanitizeJournal } = await import('../tools/journal-sanitize.ts');
+  const { isFixtureMachineId } = await import('./fake-collector.ts');
+  const j = dirtyJournal();
+  const out = join(j.dir, '..', `${j.dir.split('/').pop()}-aparte`);
+  try {
+    const dry = await sanitizeJournal({ dir: j.dir, isFixture: isFixtureMachineId });
+    const untouched = Object.entries(j.files).every(([n, t]) => readFileSync(join(j.dir, n), 'utf8') === t);
+
+    const run = sanitizeJournal({ dir: j.dir, isFixture: isFixtureMachineId, apply: true, out, settleMs: 20 });
+    // Mientras espera: el hub, que aún tenía abierto el vivo de antes, escribe.
+    appendFileSync(join(out, 'respaldo', JOURNAL_FILE), `${JSON.stringify({ id: 'late-f', at: 2, kind: 'end', agentId: 'late-f', machineId: 'vps-nue2' })}\n${JSON.stringify({ id: 'late-r', at: 2, kind: 'end', agentId: 'late-r', machineId: 'mreal' })}\n`);
+    const r = await run;
+
+    const backupOk = Object.entries(j.files).every(([n, t]) => readFileSync(join(out, 'respaldo', n), 'utf8').startsWith(t));
+    const now = [...journalLines(j.dir, 'journal.20260908-052540.000011.jsonl'), ...journalLines(j.dir, JOURNAL_FILE)];
+    const aside = readFileSync(join(out, 'apartadas.jsonl'), 'utf8').split('\n').filter(Boolean);
+    const q = new Journal({ dir: j.dir }).query({ limit: 50, order: 'asc' }).map((e) => e.agentId).sort().join(',');
+    const informe = JSON.parse(readFileSync(join(out, 'informe.json'), 'utf8')) as { before: number; kept: number; setAside: number };
+    const again = await sanitizeJournal({ dir: j.dir, isFixture: isFixtureMachineId, apply: true });
+
+    const checks = {
+      dryCounts: dry.before === 8 && dry.setAside === 4 && dry.kept === 4 && dry.unparsed === 1 && !dry.applied && dry.out === null,
+      untouched,
+      backupOk,
+      keptOnlyReal: now.join('\n') === [j.real[0], j.real[1], j.real[2], '{ not json', now.at(-1)].join('\n') && now.at(-1)!.includes('late-r'),
+      asideExact: aside.slice(0, 4).join('\n') === j.fixture.join('\n') && aside[4]!.includes('late-f') && aside.length === 5,
+      queryReal: q === 'late-r,r1,r2,r3',
+      counts: r.before === 10 && r.kept === 5 && r.setAside === 5 && r.lateTail === 2 && informe.setAside === 5,
+      stateCopied: readFileSync(join(j.dir, 'state.json'), 'utf8') === j.files['state.json'],
+      noOp: again.setAside === 0 && again.out === null && !again.applied,
+    };
+    return ok('sanitize', Object.values(checks).every(Boolean), JSON.stringify(checks));
+  } finally {
+    rmSync(j.dir, { recursive: true, force: true });
+    rmSync(out, { recursive: true, force: true });
+  }
+}));
+
+function journalLines(dir: string, name: string): string[] {
+  return readFileSync(join(dir, name), 'utf8').split('\n').filter(Boolean);
+}
 
 export default { suite: 'Fleet journal', tests } satisfies TestModule;

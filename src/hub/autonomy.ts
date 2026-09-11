@@ -18,7 +18,7 @@
  * son el `BudgetBook` de hub/budgets.ts, evaluado en el sweep del hub.
  */
 
-import type { Agent, Project } from '../shared/types.ts';
+import type { Agent, Machine, Project } from '../shared/types.ts';
 import type { CapcomMission } from '../shared/missions.ts';
 import type { Command } from '../shared/protocol.ts';
 import type { CapcomTimer } from './capcom.ts';
@@ -35,6 +35,15 @@ export interface AutonomyDeps {
   agent(id: string): Agent | undefined;
   projects(): Project[];
   project(id: string): Project | undefined;
+  /**
+   * La máquina, por id: lo que el diario mira para no anotar al arnés (su
+   * marca `synthetic`, ver shared/synthetic.ts).
+   *
+   * Opcional: un arnés que monte `AutonomyDeps` a mano sin máquinas no tiene
+   * nada sintético que descartar, y sin ella todo cuenta como real, que es el
+   * defecto de siempre.
+   */
+  machine?(id: string): Machine | undefined;
   /** Las conversaciones de misión (missions.json), por id. Copia: mutarla no cambia nada. */
   missions(): Record<string, CapcomMission>;
   /** La sesión CAPCOM viva, o null. */

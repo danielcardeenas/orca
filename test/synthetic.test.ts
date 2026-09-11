@@ -22,7 +22,8 @@
  *  - el mock se declara sintético, y al morir se lleva lo suyo.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -38,9 +39,9 @@ import { AnswerMemory } from '../src/hub/memory.ts';
 import { HubStore } from '../src/hub/persist.ts';
 import { FleetStore } from '../src/hub/fleets.ts';
 import { startHub, type Hub } from '../src/hub/server.ts';
-import { doorVerdict, startFakeFleet } from './fake-collector.ts';
+import { doorVerdict, isFixtureMachineId, startFakeFleet } from './fake-collector.ts';
 import { CLOSE_NOT_HARNESS } from '../src/hub/auth.ts';
-import { harnessInvocation, harnessProcs, stopHarnessProcs } from '../src/hub/harness.ts';
+import { harnessHomeRefusal, harnessInvocation, harnessProcs, realOrcaHome, stopHarnessProcs } from '../src/hub/harness.ts';
 import { ok, eq, test, until, type TestModule } from './harness.ts';
 
 const TOKEN = 'test-token-synthetic-0';
@@ -430,6 +431,112 @@ const border = [
   }),
 ];
 
+/* ── el diario y el directorio: lo que un hub de pruebas deja en disco ── */
+
+/** `tsx src/hub/server.ts` como proceso hijo, con el entorno que se le dé. */
+function hubProcess(env: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string; listening: boolean }> {
+  return new Promise((done) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/hub/server.ts'], {
+      cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let listening = false;
+    const read = (b: Buffer): void => {
+      out += b.toString();
+      // Arrancó: con eso basta, y se para aquí mismo. Es nuestro hijo, por pid.
+      if (!listening && out.includes('escuchando en')) { listening = true; child.kill('SIGTERM'); }
+    };
+    child.stdout.on('data', read);
+    child.stderr.on('data', read);
+    const cut = setTimeout(() => child.kill('SIGKILL'), 25_000);
+    child.once('exit', (code) => { clearTimeout(cut); done({ code, out, listening }); });
+  });
+}
+
+const ROOT = new URL('..', import.meta.url).pathname;
+
+const disk = [
+  test('el diario no anota al arnés, y al collector real de al lado sí', async () => {
+    return await withHub(async (hub) => {
+      // El fixture de verdad, el de test/fake-collector.ts: lanza por snapshot,
+      // que es lo que el barrido convierte en entradas.
+      const fleet = startFakeFleet({ hub: `ws://127.0.0.1:${hub.port}`, token: TOKEN, quiet: true, speed: 6 });
+      // Y dos collectors a mano, para que la pregunta y el final no dependan del azar.
+      const real = await collector(hub.port, machine('m-real'));
+      const fake = await collector(hub.port, machine('m-fake', true));
+      try {
+        for (const [c, m, id] of [[real, 'm-real', 'r1'], [fake, 'm-fake', 'f1']] as const) {
+          c.ws.send(JSON.stringify({ t: 'agent:new', machineId: m, agent: agent({ id, machineId: m, callsign: id.toUpperCase() }) }));
+        }
+        await until(() => hub.world.state.agents['r1'] !== undefined && hub.world.state.agents['f1'] !== undefined, 4000);
+        for (const [c, m, id] of [[real, 'm-real', 'r1'], [fake, 'm-fake', 'f1']] as const) {
+          c.ws.send(JSON.stringify({ t: 'escalation', machineId: m, escalation: escalation({ agentId: id, machineId: m }) }));
+          c.ws.send(JSON.stringify({ t: 'agent', machineId: m, id, patch: { state: 'done' } }));
+        }
+        const fleetIn = await until(() => Object.values(hub.world.state.agents)
+          .filter((a) => isFixtureMachineId(a.machineId)).length > 5, 8000);
+        await until(() => hub.world.state.agents['f1']?.state === 'done' && hub.world.state.agents['r1']?.state === 'done', 4000);
+        const swept = hub.autonomy.journal.sweep() + hub.autonomy.journal.sweep();
+        await hub.autonomy.journal.flush();
+
+        const all = hub.autonomy.journal.query({ limit: 500 });
+        const leaked = all.filter((e) => e.machineId === 'm-fake' || (e.machineId !== null && isFixtureMachineId(e.machineId)));
+        const kinds = all.filter((e) => e.machineId === 'm-real').map((e) => e.kind).sort().join(',');
+        return ok(
+          'sólo lo real llega al diario',
+          fleetIn && leaked.length === 0 && swept === 0 && kinds === 'end,escalation,launch',
+          `${all.length} entradas · del arnés: ${leaked.length} · barrido escribió ${swept} · reales: ${kinds}`,
+        );
+      } finally { real.close(); fake.close(); fleet.stop(); }
+    });
+  }),
+
+  test('un hub de pruebas se niega a arrancar sobre el ORCA_HOME del operador', () => {
+    const home = tempDir();
+    try {
+      const real = realOrcaHome(home);
+      mkdirSync(real, { recursive: true });
+      const link = join(home, 'enlace-a-orca');
+      symlinkSync(real, link);
+      const own = join(home, 'otro');
+      const cases = {
+        porOmision: harnessHomeRefusal({ harness: true, orcaDir: real, home }) !== null,
+        porEnlace: harnessHomeRefusal({ harness: true, orcaDir: link, home }) !== null,
+        conBarra: harnessHomeRefusal({ harness: true, orcaDir: `${real}/`, home }) !== null,
+        propio: harnessHomeRefusal({ harness: true, orcaDir: own, home }) === null,
+        hubReal: harnessHomeRefusal({ harness: false, orcaDir: real, home }) === null,
+      };
+      return ok('la guarda mira el directorio, no el nombre', Object.values(cases).every(Boolean), JSON.stringify(cases));
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }),
+
+  test('arrancado de verdad: sin ORCA_HOME propio no arranca ni toca el disco; con él, sí', async () => {
+    // Un HOME de mentira: el ~/.orca que se protege es el suyo, no el del operador.
+    const home = tempDir();
+    const own = tempDir();
+    const base: NodeJS.ProcessEnv = {
+      ...process.env, HOME: home, ORCA_HARNESS: '1', ORCA_PORT: '0', ORCA_HOST: '127.0.0.1',
+      ORCA_TOKEN: 'test-token-harness-home',
+    };
+    delete base['ORCA_HOME'];
+    try {
+      const refused = await hubProcess(base);
+      const wrote = existsSync(join(realOrcaHome(home), 'hub'));
+      const started = await hubProcess({ ...base, ORCA_HOME: own });
+      return ok(
+        'la guarda está en el hub, y sólo salta donde debe',
+        !refused.listening && refused.code !== 0 && refused.out.includes('no arranca') && !wrote
+        && started.listening && existsSync(join(own, 'hub')),
+        `sin propio: code ${String(refused.code)}, escribió hub/: ${String(wrote)} · con propio: escuchó ${String(started.listening)}`
+        + ` · ${refused.out.split('\n').find((l) => l.includes('ORCA_HOME')) ?? refused.out.slice(-300)}`,
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(own, { recursive: true, force: true });
+    }
+  }),
+];
+
 /* ── contención: purgar un mundo ya contaminado ───────────────────── */
 
 const containment = [
@@ -711,5 +818,5 @@ const containment = [
 
 export default {
   suite: 'El arnés en cuarentena',
-  tests: [...marking, ...routing, ...harness, ...border, ...containment],
+  tests: [...marking, ...routing, ...harness, ...border, ...disk, ...containment],
 } satisfies TestModule;

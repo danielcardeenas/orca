@@ -28,9 +28,16 @@
  * aunque hubiera levantado el suyo. Se acepta a sabiendas —un visual colgado es
  * justo uno de los procesos que hay que poder terminar— y el que se aisló queda
  * fuera igual, que es el que de verdad no está molestando a nadie.
+ *
+ * Al final, la otra mitad de la frontera: DÓNDE escribe un hub de pruebas
+ * (`harnessHomeRefusal`). La puerta decide qué máquinas entran; eso decide
+ * que el diario de un arnés no acabe en el directorio del hub real.
  */
 
 import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import { PORTS } from '../shared/protocol.ts';
 
@@ -365,4 +372,60 @@ function signalTo(
 
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/* ── El directorio: dónde escribe un hub de pruebas ───────────────── */
+
+/**
+ * El `ORCA_HOME` del operador: el que usa cualquier proceso que no diga otro.
+ *
+ * Es el que hay que proteger, se llegue a él por omisión —sin `ORCA_HOME`— o
+ * nombrándolo —`ORCA_HOME=~/.orca`, o un enlace que acaba ahí—.
+ */
+export function realOrcaHome(home: string = homedir()): string {
+  return join(home, '.orca');
+}
+
+/** Dos rutas que acaban en el mismo directorio, enlaces incluidos. */
+function sameDir(a: string, b: string): boolean {
+  const canon = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+  return canon(a) === canon(b);
+}
+
+/** ¿Es este directorio el `ORCA_HOME` del operador? */
+export function isRealOrcaHome(dir: string, home: string = homedir()): boolean {
+  return sameDir(dir, realOrcaHome(home));
+}
+
+/**
+ * Por qué un hub de pruebas no puede arrancar aquí, o null si puede.
+ *
+ * La puerta de `shared/synthetic.ts` decide qué MÁQUINAS entran en un hub;
+ * no decía nada de dónde escribe el hub. Y un hub de pruebas arrancado sin su
+ * propio `ORCA_HOME` —el camino por defecto de `test/visual.ts` sin
+ * `--isolated`, y el de toda suite de `npm test` que levantaba un hub sin
+ * darle almacén— escribía su diario, sus eventos, sus misiones y su tablero de
+ * automejora en el directorio del hub real. El 2026-09-11, 290 de los 329
+ * lanzamientos del diario de 24 h eran de las máquinas del fixture, y todo lo
+ * que se construye encima —el informe de AUTOMEJORA, los briefings de CAPCOM—
+ * estaba midiendo pruebas. Los ficheros que se escriben con renombrado
+ * atómico (misiones, tablero) además los compartían dos procesos, y ahí gana
+ * el último que escribe.
+ *
+ * La regla va en el hub por lo mismo que la puerta: un guardarraíl que pone
+ * el arnés es una pregunta que el arnés responde. Los arneses se aíslan solos
+ * —`test/run.ts` y `test/visual.ts` le dan un `ORCA_HOME` temporal a todo hub
+ * que levantan—, y esto es lo que hace que olvidarlo sea un fallo al arrancar
+ * y no una semana de datos mezclados. No hay flag que lo salte: quien quiera
+ * un hub de pruebas persistente le da un `ORCA_HOME` propio.
+ *
+ * Un hub real (sin `ORCA_HARNESS`) no pasa por aquí: el defecto sigue siendo
+ * el mundo real, en su directorio de siempre.
+ */
+export function harnessHomeRefusal(o: { harness: boolean; orcaDir: string; home?: string }): string | null {
+  if (!o.harness) return null;
+  if (!isRealOrcaHome(o.orcaDir, o.home)) return null;
+  return `hub de pruebas (ORCA_HARNESS) sobre el ORCA_HOME del operador (${o.orcaDir}): no arranca. `
+    + 'Escribiría su diario, sus eventos y sus misiones en el directorio del hub real. '
+    + 'Dale uno propio (ORCA_HOME=$(mktemp -d)) o usa --isolated.';
 }

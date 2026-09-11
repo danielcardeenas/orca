@@ -1064,15 +1064,7 @@ export async function ensureServers(
   if (swept) console.log(`[visual] ${swept} servidor(es) de corridas anteriores, cerrados`);
 
   const alone = isolatedRun();
-  if (alone && !TEMP_HOME) {
-    // Its own ORCA_HOME, so this run's hub writes its token and state where
-    // nothing else reads them. Setting it on our own env is enough: every
-    // server we start inherits it (see spawnProc), and orcaToken() below
-    // already looks there.
-    TEMP_HOME = mkdtempSync(join(tmpdir(), 'orca-visual-'));
-    process.env['ORCA_HOME'] = TEMP_HOME;
-    console.log(`[visual] isolated run: own ports and ORCA_HOME (${TEMP_HOME})`);
-  }
+  if (alone) console.log('[visual] isolated run: own ports and ORCA_HOME');
 
   // Probe only what we could actually share; `sharing` holds the rule.
   const hubUp = !alone && await httpOk(`http://127.0.0.1:${PORTS.hub}/api/health`, 1500);
@@ -1092,7 +1084,24 @@ export async function ensureServers(
   if (hubWasUp) {
     console.log(`[visual] hub already on ${hub}, reusing it`);
   } else {
-    console.log(`[visual] starting hub on ${hub}`);
+    if (!TEMP_HOME) {
+      /*
+       * Every hub this harness starts gets its own ORCA_HOME, isolated or not.
+       * It used to be only with `--isolated`, and the default run's hub —a test
+       * hub— wrote its journal, events and missions into the operator's
+       * ~/.orca/hub: on 2026-09-11, 290 of 329 journal launches in 24 h were
+       * fixture machines. A test hub now refuses the operator's ORCA_HOME
+       * outright (`harnessHomeRefusal`, src/hub/harness.ts); this is what keeps
+       * the default run working under that rule.
+       *
+       * Setting it on our own env is enough: every server we start inherits it
+       * (see spawnProc), and orcaToken() already looks there, so the fleet and
+       * Vite read the token this hub writes.
+       */
+      TEMP_HOME = mkdtempSync(join(tmpdir(), 'orca-visual-'));
+      process.env['ORCA_HOME'] = TEMP_HOME;
+    }
+    console.log(`[visual] starting hub on ${hub} (ORCA_HOME ${TEMP_HOME})`);
     // `ORCA_HARNESS`: our hub is a test hub, and only a test hub accepts the
     // synthetic fleet below. See src/shared/synthetic.ts.
     spawnProc('hub', 'npx', ['tsx', 'src/hub/server.ts'], { ORCA_PORT: String(hub), [HARNESS_ENV]: '1' });
@@ -1320,7 +1329,7 @@ export function shutdown() {
   procs.length = 0;
   started.length = 0;
   forgetRun();
-  // An isolated run's ORCA_HOME held nothing but that run's hub state.
+  // The ORCA_HOME we gave our own hub held nothing but that hub's state.
   if (TEMP_HOME && !keep) {
     rmSync(TEMP_HOME, { recursive: true, force: true });
     TEMP_HOME = null;

@@ -55,6 +55,7 @@ import { join } from 'node:path';
 
 import type { Agent } from '../shared/types.ts';
 import { TERMINAL_STATES } from '../shared/types.ts';
+import { isSynthetic } from '../shared/synthetic.ts';
 import type { AutonomyDeps } from './autonomy.ts';
 import type { EscalationAnswered, EscalationRaised } from './lifecycle.ts';
 import { normalize } from './memory.ts';
@@ -643,10 +644,10 @@ export interface JournalApi {
   rotated(input: RotationInput): void;
   /** server.ts: quién pidió un spawn, para atribuir el launch que viene. */
   spawnRequested(hint: SpawnHint): void;
-  /** Pieza C: un worktree aterrizó (o no). */
-  landed(input: LandingInput): JournalEntry;
-  /** Cualquier otra pieza: una entrada a mano. */
-  record(input: JournalInput): JournalEntry;
+  /** Pieza C: un worktree aterrizó (o no). Null si era de una máquina sintética. */
+  landed(input: LandingInput): JournalEntry | null;
+  /** Cualquier otra pieza: una entrada a mano. Null si era de una máquina sintética. */
+  record(input: JournalInput): JournalEntry | null;
   /**
    * Recorre la flota y anota lo que los eventos no trajeron: agentes sin
    * launch, terminados sin end. Corre solo cada SWEEP_MS; expuesto para que
@@ -704,6 +705,26 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
   const open = new Map<string, JournalEntry>();
   const openById = new Map<string, JournalEntry>();
 
+  /*
+   * El arnés no entra en el diario.
+   *
+   * El mundo ya resta a las máquinas sintéticas del coste; el diario no las
+   * miraba en ningún punto, y un hub de pruebas lo llenaba de lanzamientos
+   * del fixture: 18.686 entradas en un solo rotado, todas del mock. Lo que se
+   * construye encima —el informe de AUTOMEJORA, los briefings de CAPCOM— es
+   * uso real o no es nada, así que la regla va aquí, en el único sitio por el
+   * que se escribe, y no en cada lector. Incluso en un hub de pruebas: sus
+   * fixtures se miran en la consola, no se auditan.
+   *
+   * Por la marca que la máquina declara en su `hello` y nada más: una lista
+   * de nombres se queda atrás el día que el mock cambia de flota. Sin máquina
+   * conocida, real, que es el defecto de toda la frontera.
+   */
+  const synthetic = (machineId: string | null | undefined): boolean =>
+    machineId ? isSynthetic(deps.machine?.(machineId)) : false;
+  const write = (input: JournalInput): JournalEntry | null =>
+    (synthetic(input.machineId) ? null : journal.append(input));
+
   const code = (projectId: string | null): string | null => (projectId ? deps.project(projectId)?.code ?? null : null);
   const missionOf = (a: Pick<Agent, 'id' | 'squad'>): string | null => {
     let fallback: string | null = null;
@@ -736,7 +757,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
   }
 
   function recordLaunch(a: Agent, at: number): void {
-    journal.append({
+    write({
       kind: 'launch', at: a.startedAt || at, ...base(a),
       by: launchedBy(a, at), parentId: a.parentId, lead: a.lead === true,
       brief: a.mission ?? a.lastPrompt ?? null, title: a.title || null,
@@ -746,7 +767,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
 
   function recordEnd(a: Agent, state: FinalState, at: number, late = false): void {
     const m = a.metrics;
-    journal.append({
+    write({
       kind: 'end', at, ...base(a), state,
       costUSD: Number((m?.costUSD ?? 0).toFixed(4)),
       durationMs: Math.max(0, (a.updatedAt || at) - (a.startedAt || at)),
@@ -765,7 +786,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       rotation.timer.cancel();
       const { input } = rotation;
       rotation = null;
-      journal.append({
+      write({
         kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
         projectId: a.projectId, project: code(a.projectId), squad: null, missionId: null,
         fromId: input.fromId, toId: a.id, turns: input.turns ?? null,
@@ -774,7 +795,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       wrote = true;
     } else if (capcomId && capcomId !== a.id) {
       // Sin gancho del hub: un CAPCOM nuevo cuando había otro ES una rotación.
-      journal.append({
+      write({
         kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
         projectId: a.projectId, project: code(a.projectId), squad: null, missionId: null,
         fromId: capcomId, toId: a.id, note: 'inferred: a new CAPCOM appeared while another was known',
@@ -787,7 +808,9 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
 
   const offs = [
     deps.lifecycle.on('agent:new', (a, at) => {
-      if (a.subagent) return;
+      // Antes que la rama de CAPCOM: un CAPCOM del arnés no es una rotación
+      // del de verdad, ni el punto de partida de la siguiente.
+      if (a.subagent || synthetic(a.machineId)) return;
       if (a.role === 'capcom') { capcomArrived(a, at); return; }
       if (!journal.hasLaunch(a.id)) recordLaunch(a, at);
       // Llegó ya terminado (snapshot tras un reinicio del hub): el fin no se
@@ -795,7 +818,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       if (TERMINAL_STATES.has(a.state) && !journal.hasEnd(a.id)) recordEnd(a, a.state as FinalState, a.updatedAt || at, true);
     }),
     deps.lifecycle.on('agent:state', (c) => {
-      if (c.agent.subagent || c.agent.role === 'capcom') return;
+      if (c.agent.subagent || c.agent.role === 'capcom' || synthetic(c.agent.machineId)) return;
       if (!TERMINAL_STATES.has(c.to as Agent['state'])) { journal.reopen(c.agent.id); return; }
       if (journal.hasEnd(c.agent.id)) return;
       if (!journal.hasLaunch(c.agent.id)) recordLaunch(c.agent, c.at);
@@ -803,7 +826,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
     }),
     deps.lifecycle.on('escalation:new', (e: EscalationRaised) => {
       const a = e.agentId ? deps.agent(e.agentId) : undefined;
-      const entry = journal.append({
+      const entry = write({
         kind: 'escalation', at: e.at,
         agentId: e.agentId, callsign: a?.callsign ?? null, machineId: a?.machineId ?? e.machineId ?? null,
         projectId: e.projectId, project: code(e.projectId),
@@ -811,6 +834,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         escalationId: e.id, question: e.question, urgency: e.urgency ?? null, options: e.options ?? [],
         by: e.from === 'ceo' ? 'capcom' : undefined,
       });
+      if (!entry) return;
       if (e.id) openById.set(e.id, entry);
       if (e.agentId) open.set(e.agentId, entry);
     }),
@@ -819,7 +843,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       if (asked?.escalationId) openById.delete(asked.escalationId);
       if (e.agentId) open.delete(e.agentId);
       const a = e.agentId ? deps.agent(e.agentId) : undefined;
-      journal.append({
+      write({
         kind: 'answer', at: e.at,
         agentId: e.agentId, callsign: a?.callsign ?? asked?.callsign ?? null, machineId: a?.machineId ?? e.machineId ?? null,
         projectId: e.projectId ?? asked?.projectId ?? null, project: code(e.projectId ?? asked?.projectId ?? null),
@@ -835,7 +859,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
     const now = deps.now();
     let wrote = 0;
     for (const a of deps.agents()) {
-      if (a.subagent) continue;
+      if (a.subagent || synthetic(a.machineId)) continue;
       if (a.role === 'capcom') {
         if (!TERMINAL_STATES.has(a.state) && capcomId !== a.id && capcomArrived(a, now)) wrote += 1;
         continue;
@@ -874,7 +898,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         if (!rotation) return;
         const { input: held } = rotation;
         rotation = null;
-        journal.append({
+        write({
           kind: 'rotation', at: deps.now(), agentId: held.fromId, callsign: null, machineId: held.machineId ?? null,
           projectId: null, project: null, squad: null, missionId: null,
           fromId: held.fromId, toId: null, turns: held.turns ?? null,
@@ -893,7 +917,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
     landed(input) {
       const a = input.agentId ? deps.agent(input.agentId) : undefined;
       const projectId = input.projectId ?? a?.projectId ?? null;
-      return journal.append({
+      return write({
         kind: 'landing', agentId: input.agentId, callsign: a?.callsign ?? null, machineId: a?.machineId ?? null,
         projectId, project: code(projectId), squad: a?.squad ?? null, missionId: a ? missionOf(a) : null,
         branch: input.branch ?? null, target: input.target ?? null, commit: input.commit ?? null,
@@ -901,7 +925,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       });
     },
 
-    record: (input) => journal.append(input),
+    record: (input) => write(input),
     flush: () => journal.flush(),
 
     stop() {

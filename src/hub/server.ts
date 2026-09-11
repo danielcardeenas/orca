@@ -62,6 +62,7 @@ import { PatchBus } from './bus.ts';
 import type { PatchFrame } from './bus.ts';
 import { CLOSE_BAD_HELLO, CLOSE_BAD_VERSION, CLOSE_NOT_HARNESS, CLOSE_UNAUTHORIZED, ORCA_DIR, createAuth } from './auth.ts';
 import type { Auth } from './auth.ts';
+import { harnessHomeRefusal } from './harness.ts';
 import { HubStore } from './persist.ts';
 import { FleetStore } from './fleets.ts';
 import { nextSquadName, SQUAD_SEQ_FILE } from './squad-seq.ts';
@@ -637,13 +638,6 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
    * puede fiarse de que una petición diga venir de 127.0.0.1.
    */
   const host = options.host ?? process.env['ORCA_HOST'] ?? '0.0.0.0';
-  const auth = options.auth ?? createAuth(process.env, { host });
-  const store = options.store ?? new HubStore();
-  const mem = options.memory ?? new AnswerMemory(MEMORY_FILE);
-  const history = options.history ?? new History();
-  const artifactCache = options.artifactCache ?? ARTIFACT_CACHE_DIR;
-  const fileRoots = options.fileRoots ?? [];
-  const fleets = options.fleets ?? new FleetStore();
   /*
    * La frontera del arnés, resuelta una vez al arrancar.
    *
@@ -651,8 +645,21 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
    * corrección del incidente del 2026-09-07, donde quien decidía si el arnés
    * entraba era el propio arnés y le bastó un `--anyway`. Ver
    * shared/synthetic.ts.
+   *
+   * Y antes de abrir nada en disco: un hub de pruebas sobre el ORCA_HOME del
+   * operador no arranca (ver `harnessHomeRefusal`). Después ya habría leído
+   * y reescrito el directorio del hub real.
    */
   const harness = options.harness ?? isHarnessHub(process.env);
+  const refused = harnessHomeRefusal({ harness, orcaDir: ORCA_DIR });
+  if (refused) throw new Error(refused);
+  const auth = options.auth ?? createAuth(process.env, { host });
+  const store = options.store ?? new HubStore();
+  const mem = options.memory ?? new AnswerMemory(MEMORY_FILE);
+  const history = options.history ?? new History();
+  const artifactCache = options.artifactCache ?? ARTIFACT_CACHE_DIR;
+  const fileRoots = options.fileRoots ?? [];
+  const fleets = options.fleets ?? new FleetStore();
   // Carpetas que el operador autorizó desde el visor (file-roots.ts).
   const approvedRoots = new FileRoots(options.fileRootsFile !== undefined ? options.fileRootsFile : harness ? null : FILE_ROOTS_FILE);
 
@@ -831,6 +838,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     agent: (id) => world.state.agents[id],
     projects: () => Object.values(world.state.projects),
     project: (id) => world.state.projects[id],
+    machine: (id) => world.state.machines[id],
     missions: () => missions.all(),
     capcom: () => capcomRouter.live(),
     contextCutoff: () => capcomRouter.contextCutoff(),

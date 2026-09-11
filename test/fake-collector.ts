@@ -282,11 +282,35 @@ const FLEET: readonly MachineSpec[] = [
 /** Agentes por máquina que la escala no pasa: el hub tira por encima de 400. */
 const MAX_AGENTS_PER_FAKE_MACHINE = 250;
 
+/** El id de la réplica `rep` de una máquina del fixture (`scaleFleet`). */
+function replicaId(id: string, rep: number): string {
+  return rep === 0 ? id : `${id}-r${rep}`;
+}
+
+/**
+ * ¿Salió esta máquina de este fixture? Las tres de `FLEET` y cualquiera de sus
+ * réplicas, que es todo lo que este archivo sabe poner en un hub.
+ *
+ * Para cuando la marca `synthetic` ya no está a mano: en un hub vivo manda la
+ * máquina, que se declara en su `hello` (src/shared/synthetic.ts), pero una
+ * entrada vieja del diario sólo guarda el id. El saneado del diario
+ * (`tools/journal-sanitize.ts`) aparta con esto lo que un hub de pruebas
+ * escribió en el directorio del real. Se deriva de `FLEET` y de la regla de
+ * `replicaId`, no de una lista: renombrar una máquina aquí lo mueve también.
+ */
+export function isFixtureMachineId(id: string): boolean {
+  return FLEET.some((m) => {
+    if (id === m.id) return true;
+    const rep = id.startsWith(`${m.id}-r`) ? id.slice(m.id.length + 2) : '';
+    return /^[1-9]\d*$/.test(rep) && replicaId(m.id, Number(rep)) === id;
+  });
+}
+
 function cloneSpec(m: MachineSpec, rep: number): MachineSpec {
   if (rep === 0) return { ...m, projects: m.projects.map((p) => ({ ...p })) };
   return {
     ...m,
-    id: `${m.id}-r${rep}`,
+    id: replicaId(m.id, rep),
     hostname: `${m.hostname}-${rep}`,
     projects: m.projects.map((p) => ({
       ...p,

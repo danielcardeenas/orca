@@ -106,6 +106,37 @@ dimensionadas, así que lo dice aparte: `{ fleet: false, fixtures: true }`.
 las máquinas: el hub tiene que saber cuáles son fixtures de todos modos, y
 comparar hostnames se rompería en silencio el día que el mock se renombre.
 
+### Y un hub de pruebas no escribe en el directorio del real
+
+La puerta decide qué máquinas entran; no decía nada de dónde escribe el hub. Un
+hub de pruebas arrancado sin `ORCA_HOME` propio —el de `test/visual.ts` sin
+`--isolated`, y el de cada suite de `npm test` que levantaba un hub sin darle
+almacén— escribía su diario, sus eventos, sus misiones y su tablero de
+automejora en `~/.orca/hub`, el del hub real. El 2026-09-11, 290 de 329
+lanzamientos del diario de 24 h eran de las máquinas del fixture, y el informe
+de AUTOMEJORA estaba midiendo pruebas.
+
+- **El hub se niega.** `startHub` con `ORCA_HARNESS` sobre el `ORCA_HOME` del
+  operador —por omisión, nombrado, o por un enlace que acaba ahí— no arranca, y
+  lo dice con la salida (`harnessHomeRefusal`, `src/hub/harness.ts`). Antes de
+  abrir un solo fichero. No hay flag que lo salte.
+- **Los arneses se aíslan solos**, que es lo que mantiene el uso de siempre:
+  `test/run.ts` le da a la corrida entera un `ORCA_HOME` temporal, y
+  `test/visual.ts` le da uno a todo hub que levanta, con `--isolated` o sin él.
+  Quien reutiliza un hub que ya sirve no cambia nada.
+- **El diario no anota al arnés**, ni en un hub de pruebas: `createJournal`
+  descarta toda entrada cuya máquina se declara `synthetic`. Por la marca, no
+  por nombres.
+
+Se eligió negarse **y** aislar, en vez de una de las dos. Sólo negarse habría
+roto el camino por defecto de `npm run visual` y las suites que levantan un hub
+sin almacén; sólo aislar habría dejado la regla en el cliente, que es
+exactamente lo que falló el 2026-09-07. Así el uso actual sigue igual y
+olvidarse del aislamiento es un fallo al arrancar, no una semana de datos
+mezclados. Lo único que deja de funcionar es un `ORCA_HARNESS=1` a mano sobre
+`~/.orca`, y el mensaje dice qué hacer. Detalle y conteos del saneado del
+diario existente: `docs/ENTREGA-JOURNAL-ARNES-2026-09-11.md`.
+
 ## La contención, por si algo se cuela igual
 
 La puerta impide que entre. Esto es lo que se hace cuando **ya entró** — un hub

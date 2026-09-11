@@ -94,6 +94,50 @@ export function modelConfirmed(screen: string, runtime: string, choice: ModelCho
     && l.toLowerCase().includes(`set model to ${family} `));
 }
 
+/**
+ * ¿Pide Claude Code confirmar ESTE cambio, con el «sí» ya marcado?
+ *
+ * Desde 2.1.268, si la conversación tiene caché del modelo actual, `s` no
+ * cambia el modelo: abre esto (capturado de una sesión real; pasa con
+ * cualquier destino, no sólo con 1M, y no pasa si el modelo actual aún no ha
+ * respondido nada):
+ *
+ *   Switch model?
+ *   Your next response will be slower and use more tokens
+ *   This conversation is cached for the current model. Switching to Opus 5 (1M context) means …
+ *   ❯ 1. Yes, switch to Opus 5 (1M context)
+ *     2. No, go back
+ *
+ * Sólo si la opción marcada nombra el modelo pedido, Enter confirma el mismo
+ * cambio de esta sesión que ya se eligió con `s`.
+ */
+export function switchConfirmation(screen: string, choice: ModelChoice): boolean {
+  const at = screen.lastIndexOf('Switch model?');
+  if (at < 0) return false;
+  const family = choice.label.split(' ')[0]!.toLowerCase();
+  return screen.slice(at).split('\n').some(line => {
+    const m = /^\s*❯\s*\d+\.\s+Yes, switch to (.+?)\s*$/.exec(line);
+    return !!m && `${m[1]!.toLowerCase()} `.startsWith(`${family} `);
+  });
+}
+
+/**
+ * La primera línea del diálogo que el CLI tiene abierto, o null si no hay.
+ *
+ * Un diálogo es una opción numerada marcada al pie de la pantalla; su primera
+ * línea, la que sigue al borde que lo abre. Sirve para decirle al operador qué
+ * se está preguntando cuando nadie aquí sabe contestarlo.
+ */
+export function pendingDialog(screen: string): string | null {
+  const lines = screenText(screen).plain.split('\n').filter(l => l.trim()).slice(-30);
+  let option = -1;
+  for (let i = lines.length - 1; i >= 0 && option < 0; i--) if (/^\s*[❯›]\s*\d+\.\s/.test(lines[i]!)) option = i;
+  for (let i = option - 1; i >= 0; i--) {
+    if (/^\s*[▔─━]{8,}\s*$/.test(lines[i]!)) return i + 1 < option ? lines[i + 1]!.trim().slice(0, 120) : null;
+  }
+  return null;
+}
+
 interface Deps {
   tmux: Pick<TmuxHost, 'capture' | 'paste' | 'keys'>;
   agent(id: string): AgentHandle | null;
@@ -254,14 +298,21 @@ export class ModelController {
         if (effort.includes(`Select Reasoning Level for ${choice.id}`)) await this.keys(a, ['Enter']);
       }
       menuOpen = false;
-      let confirmed = false;
+      let confirmed = false; let answered = false;
       for (let i = 0; i < 15; i++) {
         const screen = await this.screen(a);
         const count = (text: string) => text.split('\n').filter(line => modelConfirmed(line, a.runtime, choice)).length;
         if (count(screen) > count(before)) { confirmed = true; break; }
+        // Una sola vez: si el diálogo sigue ahí después, que lo vea una persona.
+        if (a.runtime === 'claude' && !answered && switchConfirmation(screen, choice)) { await this.keys(a, ['Enter']); answered = true; continue; }
         await this.wait(150);
       }
-      if (!confirmed) throw new Error('Change unconfirmed. Open the terminal to finish or inspect the CLI dialog.');
+      if (!confirmed) {
+        const dialog = pendingDialog(await this.screen(a));
+        throw new Error(dialog
+          ? `Change unconfirmed. The CLI is asking "${dialog}". Open the terminal to answer it.`
+          : 'Change unconfirmed. Open the terminal to finish or inspect the CLI dialog.');
+      }
       if (this.target(a.id).sessionId !== s.sessionId) throw new Error('agent session changed while applying the model.');
       const event = { id: randomUUID(), at: Date.now(), from: s.active, to: choice.id,
         text: `Model changed: ${s.active ?? 'unknown'} → ${choice.id} · Same conversation. Applies to subsequent turns.` };

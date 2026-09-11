@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { peekIdentity } from '../src/collector/capcom-identity.ts';
-import { ModelController, modelMenu, modelPromptReady, modelConfirmed } from '../src/collector/model-control.ts';
+import { ModelController, modelMenu, modelPromptReady, modelConfirmed, pendingDialog, switchConfirmation } from '../src/collector/model-control.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
 import { test, ok } from './harness.ts';
 import { sanitizeAgentPatch } from '../src/hub/world.ts';
@@ -37,6 +37,47 @@ function rig(runtime = 'codex', catalog?: { id: string; label: string }[]) {
   const controller = new ModelController(deps);
   const settle = async () => { for (let i = 0; i < 100 && controller.locked(a.id); i++) await Promise.resolve(); };
   return { dir, a, writes, deps, controller, settle, dispose: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+/*
+ * Pantallas reales de Claude Code 2.1.268 (capturadas con `capture-pane -p -J`
+ * en una sesión desechable): Sonnet 5 con una respuesta ya dada, `/model`,
+ * Opus (1M context) y `s`. Al menú se le quitaron las líneas en blanco.
+ */
+const real = (name: string) => fs.readFileSync(new URL(`./fixtures/${name}.txt`, import.meta.url), 'utf8');
+const MENU = real('model-control/claude-model-menu-2.1.268');
+const SWITCH = real('model-control/claude-switch-dialog-2.1.268');
+const SWITCH_HAIKU = real('model-control/claude-switch-dialog-haiku-2.1.268');
+const CONFIRMED = real('model-control/claude-switch-confirmed-2.1.268');
+const PROMPT = CONFIRMED.split('\n').filter(l => !/^❯ \/model|Set model to/.test(l)).join('\n');
+const OPUS = { id: 'opus', label: 'Opus (1M context)' };
+
+/** Un Claude que tras `s` enseña `afterS`; Enter sobre el diálogo de cambio lo confirma si `enterConfirms`. */
+function claudeRig(afterS: string, enterConfirms = true) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-model-'));
+  const a = { id: 'capcom', sessionId: 'session-1234', shortId: null, runtime: 'claude', pane: 'orca-test', alive: true, state: 'idle', model: 'sonnet' } as AgentHandle;
+  let view = PROMPT; let selection = 4;
+  const menu = () => MENU.replace('   ❯ 4.', '     4.').replace(`     ${selection}.`, `   ❯ ${selection}.`);
+  const writes: string[] = [];
+  const good = () => ({ ok: true, detail: '', stdout: '' });
+  const deps = { dir: () => dir, owns: () => true, agent: () => a, wait: async () => {}, catalog: () => [OPUS, { id: 'sonnet', label: 'Sonnet' }], tmux: {
+    capture: async () => ({ ...good(), stdout: view === MENU ? menu() : view }),
+    paste: async (_pane: string, text: string) => { writes.push(text); view = MENU; selection = 4; return good(); },
+    keys: async (_pane: string, keys: string[]) => {
+      writes.push(keys.join(','));
+      for (const key of keys) {
+        if (key === 'Down') selection++;
+        if (key === 'Up') selection--;
+        if (key === 'Escape') view = PROMPT;
+        if (key === 's' && view === MENU) view = selection === 2 ? afterS : PROMPT;
+        else if (key === 'Enter' && view === SWITCH && enterConfirms) view = CONFIRMED;
+      }
+      return good();
+    },
+  } };
+  const controller = new ModelController(deps);
+  const settle = async () => { for (let i = 0; i < 1000 && controller.locked(a.id); i++) await new Promise(r => setImmediate(r)); };
+  return { dir, a, writes, controller, settle, dispose: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
 export default { suite: 'CAPCOM model control', tests: [
@@ -158,6 +199,53 @@ export default { suite: 'CAPCOM model control', tests: [
       assert.equal(state.active, 'old'); assert.equal(state.events.length, 0);
       assert.deepEqual(r.writes, ['/model', 'Escape'], 'menu opened, nothing selected, menu closed');
       return ok('unoffered model: clear failure, no keystrokes beyond closing the menu', true);
+    } finally { r.dispose(); }
+  }),
+  test('the real "Switch model?" dialog is recognized for its own model only, and unknown dialogs are named', () => {
+    assert.ok(switchConfirmation(SWITCH, OPUS), 'Sonnet → Opus 5 (1M context)');
+    assert.ok(switchConfirmation(SWITCH_HAIKU, { id: 'haiku', label: 'Haiku' }), 'Sonnet → Haiku 4.5: not only 1M');
+    assert.ok(!switchConfirmation(SWITCH_HAIKU, OPUS), 'a dialog for another model is not ours to confirm');
+    assert.ok(!switchConfirmation(CONFIRMED, OPUS) && !switchConfirmation(MENU, OPUS));
+    assert.ok(CONFIRMED.split('\n').some(l => modelConfirmed(l, 'claude', OPUS)));
+    assert.equal(pendingDialog(SWITCH), 'Switch model?');
+    assert.equal(pendingDialog(MENU), 'Select model');
+    assert.equal(pendingDialog(real('permissions/claude-bash-2.1.263')), 'Bash command');
+    assert.equal(pendingDialog(CONFIRMED), null);
+    assert.equal(pendingDialog(PROMPT), null);
+    return ok('real 2.1.268 screens', true);
+  }),
+  test('Claude asks to confirm a switch away from a cached model: answered once, session-only, confirmed', async () => {
+    const r = claudeRig(SWITCH);
+    try {
+      r.controller.request(r.a.id, 'opus'); r.controller.tick(r.a); await r.settle();
+      const state = r.controller.state(r.a)!;
+      assert.equal(state.phase, 'ready', state.detail); assert.equal(state.active, 'opus');
+      assert.equal(state.events.length, 1);
+      assert.deepEqual(r.writes, ['/model', 'Up,Up', 's', 'Enter'], 'session-only pick, then the dialog\'s «Yes»');
+      assert.equal(fs.readFileSync(path.join(r.dir, 'model-changes.jsonl'), 'utf8').trim().split('\n').length, 1);
+      return ok('Sonnet 5 → Opus 5 (1M context) without a human', true);
+    } finally { r.dispose(); }
+  }),
+  test('an unknown dialog after `s` stays failed, untouched, and the detail quotes what it asks', async () => {
+    const r = claudeRig(real('permissions/claude-bash-2.1.263'));
+    try {
+      r.controller.request(r.a.id, 'opus'); r.controller.tick(r.a); await r.settle();
+      const state = r.controller.state(r.a)!;
+      assert.equal(state.phase, 'failed'); assert.equal(state.active, 'sonnet'); assert.equal(state.events.length, 0);
+      assert.match(state.detail, /The CLI is asking "Bash command"/);
+      assert.deepEqual(r.writes, ['/model', 'Up,Up', 's'], 'nothing typed into a dialog nobody here understands');
+      assert.ok(!fs.existsSync(path.join(r.dir, 'model-changes.jsonl')));
+      return ok('unknown dialog: named, not answered', true);
+    } finally { r.dispose(); }
+  }),
+  test('a switch dialog that survives its answer is pressed once, then left to the operator', async () => {
+    const r = claudeRig(SWITCH, false);
+    try {
+      r.controller.request(r.a.id, 'opus'); r.controller.tick(r.a); await r.settle();
+      const state = r.controller.state(r.a)!;
+      assert.equal(state.phase, 'failed'); assert.match(state.detail, /asking "Switch model\?"/);
+      assert.equal(r.writes.filter(w => w === 'Enter').length, 1);
+      return ok('one Enter, never a loop', true);
     } finally { r.dispose(); }
   }),
   test('permission blocks cannot be interrupted by a queued model change', async () => {

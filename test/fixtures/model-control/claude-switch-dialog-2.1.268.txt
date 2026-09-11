@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.268
+▝▜██████▀  Sonnet 5 with high effort · Claude Max
+  ▝▝ ▝▝    /private/tmp/claude-501/-Users-danielcardenas-projects-orca/f6371e99-ccd8-45ab-83cc-ce0ffc5c3846/scratchpad/repro · /rc            
+
+
+❯ Responde solo con la palabra hola, sin usar herramientas.                                                                                                     
+
+⏺ hola
+
+✻ Worked for 2s · done 8:54 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+               
+                                                                                                                                      
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Switch model?                                                                                                                                            
+   Your next response will be slower and use more tokens                                                                                                      
+                                                                                                                                                          
+   This conversation is cached for the current model. Switching to Opus 5 (1M context) means the full history gets re-read on your next message.              
+
+   ❯ 1. Yes, switch to Opus 5 (1M context)                 
+     2. No, go back
+                                                                        

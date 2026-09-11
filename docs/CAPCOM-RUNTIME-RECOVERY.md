@@ -156,11 +156,20 @@ como un mensaje normal: el controlador nunca lo usa. Claude Code 2.1.263 utiliza
 `s` para aplicar únicamente a esta sesión, sin cambiar el predeterminado global.
 Codex sigue la semántica de persistencia de preferencias de su selector nativo.
 
+Desde Claude Code 2.1.268, si el modelo actual ya respondió en la conversación
+(su caché está caliente), `s` abre además `Switch model?` con `❯ 1. Yes, switch
+to <modelo>` / `2. No, go back`. Pasa con cualquier destino, no sólo con 1M; no
+pasa si el modelo actual aún no ha respondido. El controlador pulsa Enter una
+sola vez, y sólo si la opción marcada nombra el modelo pedido; después espera la
+confirmación de siempre. Las capturas reales están en
+`test/fixtures/model-control/`.
+
 El controlador valida el menú y su fila seleccionada, y espera una nueva
 confirmación del CLI. Rechaza escribir sobre un borrador de terminal o un diálogo
 desconocido. No interrumpe permisos pendientes. Si no reconoce la confirmación,
-muestra `Change unconfirmed` y ofrece abrir la terminal; no anuncia éxito ni
-reintenta el cambio automáticamente. La disponibilidad del menú no garantiza que
+muestra `Change unconfirmed` y ofrece abrir la terminal; si hay un diálogo
+abierto, el detalle cita su primera línea. No anuncia éxito ni reintenta el
+cambio automáticamente. La disponibilidad del menú no garantiza que
 el modelo tenga cuota. Cambiar de proveedor sigue requiriendo el relevo explícito.
 
 `model-control-<sessionId>.json`, dentro del directorio CAPCOM, guarda el catálogo,
@@ -176,7 +185,8 @@ tres cambios recientes de CAPCOM en cada consulta. No se requiere una respuesta
 del LLM para cambiar de modelo, de modo que el control funciona ante un error de cuota.
 
 Verificación: pruebas del controlador (cola, cancelación, reinicio, confirmación
-ausente, permisos y cambio Claude solo por sesión); pruebas visuales de escritorio
+ausente, permisos, cambio Claude solo por sesión y el diálogo `Switch model?` de
+2.1.268 sobre capturas reales: `npm test -- model-control`); pruebas visuales de escritorio
 y móvil (selector, errores, borrador, TALK/EVENTS); cambios reales en dos sesiones
 CLI aisladas; consulta del catálogo mediante el hub del CAPCOM activo. El CAPCOM
 real permanece en `01a07569-fdc3-75a1-88ed-8180be4b44b5`, `gpt-6-astra`.

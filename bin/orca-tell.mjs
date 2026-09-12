@@ -34,6 +34,7 @@ import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { waitFor } from './lib/wait-for.mjs';
+import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
 
@@ -45,7 +46,7 @@ function parse(args) {
   const out = {
     subject: '', body: null, kind: 'notice', to: null, files: [],
     wait: false, timeoutMin: 60, ttlMin: null, replyTo: null,
-    project: null, agentId: process.env.CLAUDE_SESSION_ID ?? null, json: false,
+    project: null, agentId: sessionId(), json: false,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];

@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { sessionId } from './lib/whoami.mjs';
 
 const [action, agent, file, ...extra] = process.argv.slice(2);
 if (!['inspect', 'decide'].includes(action) || !agent) {
@@ -16,7 +17,7 @@ try {
   const args = action === 'inspect' ? { agent_id: agent, models: file === '--models' || extra.includes('--models') }
     : { ...JSON.parse(fs.readFileSync(file, 'utf8')), agent_id: agent };
   if (action === 'decide') {
-    args.supervisor_id ??= process.env.CLAUDE_SESSION_ID ?? process.env.ORCA_PANE?.replace(/^orca-/, '');
+    args.supervisor_id ??= sessionId();
     if (!args.supervisor_id) throw new Error('Include supervisor_id in the decision: your own session id or callsign.');
   }
   const response = await fetch(new URL('/mcp', base), { method: 'POST', signal: AbortSignal.timeout(60000),

@@ -479,6 +479,38 @@ const lineageRemembersTheSquad = test('lineage.json recuerda el escuadrón entre
   }
 });
 
+/* ── 4bis · de quién es lo que un comando manda ───────────────────── */
+
+/**
+ * El orden de preferencia de `bin/lib/whoami.mjs`, comprobado de verdad.
+ *
+ * Medido el 2026-09-12 y ésta es la razón de que exista: dos artefactos
+ * publicados por un agente aparecieron en la consola colgando de otros dos,
+ * uno de ellos su propio líder. `CLAUDE_SESSION_ID` viene vacía dentro de un
+ * agente de ORCA, y sin ella el collector cae en «el agente vivo con la
+ * actividad más reciente», que con cinco agentes en un checkout acierta por
+ * casualidad. `ORCA_PANE` sí está, en todos los proveedores, porque la pone el
+ * collector al lanzar.
+ */
+const whoamiPrefersTheStrongestEvidence = test('un comando sabe de qué agente es, y en qué orden lo averigua', async () => {
+  const { sessionId } = await import('../bin/lib/whoami.mjs');
+  const A = '11111111-2222-3333-4444-555555555555';
+  const B = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+  const no = { walk: false };   // sin subir por los procesos: aquí no hay padre que valga
+
+  const checks: [string, boolean][] = [
+    ['CLAUDE_SESSION_ID gana', sessionId({ CLAUDE_SESSION_ID: A, ORCA_PANE: `orca-${B}` }, no) === A],
+    ['ORCA_PANE cuando no hay otra', sessionId({ ORCA_PANE: `orca-${B}` }, no) === B],
+    ['un pane que no es un uuid no vale', sessionId({ ORCA_PANE: 'orca-capcom' }, no) === null],
+    ['una sesión que no es un uuid no vale', sessionId({ CLAUDE_SESSION_ID: 'sess-1' }, no) === null],
+    ['sin nada, no se inventa', sessionId({}, no) === null],
+  ];
+  const bad = checks.filter(([, pass]) => !pass).map(([why]) => why);
+  return ok('un comando sabe de qué agente es, y en qué orden lo averigua',
+    bad.length === 0,
+    bad.length ? bad.join(' · ') : 'sesión > pane > nada, y lo que no es un uuid no pasa');
+});
+
 /* ── 5 · --open, de la CLI al mundo ───────────────────────────────── */
 
 const openTravels = test('orca-show --open llega hasta el mundo del hub', async () => {
@@ -598,6 +630,41 @@ const squadTrafficReachesMembers = test('orca-tell --to squad: llega a los miemb
 
 /* ── suite ────────────────────────────────────────────────────────── */
 
+/**
+ * Y el comando entero, no sólo el helper: `orca-show` sin `--agent` tiene que
+ * firmar la declaración con la sesión del pane. Es lo que decide junto a qué
+ * agente aparece un artefacto en el canvas.
+ */
+const showSignsWithThePane = test('orca-show sin --agent firma con la sesión del pane', () => {
+  const dir = temp();
+  const home = join(dir, 'orca-home');
+  const project = join(dir, 'project');
+  const mine = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff';
+  try {
+    mkdirSync(home, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    const png = join(project, 'chart.png');
+    writeFileSync(png, makePng(64, 5));
+    execFileSync(process.execPath, [
+      join(BIN, 'orca-show.mjs'), png, 'The chart', '--project', project, '--json',
+    ], {
+      // Sin CLAUDE_SESSION_ID, que es como corre un agente de ORCA de verdad.
+      env: { ...process.env, ORCA_HOME: home, CLAUDE_SESSION_ID: '', ORCA_PANE: `orca-${mine}` },
+      encoding: 'utf8',
+    });
+    const declDir = join(project, '.orca', 'artifacts');
+    const decl = readdirSync(declDir).find((f) => f.endsWith('.json'));
+    const payload = JSON.parse(readFileSync(join(declDir, decl ?? ''), 'utf8')) as Record<string, unknown>;
+    return ok('orca-show sin --agent firma con la sesión del pane',
+      payload['agentId'] === mine,
+      `agentId=${String(payload['agentId'])}`);
+  } catch (err) {
+    return { name: 'orca-show sin --agent firma con la sesión del pane', pass: false, detail: String(err) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 const tests = [
   groupsBySquad,
   acceptsARecord,
@@ -612,6 +679,8 @@ const tests = [
   briefsSayTheRightThing,
   briefOnlyPromisesReachableCommands,
   briefRidesTheEnd,
+  whoamiPrefersTheStrongestEvidence,
+  showSignsWithThePane,
   spawnAckHasAgentId,
   hostedAckDoesNotWait,
   controlWorkspaceRefused,

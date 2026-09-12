@@ -42,6 +42,7 @@ import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { waitFor } from './lib/wait-for.mjs';
+import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
 
@@ -68,7 +69,7 @@ function usage(code = 1) {
 }
 
 function parse(args) {
-  const out = { verb: '', review: null, file: null, json: null, project: null, agent: process.env.CLAUDE_SESSION_ID ?? null, jsonOut: false };
+  const out = { verb: '', review: null, file: null, json: null, project: null, agent: sessionId(), jsonOut: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '-h' || a === '--help') usage(0);

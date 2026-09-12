@@ -29,6 +29,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
 
@@ -37,7 +38,7 @@ const argv = process.argv.slice(2);
 function parse(args) {
   const out = {
     mission: '', squad: null, model: null, wait: true, timeoutSec: 90,
-    project: null, agentId: process.env.CLAUDE_SESSION_ID ?? null, json: false,
+    project: null, agentId: sessionId(), json: false,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];

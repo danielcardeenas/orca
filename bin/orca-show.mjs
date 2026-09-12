@@ -27,6 +27,7 @@
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, relative, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
 
@@ -44,7 +45,7 @@ const KINDS = {
 function parse(args) {
   const out = {
     path: null, title: null, kind: null, project: null,
-    agentId: process.env.CLAUDE_SESSION_ID ?? null, json: false, open: false,
+    agentId: sessionId(), json: false, open: false,
   };
   const loose = [];
   for (let i = 0; i < args.length; i++) {

@@ -244,7 +244,10 @@ async function main() {
       clip: { x: Math.max(0, box.x - 14), y: Math.max(0, box.y - 20), width: box.width + 28, height: 420 },
     });
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(250);
+    // Cerrar es un gesto y el `hidden` llega al final de él, no al pulsar: se
+    // espera a que termine. 250 ms bastaban por sesenta, que es margen de
+    // ninguno el día que la máquina vaya cargada.
+    await page.waitForTimeout(600);
     assert.equal(await row.locator('.missions__detail').isVisible(), false, 'and Enter again closes it');
 
     // El detalle de una misión con gente encima: los callsigns son botones, y

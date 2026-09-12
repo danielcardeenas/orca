@@ -117,6 +117,17 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
   }
 
   /*
+   * El campo captura el puntero en su `pointerdown` para poder panear, y un
+   * puntero capturado por la raíz se lleva también el `click`: la ficha no lo
+   * veía nunca. Cortarlo aquí es lo que ya hace el rótulo de una isla, que es
+   * el otro hijo DOM del campo que hay que poder pinchar. Un `pointerdown`
+   * sobre una ficha no es el principio de un paneo.
+   */
+  layer.addEventListener('pointerdown', (e) => {
+    if ((e.target as HTMLElement).closest('.chip-art')) e.stopPropagation();
+  });
+
+  /*
    * Un único oyente en la capa, no uno por ficha: una flota que declara mucho
    * recicla nodos por fotograma, y un oyente por nodo reciclado es una fuga.
    */
@@ -145,6 +156,10 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
           drawn++;
           let rec = live.get(key);
           if (!rec) { rec = { el: take(), sig: '' }; live.set(key, rec); }
+          // De quién es esta ficha, siempre: el contador lo necesita para abrir
+          // su galería, y una ficha que no sabe de quién es no se puede mirar
+          // desde fuera — ni en el arnés ni en las herramientas del navegador.
+          rec.el.dataset.agent = it.agentId;
           const sig = `${c.art?.id ?? `+${c.more}`}|${c.art?.url ?? ''}|${c.art?.at ?? 0}|${it.dim ? 'd' : ''}`;
           if (sig !== rec.sig) {
             rec.sig = sig;
@@ -154,11 +169,9 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
               + (it.dim ? ' is-dim' : '');
             if (c.art) {
               rec.el.dataset.art = c.art.id;
-              delete rec.el.dataset.agent;
               rec.el.title = `${c.art.title} · ${c.art.path}`;
             } else {
               delete rec.el.dataset.art;
-              rec.el.dataset.agent = it.agentId;
               rec.el.title = `${c.more} MORE · OPEN THE GALLERY`;
             }
           }

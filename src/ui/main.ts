@@ -1026,6 +1026,12 @@ void start();
     extra?: { choice?: ReturnType<typeof import('../shared/improve.ts').effectiveChoice>; machineId?: string | null },
   ) => store.putImprove(state, verdict, extra),
   improveReveal: () => c.openImprove(),
+  /**
+   * Un artefacto que el hub nunca vio, para fotografiar la estantería de una
+   * baldosa. Igual que `mission` e `improve`: el arnés no puede dejar sus
+   * fixtures en el índice del operador.
+   */
+  artifact: (a: Artifact) => store.putArtifactForTest(a),
   callsignOf: (id: string) => store.knownAgent(id)?.callsign ?? null,
   machineOf: (id: string) => store.knownAgent(id)?.machineId ?? null,
   // Un informe de higiene que el hub nunca vio, para el arnés visual: una foto

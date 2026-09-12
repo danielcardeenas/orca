@@ -505,6 +505,16 @@ export class Store {
     this.emit({ k: 'escalations', ids: [esc.id] });
   }
 
+  /**
+   * Un artefacto que el hub nunca vio, para el arnés visual — la misma razón
+   * que `upsertMission` y `putImprove`: una foto de una estantería de cuatro
+   * fichas no puede dejar cuatro artefactos en el índice del operador.
+   */
+  putArtifactForTest(a: Artifact): void {
+    (this.world.artifacts ??= {})[a.id] = a;
+    this.emit({ k: 'artifacts', ids: [a.id] });
+  }
+
   pushCeo(m: CeoMessage) {
     const i = this.world.ceo.messages.findIndex((x) => x.id === m.id);
     if (i >= 0) this.world.ceo.messages[i] = m;

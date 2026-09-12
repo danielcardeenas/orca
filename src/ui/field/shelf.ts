@@ -18,6 +18,7 @@
  * nada quede debajo; ver `docs/CANVAS-ARTEFACTOS-2026-09-12.md`.
  */
 
+import type { Artifact } from '../../shared/types.ts';
 import { TILE_H, TILE_W } from './layout.ts';
 import { TIER_PX } from './labels.ts';
 
@@ -66,6 +67,29 @@ export interface ChipSpec {
   z: number;
   w: number;
   h: number;
+}
+
+/**
+ * Lo que un agente cuelga de su baldosa: lo que declaró, lo más nuevo primero.
+ *
+ * Sólo lo **declarado**. Ésa es la decisión del miembro 1 sobre la captura
+ * (`docs/ENTREGA-CAPTURA-ARTEFACTOS-2026-09-12.md`), y es también la mejor
+ * respuesta que hay al caso difícil del operador: un agente que genera cuarenta
+ * png no tiene cuarenta resultados, tiene uno, y sólo él sabe cuál. Lo observado
+ * apareció sin que nadie lo eligiera y su título es un nombre de archivo; su
+ * sitio es la galería, que es un índice, y no el campo, que es un mapa.
+ *
+ * Un agente que declara de verdad muchas cosas sigue cabiendo: son cuatro
+ * fichas y un contador.
+ */
+export function shelfIds(artifacts: Iterable<Artifact>, agentId: string): string[] {
+  const mine: Artifact[] = [];
+  for (const a of artifacts) {
+    if (a.agentId !== agentId || a.source !== 'declared') continue;
+    mine.push(a);
+  }
+  mine.sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return mine.map((a) => a.id);
 }
 
 /** La baldosa bajo la que cuelga la estantería. Sale de `layout.ts`. */

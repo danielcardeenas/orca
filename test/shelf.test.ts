@@ -9,11 +9,15 @@
  */
 
 import {
-  CHIP_MAX, SHELF_H, SHELF_PX, shelfChips, shelfHeight, shelfVisible, type ShelfTile,
+  CHIP_MAX, SHELF_H, SHELF_PX, shelfChips, shelfHeight, shelfIds, shelfVisible, type ShelfTile,
 } from '../src/ui/field/shelf.ts';
 import { CELL_SCALE, TILE_H, TILE_W } from '../src/ui/field/layout.ts';
 import { TIER_PX } from '../src/ui/field/labels.ts';
+import type { Artifact, ArtifactSource } from '../src/shared/types.ts';
 import { ok, test, type TestModule } from './harness.ts';
+
+const art = (id: string, agentId: string, source: ArtifactSource, at: number): Artifact =>
+  ({ id, agentId, source, at, kind: 'image', path: `/p/${id}.png`, title: id } as unknown as Artifact);
 
 const tile = (extra: Partial<ShelfTile> = {}): ShelfTile =>
   ({ x: 0, y: 0, z: 0, scale: 1, trayOf: null, ...extra });
@@ -130,6 +134,43 @@ export default {
       const pass = shelfHeight(9, celda) === 0 && shelfChips(ids(9), celda).length === 0;
       return ok('una celda de bandeja no tiene estantería', pass,
         `una celda a escala ${CELL_SCALE} con 9 artefactos no reserva ni dibuja nada`);
+    }),
+
+    test('la baldosa cuelga lo que su agente declaró, y sólo eso', () => {
+      /*
+       * La decisión del miembro 1: declarar manda. Un agente que genera cuarenta
+       * png no tiene cuarenta resultados, y lo observado —que apareció sin que
+       * nadie lo eligiera, con un nombre de archivo por título— espera en la
+       * galería. Ésta es la prueba de que el campo no se llena de eso.
+       */
+      const mundo = [
+        art('d2', 'a1', 'declared', 200),
+        art('o1', 'a1', 'observed', 900),
+        art('d1', 'a1', 'declared', 100),
+        art('ajeno', 'a2', 'declared', 999),
+      ];
+      const suyos = shelfIds(mundo, 'a1');
+      // Lo más nuevo primero, y el observado de las 900 no está aunque sea el más nuevo.
+      const pass = suyos.join(',') === 'd2,d1';
+      return ok('la baldosa cuelga lo que su agente declaró, y sólo eso', pass,
+        `de 4 artefactos del mundo la estantería de a1 cuelga [${suyos.join(', ')}]`);
+    }),
+
+    test('cuarenta observados no ponen nada en el campo', () => {
+      const mundo = Array.from({ length: 40 }, (_, i) => art(`o${i}`, 'a1', 'observed', i));
+      const suyos = shelfIds(mundo, 'a1');
+      const pass = suyos.length === 0 && shelfHeight(suyos.length, tile()) === 0;
+      return ok('cuarenta observados no ponen nada en el campo', pass,
+        `40 observados dan ${suyos.length} fichas y reservan ${shelfHeight(suyos.length, tile())}`);
+    }),
+
+    test('dos artefactos del mismo instante no cambian de orden entre dibujos', () => {
+      // Empate en `at`: el id rompe la igualdad, o la fila baila sola entre frames.
+      const mundo = [art('b', 'a1', 'declared', 5), art('a', 'a1', 'declared', 5)];
+      const uno = shelfIds(mundo, 'a1').join(',');
+      const otro = shelfIds([...mundo].reverse(), 'a1').join(',');
+      return ok('dos artefactos del mismo instante no cambian de orden entre dibujos',
+        uno === otro && uno === 'a,b', `${uno} y ${otro}`);
     }),
 
     test('de lejos la estantería desaparece, y lo hace en un peldaño de los rótulos', () => {

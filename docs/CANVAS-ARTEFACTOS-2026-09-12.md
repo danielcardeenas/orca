@@ -218,17 +218,19 @@ cerrar (i): `kind: 'file'` no debe llegar a la rama de texto de `media.ts`
 ### 3.6 Zoom lejano: la estantería se va antes que los rótulos
 
 Un solo umbral, sobre el mismo escalar que usa todo lo demás: la estantería se
-dibuja mientras la baldosa esté en el peldaño 2 de los rótulos o por encima
-(112 px, `labels.ts:103`), es decir mientras la baldosa ya esté mostrando
-palabras. Por debajo, la estantería no se encoge: **desaparece**. De lejos el
-trabajo del canvas es la forma de la flota y el color de los estados, y una
-mancha de 7 px de fotografía es justo lo que rompe esa lectura.
+dibuja mientras la baldosa esté en el **peldaño 3** de los rótulos o por encima
+(190 px, `labels.ts:103`), es decir mientras la baldosa ya esté diciendo lo que
+hace. Ahí una ficha son 33 px, que es una imagen; en el peldaño de abajo serían
+19 px, que es un color, y un color no es una miniatura. Por debajo, la
+estantería no se encoge: **desaparece**. De lejos el trabajo del canvas es la
+forma de la flota y el color de los estados, y una mancha de fotografía es justo
+lo que rompe esa lectura.
 
 Y como la estantería **está reservada en el layout**, el hueco sigue reservado a
 cualquier zoom: la flota no se recoloca al alejarse, que sería mucho peor que una
 franja vacía. Ése es el argumento de reservar en vez de superponer, otra vez.
 
-Entre el peldaño 1 y el 2 merece la pena un intermedio: **una marca de cuenta** —
+Entre el peldaño 1 y el 3 merece la pena un intermedio: **una marca de cuenta** —
 una barra pequeña o un `4` en la esquina de la baldosa, sin imagen. «Este agente
 ha hecho cosas» sobrevive un escalón de zoom más que «esto es lo que ha hecho».
 Eso va donde va el sigilo del shader (`sigilOf`, `field.ts:2341`) y no cuesta

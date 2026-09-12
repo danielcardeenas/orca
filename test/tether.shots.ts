@@ -41,17 +41,128 @@ async function chips(page: Page, agentId: string): Promise<Chip[]> {
 
 /** Las cinco fichas de un agente, cuando estén y cuando ya no se muevan (ver shelf.shots.ts). */
 async function shelfOf(page: Page, agentId: string): Promise<Chip[]> {
-  await page.waitForFunction((id) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
-    .filter((el) => !el.hidden && el.dataset.agent === id).length === 5, agentId, { timeout: 20_000 });
+  const esperar = (ms: number) => page.waitForFunction((id) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
+    .filter((el) => !el.hidden && el.dataset.agent === id).length === 5, agentId, { timeout: ms });
+  /*
+   * Y si no están, un vuelo antes de rendirse.
+   *
+   * Que no haya `.chip-art` no significa que el agente se haya ido: entre 44 y
+   * 190 px de baldosa la franja es una TARJETA (`.chip-badge`), y por debajo
+   * sólo la marca del shader, así que una cámara que quedó en otro peldaño
+   * —tras un zoom cercano, tras un reencuadre— deja al mismo agente sin una
+   * sola ficha que contar. Volar a él lo devuelve a su escala de lectura. Si
+   * ni así aparecen, entonces sí se plegó en la bandeja de su padre o se
+   * murió, y eso se dice con su nombre en vez de morir veinte líneas más
+   * abajo con un «undefined no tiene x».
+   */
+  const cinco = async () => {
+    try {
+      await esperar(10_000);
+    } catch {
+      await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), agentId);
+      await sleep(1500);
+      await esperar(10_000).catch(() => { throw new Error(`${agentId} se quedó sin estantería a mitad de la prueba`); });
+    }
+  };
+  await cinco();
   let prev = '';
   for (let i = 0; i < 30; i++) {
     const now = await chips(page, agentId);
+    /*
+     * Sin fichas no hay nada que estabilizar: el agente perdió su baldosa
+     * entre dos lecturas —se plegó en la bandeja de su padre, se murió, la
+     * flota sintética está viva— y la firma vacía nunca va a igualar a la
+     * anterior. Devolver la lista vacía era salir por la puerta de atrás:
+     * el que llama hace `.find(...)!` y revienta veinte líneas más abajo con
+     * un «undefined no tiene x» que no nombra a nadie. Se vuelve a esperar,
+     * y si no vuelven se dice qué pasó.
+     */
+    if (!now.length) { await cinco(); continue; }
     const sig = now.map((c) => `${Math.round(c.x)},${Math.round(c.y)}`).join('|');
-    if (sig && sig === prev) return now;
+    if (sig === prev) return now;
     prev = sig;
     await sleep(250);
   }
   return chips(page, agentId);
+}
+
+/** Una caja en pantalla: la baldosa de un agente, una superficie, un rótulo. */
+interface Box { x: number; y: number; w: number; h: number }
+
+/**
+ * La misma caja leída dos veces seguidas igual.
+ *
+ * El campo no está quieto cuando se le hace una foto: la cámara llega con
+ * easing, la flota sintética relayoutea y un vecino que nace empuja la
+ * baldosa medio segundo después de haberla medido. Es el mismo motivo por el
+ * que `shelfOf` estabiliza la franja antes de devolverla, aplicado a una
+ * caja sola.
+ */
+async function still(read: () => Promise<Box | null>, tries = 20): Promise<Box | null> {
+  let prev = '';
+  let now = await read();
+  for (let i = 0; i < tries; i++) {
+    const sig = now ? `${Math.round(now.x)},${Math.round(now.y)},${Math.round(now.w)},${Math.round(now.h)}` : '';
+    if (sig && sig === prev) return now;
+    prev = sig;
+    await sleep(200);
+    now = await read();
+  }
+  return now;
+}
+
+/**
+ * ¿Se enciende el puerto de `anchor` al poner el puntero sobre `target`?
+ *
+ * Afirmarlo a la primera culpaba al tirante de lo que hacía la flota. El
+ * parche se calcula sobre coordenadas leídas antes, y si la baldosa se
+ * desplaza entre la foto fría y la caliente las dos son del suelo: salen
+ * iguales aunque el puerto se encendiera entero, y la prueba dice que el
+ * hover no hace nada cuando lo que pasó es que miró a otro sitio. De los
+ * cinco fallos de este shot en un mismo día, tres eran esto.
+ *
+ * Así que se espera a que todo esté quieto, se comprueba que lo siguió
+ * estando entre las dos fotos, y sólo se da por muerto el tirante cuando
+ * cuatro intentos con el campo parado dan la misma foto.
+ */
+async function lightsUp(
+  page: Page,
+  anchor: () => Promise<Box | null>,
+  port: (b: Box) => Box,
+  target: () => Promise<Box | null>,
+  traer?: () => Promise<void>,
+): Promise<string> {
+  let why = 'no se llegó a medir';
+  for (let intento = 0; intento < 4; intento++) {
+    await page.mouse.move(VIEW.w - 20, VIEW.h - 20);
+    await sleep(250);
+    const a = await still(anchor);
+    const t = await still(target);
+    if (!a || !t) { why = 'la baldosa o la superficie se fueron de la pantalla'; continue; }
+    const p = port(a);
+    // Un parche entero fuera del lienzo no es una foto: `patch` recorta, y de
+    // un recorte vacío Playwright no saca imagen ninguna. La baldosa se fue de
+    // cuadro entre medias; se vuelve a mirar.
+    if (p.x + p.w <= 0 || p.y + p.h <= 0 || p.x >= VIEW.w || p.y >= VIEW.h) {
+      why = 'el puerto quedó fuera del lienzo';
+      // Traerlo de vuelta a cuadro, si quien llama sabe cómo: un encuadre que
+      // se fue no dice nada del tirante.
+      if (traer) { await traer(); await sleep(1500); }
+      continue;
+    }
+    const rest = await patch(page, p.x, p.y, p.w, p.h);
+    await page.mouse.move(t.x + t.w / 2, t.y + t.h / 2);
+    await sleep(450);
+    const a2 = await anchor();
+    if (!a2 || Math.abs(a2.x - a.x) > 1 || Math.abs(a2.y - a.y) > 1) { why = 'se movió entre foto y foto'; continue; }
+    if (await patch(page, p.x, p.y, p.w, p.h) !== rest) return '';
+    why = `cuatro veces con el campo quieto y el parche no cambió · puerto ${Math.round(p.x)},${Math.round(p.y)} · puntero ${Math.round(t.x + t.w / 2)},${Math.round(t.y + t.h / 2)}`;
+    // Con el puntero todavía encima: la foto de lo que se estaba mirando es la
+    // única forma de saber si el tirante no se encendió o si el parche miraba
+    // a otro sitio, y sin ella hay que volver a provocar el fallo para verlo.
+    await page.screenshot({ path: join(SHOTS, 'tether-XX-nolight.png') });
+  }
+  return why;
 }
 
 /** Los píxeles de un parche, como firma comparable. */
@@ -234,30 +345,35 @@ async function main() {
       .filter((el) => !el.hidden && el.dataset.agent === id).every((el) => !el.classList.contains('is-hot')), who, { timeout: 5_000 });
 
     /* ── Hover en la superficie: su tirante se enciende ─────────────── */
-    const srf = await page.evaluate(() => {
-      const el = [...document.querySelectorAll<HTMLElement>('.srf')].find((x) => (x.textContent ?? '').includes('fotograma 0'));
-      if (!el) return null;
+    const srfOf = (texto: string) => page.evaluate((txt) => {
+      const el = [...document.querySelectorAll<HTMLElement>('.srf')].find((x) => (x.textContent ?? '').includes(txt));
+      if (!el || el.style.display === 'none') return null;
       const r = el.getBoundingClientRect();
       return { x: r.x, y: r.y, w: r.width, h: r.height };
-    });
+    }, texto);
+    const tileOf = (id: string) => page.evaluate((quien) => (window as never as {
+      __orca: { screenOf(i: string): { x: number; y: number; w: number; h: number } | null };
+    }).__orca.screenOf(quien), id);
+    const srf = await still(() => srfOf('fotograma 0'));
     assert.ok(srf, 'la superficie colocada sigue en pantalla');
+    const tile2 = await still(() => tileOf(who));
+    assert.ok(tile2, 'la baldosa sigue en pantalla');
     /*
      * El puerto de origen: en el borde de la baldosa que mira a la superficie,
      * a −0.12 del centro (`SIDE_DROP`). Apagado y pequeño en reposo, lima y
      * entero caliente — un parche ahí cambia con el hover aunque el resto del
      * tirante pase por debajo de un vecino.
+     *
+     * De qué lado se lee una vez, con la baldosa quieta: un relayout la
+     * desplaza unos píxeles, no la cambia de lado de la superficie.
      */
-    const tile2 = await page.evaluate((id) => (window as never as {
-      __orca: { screenOf(i: string): { x: number; y: number; w: number; h: number } | null };
-    }).__orca.screenOf(id), who);
-    assert.ok(tile2, 'la baldosa sigue en pantalla');
-    const side = srf.x > tile2.x ? tile2.x + tile2.w : tile2.x;
-    const port = { x: side - 8, y: tile2.y + tile2.h * (0.5 + 0.12) - 8, w: 16, h: 16 };
-    const portRest = await patch(page, port.x, port.y, port.w, port.h);
+    const derecha = srf.x > tile2.x;
+    const puerto = (t: Box): Box => ({ x: (derecha ? t.x + t.w : t.x) - 8, y: t.y + t.h * (0.5 + 0.12) - 8, w: 16, h: 16 });
+    const volarA = async () => { await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), who); };
+    const mudo = await lightsUp(page, () => tileOf(who), puerto, () => srfOf('fotograma 0'), volarA);
+    assert.equal(mudo, '', `el puerto de origen cambia con el puntero sobre la superficie (${mudo})`);
     await page.mouse.move(srf.x + srf.w / 2, srf.y + srf.h / 2);
-    await sleep(400);
-    const portHot = await patch(page, port.x, port.y, port.w, port.h);
-    assert.notEqual(portHot, portRest, 'el puerto de origen cambia con el puntero sobre la superficie');
+    await sleep(300);
     await page.screenshot({ path: join(SHOTS, 'tether-04-hover-surface.png') });
     await page.mouse.move(VIEW.w - 20, VIEW.h - 20);
 
@@ -335,12 +451,13 @@ async function main() {
      * parche justo a la izquierda del rótulo, centrado en su altura, es el
      * puerto — apagado en reposo, lima con el puntero sobre la superficie.
      */
-    const sqPort = { x: rot!.x - 40, y: rot!.y + rot!.h / 2 - 14, w: 40, h: 28 };
-    const sqRest = await patch(page, sqPort.x, sqPort.y, sqPort.w, sqPort.h);
+    const sqMudo = await lightsUp(page,
+      () => rect('.squad[data-squad="ledger-close"]'),
+      (r) => ({ x: r.x - 40, y: r.y + r.h / 2 - 14, w: 40, h: 28 }),
+      () => rect('.srf', 'el cierre de marzo'));
+    assert.equal(sqMudo, '', `el puerto de la escuadra cambia con el puntero sobre la superficie de su miembro (${sqMudo})`);
     await page.mouse.move(srf2!.x + srf2!.w / 2, srf2!.y + srf2!.h / 2);
-    await sleep(400);
-    const sqHot = await patch(page, sqPort.x, sqPort.y, sqPort.w, sqPort.h);
-    assert.notEqual(sqHot, sqRest, 'el puerto de la escuadra cambia con el puntero sobre la superficie de su miembro');
+    await sleep(300);
     await page.screenshot({ path: join(SHOTS, 'tether-06-squad-hover.png') });
     await page.mouse.move(VIEW.w - 20, VIEW.h - 20);
 

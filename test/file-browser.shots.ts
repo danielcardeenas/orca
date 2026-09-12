@@ -8,9 +8,11 @@
  * corre su sesión entera cuando el fichero de entrada acaba así.
  *
  * La flota sintética declara proyectos que no existen en este disco, así que
- * la carpeta que se navega es este mismo repo: el hub del arnés la sirve por
- * `ORCA_FILE_ROOTS` y la ventana se abre por el gancho `__orca.openFiles`,
- * que es lo mismo que BROWSE FILES en el menú de un proyecto con esa ruta.
+ * la carpeta que se navega es este mismo repo —o el checkout principal, si
+ * este es un worktree bajo `.claude`, que el hub no sirve: ver
+ * `repoQueElHubSirve`—. El hub del arnés la abre por `ORCA_FILE_ROOTS` y la
+ * ventana se levanta por el gancho `__orca.openFiles`, que es lo mismo que
+ * BROWSE FILES en el menú de un proyecto con esa ruta.
  *
  * Lo que se comprueba es lo que `npm test` ya prueba contra un DOM suelto,
  * pero aquí con main.ts delante del teclado: que `j`, `G`, `gg`, `l`, `h`,
@@ -19,13 +21,42 @@
  */
 
 import { chromium, type Page } from 'playwright';
+import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
 
 // Antes de importar el arnés: sus servidores nacen con este entorno.
 process.env['ORCA_VISUAL_ISOLATED'] = '1';
-const REPO = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+
+/**
+ * La carpeta que se navega: este repo, y si este repo no se puede servir, el
+ * checkout principal.
+ *
+ * El hub no sirve NADA que lleve un segmento `.claude` (`privatePath`, en
+ * `src/hub/files.ts`): ahí viven la configuración y las credenciales de los
+ * agentes, y esa puerta está cerrada a propósito. Los worktrees con los que
+ * trabaja un agente de FORGE viven justo ahí, en `.claude/worktrees/<x>`, así
+ * que corrido desde uno de ellos este shot pedía una carpeta que el hub
+ * devuelve con un 403 y se quedaba quince segundos esperando una fila que no
+ * iba a llegar. No es un fallo del navegador de archivos ni de la regla: es
+ * que la carpeta elegida era imposible. `--git-common-dir` da el `.git` del
+ * checkout principal, cuyo padre sí se sirve y tiene los mismos `src/` y
+ * `package.json` que esta prueba nombra.
+ */
+function repoQueElHubSirve(): string {
+  const aqui = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+  const privada = (p: string) => p.split('/').some((seg) => seg === '.claude');
+  if (!privada(aqui)) return aqui;
+  try {
+    const comun = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: aqui, encoding: 'utf8' }).trim();
+    const principal = dirname(comun.replace(/\/$/, ''));
+    if (principal && !privada(principal)) return principal;
+  } catch { /* sin git, o un worktree que ya no cuelga de nadie */ }
+  return aqui;
+}
+
+const REPO = repoQueElHubSirve();
 process.env['ORCA_FILE_ROOTS'] = REPO;
 
 const { GPU_ARGS, SHOTS, ensureServers, newPage, open, shutdown, uiPort, waitForFleet } = await import('./visual.ts');

@@ -31,6 +31,23 @@ interface R { x: number; y: number; w: number; h: number }
 const overlaps = (a: R, b: R) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
 /** The screen rectangles of the windows in front: the housings the DOM is drawing, folded ones excluded. */
+/**
+ * Las ventanas cuando ya son `n`.
+ *
+ * `open` es una petición, no un hecho consumado: la ventana se ensambla, llega
+ * con su animación y hasta entonces mide 0x0 o no está. Un `waitForTimeout`
+ * fijo acierta con la máquina ociosa y falla con la máquina ocupada, que es
+ * como decir que la prueba mide la máquina. Se espera a la cuenta.
+ */
+async function windowsWhen(page: Page, n: number): Promise<R[]> {
+  await page.waitForFunction((want) => [...document.querySelectorAll<HTMLElement>('.win')]
+    .filter((e) => !e.classList.contains('is-min'))
+    .map((e) => e.getBoundingClientRect())
+    .filter((r) => r.width > 0 && r.height > 0).length === want, n, { timeout: 15_000 })
+    .catch(() => { /* la cuenta la afirma quien llama, con la lista delante */ });
+  return windows(page);
+}
+
 async function windows(page: Page): Promise<R[]> {
   return page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.win')]
     .filter((e) => !e.classList.contains('is-min'))
@@ -41,14 +58,24 @@ async function windows(page: Page): Promise<R[]> {
 /** Where the tile is once the camera has stopped: the same answer twice in a row. */
 async function landed(page: Page, id: string): Promise<R> {
   let prev: R | null = null;
+  let seen = false;
   for (let i = 0; i < 60; i++) {
     await page.waitForTimeout(120);
     const r = await page.evaluate((id) => window.__orca!.screenOf(id), id);
-    assert.ok(r, `no tile for ${id}`);
+    /*
+     * Un fotograma sin baldosa no es el final del viaje: la flota sintética se
+     * recoloca por debajo y la cámara todavía está llegando, así que la
+     * baldosa puede salirse del lienzo un instante y volver. Lo que esta
+     * función responde es DÓNDE PARA, y para eso hay que dejarla volver;
+     * rendirse en el primer null era fallar por lo que pasaba mientras se
+     * miraba. Si no aparece en ninguno de los sesenta, entonces sí no está.
+     */
+    if (!r) { prev = null; continue; }
+    seen = true;
     if (prev && Math.abs(prev.x - r.x) < 0.5 && Math.abs(prev.y - r.y) < 0.5 && Math.abs(prev.w - r.w) < 0.5) return r;
     prev = r;
   }
-  throw new Error('the camera never settled');
+  throw new Error(seen ? 'the camera never settled' : `no tile for ${id}`);
 }
 
 /**
@@ -105,8 +132,7 @@ async function main() {
 
     /* ── One window in front, over the centre ──────────────────────── */
     await page.evaluate((id) => window.__orca!.open(id), a);
-    await page.waitForTimeout(600);
-    let wins = await windows(page);
+    let wins = await windowsWhen(page, 1);
     assert.equal(wins.length, 1, `one window: ${JSON.stringify(wins)}`);
     // The window must be where the naive centring would put the tile: over the middle of the glass.
     const naive = { x: view.w / 2 - centred.w / 2, y: view.h / 2 - centred.h / 2, w: centred.w, h: centred.h };
@@ -119,8 +145,7 @@ async function main() {
 
     /* ── Two windows in front ──────────────────────────────────────── */
     await page.evaluate((id) => window.__orca!.open(id), c);
-    await page.waitForTimeout(600);
-    wins = await windows(page);
+    wins = await windowsWhen(page, 2);
     assert.equal(wins.length, 2, `two windows: ${JSON.stringify(wins)}`);
     const two = await flyAndLand(page, b);
     await page.screenshot({ path: join(SHOTS, 'framing-2-two-windows.png') });

@@ -1331,7 +1331,26 @@ export function shutdown() {
   forgetRun();
   // The ORCA_HOME we gave our own hub held nothing but that hub's state.
   if (TEMP_HOME && !keep) {
-    rmSync(TEMP_HOME, { recursive: true, force: true });
+    /*
+     * The hub is still dying while this line runs. `signalProc` asks the
+     * group to go and cannot wait for it: `shutdown` is also the `exit`
+     * handler, and that one only gets synchronous work done. So a hub that
+     * writes one more file between rimraf emptying a directory and rmdir'ing
+     * it turns the teardown into ENOTEMPTY — which is what took
+     * `hud-missions.shots.ts` down (its hub keeps `hub/improve` ticking)
+     * after it had printed that every assertion passed.
+     *
+     * `force` does not cover that: it forgives a missing path, not a busy
+     * one. `maxRetries` does, and stays synchronous. And if the directory
+     * outlives us even so, it is said out loud and the run stands: what a
+     * shot saw on the screen is its verdict, not what it managed to delete
+     * from TMPDIR afterwards.
+     */
+    try {
+      rmSync(TEMP_HOME, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch (err) {
+      console.warn(`[visual] temp ORCA_HOME left behind (${TEMP_HOME}): ${(err as Error).message}`);
+    }
     TEMP_HOME = null;
   }
 }

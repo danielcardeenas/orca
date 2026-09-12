@@ -86,6 +86,12 @@ async function chromeFits(page: Page, where: string) {
       const h = head.getBoundingClientRect();
       const title = win.querySelector<HTMLElement>('.win__title')?.getBoundingClientRect();
       for (const b of win.querySelectorAll<HTMLElement>('.win__btn')) {
+        // Los retirados no se miden, por lo mismo que no se mide una cabecera
+        // sin altura: FRONT y PIN sólo significan algo sobre el plano del
+        // canvas y en el teléfono salen con `hidden`, así que miden 0x0.
+        // Exigirles 44 era exigirle tamaño de dedo a un control que el dedo
+        // no puede alcanzar. Que estén retirados donde toca se afirma en 6d.
+        if (!b.checkVisibility()) continue;
         const r = b.getBoundingClientRect();
         out.push({
           kind: win.dataset['kind'] ?? '?',
@@ -259,7 +265,14 @@ async function settledTile(page: Page): Promise<{ id: string; x: number; y: numb
     }
     return out;
   });
-  for (let n = 0; n < 4; n++) {
+  /*
+   * Seis rondas y no cuatro: en apaisado (844x390) el mástil envuelve y
+   * vuelven el radar, la bandeja y las pistas, así que la banda que queda
+   * libre es una franja estrecha y hacen falta más reencuadres hasta que
+   * alguna baldosa caiga dentro y además esté quieta. Cuatro bastaban en
+   * vertical y dejaban el apaisado colgando de la suerte.
+   */
+  for (let n = 0; n < 6; n++) {
     if (n) { await page.evaluate(() => window.__orca!.frame()); await page.waitForTimeout(1200); }
     const a = await sample();
     await page.waitForTimeout(500);
@@ -282,6 +295,26 @@ async function tileAt(page: Page, id: string): Promise<{ x: number; y: number } 
 }
 
 /** Mantener pulsado un punto `ms` y soltar. */
+/**
+ * El centro de una baldosa cuando deja de moverse.
+ *
+ * `settledTile` elige una quieta, pero entre aquella elección y un gesto
+ * posterior puede haber pasado un vuelo —abrir una ventana de agente mueve la
+ * cámara—, y un `hold` sobre donde la baldosa estaba hace trescientos
+ * milisegundos cae en el suelo y no abre nada. Misma regla que allí, para una
+ * baldosa ya elegida: dos lecturas seguidas en el mismo sitio.
+ */
+async function steadyAt(page: Page, id: string, tries = 12): Promise<{ x: number; y: number } | null> {
+  let prev: { x: number; y: number } | null = null;
+  for (let i = 0; i < tries; i++) {
+    const now = await tileAt(page, id);
+    if (now && prev && Math.abs(now.x - prev.x) < 3 && Math.abs(now.y - prev.y) < 3) return now;
+    prev = now;
+    await page.waitForTimeout(300);
+  }
+  return prev;
+}
+
 async function hold(page: Page, x: number, y: number, ms: number) {
   await touch(page, [{ at: 0, points: [{ x, y }] }, { at: ms, points: [] }]);
   await page.waitForTimeout(250);
@@ -595,33 +628,55 @@ async function main() {
 
     /* ── 6d. Cerrar y minimizar: 44x44 de verdad ──────────────────── */
 
+    /*
+     * Cada control por su nombre, y si se ve o no. En el teléfono la ventana
+     * no está sobre un plano espacial (`spatial` en wm.ts es falso con
+     * `MOBILE()`), así que FRONT y PIN —que sólo significan algo en el
+     * canvas— se retiran con `hidden` y miden 0x0. Medirlos junto a los
+     * demás es lo que tenía este bloque en rojo desde el día en que nació:
+     * afirmaba 44x44 sobre dos botones que el dedo no puede tocar, y nadie
+     * corría los shots para verlo. Lo que sí hay que exigirles es que sigan
+     * retirados, y eso se afirma aparte, justo debajo: si un día uno de los
+     * dos vuelve al teléfono, entra a medirse con el resto en lugar de
+     * colarse.
+     */
     const ctl = await page.locator('.win.is-mission .win__btn').evaluateAll((els) => els.map((e) => {
-      const r = e.getBoundingClientRect();
+      const el = e as HTMLElement;
+      const r = el.getBoundingClientRect();
       const t = document.createRange();
-      t.selectNodeContents(e);
+      t.selectNodeContents(el);
       const g = t.getBoundingClientRect();
       return {
-        k: (e as HTMLElement).dataset.wClose !== undefined ? 'close' : (e as HTMLElement).dataset.wMin !== undefined ? 'min' : 'other',
+        k: el.dataset.wClose !== undefined ? 'close'
+          : el.dataset.wMin !== undefined ? 'min'
+          : el.dataset.wFront !== undefined ? 'front'
+          : el.dataset.wPin !== undefined ? 'pin' : 'other',
+        vis: el.checkVisibility(),
         w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x),
         // Cuánto se desvía el glifo del centro de su botón, en los dos ejes.
         dx: Math.round(Math.abs((g.x + g.width / 2) - (r.x + r.width / 2))),
         dy: Math.round(Math.abs((g.y + g.height / 2) - (r.y + r.height / 2))),
-        font: Math.round(parseFloat(getComputedStyle(e).fontSize)),
+        font: Math.round(parseFloat(getComputedStyle(el).fontSize)),
       };
     }));
-    assert.ok(ctl.length >= 2, 'the window has its close and minimize');
-    for (const b of ctl) {
+    const away = ctl.filter((b) => !b.vis).map((b) => b.k).sort();
+    assert.deepEqual(away, ['front', 'pin'],
+      `on a phone the canvas controls are the only ones out of reach, not ${away.join(', ') || 'none'}`);
+    const tocables = ctl.filter((b) => b.vis);
+    assert.ok(tocables.length >= 2, 'the window has its close and minimize');
+    for (const b of tocables) {
       assert.ok(b.w >= 44 && b.h >= 44, `${b.k} is 44x44 (${b.w}x${b.h})`);
       assert.ok(b.dy <= 2 && b.dx <= 2, `${b.k}'s glyph is centred (off by ${b.dx},${b.dy})`);
       assert.ok(b.font >= 16, `${b.k}'s glyph is legible (${b.font}px)`);
     }
-    const gap = Math.min(...ctl.slice(1).map((b, i) => b.x - (ctl[i]!.x + ctl[i]!.w)));
+    const gap = Math.min(...tocables.slice(1).map((b, i) => b.x - (tocables[i]!.x + tocables[i]!.w)));
     assert.ok(gap >= 4, `they are far enough apart to hit one at a time (${gap}px)`);
     // Y dentro de su cabecera: un botón que sobresale por arriba se toca fuera
-    // de la ventana, y ahí el toque es del campo.
+    // de la ventana, y ahí el toque es del campo. Los retirados no tienen caja
+    // que quepa en ningún sitio.
     const fit = await page.evaluate(() => {
       const head = document.querySelector('.win.is-mission .win__head')!.getBoundingClientRect();
-      return [...document.querySelectorAll('.win.is-mission .win__btn')].map((e) => {
+      return [...document.querySelectorAll('.win.is-mission .win__btn')].filter((e) => (e as HTMLElement).checkVisibility()).map((e) => {
         const r = e.getBoundingClientRect();
         return { over: Math.round(head.top - r.top), under: Math.round(r.bottom - head.bottom) };
       });
@@ -802,11 +857,40 @@ async function main() {
       assert.ok(await page.locator('.win.is-agent').count() >= 1, 'and still does what a tap did');
       await closeAll(page);
 
-      // Medio segundo quieto: el menú, una vez, del sujeto correcto. El punto
-      // se vuelve a leer aquí mismo: entre medir y pulsar, el campo se mueve.
-      p = (await tileAt(page, tile.id)) ?? p;
-      await hold(page, p.x, p.y, 620);
-      assert.equal(await page.locator('.ctx').count(), 1, 'holding opens the menu, once');
+      /*
+       * Medio segundo quieto: el menú, una vez, del sujeto correcto.
+       *
+       * La baldosa se vuelve a elegir entera en cada intento, no sólo a
+       * releer: el toque corto de arriba abrió una ventana de agente y eso
+       * vuela la cámara, de modo que la elegida antes puede haber quedado
+       * parada bajo el mástil, bajo la bandeja que acaba de aparecer o fuera
+       * de cuadro. `settledTile` ya sabe descartar todo eso; `tileAt` sólo
+       * sabe dónde está el centro, y un gesto sobre un punto tapado es un
+       * gesto del que hay encima. Lo que no se repite es la exigencia: salga
+       * al primer intento o al tercero, el menú tiene que ser UNO. Y si no
+       * sale ninguno, se dice qué había bajo el dedo y queda la foto, que es
+       * la diferencia entre un fallo que se puede leer y uno que hay que
+       * volver a provocar.
+       */
+      let abierto = 0;
+      let bajo = 'no se llegó a pulsar';
+      for (let intento = 0; intento < 3 && abierto === 0; intento++) {
+        const donde = intento === 0 ? await steadyAt(page, tile.id) : (await settledTile(page));
+        if (!donde) { bajo = 'ninguna baldosa se quedó quieta y a la vista'; break; }
+        p = donde;
+        await hold(page, p.x, p.y, 620);
+        abierto = await page.locator('.ctx').count();
+        if (!abierto) {
+          bajo = await page.evaluate(({ x, y }) => {
+            const el = document.elementFromPoint(x, y) as HTMLElement | null;
+            return el ? `${el.tagName.toLowerCase()}${el.className ? `.${String(el.className).split(' ').join('.')}` : ''}` : 'nada';
+          }, p);
+          await closeAll(page);
+          await page.waitForTimeout(400);
+        }
+      }
+      if (abierto !== 1) await page.screenshot({ path: join(SHOTS, 'mobile-06i-nomenu.png') });
+      assert.equal(abierto, 1, `holding opens the menu, once (bajo el dedo: ${bajo})`);
       const menu = page.locator('.ctx');
       assert.equal(await menu.evaluate((e) => e.classList.contains('is-dialog')), true,
         'and it arrives dressed as the touch dialog');
@@ -822,7 +906,10 @@ async function main() {
       const head = (await menu.locator('.ctx__head b').innerText()).trim();
       assert.match(head, /^[A-Z0-9]{1,4}$/, `the header carries a callsign, not a generic title (${head})`);
       const labels = await menu.locator('.ctx__item b').allInnerTexts();
-      for (const want of ['OPEN', 'FLY TO', 'SPAWN CHILD', 'STOP']) {
+      // `STOP…` con puntos porque abre un diálogo —pide confirmación y motivo
+      // (b21db43)—, la misma convención que `ANSWER…` y `SAY…`. La etiqueta se
+      // afirma entera: si pierde los puntos, ha dejado de preguntar.
+      for (const want of ['OPEN', 'FLY TO', 'SPAWN CHILD', 'STOP…']) {
         assert.ok(labels.includes(want), `an agent's own verbs are there (${want} · got ${labels.join(', ')})`);
       }
       assert.ok(!labels.includes('FRAME ALL'), 'and not the field\'s, which would mean it picked the canvas');
@@ -974,7 +1061,7 @@ async function main() {
       const head = (await page.locator('.ctx__head b').innerText()).trim();
       assert.match(head, /^[A-Z0-9]{1,4}$/, `landscape: the header is that agent's callsign (${head})`);
       const labels = await page.locator('.ctx__item b').allInnerTexts();
-      for (const want of ['OPEN', 'FLY TO', 'STOP']) {
+      for (const want of ['OPEN', 'FLY TO', 'STOP…']) {
         assert.ok(labels.includes(want), `landscape: an agent's verbs (${want} · got ${labels.join(', ')})`);
       }
       assert.ok(!labels.includes('FRAME ALL'), 'landscape: and not the field\'s');
@@ -1047,10 +1134,20 @@ async function main() {
     await page.setViewportSize(DESKTOP);
     await page.waitForTimeout(800);
     assert.equal((await box(page, '.secbar'))?.vis, false, 'no bar on a desktop');
+    /*
+     * Los dos paneles vuelven a su sitio de escritorio, que desde 188e359 es
+     * el MISMO: el carril de la izquierda (`.hud__col`), MISIONES arriba y
+     * AUTOMEJORA debajo, empujada por ella. Antes AUTOMEJORA flotaba en la
+     * esquina derecha y esta prueba la buscaba allí — se quedó mirando a un
+     * rincón donde ya sólo están el reloj y el radar, y nadie la corría para
+     * verlo. Lo que hay que comprobar al volver del teléfono no es un rincón
+     * concreto: es que el carril se rehízo, en orden y sin montarse.
+     */
     const deskM = (await box(page, '.missions'))!, deskI = (await box(page, '.improve'))!;
     assert.ok(deskM.vis && deskM.x < 200, 'the mission panel is back at the top left');
-    assert.ok(deskI.vis && deskI.x + deskI.w > DESKTOP.width - 200, 'and AUTOMEJORA at the top right');
-    assert.ok(!overlaps(deskM, deskI), 'the two float side by side, as they did');
+    assert.ok(deskI.vis && deskI.x < 200, `and AUTOMEJORA is back in the same rail (x ${deskI.x})`);
+    assert.ok(deskI.y >= deskM.y + deskM.h - 1, `under the missions panel, not beside it (${deskI.y} vs ${deskM.y + deskM.h})`);
+    assert.ok(!overlaps(deskM, deskI), 'the two stack, as they do');
     // Los controles del escritorio siguen siendo los de un ratón, y dentro.
     await openSome(page);
     const desk = await page.evaluate(() => {

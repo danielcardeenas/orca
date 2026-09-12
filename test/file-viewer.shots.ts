@@ -35,9 +35,21 @@ interface WinState { kind: string; canvas: boolean; focus: boolean; scale: numbe
 
 function state(page: Page): Promise<WinState[]> {
   return page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.win')].map((w) => {
+    /*
+     * `style.scale` es una propiedad de dos ejes: el navegador la devuelve
+     * unas veces como «0.2» y otras como «0.2 0.2», según quién la escribiera
+     * por última vez. `Number('0.2 0.2')` es NaN, y un NaN aquí no se nota
+     * hasta el `mouse.move` de más abajo, que lo rechaza con un «Invalid
+     * parameters» que no nombra a nadie. Se lee el primer eje, que es el que
+     * la consola escribe.
+     */
+    const scaleOf = (el: HTMLElement) => {
+      const n = Number(String(el.style.scale || '1').trim().split(/\s+/)[0]);
+      return Number.isFinite(n) && n > 0 ? n : 1;
+    };
     const r = w.getBoundingClientRect();
     const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('.win') as HTMLElement | null;
-    return { kind: w.dataset['kind'] ?? '?', canvas: w.classList.contains('is-canvas'), focus: w.classList.contains('is-focus'), scale: Number(w.style.scale || 1), x: r.x, y: r.y, w: r.width, h: r.height, top: top?.dataset['kind'] ?? 'none' };
+    return { kind: w.dataset['kind'] ?? '?', canvas: w.classList.contains('is-canvas'), focus: w.classList.contains('is-focus'), scale: scaleOf(w), x: r.x, y: r.y, w: r.width, h: r.height, top: top?.dataset['kind'] ?? 'none' };
   }));
 }
 
@@ -71,18 +83,38 @@ async function main() {
 
     /* 2 · the origin on the canvas: the new file still lands in front */
     await page.evaluate(() => { document.querySelector<HTMLElement>('.win.is-agent [data-w-front]')?.click(); });
-    await sleep(600);
+    /*
+     * Hasta que ESTÉ en el plano, no seiscientos milisegundos. Mientras la
+     * ventana viaja del cristal al canvas su escala no responde al zoom, y
+     * cuarenta ruedas contra una ventana en tránsito la dejan donde estaba:
+     * el fallo se leía como «no llega a escala de lectura» y lo que pasaba
+     * era que el zoom empezó antes de tiempo.
+     */
+    await page.waitForFunction(() => !!document.querySelector('.win.is-agent.is-canvas'), null, { timeout: 10_000 })
+      .catch(() => { throw new Error('la ventana del agente no volvió al canvas'); });
     // Zoom anchored on the header, so it stays under the mouse while it grows to reading scale.
-    for (let i = 0; i < 40; i++) {
+    const from = (await state(page)).find((w) => w.kind === 'agent')!.scale;
+    // Sesenta pasos y no cuarenta: de dónde parte la ventana lo decide la
+    // cámara del reencuadre anterior, y desde el peldaño más lejano cuarenta
+    // ruedas se quedaban a mitad de camino de la escala de lectura.
+    for (let i = 0; i < 60; i++) {
       const a = (await state(page)).find((w) => w.kind === 'agent')!;
-      if (a.scale >= 0.6) break;
+      /*
+       * `a.canvas` y no sólo la escala: una ventana en el cristal no lleva
+       * `style.scale`, y eso se lee como 1 — que ya cumple el listón. El
+       * bucle salía sin dar una sola vuelta creyendo que estaba a escala de
+       * lectura, y cuatrocientos milisegundos después la ventana aterrizaba
+       * en el plano a 0.28 y la aserción culpaba al zoom de no llegar.
+       */
+      if (a.canvas && a.scale >= 0.6) break;
       await page.mouse.move(a.x + a.w - 60 * a.scale, a.y + 12 * a.scale);
       await page.keyboard.down('Meta'); await page.mouse.wheel(0, -60); await page.keyboard.up('Meta');
       await sleep(120);
     }
     await sleep(400);
     const onCanvas = (await state(page)).find((w) => w.kind === 'agent')!;
-    assert.ok(onCanvas.canvas && onCanvas.scale >= 0.55, `the agent window reads on the canvas (scale ${onCanvas.scale})`);
+    assert.ok(onCanvas.canvas && onCanvas.scale >= 0.55,
+      `the agent window reads on the canvas (scale ${onCanvas.scale}, desde ${from.toFixed(3)})`);
     await page.evaluate(() => window.__orca!.openFile!('/Users/nobody/x/other.md', { x: 20, y: 600 }));
     await sleep(900);
     s = await state(page);
@@ -91,12 +123,22 @@ async function main() {
     await page.screenshot({ path: join(SHOTS, 'file-viewer-01-stack.png') });
 
     /* 3 · click the canvas window's title: in front of everything, active */
+    /*
+     * Se barre la cabecera entera, no sólo su línea media: la ventana de
+     * archivo que acaba de abrirse delante puede cruzarla por el medio y
+     * dejar libres el borde de arriba o el de abajo. Antes bastaba con eso
+     * para que la prueba dijera que no hay dónde agarrar la ventana, cuando
+     * lo que pasaba es que sólo miraba una línea de las veinte que tiene.
+     */
     const pt = await page.evaluate(() => {
       const w = document.querySelector<HTMLElement>('.win.is-agent')!; const head = w.querySelector<HTMLElement>('.win__head')!;
       const r = head.getBoundingClientRect();
-      for (let x = r.x + 6; x < r.right; x += 8) {
-        const e = document.elementFromPoint(x, r.y + r.height / 2) as HTMLElement | null;
-        if (e && e.closest('.win') === w && !e.closest('button')) return { x, y: r.y + r.height / 2 };
+      for (const fy of [0.5, 0.25, 0.75, 0.12, 0.88]) {
+        const y = r.y + r.height * fy;
+        for (let x = r.x + 6; x < r.right; x += 8) {
+          const e = document.elementFromPoint(x, y) as HTMLElement | null;
+          if (e && e.closest('.win') === w && !e.closest('button')) return { x, y };
+        }
       }
       return null;
     });

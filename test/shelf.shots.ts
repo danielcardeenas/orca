@@ -45,6 +45,32 @@ async function chips(page: Page, agentId: string): Promise<{ art: string | null;
 }
 
 /** La caja del rótulo de una baldosa, que ES la caja de la baldosa. */
+/**
+ * Pinchar algo de la franja y esperar a lo que tiene que abrir, reintentando.
+ *
+ * Las fichas son nodos de un pool que se recicla por fotograma: el mismo
+ * `<button>` puede estar sirviendo a otro agente un fotograma después, y un
+ * clic resuelto contra el selector aterriza entonces en una ficha que ya no
+ * es la que se eligió — abre otra cosa, o nada. Playwright reintenta mientras
+ * el elemento se MUEVE; lo que no puede saber es que ha dejado de ser el
+ * mismo. Así que el gesto se repite, con la franja quieta antes de cada
+ * intento, y sólo se da por roto cuando tres clics buenos no abren nada.
+ */
+async function abre(page: Page, agentId: string, sel: string, texto: string, queja: string): Promise<void> {
+  for (let intento = 0; intento < 3; intento++) {
+    // La franja también puede no estar: `shelfOf` ya vuela al agente antes de
+    // rendirse, y si aun así no vuelve, este intento no cuenta.
+    try { await shelfOf(page, agentId); } catch { await sleep(1000); continue; }
+    await page.click(sel, { timeout: 10_000 }).catch(() => { /* se recicló entre el hit-test y el clic */ });
+    const ok = await page.waitForFunction((t) => [...document.querySelectorAll('.win')]
+      .some((w) => (w.textContent ?? '').includes(t)), texto, { timeout: 8_000 }).then(() => true).catch(() => false);
+    if (ok) return;
+    await page.evaluate(() => document.querySelectorAll<HTMLElement>('.win [data-w-close]').forEach((b) => b.click()));
+    await sleep(400);
+  }
+  throw new Error(queja);
+}
+
 async function tileBox(page: Page, id: string): Promise<{ x: number; y: number; w: number; h: number } | null> {
   return page.evaluate((agentId) => {
     const layer = document.querySelector('[data-labels]');
@@ -68,9 +94,28 @@ async function tileBox(page: Page, id: string): Promise<{ x: number; y: number; 
  * hace medio segundo pinchan el lienzo en vez de la ficha.
  */
 async function shelfOf(page: Page, agentId: string, n = 5): Promise<Awaited<ReturnType<typeof chips>>> {
-  await page.waitForFunction(({ id, want }) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
+  const esperar = (ms: number) => page.waitForFunction(({ id, want }) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
     .filter((el) => !el.hidden && el.dataset.agent === id).length === want,
-  { id: agentId, want: n }, { timeout: 20_000 });
+  { id: agentId, want: n }, { timeout: ms });
+  /*
+   * Y si no están, un vuelo antes de rendirse.
+   *
+   * Que no haya `.chip-art` no significa que el agente se haya ido: entre 44 y
+   * 190 px de baldosa la franja es una TARJETA (`.chip-badge`), y por debajo
+   * sólo la marca del shader, así que una cámara que quedó en otro peldaño
+   * —tras un zoom cercano, tras un reencuadre— deja al mismo agente sin una
+   * sola ficha que contar. Volar a él lo devuelve a su escala de lectura. Si
+   * ni así aparecen, entonces sí se plegó en la bandeja de su padre o se
+   * murió, y eso se dice con su nombre en vez de morir veinte líneas más
+   * abajo con un «undefined no tiene x».
+   */
+  try {
+    await esperar(10_000);
+  } catch {
+    await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), agentId);
+    await sleep(1500);
+    await esperar(10_000).catch(() => { throw new Error(`${agentId} se quedó sin estantería a mitad de la prueba`); });
+  }
   let prev = '';
   for (let i = 0; i < 30; i++) {
     const now = await chips(page, agentId);
@@ -162,7 +207,19 @@ async function main() {
     });
     assert.ok(candidatos.length, 'la flota sintética dio algún agente con baldosa propia');
 
+    /*
+     * Vale el que las TIENE y las CONSERVA, no el que las tuvo un instante.
+     *
+     * Antes bastaba con que las cinco fichas aparecieran una vez: se aceptaba
+     * al candidato y se le medía la franja unas líneas más abajo, cuando ya se
+     * había plegado, y la prueba moría en «cuatro fichas y un contador, no 0»
+     * acusando a la estantería de algo que hizo el mock. Que `shelfOf` —que es
+     * la medida de verdad, con su estabilización— entre en el bucle cierra ese
+     * hueco: si el candidato no llega entero hasta la medida, se prueba el
+     * siguiente en vez de dar por rota la consola.
+     */
     let who = '';
+    let shown: Awaited<ReturnType<typeof chips>> = [];
     for (const cand of candidatos.slice(0, 4)) {
       await declare(page, cand);
       await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), cand);
@@ -171,13 +228,15 @@ async function main() {
           (id) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
             .filter((el) => !el.hidden && el.dataset.agent === id).length === 5,
           cand, { timeout: 10_000 });
+        const franja = await shelfOf(page, cand);
+        if (franja.length !== 5) continue;
         who = cand;
+        shown = franja;
         break;
       } catch { /* se plegó, se fue de cuadro o se murió: el siguiente */ }
     }
     assert.ok(who, `ninguno de los ${Math.min(4, candidatos.length)} candidatos mantuvo su baldosa el tiempo de colgarle nada`);
 
-    const shown = await shelfOf(page, who);
     assert.equal(shown.length, 5, `cuatro fichas y un contador, no ${shown.length}`);
     const counter = shown.filter((c) => !c.art);
     assert.equal(counter.length, 1, 'exactamente una ficha contador');
@@ -231,16 +290,27 @@ async function main() {
         const s = (window as never as { __orca: { spotOf(i: string): { scale: number; trayOf: string | null } | undefined } }).__orca.spotOf(id);
         return !!s && s.trayOf === null && s.scale >= 1;
       }, who);
-      if (propia) {
-        const box = await tileBox(page, who);
+      const box = await tileBox(page, who);
+      /*
+       * Y con la baldosa todavía EN el encuadre. El zoom va contra la franja,
+       * pero la cámara la reencuadra con easing mientras la flota se recoloca
+       * debajo, y a veces el acercamiento acaba con la baldosa entera fuera
+       * del lienzo: entonces no hay fichas que contar, y eso no dice nada de
+       * la caja —que es lo único que esta parte prueba—. Se dice y no se
+       * afirma, igual que cuando el agente se pliega: un rojo que depende del
+       * fixture envenena la puerta (`shelf-routes.shots.ts`, §6).
+       */
+      if (propia && box) {
         const cerca = await chips(page, who);
-        assert.ok(cerca.length > 0, 'acercándose mucho, la estantería sigue dibujada');
+        // La foto antes que la aserción: si falla, que quede lo que se vio.
+        await page.screenshot({ path: join(SHOTS, 'shelf-09-close.png') });
+        assert.ok(cerca.length > 0,
+          `acercándose mucho, la estantería sigue dibujada (caja ${box.x.toFixed(0)},${box.y.toFixed(0)} ${box.w.toFixed(0)}x${box.h.toFixed(0)})`);
         assert.ok(!box || box.y < 0 || box.y + box.h > VIEW.h || box.h > VIEW.h * 0.8,
           `la baldosa desborda el lienzo (caja ${box ? `${box.y.toFixed(0)}+${box.h.toFixed(0)}` : 'sin rótulo'})`);
-        await page.screenshot({ path: join(SHOTS, 'shelf-09-close.png') });
         console.log(`[shelf] de cerca siguen ${cerca.length} fichas con la baldosa desbordando el lienzo`);
       } else {
-        console.log('[shelf] skip · el agente se plegó durante el zoom cercano; no afirmo nada de la caja');
+        console.log(`[shelf] skip · ${propia ? 'la baldosa acabó fuera del lienzo' : 'el agente se plegó'} durante el zoom cercano; no afirmo nada de la caja`);
       }
       for (let i = 0; i < 6; i++) {
         await page.keyboard.down('Control'); await page.mouse.wheel(0, 200); await page.keyboard.up('Control');
@@ -259,8 +329,6 @@ async function main() {
      * centro del elemento en el momento de pinchar, que es lo que hace una
      * persona.
      */
-    await shelfOf(page, who);
-    await page.click(`.chip-art[data-agent="${who}"][data-art]`);
     /*
      * Se espera a que la ventana esté, no un número de milisegundos. Un `sleep`
      * aquí es una prueba que falla cuando la máquina está ocupada y pasa cuando
@@ -268,20 +336,16 @@ async function main() {
      * primera, que es la más nueva, que es una de las que puso esta prueba: de
      * ahí que la ruta se pueda afirmar.
      */
-    await page.waitForFunction(() => [...document.querySelectorAll('.win')]
-      .some((w) => (w.textContent ?? '').includes('/p/out/')), null, { timeout: 15_000 })
-      .catch(() => { throw new Error('un clic en una ficha no abrió la ventana de su artefacto'); });
+    await abre(page, who, `.chip-art[data-agent="${who}"][data-art]`, '/p/out/',
+      'un clic en una ficha no abrió la ventana de su artefacto');
     await page.screenshot({ path: join(SHOTS, 'shelf-02-artifact.png') });
     await page.evaluate(() => document.querySelectorAll<HTMLElement>('.win [data-w-close]').forEach((b) => b.click()));
     await sleep(500);
 
     /* ── Clic en el contador: la galería, filtrada por ese agente ────── */
 
-    await shelfOf(page, who);
-    await page.click(`.chip-art[data-agent="${who}"]:not([data-art])`);
-    await page.waitForFunction(() => [...document.querySelectorAll('.win')]
-      .some((w) => (w.textContent ?? '').includes('GALLERY')), null, { timeout: 15_000 })
-      .catch(() => { throw new Error('el contador no abrió la galería'); });
+    await abre(page, who, `.chip-art[data-agent="${who}"]:not([data-art])`, 'GALLERY',
+      'el contador no abrió la galería');
     const gal = await page.evaluate(() => [...document.querySelectorAll('.win')]
       .map((w) => w.textContent ?? '').find((t) => t.includes('GALLERY')) ?? '');
     /*
@@ -388,12 +452,28 @@ async function main() {
      * que este agente produjo algo sin acercarse. Con cuatro o más declarados
      * la cuenta va escrita; se comprueba contra el mundo, como el contador.
      */
-    const badge = await page.evaluate((id) => {
+    const leerBadge = () => page.evaluate((id) => {
       const el = document.querySelector<HTMLElement>(`.chip-badge[data-agent="${id}"]`);
       if (!el || el.hidden) return null;
       const r = el.getBoundingClientRect();
       return { text: el.textContent ?? '', h: r.height, art: el.dataset.art ?? null };
     }, who);
+    /*
+     * El peldaño de la tarjeta es una franja estrecha —entre 44 y 190 px de
+     * baldosa— y la rueda da pasos gordos: el primer fotograma sin fichas
+     * puede haberla cruzado entera y estar ya por debajo del rótulo, donde
+     * sólo queda la marca del shader. Se vuelve a acercar de uno en uno hasta
+     * dar con ella, y si al acercarse reaparecen las fichas sin que la tarjeta
+     * se haya visto, entonces sí falta el peldaño de en medio.
+     */
+    let badge = await leerBadge();
+    for (let i = 0; i < 8 && !badge; i++) {
+      await page.mouse.move(VIEW.w / 2, VIEW.h / 2);
+      await page.mouse.wheel(0, -100);
+      await sleep(600);
+      if ((await chips(page, who)).length) break;
+      badge = await leerBadge();
+    }
     assert.ok(badge, 'sin fichas, la baldosa cuelga la tarjeta');
     const total = await declaredCount(page, who);
     assert.match(badge.text, new RegExp(`×${total}(?!\\d)`), `la tarjeta dice cuántos hay (${total}), no "${badge.text}"`);

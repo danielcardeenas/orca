@@ -1913,8 +1913,8 @@ class Collector {
     console.log(`vivos CLI  ${this.liveness.size} sesiones reportadas por \`claude agents --json\``);
     const withParent = agents.filter((a) => a.parentId).length;
     console.log(`linaje     ${withParent} con padre, profundidad máx ${Math.max(0, ...agents.map((a) => a.depth))}`);
-    const cost = agents.reduce((s, a) => s + a.metrics.costUSD, 0);
-    console.log(`costo      $${cost.toFixed(2)} acumulado en los cost-state leídos\n`);
+    const used = agents.reduce((s, a) => s + ceilingTokens(a.metrics), 0);
+    console.log(`uso        ${used} tokens de techo acumulados (entrada + salida + escritura de caché)\n`);
 
     console.log('── proyectos ──');
     for (const p of this.projects.all().slice(0, 20)) {
@@ -1933,7 +1933,7 @@ class Collector {
       console.log(
         `  ${a.callsign} ${(p?.code ?? '--')} ${a.state.padEnd(8)} `
         + `d${a.depth} tps=${m.tokensPerSec.toFixed(1).padStart(6)} `
-        + `out=${String(m.outputTokens).padStart(8)} $${m.costUSD.toFixed(2).padStart(7)} `
+        + `out=${String(m.outputTokens).padStart(8)} use=${String(ceilingTokens(m)).padStart(9)} `
         + `tools=${String(m.toolCalls).padStart(4)} turns=${String(m.turns).padStart(3)} `
         + `up=${fmtDur(a.uptimeMs)}  ${oneLine(a.title, 46)}`,
       );

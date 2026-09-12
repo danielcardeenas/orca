@@ -680,7 +680,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     if (a) band.style.setProperty('--band-t', `${Math.max(0.35, 1.6 - Math.min(1, a.metrics.tokensPerSec / 80) * 1.2)}s`);
     ctx.setCallsign('CAPCOM', a ? store.world.projects[a.projectId]?.code : undefined);
     ctx.setState(next.kind === 'waiting' ? 'blocked' : next.kind === 'error' ? 'dead' : null, next.color);
-    const s = JSON.stringify([a?.id, a?.pane, a?.metrics.tokensPerSec, a?.metrics.costUSD, store.linkUp, store.authed()]);
+    const s = JSON.stringify([a?.id, a?.pane, a?.metrics.tokensPerSec, a ? ceilingTokens(a.metrics) : 0, store.linkUp, store.authed()]);
     if (s === statusSig) return;
     statusSig = s;
     const parts: string[] = [];

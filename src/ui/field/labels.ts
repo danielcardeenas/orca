@@ -337,7 +337,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
         // name and code are in it too — they decide whether the title is an
         // echo, and they can land after the label already exists.
         const sig = `${it.forge?.label ?? ''}|${a.origin}|${a.role}|${tier}|${unit}|${amber ? 'A' : ''}|${a.state}|${a.block?.kind ?? ''}|${a.title}|${a.mission}|${a.tool}|${a.toolDetail}|${a.lastSay}|${a.callsign}|${projectCode(a)}|${names.get(islandOf(a)) ?? ''}`
-          + (tier >= 4 ? `|${a.metrics.costUSD.toFixed(2)}|${Math.round(a.metrics.tokensPerSec)}|${Math.round(a.uptimeMs / 1000)}|${a.metrics.turns}` : '')
+          + (tier >= 4 ? `|${ceilingTokens(a.metrics)}|${Math.round(a.metrics.tokensPerSec)}|${Math.round(a.uptimeMs / 1000)}|${a.metrics.turns}` : '')
           + (tier >= 5 ? `|${a.model}|${a.machineId}` : '');
         if (sig !== rec.sig) {
           // A label that did not exist a frame ago is not climbing a rung: it

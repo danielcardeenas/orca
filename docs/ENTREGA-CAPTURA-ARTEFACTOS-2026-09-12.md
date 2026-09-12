@@ -92,6 +92,7 @@ mirarlo. Al revés sí: publicar sube lo que ya estaba.
 | `9b9f602` | captura por efecto: lo que sale de un proceso |
 | `104bbf1` | el techo tira primero lo que nadie eligió |
 | `1823a90` | lo que git ignora no entra solo; y un `.zip` no entra ni declarándose `file` |
+| `6d5d7da` | un comando de ORCA sabe de qué agente es |
 
 ### La captura por efecto
 
@@ -160,17 +161,42 @@ los cuatro segundos estaba en `/api/world` — 171.610 bytes, `observed`,
 atribuido a su agente. Un pipeline de generación de imagen apareciendo solo en
 ORCA, que hasta ese momento era invisible.
 
+### Quién hizo qué
+
+Esto empezó como una nota al pie y resultó ser la pieza que faltaba. Al
+verificar los dos artefactos publicados en la consola viva, los dos colgaban de
+**otros agentes**, y uno del propio líder de la squad.
+
+La causa: los seis comandos `orca-*` tomaban el agente de
+`CLAUDE_SESSION_ID`, y esa variable **viene vacía dentro de un agente de
+ORCA**. Sin ella, el collector cae en su heurística —el agente vivo del
+proyecto con la actividad más reciente—, que con un agente por repo acierta
+siempre y con cinco en el mismo checkout acierta por casualidad. Es exactamente
+lo que el operador pidió que no pasara. Y no era sólo cosa de los artefactos:
+explicaba también los indicativos cruzados en los mensajes de la tarde, porque
+`orca-tell` firmaba igual de mal.
+
+`bin/lib/whoami.mjs` lo resuelve una sola vez para los seis, de la evidencia
+más fuerte a la más débil: `--agent`, `CLAUDE_SESSION_ID`, `ORCA_PANE` —que
+pone el collector al lanzar, para cualquier proveedor, validada como uuid
+porque un pane puede llamarse `orca-capcom`— y, como último recurso, la cadena
+de procesos buscando el `--session-id` con el que se lanzó el CLI. Eso último
+cubre al agente que ORCA no lanzó; un proveedor que no use esa bandera no
+aparece y no rompe nada.
+
+`null` sigue siendo una respuesta legítima: significa «no lo sé», y el
+collector conserva su heurística. Lo que ya no ocurre es inventar un id.
+
 ## 5. Lo que falla, dicho claro
 
-**La atribución de lo observado se equivoca.** Un archivo que aparece no lleva
-firma: se le cuelga al agente vivo del proyecto con la actividad más reciente.
-Con cinco agentes en un mismo checkout —la situación real de hoy— falla, y ya
-falló: dos capturas del arnés que corrió otro agente quedaron colgadas de mí. El
-daño está acotado por diseño, y es la razón por la que `source` es necesario:
+**La atribución de lo observado sigue siendo aproximada.** Un archivo que
+aparece no lleva firma: se le cuelga al agente vivo del proyecto con la
+actividad más reciente, y con varios agentes en un checkout se equivoca. El
+daño está acotado por diseño, y es otra razón por la que `source` es necesario:
 lo observado no se ancla en el campo, así que una atribución torcida cuesta una
-línea mal puesta en la galería, no una imagen junto al agente equivocado. La vía
-declarada no tiene este problema: `orca-show` lo ejecuta el agente y lleva su
-sesión.
+línea mal puesta en la galería, no una imagen junto al agente equivocado. La
+vía declarada sí es exacta desde `6d5d7da`, y antes de ese commit no lo era —
+conviene no fiarse de la atribución de nada anterior.
 
 **No propongo arreglarlo enumerando directorios prohibidos** (`test/shots`,
 `docs`, lo que vaya apareciendo). Enumerar lo prohibido nunca cierra: mañana
@@ -225,7 +251,7 @@ que ya estaban corriendo no lo tienen, y seguirán sin declarar nada.
 
 ```
 npm test -- artifacts         las doce pruebas de la captura y del camino
-npm test -- squads            el pie del escuadrón y los comandos alcanzables
-npm test -- --changed         896/896 en las suites alcanzadas
+npm test -- squads            el pie, los comandos alcanzables y de quién firma cada uno
+npm test                      1362/1362, la suite entera sobre este árbol
 npm run typecheck             limpio
 ```

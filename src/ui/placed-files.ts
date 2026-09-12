@@ -27,7 +27,8 @@ export const FILE_ID_PREFIX = 'file:';
 /** Más superficies que esto y el campo deja de ser un campo; media.ts corta en 40 con los artefactos. */
 export const MAX_PLACED_FILES = 40;
 
-export interface Placement { x: number; y: number; z: number }
+/** Dónde, y a qué ancho si el operador lo redimensionó (unidades de mundo). */
+export interface Placement { x: number; y: number; z: number; w?: number }
 
 export interface PlacedFile {
   id: string;

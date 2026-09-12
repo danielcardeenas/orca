@@ -189,9 +189,26 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
     const d = document.createElement('button');
     d.type = 'button';
     d.className = 'chip-art';
+    // Una ficha se arrastra al campo: la misma carga que una miniatura de la
+    // galería (`ARTIFACT_DND` en windows/kinds/gallery.ts), y el mismo drop
+    // del campo, que coloca la superficie donde se suelta.
+    d.draggable = true;
     layer.appendChild(d);
     return d;
   }
+
+  layer.addEventListener('dragstart', (e) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art, .chip-badge');
+    const id = el?.dataset.art;
+    const dt = e.dataTransfer;
+    // El contador y la tarjeta de varios no son un artefacto: no hay nada que soltar.
+    if (!el || !id || !dt) { e.preventDefault(); return; }
+    dt.setData('text/orca-artifact', id);
+    dt.setData('text/plain', id);
+    dt.effectAllowed = 'copy';
+    // Al arrastrar, el puntero sale de la ficha sin `pointerout`: se apaga a mano.
+    hoverTo(null);
+  });
 
   /*
    * El campo captura el puntero en su `pointerdown` para poder panear, y un

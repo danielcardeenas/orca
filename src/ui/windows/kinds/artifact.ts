@@ -55,6 +55,18 @@ export function mountArtifact(ctx: WinCtx, c: Console) {
       fetch(url).then((r) => r.text()).then((t) => { pre.textContent = t.slice(0, 60_000); }).catch(() => { pre.textContent = 'could not load'; });
     }
     body.querySelector('[data-raw]')?.addEventListener('click', () => window.open(url!, '_blank', 'noopener'));
+    /*
+     * Una imagen entra encajada en la ventana; un clic la pone a 1:1 y la
+     * ventana se vuelve un visor con scroll —para leer un diagrama de cuatro
+     * mil píxeles hace falta moverse por él—, y otro clic la vuelve a encajar.
+     * El vídeo tiene sus controles y la página su propio scroll.
+     */
+    const art = body.querySelector<HTMLElement>('.art');
+    const img = art?.querySelector<HTMLElement>('img');
+    if (art && img) {
+      img.title = 'CLICK · 1:1 / FIT';
+      img.addEventListener('click', () => art.classList.toggle('is-1to1'));
+    }
     const place = body.querySelector<HTMLElement>('[data-place]')!;
     place.addEventListener('click', () => {
       slabFlash(place);

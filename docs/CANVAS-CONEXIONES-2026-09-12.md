@@ -273,6 +273,49 @@ npm test -- shelf                     la escalera sin huecos ni solapes, y la ge
 ORCA_VISUAL_ISOLATED=1 npx tsx test/shelf.shots.ts   shelf-06-badge.png (la tarjeta con ×N en el primer fotograma sin fichas) y shelf-07-mark.png (más lejos, sin tarjeta, con la flota dibujada)
 ```
 
+## 8. Cerca no desaparecen, y se arrastran, se redimensionan y se leen (mismo día, pedido del operador)
+
+*«Cuando hacemos mucho zoom desaparecen»*: `camera.project().visible` mira
+un **punto** —la esquina superior izquierda—, y en cuanto esa esquina salía
+del lienzo se apagaban el rótulo, la estantería y la superficie colocada,
+justo cuando más grandes se veían. Ahora la pregunta es por la **caja**
+(`camera.boxOnScreen`): algo se dibuja si cualquier parte de su caja cae en
+pantalla, con margen para la franja que cuelga de la baldosa. Vale para
+rótulos, fichas, tarjeta, cuadros con textura, superficies DOM y sus pies.
+
+*«Arrastrarlos y dimensionarlos, scrollear dentro cuando los abrimos»*:
+
+- **Arrastrar una ficha o la tarjeta al campo** la coloca donde se suelta:
+  la ficha es origen de arrastre HTML5 con la misma carga que una miniatura
+  de la galería (`text/orca-artifact`), y el campo ya sabía recibirla. El
+  contador y la tarjeta de varios no se arrastran: no son un artefacto.
+- **Redimensionar una superficie colocada**: un asa en el rincón inferior
+  derecho (`.srf-grip`, DOM sobre el lienzo, así vale igual para un cuadro
+  con textura que para una página), se tira de ella y la esquina superior
+  izquierda se queda quieta. Entre media baldosa y doce. El ancho viaja con
+  la colocación (`placement.w`, `shared/types.ts`, el cambio mínimo) y se
+  guarda donde se guardaba la colocación; moverla lo conserva.
+- **Leer dentro de la ventana del artefacto**: la imagen entra encajada y
+  un clic la pone a 1:1 con scroll en las dos direcciones; otro clic la
+  vuelve a encajar. El texto ya hacía scroll, el vídeo tiene controles y la
+  página su propio scroll. Las ventanas ya se redimensionaban por su rincón.
+
+**Verificación.** `npm test -- camera-box` mide la caja frente a la esquina.
+`shelf.shots.ts` acerca el zoom hasta que la baldosa desborda el lienzo y
+comprueba que las fichas siguen (`shelf-09-close.png`; si el agente se
+pliega durante el zoom lo dice y no afirma nada). `tether.shots.ts` tira del
+asa y exige que la superficie se ensanche (`tether-08-resize.png`), y
+arrastra una ficha al suelo y exige una superficie nueva
+(`tether-09-drag.png`). El visor 1:1 de la ventana no tiene suite.
+
+Y algo que conviene saber del arnés de la estantería: contra la flota
+sintética falla a ratos en pasos que ya existían —el agente elegido se
+pliega en la bandeja de su padre entre que se le cuelgan las fichas y se
+pincha una—; en esta tanda pasó dos de cinco veces, y las tres caídas
+fueron en esos pasos, no en los nuevos. Los pasos nuevos hacen skip
+explícito cuando el fixture no acompaña; los viejos no, y arreglarlos es
+otra pieza.
+
 ## Filtros que cubren este documento
 
 ```

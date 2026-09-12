@@ -207,6 +207,49 @@ async function main() {
     await mkdir(SHOTS, { recursive: true });
     await page.screenshot({ path: join(SHOTS, 'shelf-01-chips.png') });
 
+    /* ── Acercándose mucho, las fichas siguen: se ven por la caja, no por la esquina ── */
+
+    /*
+     * Zoom hacia la propia franja hasta que la baldosa desborde el lienzo. La
+     * esquina superior izquierda de la baldosa sale de pantalla y antes eso
+     * apagaba el rótulo y las fichas justo cuando más grandes se veían
+     * (`camera.boxOnScreen`). Lo que se afirma: alguna ficha del agente sigue
+     * dibujada mientras haya una baldosa tan grande que no cabe.
+     */
+    {
+      const c = shown[1]!;
+      await page.mouse.move(c.x + c.w / 2, c.y + c.w / 2);
+      for (let i = 0; i < 6; i++) {
+        await page.keyboard.down('Control'); await page.mouse.wheel(0, -200); await page.keyboard.up('Control');
+        await sleep(250);
+      }
+      await sleep(600);
+      // Sólo se afirma si la baldosa sigue siendo propia: un hijo que se
+      // pliega en la bandeja de su padre mientras se acerca el zoom no tiene
+      // estantería por regla, y eso no dice nada de la caja.
+      const propia = await page.evaluate((id) => {
+        const s = (window as never as { __orca: { spotOf(i: string): { scale: number; trayOf: string | null } | undefined } }).__orca.spotOf(id);
+        return !!s && s.trayOf === null && s.scale >= 1;
+      }, who);
+      if (propia) {
+        const box = await tileBox(page, who);
+        const cerca = await chips(page, who);
+        assert.ok(cerca.length > 0, 'acercándose mucho, la estantería sigue dibujada');
+        assert.ok(!box || box.y < 0 || box.y + box.h > VIEW.h || box.h > VIEW.h * 0.8,
+          `la baldosa desborda el lienzo (caja ${box ? `${box.y.toFixed(0)}+${box.h.toFixed(0)}` : 'sin rótulo'})`);
+        await page.screenshot({ path: join(SHOTS, 'shelf-09-close.png') });
+        console.log(`[shelf] de cerca siguen ${cerca.length} fichas con la baldosa desbordando el lienzo`);
+      } else {
+        console.log('[shelf] skip · el agente se plegó durante el zoom cercano; no afirmo nada de la caja');
+      }
+      for (let i = 0; i < 6; i++) {
+        await page.keyboard.down('Control'); await page.mouse.wheel(0, 200); await page.keyboard.up('Control');
+        await sleep(250);
+      }
+      await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), who);
+      await sleep(1200);
+    }
+
     /* ── Clic en una ficha: se abre su artefacto ─────────────────────── */
 
     /*

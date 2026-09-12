@@ -651,8 +651,12 @@ export interface Artifact {
    * the canvas by itself. What was merely observed waits in the gallery.
    */
   source: ArtifactSource;
-  /** Set when the operator has pulled it out of its agent into the field. */
-  placement: { x: number; y: number; z: number } | null;
+  /**
+   * Set when the operator has pulled it out of its agent into the field.
+   * `w` is the width the operator dragged it to, in world units; absent, the
+   * field's default (`MEDIA_W`). Local to the console, like the rest of it.
+   */
+  placement: { x: number; y: number; z: number; w?: number } | null;
 }
 
 /* ── Credentials ──────────────────────────────────────────────────── */

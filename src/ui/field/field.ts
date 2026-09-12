@@ -92,7 +92,8 @@ export interface FieldEvents {
   /** Right click: the field names what is under the pointer and where. */
   onContext(target: FieldTarget, sx: number, sy: number): void;
   onPlace(agentId: string, x: number, y: number, z: number): void;
-  onPlaceArtifact(artifactId: string, x: number, y: number, z: number): void;
+  /** `w`: the width the operator dragged the surface to, when it was a resize and not a move. */
+  onPlaceArtifact(artifactId: string, x: number, y: number, z: number, w?: number): void;
   onUnplaceArtifact(artifactId: string): void;
   onHover(id: string | null): void;
   /**
@@ -389,7 +390,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   // Quién hizo una superficie, para su pie: el agente de este feed, o el que
   // el almacén recuerda si ya se archivó — un artefacto sobrevive a su autor.
   const media = createMedia(scene, surfacesLayer, camera, (id) => ev.onUnplaceArtifact(id),
-    (id) => byId.get(id)?.callsign ?? store.knownAgent(id)?.callsign ?? null);
+    (id) => byId.get(id)?.callsign ?? store.knownAgent(id)?.callsign ?? null,
+    (id, x, y, z, w) => ev.onPlaceArtifact(id, x, y, z, w));
   const shelves = createShelves(shelvesLayer, {
     onOpenArtifact: (id, x, y) => ev.onOpenArtifact(id, x, y),
     onOpenGallery: (agentId) => ev.onOpenGallery(agentId),
@@ -2530,7 +2532,17 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         const p = camera.project(s.x - TILE_W / 2 * scale, s.y + TILE_H / 2 * scale, s.z);
         const q = camera.project(s.x + TILE_W / 2 * scale, s.y - TILE_H / 2 * scale, s.z);
         const bw = q.x - p.x, bh = q.y - p.y;
-        if (p.visible && bw >= LABEL_PX && bh > 2) {
+        /*
+         * En pantalla por la CAJA, no por la esquina: acercándose mucho, la
+         * esquina superior izquierda sale del lienzo mientras la baldosa —y
+         * la estantería que cuelga de ella— siguen llenando media pantalla,
+         * y con `p.visible` el rótulo y las fichas desaparecían justo ahí.
+         * La franja cuelga por debajo de la caja, de ahí el margen.
+         */
+        const ahead = p.ahead && q.ahead;
+        const onTile = ahead && camera.boxOnScreen(p.x, p.y, q.x, q.y);
+        const onShelf = ahead && camera.boxOnScreen(p.x, p.y, q.x, q.y + bh * 0.45);
+        if (onTile && bw >= LABEL_PX && bh > 2) {
           labelItems.push({ agent: a, forge: forge.get(a.id), sx: p.x, sy: p.y, w: bw, h: bh, sel: isSel || near, selected: isSel, amber: alert >= 0.75 });
         }
         /*
@@ -2540,7 +2552,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
          * miniatura. El hueco sigue reservado, así que la flota no se recoloca
          * al alejarse — sólo se queda la franja vacía.
          */
-        if (p.visible && shelved.has(a.id) && shelfVisible(bw)) {
+        if (onShelf && shelved.has(a.id) && shelfVisible(bw)) {
           const ids = shelfIds(artifacts, a.id);
           const chips = shelfChips(ids, { x: s.x, y: s.y, z: s.z, scale, trayOf: s.trayOf });
           if (chips.length) {
@@ -2562,7 +2574,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
             });
             shelfItems.push({ agentId: a.id, chips: items, dim, hot, badge: null });
           }
-        } else if (p.visible && shelved.has(a.id) && badgeVisible(bw)) {
+        } else if (onShelf && shelved.has(a.id) && badgeVisible(bw)) {
           /*
            * El peldaño de en medio (`shelf.ts`): la tarjeta con el más nuevo y
            * la cuenta, colgada del borde inferior por un solo hilo. Con un solo

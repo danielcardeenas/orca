@@ -183,10 +183,20 @@ const field = createField(fieldEl, {
   onOpenGallery: (agentId) => c.openGallery(agentId),
   onContext: (target, x, y) => c.menu(target, { x, y }),
   onPlace: () => { /* persisted locally by the field; the hub has no placement channel yet */ },
-  onPlaceArtifact(id, x, y, z) {
-    if (isPlacedFileId(id)) { placedFiles.move(id, { x, y, z }); field.setExtraMedia(placedFiles.artifacts()); return; }
+  onPlaceArtifact(id, x, y, z, w) {
+    // Un movimiento conserva el ancho al que el operador lo dejó; un
+    // redimensionado trae el suyo.
+    if (isPlacedFileId(id)) {
+      const keep = w ?? placedFiles.get(id)?.placement.w;
+      placedFiles.move(id, keep !== undefined ? { x, y, z, w: keep } : { x, y, z });
+      field.setExtraMedia(placedFiles.artifacts());
+      return;
+    }
     const a = store.world.artifacts?.[id];
-    if (a) { a.placement = { x, y, z }; saveArtifactPlacements(); }
+    if (!a) return;
+    const keep = w ?? a.placement?.w;
+    a.placement = keep !== undefined ? { x, y, z, w: keep } : { x, y, z };
+    saveArtifactPlacements();
   },
   onUnplaceArtifact: (id) => c.unplaceArtifact(id),
   onHover: (id) => cursor.setTarget(!!id),

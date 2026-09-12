@@ -97,6 +97,21 @@ export class FieldCamera {
    * far off it — a line can be drawn to it. Behind the camera the projection
    * mirrors, and the numbers mean nothing.
    */
+  /**
+   * ¿Asoma por el lienzo una caja proyectada, dada por dos esquinas en píxeles
+   * de pantalla? `project().visible` mira un PUNTO, y una baldosa, una franja
+   * de fichas o una superficie con la esquina fuera de pantalla seguían
+   * ocupando media pantalla: al acercarse mucho desaparecían justo cuando
+   * más grandes eran. Lo que se dibuja es una caja, y una caja se ve si
+   * cualquier parte de ella cae dentro, con un margen para lo que cuelga de
+   * ella. Quien llama comprueba `ahead` de las dos esquinas: una caja con una
+   * esquina detrás de la cámara no tiene proyección de la que fiarse.
+   */
+  boxOnScreen(ax: number, ay: number, bx: number, by: number, margin = 0): boolean {
+    const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), y0 = Math.min(ay, by), y1 = Math.max(ay, by);
+    return x1 >= -margin && x0 <= this.w + margin && y1 >= -margin && y0 <= this.h + margin;
+  }
+
   project(x: number, y: number, z: number): { x: number; y: number; visible: boolean; ahead: boolean } {
     const v = this.tmp.set(x, y, z).project(this.three);
     return {

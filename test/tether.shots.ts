@@ -126,6 +126,57 @@ async function main() {
     const who2 = await page.evaluate(() => document.querySelector('.srf__who')?.textContent ?? '');
     assert.ok(who2.includes(callsign), `el pie de la superficie dice de quién es: "${who2}" no lleva ${callsign}`);
 
+    /* ── El asa: tirar del rincón la ensancha, y el ancho se queda ──── */
+
+    /*
+     * La superficie recién colocada lleva su asa en el rincón inferior
+     * derecho (`.srf-grip`). Se tira de ella 120 px a la derecha y la caja de
+     * la superficie tiene que ser más ancha; y el ancho tiene que sobrevivir
+     * a un feed, porque viaja con la colocación (`placement.w`).
+     */
+    const srfBox = () => page.evaluate(() => {
+      const el = [...document.querySelectorAll<HTMLElement>('.srf')].find((x) => (x.textContent ?? '').includes('fotograma 0'));
+      if (!el || el.style.display === 'none') return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    const antes = await srfBox();
+    assert.ok(antes, 'la superficie colocada está en pantalla');
+    const grip = await page.evaluate(() => {
+      const g = [...document.querySelectorAll<HTMLElement>('.srf-grip')].find((x) => !x.hidden);
+      if (!g) return null;
+      const r = g.getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    });
+    assert.ok(grip, 'la superficie lleva su asa de redimensionar');
+    await page.mouse.move(grip.x, grip.y);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + 60, grip.y + 30, { steps: 6 });
+    await page.mouse.move(grip.x + 120, grip.y + 60, { steps: 6 });
+    await page.mouse.up();
+    await sleep(500);
+    const despues = await srfBox();
+    assert.ok(despues && despues.w > antes.w + 40, `tirar del asa ensancha la superficie: ${antes.w.toFixed(0)} → ${despues?.w.toFixed(0)} px`);
+    await page.evaluate(() => (window as never as { __orca: { frame(): void } }).__orca);
+    await page.screenshot({ path: join(SHOTS, 'tether-08-resize.png') });
+
+    /* ── Arrastrar una ficha al campo la coloca donde se suelta ─────── */
+
+    /*
+     * Una ficha es origen de arrastre HTML5 con la carga de la galería. Se
+     * arrastra la segunda ficha del agente a un punto de suelo abierto y tiene
+     * que aparecer una segunda superficie con su título.
+     */
+    const chipSelDrag = `.chip-art[data-agent="${who}"][data-art]`;
+    const chipTitles = await page.evaluate((sel) => [...document.querySelectorAll<HTMLElement>(sel)].map((el) => el.title.split(' · ')[0] ?? ''), chipSelDrag);
+    const dragged = chipTitles[1] ?? '';
+    const antesN = await page.evaluate(() => document.querySelectorAll('.srf').length);
+    await page.locator(chipSelDrag).nth(1).dragTo(page.locator('[data-field]'), { targetPosition: { x: 200, y: VIEW.h - 120 } });
+    await sleep(800);
+    const arrastrada = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.srf')].filter((x) => x.style.display !== 'none').length);
+    assert.ok(arrastrada > antesN, `arrastrar una ficha coloca su superficie: había ${antesN} y hay ${arrastrada} ("${dragged}")`);
+    await page.screenshot({ path: join(SHOTS, 'tether-09-drag.png') });
+
     await page.mouse.move(VIEW.w - 20, VIEW.h - 20);
     const shown = await shelfOf(page, who);
     await mkdir(SHOTS, { recursive: true });

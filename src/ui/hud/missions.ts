@@ -75,7 +75,7 @@ import { ago, besidesTitle, esc } from '../util.ts';
 import { REDUCE } from '../motion.ts';
 import {
   ALGN_BEAT, ALGN_HOLD, ALGN_SEAT, ZIP_SVG, type AlgnGesture,
-  algnFold, algnFoldClear, algnRowBack, algnRowIn, algnRowPulse, algnUnfold, algnZipDelay, algnZipTo,
+  algnDisclose, algnFold, algnFoldClear, algnRowBack, algnRowIn, algnRowPulse, algnUnfold, algnZipDelay, algnZipTo,
   paintBadge,
 } from '../gfx/algn.ts';
 import { PHASE_WORD, isOpen, missionArchiveAsk, missionRows, type MissionPhase, type MissionRow } from './mission-status.ts';
@@ -90,7 +90,11 @@ const AGO_TICK_MS = 10_000;
 /** Where the zipper sits for each phase: seated, or not yet. */
 const ZIP_AT: Record<MissionPhase, number> = { waiting: 1, progress: 1, stalled: 0, queued: 0, completed: 1, failed: 0 };
 
-interface Mounted { el: HTMLElement; zip: HTMLElement; detail: HTMLElement; phase: MissionPhase; sig: string }
+interface Mounted {
+  el: HTMLElement; zip: HTMLElement; detail: HTMLElement; phase: MissionPhase; sig: string;
+  /** Hay un gesto de apertura o cierre corriendo sobre el detalle. */
+  busy: boolean;
+}
 
 export interface MissionsHandle {
   el: HTMLElement;
@@ -242,6 +246,7 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
       : !brief ? ''
       : `<div class="missions__brief mono scroll">${esc(brief)}</div>`;
     return `
+      <div class="missions__detailin">
       <p class="missions__full mono">${esc(r.headline)}</p>
       ${body}
       ${crewHtml(r)}
@@ -251,16 +256,44 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
         <button class="missions__act" type="button" data-act="crew">CREW</button>
         <button class="missions__act missions__act--archive" type="button" data-archive
           title="Take it out of the console. Its agents and its conversation are kept.">ARCHIVE</button>
+      </div>
       </div>`;
   }
 
-  function setOpen(m: Mounted, r: MissionRow, on: boolean) {
+  /**
+   * Abrir o cerrar el detalle de una fila.
+   *
+   * `animate` es lo que separa un GESTO del operador de un REPINTADO. La lista
+   * se vuelve a pintar cada diez segundos por los «2M» y cada vez que se mueve
+   * la flota, y `paintRow` llama aquí en cada pasada: sin esa distinción, una
+   * fila abierta se abriría de nuevo diez veces por minuto delante de quien la
+   * está leyendo, y una recién montada ya abierta entraría dando un respingo.
+   * Sólo el clic anima; todo lo demás deja la fila donde ya estaba.
+   *
+   * Con movimiento reducido tampoco hay gesto: el detalle aparece y desaparece,
+   * que es quitar el movimiento sin quitar nada de lo que dice.
+   */
+  function setOpen(m: Mounted, r: MissionRow, on: boolean, animate: boolean) {
     if (on) opened.add(r.id); else opened.delete(r.id);
     const peek = m.el.querySelector<HTMLElement>('[data-peek]')!;
     peek.setAttribute('aria-expanded', on ? 'true' : 'false');
     peek.querySelector<HTMLElement>('.missions__chev')!.textContent = on ? '▾' : '▸';
-    m.detail.hidden = !on;
     m.el.classList.toggle('is-open', on);
+
+    if (!animate || REDUCE.value || store.booting) {
+      // Lo único que un repintado no toca es un detalle con un gesto encima:
+      // esconderlo a media animación lo cortaría en seco. Lo termina el gesto.
+      if (!m.busy) m.detail.hidden = !on;
+      return;
+    }
+    m.busy = true;
+    if (on) m.detail.hidden = false;
+    algnDisclose(m.detail, on, false, () => {
+      m.busy = false;
+      // Al final, y contra lo que el operador quiere AHORA: puede haberse
+      // arrepentido a media animación, y entonces manda el último clic.
+      m.detail.hidden = !opened.has(r.id);
+    });
   }
 
   function paintRow(m: Mounted, r: MissionRow, index: number, fresh: boolean) {
@@ -286,7 +319,7 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
     }
     row.querySelector<HTMLElement>('[data-ago]')!.textContent = ago(r.at);
     row.classList.toggle('is-current', store.activeMissionId === r.id);
-    setOpen(m, r, opened.has(r.id));
+    setOpen(m, r, opened.has(r.id), false);
 
     const reduce = REDUCE.value || store.booting;
     if (fresh && waving()) {
@@ -314,7 +347,7 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
       el: row,
       zip: row.querySelector<HTMLElement>('[data-zip]')!,
       detail: row.querySelector<HTMLElement>('[data-detail]')!,
-      phase: r.phase, sig: '',
+      phase: r.phase, sig: '', busy: false,
     };
     rows.set(r.id, m);
     paintRow(m, r, index, true);
@@ -416,7 +449,9 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
 
     if (t.closest('[data-peek]')) {
       e.stopPropagation();
-      setOpen(m, r, m.detail.hidden);
+      // La intención y no el DOM: durante el cierre el detalle todavía se ve, y
+      // un segundo clic ahí tiene que leerse como «vuelve a abrirlo».
+      setOpen(m, r, !opened.has(id), true);
       return;
     }
     // Anywhere else on the row — the title button included — is the way in.

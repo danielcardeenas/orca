@@ -80,6 +80,8 @@ export const ALGN_INSET = '11.3%';
 const ALGN_STEP = '4%';
 /** Lo que tarda la lista en recogerse hasta la cabecera, y en volver a abrirse. */
 export const ALGN_SHUT = 0.42;
+/** Lo que tarda un detalle en abrirse bajo su fila. Cerrar va más deprisa. */
+export const ALGN_OPEN = 0.26;
 /** Lo que tarda una fila en descubrirse de un lado al otro (`algnRowSweep`). */
 export const ALGN_SWEEP = 0.34;
 /** Lo que tarda una fila en irse: se estrecha y se apaga, más rápido que al llegar. */
@@ -242,6 +244,47 @@ export function algnUnfold(list: HTMLElement, parts: number, reduce: boolean): v
     duration: Math.max(ALGN_SHUT * 0.6, Math.max(0, parts - 1) * ALGN_BEAT * 0.6),
     ease: 'power3.out',
     onComplete: () => algnFoldClear(list),
+  });
+}
+
+/**
+ * El detalle de una fila que se abre, y que se cierra.
+ *
+ * Es la persiana de `algnFold` a la escala de una fila: lo que se mueve es el
+ * ALTO de la caja, que es lo que empuja a las filas de debajo en vez de
+ * aparecer encima de ellas. Nada se desliza dentro; el contenido está donde va
+ * a estar desde el primer fotograma y lo único que cambia es cuánto se ve de
+ * él.
+ *
+ * Cerrar va más rápido que abrir, como en el panel: al abrir se pide leer, y
+ * al cerrar se pide que desaparezca.
+ *
+ * El alto de destino se mide en `auto` cada vez —un detalle con seis nombres de
+ * tripulación no mide lo que uno vacío— y el gesto arranca de donde esté la
+ * caja, así que abrir y cerrar a media animación no da un salto.
+ *
+ * `done` corre al final y también cuando no hay gesto que jugar: quién esconde
+ * la caja de verdad es cosa de quien llama, que es el único que sabe si el
+ * operador ya se ha arrepentido. Con movimiento reducido no hay gesto y `done`
+ * llega en el acto, que es lo que pide `prefers-reduced-motion`: quitar el
+ * movimiento, nunca la información.
+ */
+export function algnDisclose(el: HTMLElement, on: boolean, reduce: boolean, done?: () => void): void {
+  gsap.killTweensOf(el);
+  if (reduce) { gsap.set(el, { clearProps: 'height,opacity,visibility,overflow' }); done?.(); return; }
+  const from = el.style.height ? el.offsetHeight : (on ? 0 : el.offsetHeight);
+  if (!on) {
+    gsap.to(el, {
+      height: 0, autoAlpha: 0, overflow: 'hidden', duration: ALGN_OPEN * 0.72, ease: 'power2.in',
+      onComplete: () => { gsap.set(el, { clearProps: 'height,opacity,visibility,overflow' }); done?.(); },
+    });
+    return;
+  }
+  gsap.set(el, { height: 'auto', autoAlpha: 1 });
+  const to = el.offsetHeight;
+  gsap.fromTo(el, { height: from, autoAlpha: 0, overflow: 'hidden' }, {
+    height: to, autoAlpha: 1, duration: ALGN_OPEN, ease: 'power2.out',
+    onComplete: () => { gsap.set(el, { clearProps: 'height,opacity,visibility,overflow' }); done?.(); },
   });
 }
 

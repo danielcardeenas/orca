@@ -693,12 +693,24 @@ body.tray-mode .tray .tile { width: 72px; }
 .missions__chev { font-size: 9px; }
 .missions__crewn { color: var(--ink-dim); font-size: 9px; letter-spacing: 0.08em; }
 
-/* The detail: the whole title, the whole brief, the crew, the two ways in. */
-.missions__detail {
-  grid-column: 1 / -1; display: grid; gap: 5px;
+/* The detail: the whole title, the whole brief, the crew, the ways in.
+ *
+ * Dos cajas y no una porque abrirlo es un gesto: la de fuera es lo que crece y
+ * se recoge —sólo el ALTO, que es lo que empuja a las filas de debajo— y la de
+ * dentro lleva el vestido. Con el margen, el relleno y la línea en la de fuera,
+ * a alto cero seguían midiendo doce píxeles y el detalle nunca llegaba a
+ * cerrarse del todo.
+ *
+ * El `overflow: hidden` es fijo y no del gesto: puesto y quitado a cada
+ * extremo, el margen de la caja de dentro se colapsaría fuera de la de fuera al
+ * quitarlo, y la fila daría un salto de cuatro píxeles justo al acabar de
+ * abrirse. */
+.missions__detail { grid-column: 1 / -1; overflow: hidden; }
+.missions__detail[hidden] { display: none; }
+.missions__detailin {
+  display: grid; gap: 5px;
   margin: 4px 0 1px; padding-top: 6px; border-top: 1px solid rgba(192,249,74,0.22);
 }
-.missions__detail[hidden] { display: none; }
 .missions__full { margin: 0; font-size: 11px; line-height: 1.35; color: var(--ink-bright); }
 .missions__brief {
   margin: 0; max-height: 132px; overflow: auto; overscroll-behavior: contain;

@@ -14,9 +14,21 @@
  *              qué estimarlos: una casilla vacía dice «no lo sé», que es
  *              verdad, y una inventada ordenaría la lista mal—, el área, si es
  *              medición o hipótesis, y cuándo se movió.
- *   abierta    el resumen entero, la evidencia (cifras medidas), la hipótesis
- *              cuando la idea no viene de una medición, el detalle largo, la
- *              pregunta al operador y la conversación entera.
+ *   abierta    el título ENTERO —la línea lo corta, y hasta hoy lo entero sólo
+ *              vivía en un tooltip—, el resumen, la evidencia (cifras
+ *              medidas), la hipótesis cuando la idea no viene de una medición,
+ *              el detalle largo, la pregunta al operador y la conversación.
+ *
+ * El detalle está SIEMPRE en el DOM, escondido cuando la ficha está cerrada.
+ * Antes no existía hasta que se abría, y lo que no está no se puede descubrir
+ * con un gesto ni recoger con otro: aparecía y desaparecía de golpe. Ahora se
+ * abre y se cierra como una persiana (`algnDisclose`), y sólo cuando el
+ * operador lo pide — el pintado, que llega con cada empujón del hub y cada
+ * treinta segundos por los «2M», no anima nunca.
+ *
+ * Y por eso la lista se repinta reconciliando en vez de rehacerse entera: una
+ * ficha con un detalle a medio abrir, con el foco dentro o con media respuesta
+ * escrita ya no es algo que se pueda tirar y volver a construir.
  *
  * Era una ficha de tres líneas, y ocho fichas tapaban media pantalla para
  * decir ocho titulares. Lo que se lee en diagonal es la lista; lo que se lee
@@ -68,7 +80,7 @@ import { pick, type PickHandle } from '../controls.ts';
 import type { ProviderModel } from '../../shared/provider-handoff.ts';
 import { sigilBits, sigilRows } from '../gfx/sigil.ts';
 import {
-  type AlgnGesture, algnFold, algnFoldClear, algnRowBack, algnRowSweep, algnUnfold, paintBits,
+  type AlgnGesture, algnDisclose, algnFold, algnFoldClear, algnRowBack, algnRowSweep, algnUnfold, paintBits,
 } from '../gfx/algn.ts';
 import {
   BUDGET_MAX, BUDGET_MIN, IMPROVE_GRADES, REVIEW_MAX_MS,
@@ -135,7 +147,19 @@ function talkHtml(p: ImproveProposal): string {
     + `</ul>`;
 }
 
-function detailHtml(p: ImproveProposal, status: ImproveStatus): string {
+/**
+ * El detalle de una propuesta. Dos cajas y no una, y siempre en el DOM.
+ *
+ * SIEMPRE porque hasta hoy no existía hasta que se abría (`${open ? … : ''}`),
+ * y lo que no está en el DOM no se puede abrir con un gesto ni cerrar con uno:
+ * aparecía y desaparecía de golpe. Ahora está escondido, que es una cosa que sí
+ * se puede descubrir.
+ *
+ * Y dos cajas porque la de fuera es lo que crece y se recoge —sólo el ALTO— y
+ * la de dentro lleva el margen, el relleno y la línea. Con el vestido en la de
+ * fuera, a alto cero seguía midiendo trece píxeles y no llegaba a cerrarse.
+ */
+function detailHtml(p: ImproveProposal, status: ImproveStatus, open: boolean): string {
   const parts: string[] = [];
   // El título ENTERO abre el detalle. La fila lo corta con puntos suspensivos y
   // hasta hoy lo entero sólo vivía en el `title=`, o sea en un tooltip: algo
@@ -186,7 +210,7 @@ function detailHtml(p: ImproveProposal, status: ImproveStatus): string {
     acts.push(`<button class="imp__act" type="button" data-do="reopen">REOPEN</button>`);
   }
   parts.push(`<div class="imp__acts">${acts.join('')}</div>`);
-  return `<div class="imp__d">${parts.join('')}</div>`;
+  return `<div class="imp__d"${open ? '' : ' hidden'}><div class="imp__din">${parts.join('')}</div></div>`;
 }
 
 /**
@@ -203,7 +227,14 @@ function detailHtml(p: ImproveProposal, status: ImproveStatus): string {
  * lo dice, continua o discontinua, sin gastar ancho, y el detalle lo dice con
  * todas las letras al abrirlo.
  */
-function rowHtml(p: ImproveProposal, status: ImproveStatus, open: boolean, now: number): string {
+/**
+ * El área y cuándo se movió: lo ÚNICO de la ficha que cambia sin que haya
+ * pasado nada. Se escribe aparte en cada pintado, y por eso no entra en la
+ * firma de la ficha (`cardSig`): si entrara, el tic de los «2M» reharía la
+ * ficha entera cada treinta segundos y se llevaría por delante el borrador a
+ * medias de una respuesta y el gesto de un detalle abriéndose.
+ */
+export function tagsText(p: ImproveProposal, status: ImproveStatus, now: number): string {
   // Una terminada lo dice con una palabra: la barra ya dice que es una misión,
   // y sin esto una misión cerrada y una en marcha se leían igual.
   const when = status === 'snoozed' && p.snoozeUntil
@@ -211,13 +242,37 @@ function rowHtml(p: ImproveProposal, status: ImproveStatus, open: boolean, now: 
     : status === 'completed' ? `DONE · ${ago(p.updatedAt, now)}`
       : ago(p.updatedAt, now);
   const raised = p.raised > 1 ? ` · RAISED ${p.raised}×` : '';
+  return `${p.area.toUpperCase()} · ${when}${raised}`;
+}
+
+/** Lo que una ficha DICE, sin lo que sólo cambia con el reloj: ver `tagsText`. */
+export function cardSig(p: ImproveProposal, status: ImproveStatus): string {
+  return JSON.stringify([
+    status, p.kind, p.missionId ?? '', p.seenAt === undefined,
+    p.title, p.summary ?? '', p.evidence, p.hypothesis ?? '', p.detail ?? '', p.question ?? '',
+    p.callsign ?? p.agentId ?? '', p.impact ?? '', p.effort ?? '',
+    p.notes.map((n) => [n.role, n.text]),
+  ]);
+}
+
+function rowHtml(p: ImproveProposal, status: ImproveStatus, open: boolean, now: number): string {
   return `
     <i class="imp__dot" aria-hidden="true"></i>
     <button class="imp__title" type="button" data-toggle aria-expanded="${open}" title="${esc(p.title)}">${esc(p.title)}</button>
     <span class="imp__grade">${meter('IMP', p.impact)}${meter('EFF', p.effort)}</span>
-    <span class="imp__tags ${p.kind === 'hypothesis' ? 'is-hyp' : ''}">${esc(p.area.toUpperCase())} · ${esc(when)}${raised}</span>
+    <span class="imp__tags ${p.kind === 'hypothesis' ? 'is-hyp' : ''}" data-tags>${esc(tagsText(p, status, now))}</span>
     <button class="imp__chev" type="button" data-toggle aria-label="detail">▸</button>
-    ${open ? detailHtml(p, status) : ''}`;
+    ${detailHtml(p, status, open)}`;
+}
+
+/** Una ficha en pantalla: su caja, lo que dice y si tiene un gesto encima. */
+interface Card {
+  id: string;
+  el: HTMLElement;
+  /** Lo último que se pintó dentro (`cardSig`). '' es «todavía nada». */
+  sig: string;
+  /** Hay un gesto de apertura o cierre corriendo sobre su detalle. */
+  busy: boolean;
 }
 
 export interface ImproveHandle {
@@ -303,6 +358,16 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
 
   /** Las fichas abiertas. Se olvidan al recargar, como una posición de scroll. */
   const opened = new Set<string>();
+  /**
+   * Las fichas montadas, por id.
+   *
+   * La lista se rehacía entera en cada pintado (`list.innerHTML = ''`), y eso
+   * era barato mientras una ficha no tuviera nada que perder. Ahora sí lo
+   * tiene: un detalle a medio abrir, el foco dentro de él y el borrador de una
+   * respuesta sin enviar. Se repinta lo que cambia y se deja quieto lo demás,
+   * como hace el panel de misiones.
+   */
+  const cards = new Map<string, Card>();
   /** Lo cerrado desplegado bajo «…AND N MORE». */
   let showMore = false;
   /** ¿Ya se jugó el barrido de entrada? Se juega una vez, como toda entrada. */
@@ -502,13 +567,16 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     const id = card.dataset.imp!;
 
     if (t.closest('[data-toggle]')) {
-      if (opened.has(id)) opened.delete(id);
-      else {
+      // La intención y no el DOM: durante el cierre el detalle todavía se ve, y
+      // un segundo clic ahí tiene que leerse como «vuelve a abrirlo».
+      const on = !opened.has(id);
+      if (on) {
         opened.add(id);
         // Abrirla ES verla: el aviso se apaga aquí y no al pintarla, que es lo
         // que distingue «lo he leído» de «estaba en pantalla».
         if (store.improve?.proposals[id]?.seenAt === undefined) act(() => hub.improveSeen([id]));
-      }
+      } else opened.delete(id);
+      disclose(id, on);
       render();
       return;
     }
@@ -554,6 +622,35 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
       }
     }
   });
+
+  /**
+   * El detalle de una ficha que se abre, o que se cierra.
+   *
+   * Sólo desde aquí, que es el clic del operador. El pintado no llama nunca:
+   * la lista se repinta con cada empujón del hub y con el tic de los «2M», y
+   * una ficha abierta que se abriera otra vez en cada pasada sería un panel
+   * latiendo delante de quien lo está leyendo. Una que ya estaba abierta al
+   * montar tampoco entra por aquí: aparece abierta y quieta.
+   *
+   * Con movimiento reducido no hay gesto y el detalle aparece o desaparece: se
+   * quita el movimiento, nunca lo que dice.
+   */
+  function disclose(id: string, on: boolean): void {
+    const card = cards.get(id);
+    const d = card?.el.querySelector<HTMLElement>('.imp__d');
+    if (!card || !d) return;
+    if (REDUCE.value || store.booting) { d.hidden = !on; return; }
+    card.busy = true;
+    if (on) d.hidden = false;
+    algnDisclose(d, on, false, () => {
+      card.busy = false;
+      // Al final, y contra lo que el operador quiere AHORA: puede haberse
+      // arrepentido a media animación. Y un pintado más, por si la ficha
+      // cambió mientras el gesto la tenía tomada.
+      d.hidden = !opened.has(id);
+      render();
+    });
+  }
 
   /* ── pintado ────────────────────────────────────────────────────── */
 
@@ -813,6 +910,16 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     runBtn.disabled = !!activeReview(state, Date.now());
   }
 
+  /**
+   * La lista vaciada de verdad: el mapa de fichas apuntaría si no a nodos que
+   * ya no están en la página, y la ficha que volviera con el mismo id se daría
+   * por pintada sin estar en ninguna parte.
+   */
+  function resetList(): void {
+    for (const card of cards.values()) card.el.remove();
+    cards.clear();
+  }
+
   function render(): void {
     const state = store.improve;
     const now = Date.now();
@@ -824,6 +931,7 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
       // «No ha llegado» y «no hay nada» son dos pantallas distintas, y
       // confundirlas es lo que dejó la sección diciendo «ASKING THE HUB…»
       // mientras el operador creía que no había propuestas.
+      resetList();
       list.innerHTML = boardError
         ? `<p class="improve__empty">${store.linkUp
           ? 'THE HUB DID NOT ANSWER FOR THE BOARD'
@@ -853,6 +961,7 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
 
     const shown = showMore ? [...open, ...closed] : [...open, ...closed.slice(0, CLOSED_SHOWN)];
     if (!shown.length) {
+      resetList();
       list.innerHTML = state.reviews.length
         ? `<p class="improve__empty">NOTHING ON THE BOARD · THE LAST REVIEW FOUND NOTHING WORTH YOUR TIME</p>`
         : `<p class="improve__empty">NO REVIEW HAS RUN YET · ORCA WILL LOOK AT ITSELF WHEN THERE IS ENOUGH TO LOOK AT, OR PRESS REVIEW NOW</p>`;
@@ -860,20 +969,49 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
     }
 
     const fresh: HTMLElement[] = [];
-    list.innerHTML = '';
+    const keep = new Set(shown.map((p) => p.id));
+    for (const [id, card] of cards) if (!keep.has(id)) { card.el.remove(); cards.delete(id); opened.delete(id); }
+    /*
+     * Fuera todo lo que no es una ficha: el aviso de «ASKING THE HUB…» que
+     * pudiera quedar de antes y el botón del final, que se rehace abajo. Las
+     * posiciones que se cuentan a continuación son las de las fichas y de nada
+     * más, y un nodo suelto entre ellas las correría todas.
+     */
+    for (const n of [...list.children]) if (!(n as HTMLElement).dataset?.imp) n.remove();
+
+    let at = 0;
     for (const p of shown) {
       const status = effectiveStatus(p, now);
-      const card = document.createElement('article');
-      // `is-mission` es la marca de «convertida en misión» y la lleva mientras
-      // haya enlace, esté la misión en marcha o terminada: el color no cambia
-      // con el estado, sólo la palabra de la fila.
-      card.className = `imp is-${status} is-${p.kind}${p.missionId ? ' is-mission' : ''}`;
-      card.dataset.imp = p.id;
-      card.classList.toggle('is-new', p.seenAt === undefined && status === 'open');
-      card.classList.toggle('is-open', opened.has(p.id));
-      card.innerHTML = rowHtml(p, status, opened.has(p.id), now);
-      list.appendChild(card);
-      if (!announced.has(p.id)) fresh.push(card);
+      const sig = cardSig(p, status);
+      let card = cards.get(p.id);
+      if (!card) {
+        const box = document.createElement('article');
+        box.dataset.imp = p.id;
+        card = { id: p.id, el: box, sig: '', busy: false };
+        cards.set(p.id, card);
+      }
+      // Rehacer una ficha con un gesto encima lo cortaría en seco: se deja para
+      // la pasada siguiente, que el propio gesto pide al acabar.
+      if (card.sig !== sig && !card.busy) {
+        card.sig = sig;
+        // `is-mission` es la marca de «convertida en misión» y la lleva mientras
+        // haya enlace, esté la misión en marcha o terminada: el color no cambia
+        // con el estado, sólo la palabra de la fila.
+        card.el.className = `imp is-${status} is-${p.kind}${p.missionId ? ' is-mission' : ''}`;
+        card.el.classList.toggle('is-new', p.seenAt === undefined && status === 'open');
+        card.el.innerHTML = rowHtml(p, status, opened.has(p.id), now);
+      }
+      card.el.classList.toggle('is-open', opened.has(p.id));
+      card.el.querySelector<HTMLElement>('.imp__title')!.setAttribute('aria-expanded', String(opened.has(p.id)));
+      card.el.querySelector<HTMLElement>('[data-tags]')!.textContent = tagsText(p, status, now);
+      /*
+       * Mover sólo lo que está fuera de sitio, como en el panel de misiones:
+       * volver a insertar un nodo se lleva el foco que hubiera dentro, y aquí
+       * dentro hay una caja de texto en la que se puede estar escribiendo.
+       */
+      if (list.children[at] !== card.el) list.insertBefore(card.el, list.children[at] ?? null);
+      at++;
+      if (!announced.has(p.id)) fresh.push(card.el);
     }
 
     /*
@@ -894,20 +1032,13 @@ export function mountImprove(host: HTMLElement, c: Console): ImproveHandle {
       }
     }
 
-    if (closed.length > CLOSED_SHOWN && !showMore) {
-      const more = document.createElement('button');
-      more.type = 'button';
-      more.className = 'improve__more';
-      more.textContent = `…AND ${closed.length - CLOSED_SHOWN} MORE`;
-      more.addEventListener('click', () => { showMore = true; more.blur(); render(); });
-      list.appendChild(more);
-    } else if (showMore && closed.length > CLOSED_SHOWN) {
-      const less = document.createElement('button');
-      less.type = 'button';
-      less.className = 'improve__more';
-      less.textContent = 'FOLD THE CLOSED ONES';
-      less.addEventListener('click', () => { showMore = false; less.blur(); render(); });
-      list.appendChild(less);
+    if (closed.length > CLOSED_SHOWN) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'improve__more';
+      btn.textContent = showMore ? 'FOLD THE CLOSED ONES' : `…AND ${closed.length - CLOSED_SHOWN} MORE`;
+      btn.addEventListener('click', () => { showMore = !showMore; btn.blur(); render(); });
+      list.appendChild(btn);
     }
 
     announce(shown.map((p) => p.id), fresh, unseen.length);

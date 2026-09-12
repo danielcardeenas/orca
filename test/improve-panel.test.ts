@@ -17,6 +17,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { ok, test, type TestModule } from './harness.ts';
+import { cardSig, tagsText } from '../src/ui/hud/improve.ts';
+import type { ImproveProposal } from '../src/shared/improve.ts';
 
 /** Los mismos escalones que usa `hud/improve.ts`. */
 const RETRY_MS = [700, 1_500, 3_000, 6_000, 12_000];
@@ -180,7 +182,43 @@ const tests = [
       && onLink.includes('askBoard()') && !/hub\.improve\w+\(/.test(onLink),
       `askBoard calls: ${calls.join(', ') || 'none'}`);
   }),
+
+  /*
+   * El tic de los «2M» no puede rehacer una ficha.
+   *
+   * La lista se repinta cada treinta segundos y con cada empujón del hub, y
+   * desde que el detalle vive en el DOM una ficha tiene cosas que perder: un
+   * gesto a medias, el foco dentro y el borrador de una respuesta sin enviar.
+   * Por eso lo que sólo cambia con el reloj se escribe aparte y queda fuera de
+   * la firma. Si alguien mete `updatedAt` en `cardSig`, esto se pone rojo antes
+   * de que el operador vea desaparecer lo que estaba escribiendo.
+   */
+  test('cardSig no se mueve con el reloj, y el área · cuándo sí', () => {
+    const p = proposal();
+    const t0 = p.updatedAt + 60_000;
+    const t1 = p.updatedAt + 3 * 3_600_000;
+    const said = { ...p, notes: [{ id: 'n', role: 'human' as const, text: 'que sí', at: t0 }] };
+    return ok('sig / tags',
+      cardSig(p, 'open') === cardSig(p, 'open')
+      && cardSig(p, 'open') === cardSig({ ...p, updatedAt: t1 }, 'open')
+      && cardSig(p, 'open') !== cardSig(p, 'dismissed')
+      && cardSig(p, 'open') !== cardSig(said, 'open')
+      && tagsText(p, 'open', t0) !== tagsText(p, 'open', t1)
+      && tagsText(p, 'open', t0).startsWith('USABILITY · '),
+      `${tagsText(p, 'open', t0)} / ${tagsText(p, 'open', t1)}`);
+  }),
+
 ];
+
+/** Una propuesta cualquiera, para las reglas que no necesitan un tablero. */
+function proposal(): ImproveProposal {
+  return {
+    id: 'imp_1', key: 'k', reviewId: 'rev_1', at: 1_789_000_000_000, updatedAt: 1_789_000_000_000,
+    title: 'Quitar el dinero de la consola', area: 'usability', kind: 'observed',
+    summary: 'El gasto no ayuda a decidir nada', evidence: ['3 de 4 paneles lo enseñan'],
+    status: 'open', raised: 1, lastRaisedAt: 1_789_000_000_000, notes: [],
+  };
+}
 
 /** El texto del módulo del panel, para comprobar reglas que son de forma. */
 function readSource(): string {

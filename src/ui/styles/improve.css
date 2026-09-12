@@ -328,6 +328,8 @@
 }
 .imp__chev:hover { color: var(--auto); }
 .imp.is-open .imp__chev { transform: rotate(90deg); }
+.imp__chev { transition: transform var(--t-snap) var(--ease-out); }
+@media (prefers-reduced-motion: reduce) { .imp__chev { transition: none; } }
 /* Un aviso que nadie ha visto lleva su marca, y la marca no parpadea. Va con
    la barra del borde, que es el lado por el que se lee la fila. */
 .imp__dot {
@@ -338,10 +340,17 @@
 
 /* ── el detalle ───────────────────────────────────────────────────── */
 
-.imp__d {
-  grid-column: 1 / -1;
-  margin-top: 6px; border-top: 1px solid var(--line-soft); padding-top: 6px;
-}
+/*
+ * El detalle: la de fuera crece y se recoge, la de dentro lleva el vestido.
+ * Ver `detailHtml` — con el margen y la línea en la de fuera, a alto cero
+ * seguía midiendo trece píxeles y el cierre nunca terminaba.
+ *
+ * El `overflow: hidden` es fijo y no del gesto: puesto y quitado en cada
+ * extremo, el margen de la caja de dentro se colapsaría fuera de la de fuera y
+ * la ficha daría un salto de seis píxeles justo al acabar de abrirse.
+ */
+.imp__d { grid-column: 1 / -1; overflow: hidden; }
+.imp__din { margin-top: 6px; border-top: 1px solid var(--line-soft); padding-top: 6px; }
 .imp__k {
   display: block; margin: 6px 0 2px;
   font-family: var(--font-display, 'Tiny5', monospace);

@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 620" width="1060" height="620" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+  <rect width="1060" height="620" fill="#0b0a0d"/>
+
+  <text x="40" y="52" fill="#f2f4f0" font-size="19" letter-spacing="1.5">EL CAMINO DE UN ARTEFACTO</text>
+  <text x="40" y="76" fill="#8b9088" font-size="12" letter-spacing="0.6">de lo que un agente produce a lo que se ve junto a él en el canvas · orca, 2026-09-12</text>
+  <line x1="40" y1="94" x2="1020" y2="94" stroke="#2a2e38" stroke-width="1"/>
+
+  <!-- 1 · el agente -->
+  <rect x="40" y="124" width="220" height="176" fill="#17161c" stroke="#2a2e38"/>
+  <text x="56" y="150" fill="#c5cad3" font-size="12" letter-spacing="1.2">1 · EL AGENTE</text>
+  <text x="56" y="182" fill="#c0f94a" font-size="11.5">orca-show &lt;ruta&gt; "&lt;qué es&gt;"</text>
+  <text x="56" y="200" fill="#6a7068" font-size="10.5">escribe .orca/artifacts/&lt;id&gt;.json</text>
+  <text x="56" y="216" fill="#6a7068" font-size="10.5">→ source: declared</text>
+  <line x1="56" y1="234" x2="244" y2="234" stroke="#22252d"/>
+  <text x="56" y="258" fill="#c5cad3" font-size="11.5">Write · Edit · MultiEdit</text>
+  <text x="56" y="276" fill="#6a7068" font-size="10.5">un .png en el transcript</text>
+  <text x="56" y="292" fill="#6a7068" font-size="10.5">→ source: observed</text>
+
+  <!-- 2 · el collector -->
+  <rect x="316" y="124" width="220" height="176" fill="#17161c" stroke="#2a2e38"/>
+  <text x="332" y="150" fill="#c5cad3" font-size="12" letter-spacing="1.2">2 · EL COLLECTOR</text>
+  <text x="332" y="176" fill="#e8e8ea" font-size="11">ArtifactIndex</text>
+  <text x="332" y="194" fill="#6a7068" font-size="10.5">collector/artifacts.ts</text>
+  <text x="332" y="220" fill="#8b9088" font-size="10.5">id = sha1(máquina + ruta)</text>
+  <text x="332" y="238" fill="#8b9088" font-size="10.5">extensión de la lista blanca</text>
+  <text x="332" y="256" fill="#8b9088" font-size="10.5">declarado ⇒ dentro del proyecto</text>
+  <text x="332" y="274" fill="#8b9088" font-size="10.5">techo de 200, expulsa el viejo</text>
+  <text x="332" y="292" fill="#6a7068" font-size="10.5">sólo el registro: los bytes no viajan</text>
+
+  <!-- 3 · el hub -->
+  <rect x="592" y="124" width="220" height="176" fill="#17161c" stroke="#2a2e38"/>
+  <text x="608" y="150" fill="#c5cad3" font-size="12" letter-spacing="1.2">3 · EL HUB</text>
+  <text x="608" y="176" fill="#e8e8ea" font-size="11">World.upsertArtifact</text>
+  <text x="608" y="194" fill="#6a7068" font-size="10.5">hub/world.ts · server.ts</text>
+  <text x="608" y="220" fill="#8b9088" font-size="10.5">la url la pone el hub, no el</text>
+  <text x="608" y="238" fill="#8b9088" font-size="10.5">productor: /api/artifact/&lt;id&gt;</text>
+  <text x="608" y="256" fill="#8b9088" font-size="10.5">pide los bytes con artifact:read</text>
+  <text x="608" y="274" fill="#8b9088" font-size="10.5">y los cachea en ~/.orca/artifacts</text>
+  <text x="608" y="292" fill="#6a7068" font-size="10.5">retención 24 h</text>
+
+  <!-- 4 · la consola -->
+  <rect x="868" y="124" width="152" height="176" fill="#17161c" stroke="#2a2e38"/>
+  <text x="884" y="150" fill="#c5cad3" font-size="12" letter-spacing="1.2">4 · LA CONSOLA</text>
+  <text x="884" y="180" fill="#e8e8ea" font-size="11">gallery</text>
+  <text x="884" y="200" fill="#e8e8ea" font-size="11">ventana de misión</text>
+  <text x="884" y="220" fill="#e8e8ea" font-size="11">ventana de artefacto</text>
+  <text x="884" y="248" fill="#c0f94a" font-size="11">el campo</text>
+  <text x="884" y="266" fill="#6a7068" font-size="10.5">field/media.ts</text>
+  <text x="884" y="284" fill="#6a7068" font-size="10.5">junto a su agente</text>
+
+  <!-- flechas -->
+  <g stroke="#c0f94a" stroke-width="1.4" fill="none">
+    <path d="M264 212 L310 212"/><path d="M302 206 L312 212 L302 218" fill="#c0f94a" stroke="none"/>
+    <path d="M540 212 L586 212"/><path d="M578 206 L588 212 L578 218" fill="#c0f94a" stroke="none"/>
+    <path d="M816 212 L862 212"/><path d="M854 206 L864 212 L854 218" fill="#c0f94a" stroke="none"/>
+  </g>
+  <text x="266" y="204" fill="#6a7068" font-size="9.5">poll 1s + watch</text>
+  <text x="542" y="204" fill="#6a7068" font-size="9.5">frame artifact</text>
+  <text x="818" y="204" fill="#6a7068" font-size="9.5">patch del mundo</text>
+
+  <!-- la regla -->
+  <rect x="40" y="344" width="980" height="106" fill="#121116" stroke="#2a2e38"/>
+  <text x="58" y="372" fill="#c5cad3" font-size="12" letter-spacing="1.2">LA REGLA QUE DECIDE EL CANVAS</text>
+  <text x="58" y="400" fill="#c0f94a" font-size="11.5">declared</text>
+  <text x="150" y="400" fill="#c5cad3" font-size="11.5">lo eligió el agente, con el título que él escribió — se ancla solo junto a su baldosa</text>
+  <text x="58" y="424" fill="#8b9088" font-size="11.5">observed</text>
+  <text x="150" y="424" fill="#8b9088" font-size="11.5">sólo apareció mientras trabajaba — espera en la galería, sin ocupar sitio en el campo</text>
+  <text x="58" y="444" fill="#6a7068" font-size="10">declarar no se pierde: reescribir el archivo con Write no degrada lo que el agente publicó.</text>
+
+  <!-- huecos -->
+  <rect x="40" y="478" width="980" height="106" fill="#121116" stroke="#2a2e38"/>
+  <text x="58" y="506" fill="#c5cad3" font-size="12" letter-spacing="1.2">LO QUE TODAVÍA NO SE CAPTURA</text>
+  <text x="58" y="534" fill="#f5a524" font-size="11.5">bash</text>
+  <text x="150" y="534" fill="#c5cad3" font-size="11.5">ffmpeg, playwright, un build, un script de generación: no pasan por Write, así que no existen</text>
+  <text x="58" y="558" fill="#f5a524" font-size="11.5">urls</text>
+  <text x="150" y="558" fill="#c5cad3" font-size="11.5">una página servida en localhost no tiene bytes que cachear ni alcance desde otra máquina</text>
+  <text x="58" y="578" fill="#6a7068" font-size="10">las dos, aplazadas con motivo; la segunda se sustituye por una captura o por el .html, que ya funcionan.</text>
+</svg>

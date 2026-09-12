@@ -91,6 +91,7 @@ mirarlo. Al revés sí: publicar sube lo que ya estaba.
 | `4405844` | el svg del camino de datos, publicado por ese camino |
 | `9b9f602` | captura por efecto: lo que sale de un proceso |
 | `104bbf1` | el techo tira primero lo que nadie eligió |
+| `1823a90` | lo que git ignora no entra solo; y un `.zip` no entra ni declarándose `file` |
 
 ### La captura por efecto
 
@@ -112,6 +113,25 @@ Lo que lo hace aceptable es lo acotado que está:
 - **sin agente a quien atribuirlo, no hay registro.** Inventar un dueño es peor
   que perder el archivo;
 - y entra como `observed`, así que no ocupa sitio en el campo.
+
+### Lo que git ignora no entra solo
+
+Dos horas después de poner esto en servicio, la flota real dio la medida: 23
+capturas del arnés visual en diez minutos, todas en `test/shots/`, todas
+atribuidas a agentes que no las habían hecho. El arnés produce imágenes de
+verdad; ninguna es un resultado.
+
+El filtro no es una lista de directorios nuestra —eso nunca cierra, mañana hay
+otro— sino la que el propio repo escribe y mantiene al día: `git check-ignore`,
+un proceso por tick para todo el lote, con los veredictos recordados por ruta.
+Cuando git no puede contestar, no se filtra nada: perder un resultado por una
+duda es peor que dejar pasar una captura de más.
+
+**Y vale sólo para lo que aparece solo.** Una declaración nunca se filtra por
+aquí, y es deliberado: un render de vídeo vive en un directorio ignorado casi
+siempre, porque los binarios no se commitean, y colar el filtro ahí mataría el
+caso que motivó la captura. Publicarlo sigue siendo la forma de decir «éste
+sí».
 
 ### El techo, corregido por lo que pasó al ponerlo en servicio
 
@@ -173,12 +193,25 @@ decide lo que importa.
   `file`, así que el problema no existe todavía; si la captura se ensancha a
   binarios, `media.ts` los pintaría como texto.
 
+Un binario, por si queda duda, no entra hoy por ninguna puerta: la CLI lo
+rechaza (`orca-show: .zip is not something the console can show`) y el collector
+lo rechaza otra vez, porque **la extensión manda incluso sobre el `kind`
+declarado**. Esa regla no es cosmética: si el `kind` pudiera saltarse la lista
+blanca, un `{"path": ".env", "kind": "text"}` en `.orca/artifacts` convertiría
+este canal en una forma de sacar los secretos del proyecto por el hub.
+
 ## 7. El relevo
 
-**No hace falta ninguno.** El hub y el collector corren bajo
-`tools/supervise.mjs` y se relanzaron solos con el código nuevo (`15:01:57` y
-`15:07:42`); no se reinició nada a mano. Por eso las dos pruebas de punta a
-punta de arriba pudieron hacerse contra la flota real.
+**No hace falta ninguno.** El hub y el collector se relevaron durante la misión
+(`15:01:57` y `15:07:42`) y volvieron con este código; por eso las dos pruebas
+de punta a punta de arriba pudieron hacerse contra la flota real.
+
+Conviene saber cómo ocurre, porque es fácil de leer mal: `tools/supervise.mjs`
+**no vigila archivos**. Sólo relanza cuando el proceso sale con el código 75
+pidiendo relevo, y quien lo pide es el propio collector al recibir un frame
+`restart` del hub (`src/collector/index.ts:1686`) — es decir, el botón de
+relevo de la consola. Los dos relevos los disparó alguien desde ahí. Editar
+código no reinicia nada por sí solo.
 
 Para confirmarlo en la consola: abrir la galería y mirar cualquier miniatura
 reciente, o pedirle al hub `/api/world` y comprobar que los artefactos traen
@@ -191,8 +224,8 @@ que ya estaban corriendo no lo tienen, y seguirán sin declarar nada.
 ## Filtros que cubren este documento
 
 ```
-npm test -- artifacts         las once pruebas de la captura y del camino
+npm test -- artifacts         las doce pruebas de la captura y del camino
 npm test -- squads            el pie del escuadrón y los comandos alcanzables
-npm test -- --changed         330/330 en las suites alcanzadas
+npm test -- --changed         896/896 en las suites alcanzadas
 npm run typecheck             limpio
 ```

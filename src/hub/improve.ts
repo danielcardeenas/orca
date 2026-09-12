@@ -468,7 +468,7 @@ export class ImproveStore {
    * seguir vivo no hay hueco para otro. `endedAt` lo pone `closeReview`, y sólo
    * cuando el mundo confirma que se fue.
    */
-  settleOutcome(reviewId: string, status: ReviewStatus, note: string, spend?: { costUSD?: number; tokens?: number }): ImproveReview | null {
+  settleOutcome(reviewId: string, status: ReviewStatus, note: string, spend?: { tokens?: number }): ImproveReview | null {
     const r = this.data.reviews.find((x) => x.id === reviewId);
     if (!r || r.endedAt !== undefined) return null;
     // Un resultado ya decidido no se pisa: lo primero que pasó es lo que pasó.
@@ -477,7 +477,6 @@ export class ImproveStore {
       r.outcomeAt = this.now();
     }
     r.note = note.slice(0, 300);
-    if (spend?.costUSD !== undefined) r.costUSD = spend.costUSD;
     if (spend?.tokens !== undefined) r.tokens = spend.tokens;
     this.save();
     return { ...r };
@@ -500,13 +499,12 @@ export class ImproveStore {
    * —el agente termina, o lo paran, y eso no deshace lo que entregó—; sólo se
    * le apunta cuándo terminó y qué costó.
    */
-  closeReview(reviewId: string, status: ReviewStatus, note?: string, spend?: { costUSD?: number; tokens?: number }): ImproveReview | null {
+  closeReview(reviewId: string, status: ReviewStatus, note?: string, spend?: { tokens?: number }): ImproveReview | null {
     const r = this.data.reviews.find((x) => x.id === reviewId);
     if (!r) return null;
     if (r.status !== 'reported') r.status = status;
     r.endedAt = this.now();
     if (note) r.note = note.slice(0, 300);
-    if (spend?.costUSD !== undefined) r.costUSD = spend.costUSD;
     if (spend?.tokens !== undefined) r.tokens = spend.tokens;
     this.save();
     return { ...r };
@@ -798,7 +796,6 @@ export class ImproveStore {
 
 /* ── la telemetría, en palabras ───────────────────────────────────── */
 
-function money(n: number): string { return `$${n.toFixed(2)}`; }
 function mins(ms: number | null): string { return ms === null ? '—' : `${Math.round(ms / 60_000)}m`; }
 function hoursOf(ms: number): string { return `${Math.round(Math.max(0, ms) / 360_000) / 10}h`; }
 
@@ -1011,7 +1008,7 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
       if (r.outcomeAt === undefined) {
         if (overBudget(r, a)) { retryStop(r, a); continue; }
         if (now - r.at >= REVIEW_MAX_MS) {
-          const spend = { costUSD: a.metrics.costUSD, tokens: tokensOf(a) };
+          const spend = { tokens: tokensOf(a) };
           store.settleOutcome(r.id, 'expired', `no report in ${Math.round(REVIEW_MAX_MS / 60_000)} minutes`, spend);
           deps.log(`improve: review ${r.id} out of time; stopping ${a.callsign}`);
           retryStop(store.review(r.id) ?? r, a);
@@ -1030,7 +1027,7 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
           const reported = (store.review(r.id)?.reportedAt ?? 0) > 0;
           store.settleOutcome(r.id, reported ? 'reported' : 'ended',
             reported ? 'filed and went quiet' : 'the reviewer finished without filing anything',
-            { costUSD: a.metrics.costUSD, tokens: tokensOf(a) });
+            { tokens: tokensOf(a) });
           retryStop(store.review(r.id) ?? r, a);
         }
         continue;
@@ -1086,7 +1083,7 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
     // que pare sigue vivo, y darle su hueco a otro tendría dos revisores.
     store.settleOutcome(r.id, 'overbudget',
       `stopped at ${Math.round(spent / 1000)}k of a ${Math.round(cap / 1000)}k ceiling`,
-      { costUSD: a.metrics.costUSD, tokens: spent });
+      { tokens: spent });
     deps.note(`AUTOMEJORA: ${a.callsign} went over its ${Math.round(cap / 1000)}k ceiling at ${Math.round(spent / 1000)}k; stopping it`);
     deps.log(`improve: review ${r.id} over budget (${spent}/${cap}), stopping ${a.callsign}`);
     return true;
@@ -1095,7 +1092,6 @@ export function createImprove(deps: AutonomyDeps, hooks: ImproveHooks): ImproveA
   /** Cierra una revisión por el estado final de su agente, con lo que gastó. */
   function closeFor(r: ImproveReview, a: Agent): void {
     const spend = {
-      costUSD: a.metrics.costUSD,
       tokens: tokensOf(a),
     };
     // Un final que ya se ganó no lo deshace la muerte del agente: una revisión

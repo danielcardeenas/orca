@@ -348,10 +348,10 @@ const tests = [
     const closed = r.hub.autonomy.improve.store.state().reviews[0]!;
     // Y el hueco queda libre: la siguiente revisión sale de verdad.
     const next = await launch(r, 2);
-    return ok('reported, costed, and the slot is free again',
-      closed.status === 'reported' && closed.costUSD === 0.37 && closed.tokens === 140_000
+    return ok('reported, measured, and the slot is free again',
+      closed.status === 'reported' && closed.tokens === 140_000
       && spawns(r).length === 2 && next.id === 'sess_reviewer_2',
-      `${closed.status} · $${closed.costUSD} · ${closed.tokens}`);
+      `${closed.status} · ${closed.tokens} tokens`);
   })),
 
   test('finish: an agent that dies without filing is a failure, not a review', () => withRig(async (r) => {

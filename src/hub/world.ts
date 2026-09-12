@@ -1533,11 +1533,11 @@ export class World {
    * llevan máquina, así que no hay forma de distinguirlas, y la tira es
    * acotada y se vacía sola.
    */
-  purgeSynthetic(): { machines: number; agents: number; projects: number; escalations: number; costUSD: number } {
+  purgeSynthetic(): { machines: number; agents: number; projects: number; escalations: number } {
     const machineIds = new Set(
       Object.values(this.state.machines).filter(isSynthetic).map((m) => m.id),
     );
-    const summary = { machines: 0, agents: 0, projects: 0, escalations: 0, costUSD: 0 };
+    const summary = { machines: 0, agents: 0, projects: 0, escalations: 0 };
     if (machineIds.size === 0) return summary;
 
     // Las preguntas primero: `dropAgent` retiraría las de sus agentes, pero una
@@ -1553,7 +1553,6 @@ export class World {
     const projects = new Set<string>();
     for (const a of Object.values(this.state.agents)) {
       if (!machineIds.has(a.machineId)) continue;
-      summary.costUSD += a.metrics.costUSD;
       projects.add(a.projectId);
       if (this.state.talk) delete this.state.talk[a.id];
       if (this.state.talkLive) delete this.state.talkLive[a.id];
@@ -1609,8 +1608,7 @@ export class World {
     // está. Quien pidió la purga recibe el mismo resumen de vuelta.
     this.log(
       `purga del arnés: ${summary.machines} máquinas, ${summary.agents} agentes, `
-      + `${summary.projects} proyectos, ${summary.escalations} preguntas, `
-      + `$${summary.costUSD.toFixed(2)} de gasto ficticio fuera`,
+      + `${summary.projects} proyectos, ${summary.escalations} preguntas fuera`,
     );
     this.flushOut();
     return summary;

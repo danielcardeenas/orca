@@ -262,8 +262,11 @@ export interface ImproveReview {
   cancelledAt?: number;
   filed: number;
   merged: number;
-  /** Lo que costó de verdad, leído del propio agente al cerrarse. */
-  costUSD?: number;
+  /**
+   * Lo que consumió de verdad, leído del propio agente al cerrarse. Hasta el
+   * 2026-09-12 se guardaba también `costUSD`, que nadie llegó a leer nunca:
+   * una revisión con plan plano no cuesta dólares, gasta cuota.
+   */
   tokens?: number;
   /** El techo con el que se lanzó, para poder decir «gastó X de Y». */
   budgetTokens?: number;

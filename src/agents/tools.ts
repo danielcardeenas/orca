@@ -188,7 +188,7 @@ export interface CeoContext {
 /** What a harness purge did: what it stopped, and what it removed. */
 export interface HarnessPurge {
   stopped: StoppedProc[];
-  removed: { machines: number; agents: number; projects: number; escalations: number; costUSD: number };
+  removed: { machines: number; agents: number; projects: number; escalations: number };
 }
 
 /** The book of budgets, with the fleet already bound to it. */

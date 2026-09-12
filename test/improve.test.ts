@@ -477,9 +477,9 @@ const tests = [
       r.arrive(a);
       r.move(a, 'done', { metrics: { ...a.metrics, costUSD: 0.42, inputTokens: 90_000, outputTokens: 10_000 } });
       const rev = api.store.state().reviews[0]!;
-      return ok('ended, with what it cost, and never "reported"',
+      return ok('ended, with what it used, and never "reported"',
         rev.status === 'ended' && (rev.note ?? '').includes('without filing')
-        && rev.costUSD === 0.42 && rev.tokens === 100_000
+        && rev.tokens === 100_000
         && activeReview(api.store.state(), r.clock.now()) === null,
         `${rev.status} · ${rev.note}`);
     } finally { api.stop(); r.done(); }

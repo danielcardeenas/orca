@@ -53,6 +53,8 @@ import type { Rect as PxRect } from './framing.ts';
 import { createGround, GROUND_Z } from './ground.ts';
 import { createLabels, rememberMachine, rememberProjectCode, rememberProjectName, type LabelItem } from './labels.ts';
 import { createMedia } from './media.ts';
+import { shelfChips, shelfIds, shelfVisible } from './shelf.ts';
+import { createShelves, type ShelfItem } from './shelves.ts';
 import { createPipes, laneShift, pathLength, routeGutter, routeGutterMsg, routeLineage, routeMessage, spanOf, type Pt } from './pipes.ts';
 import { absorbedChildren } from './blocks.ts';
 import { createSwarm } from './swarm.ts';
@@ -81,6 +83,11 @@ export interface FieldEvents {
   onOpenProject(projectId: string, sx: number, sy: number): void;
   onOpenSquad(name: string, projectId: string, sx: number, sy: number): void;
   onOpenArtifact(artifactId: string, sx: number, sy: number): void;
+  /**
+   * El índice de un agente: lo que el contador de su estantería abre. El lienzo
+   * dice «hizo cuarenta» con cinco fichas, y la puerta a las cuarenta es esto.
+   */
+  onOpenGallery(agentId: string): void;
   /** Right click: the field names what is under the pointer and where. */
   onContext(target: FieldTarget, sx: number, sy: number): void;
   onPlace(agentId: string, x: number, y: number, z: number): void;
@@ -349,12 +356,14 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   root.innerHTML = `
     <canvas class="field__canvas" data-canvas></canvas>
     <div class="field__layer" data-labels></div>
+    <div class="field__layer" data-shelves></div>
     <div class="field__layer" data-surfaces></div>
     <div class="field__layer" data-regions></div>
     <div class="field__layer"><div class="lasso" data-lasso></div></div>
   `;
   const canvas = root.querySelector<HTMLCanvasElement>('[data-canvas]')!;
   const labelsLayer = root.querySelector<HTMLElement>('[data-labels]')!;
+  const shelvesLayer = root.querySelector<HTMLElement>('[data-shelves]')!;
   const surfacesLayer = root.querySelector<HTMLElement>('[data-surfaces]')!;
   const regionsLayer = root.querySelector<HTMLElement>('[data-regions]')!;
   const lassoEl = root.querySelector<HTMLElement>('[data-lasso]')!;
@@ -377,6 +386,10 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   const ground = createGround(scene);
   const labels = createLabels(labelsLayer);
   const media = createMedia(scene, surfacesLayer, camera, (id) => ev.onUnplaceArtifact(id));
+  const shelves = createShelves(shelvesLayer, {
+    onOpenArtifact: (id, x, y) => ev.onOpenArtifact(id, x, y),
+    onOpenGallery: (agentId) => ev.onOpenGallery(agentId),
+  });
 
   const reduce = REDUCE.value;
 
@@ -434,6 +447,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   let absorbed = new Map<string, string>();
   /** Quién cuelga una estantería de su baldosa; ver `shelvedAgents`. */
   let shelved = new Set<string>();
+  /** Los artefactos por id, para las fichas de la estantería. */
+  const artById = new Map<string, Artifact>();
   /** How many of those each project holds — the number on its YOU node. */
   const pendingByProject = new Map<string, number>();
   const byCallsign = new Map<string, string>();
@@ -844,6 +859,10 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     }
 
     artifacts = [...Object.values(w.artifacts ?? {}), ...extraMedia];
+    // Un índice por id, una vez por feed: las fichas lo leen por fotograma y
+    // buscar en una lista por cada una sería el bucle dentro del bucle.
+    artById.clear();
+    for (const a of artifacts) artById.set(a.id, a);
     media.update(artifacts);
     syncRegions();
     if (!userMoved && agents.length !== lastFramedCount) { lastFramedCount = agents.length; camera.frame(layout.bounds); }
@@ -2247,6 +2266,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   let fps = 60;
   let drawn = 0;
   const labelItems: LabelItem[] = [];
+  const shelfItems: ShelfItem[] = [];
 
   function resize() {
     const r = canvas.getBoundingClientRect();
@@ -2313,6 +2333,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     let slot = 0;
     let haloDrawn = false;
     labelItems.length = 0;
+    shelfItems.length = 0;
     for (const a of agents) {
       const s = layout.spots.get(a.id);
       if (!s) continue;
@@ -2387,6 +2408,26 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
         if (p.visible && bw >= LABEL_PX && bh > 2) {
           labelItems.push({ agent: a, forge: forge.get(a.id), sx: p.x, sy: p.y, w: bw, h: bh, sel: isSel || near, selected: isSel, amber: alert >= 0.75 });
         }
+        /*
+         * La estantería, en el mismo fotograma y con el mismo recorte que el
+         * rótulo. Sube un peldaño más tarde que las palabras (`shelfVisible`):
+         * más abajo una ficha son diecinueve píxeles, y un color no es una
+         * miniatura. El hueco sigue reservado, así que la flota no se recoloca
+         * al alejarse — sólo se queda la franja vacía.
+         */
+        if (p.visible && shelved.has(a.id) && shelfVisible(bw)) {
+          const ids = shelfIds(artifacts, a.id);
+          const chips = shelfChips(ids, { x: s.x, y: s.y, z: s.z, scale, trayOf: s.trayOf });
+          if (chips.length) {
+            const dim = a.state === 'dead' || a.state === 'done';
+            const items = chips.map((c) => {
+              const c0 = camera.project(c.x - c.w / 2, c.y + c.h / 2, c.z);
+              const c1 = camera.project(c.x + c.w / 2, c.y - c.h / 2, c.z);
+              return { art: artById.get(c.id ?? '') ?? null, more: c.more, sx: c0.x, sy: c0.y, px: Math.max(1, c1.x - c0.x) };
+            });
+            shelfItems.push({ agentId: a.id, chips: items, dim });
+          }
+        }
       }
     }
     swarm.commit(slot, clock, ppu);
@@ -2394,6 +2435,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     halo.commit(clock, ppu);
     drawn = slot;
     labels.update(labelItems);
+    shelves.update(shelfItems);
 
     buildPipes(wallNow);
     pipes.step(dt);
@@ -2672,7 +2714,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       for (const t of squadBeat.values()) clearTimeout(t);
       squadBeat.clear();
       anim.sweep(() => false);
-      swarm.dispose(); pipes.dispose(); halo.dispose(); ground.dispose(); labels.dispose(); media.dispose();
+      swarm.dispose(); pipes.dispose(); halo.dispose(); ground.dispose(); labels.dispose(); media.dispose(); shelves.dispose();
       for (const m of slabs) scene.remove(m);
       slabGeo.dispose(); slabMat.dispose();
       renderer.dispose();

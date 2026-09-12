@@ -180,6 +180,7 @@ const field = createField(fieldEl, {
   onOpenProject: (id, x, y) => c.openProject(id, { x, y }),
   onOpenSquad: (name, projectId, x, y) => { void projectId; c.openSquad(name, { x, y }); },
   onOpenArtifact: (id, x, y) => c.openArtifact(id, { x, y }),
+  onOpenGallery: (agentId) => c.openGallery(agentId),
   onContext: (target, x, y) => c.menu(target, { x, y }),
   onPlace: () => { /* persisted locally by the field; the hub has no placement channel yet */ },
   onPlaceArtifact(id, x, y, z) {
@@ -350,7 +351,17 @@ const c: Console = {
     else gesture('hud', 'improve-reveal');
     improvePanel.reveal();
   },
-  openGallery: () => { wm.open({ kind: 'gallery', key: 'gallery', callsign: 'GALLERY' }); },
+  openGallery: (agentId) => {
+    /*
+     * Filtrada por un agente es otra ventana, no la misma con otro filtro: si
+     * compartieran clave, abrir el contador de una baldosa recolocaría la
+     * galería que el operador tenía abierta mirando otra cosa.
+     */
+    const cs = agentId ? store.knownAgent(agentId)?.callsign : '';
+    wm.open(agentId
+      ? { kind: 'gallery', key: `gallery:${agentId}`, callsign: `GALLERY · ${cs ?? '??'}`, params: { agentId } }
+      : { kind: 'gallery', key: 'gallery', callsign: 'GALLERY' });
+  },
   openTimeline: () => { wm.open({ kind: 'timeline', key: 'timeline', callsign: 'TIME' }); },
   openSfx: () => { wm.open({ kind: 'sfx', key: 'sfx', callsign: 'SFX' }); },
   openMusic: () => { wm.open({ kind: 'music', key: 'music', callsign: 'MUSIC' }); },

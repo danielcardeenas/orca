@@ -365,9 +365,67 @@
   position: absolute; inset: 0; display: grid; place-items: center; color: var(--red);
 }
 
+/* ── La estantería: las fichas de lo que un agente hizo ───────────── */
+
+/*
+ * Una franja de fichas bajo la baldosa. El hueco lo reserva la rejilla
+ * (`layout.ts`), así que esto no tapa nada: cae en su sitio.
+ *
+ * Son `<img>` y no texturas a propósito — ver `field/shelves.ts` —, con techo
+ * en píxeles: el lado lo pone el campo por fotograma, y `object-fit: cover`
+ * hace que una imagen de cualquier proporción llene su ficha cuadrada sin
+ * deformarse, que es lo que hace que una fila de cuatro lea como una fila.
+ */
+.chip-art {
+  position: absolute; left: 0; top: 0;
+  transform-origin: 0 0; will-change: transform;
+  padding: 0; overflow: hidden; pointer-events: auto;
+  background: var(--screen); border: 1px solid var(--line);
+  display: grid; place-items: center;
+}
+.chip-art img,
+.chip-art video { display: block; width: 100%; height: 100%; object-fit: cover; }
+/*
+ * Lo que no tiene miniatura posible dice qué es y cuánto pesa. La ficha es
+ * pequeña, así que el texto se encoge con ella y se parte: `ZIP` arriba y el
+ * peso debajo es legible a 33 px, y una línea de veinte caracteres no.
+ */
+.chip-art .chip__k {
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 8px; line-height: 1.15; text-align: center; color: var(--ink-dim);
+  padding: 2px; word-break: break-all;
+}
+/* El contador: no es una imagen, es una puerta. Lo dice pareciendo un botón. */
+.chip-art--more { background: var(--shell); }
+.chip-art--more .chip__n {
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 10px; color: var(--ink-mid);
+}
+.chip-art:hover { border-color: var(--lime); }
+.chip-art:hover .chip__n,
+.chip-art:hover .chip__k { color: var(--lime); }
+/* Un vídeo es su primer fotograma y una marca, nunca un vídeo reproduciéndose. */
+.chip__play {
+  position: absolute; right: 1px; bottom: 0;
+  font-size: 7px; color: var(--ink-bright); text-shadow: 0 0 3px #000;
+}
+/*
+ * El agente terminó o murió: su franja se atenúa con su baldosa, que ya lo
+ * dice (`alpha` 0.35 y 0.55 en el campo). Un artefacto de alguien que terminó
+ * sigue siendo suyo; lo que cambia es cuánta atención pide.
+ */
+.chip-art.is-dim { opacity: 0.55; }
+.field__layer.is-focus .chip-art { opacity: 0.12; }
+
 @media (prefers-reduced-motion: reduce) {
   .field.is-live { transition: none; }
   .field__layer .lbl { transition: none; }
+  /*
+   * La ficha aparece dibujada, nunca deslizada ni desvanecida, así que no hay
+   * transición que quitar: sólo el subrayado del hover, que es movimiento de
+   * color y no de forma. Se queda, porque quitarlo quitaría información — cuál
+   * de las cinco fichas se va a abrir.
+   */
   /* The rung lands whole: the information is the elements, not their order. */
   .lbl.is-rung [data-rung] { animation: none; }
   /* The beacon stays lit: colour alone says command. */

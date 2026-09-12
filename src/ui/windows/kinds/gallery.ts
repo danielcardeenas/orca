@@ -50,7 +50,12 @@ export const ARTIFACT_DND = 'text/orca-artifact';
 export function mountGallery(ctx: WinCtx, c: Console) {
   const body = ctx.body;
   let project = '';   // '' = every project
-  let agent = '';     // '' = every agent
+  /*
+   * '' = every agent. Puede venir puesto: el contador de la estantería de una
+   * baldosa («+36») abre esta ventana ya filtrada por ese agente, que es lo que
+   * hace que el lienzo pueda decir «hizo cuarenta» sin enseñar cuarenta.
+   */
+  let agent = ctx.win.spec.params?.agentId ?? '';
   let newestFirst = true;
   let sig = '';
 

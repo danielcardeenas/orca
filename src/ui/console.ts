@@ -64,7 +64,11 @@ export interface Console {
   openHygiene(): void;
   /** Despliega la sección AUTOMEJORA y la trae a la vista (⌥I). */
   openImprove(): void;
-  openGallery(): void;
+  /**
+   * El índice de todo lo que la flota ha hecho. Con un agente, ya filtrado por
+   * él: es la puerta del contador de su estantería en el campo.
+   */
+  openGallery(agentId?: string): void;
   openTimeline(): void;
   /** The sound board: audition every clip, assign one per event. */
   openSfx(): void;

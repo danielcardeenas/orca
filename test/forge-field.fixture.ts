@@ -20,7 +20,7 @@ store.world.agents = { F1: lead, F2: child, F3: member, C1: capcom, O1: worker }
 store.world.missions = { [mission.id]: mission };
 export const opened: string[] = [];
 export const field = createField(document.querySelector<HTMLElement>('.field')!, {
-  onSelect(ids, at) { if (at) opened.push(...ids); }, onOpen(id) { opened.push(id); }, onOpenProject() {}, onOpenSquad() {}, onOpenArtifact() {}, onContext() {}, onPlace() {}, onPlaceArtifact() {}, onUnplaceArtifact() {}, onHover() {},
+  onSelect(ids, at) { if (at) opened.push(...ids); }, onOpen(id) { opened.push(id); }, onOpenProject() {}, onOpenSquad() {}, onOpenArtifact() {}, onOpenGallery() {}, onContext() {}, onPlace() {}, onPlaceArtifact() {}, onUnplaceArtifact() {}, onHover() {},
 });
 field.setActive(true);
 export function phase(label: string) {

@@ -32,7 +32,17 @@ npm test                      las 62 suites
 npm test -- capcom wake       suites cuyo nombre contiene alguno de los filtros
 npm test -- --since=HEAD~1    contra una referencia de git
 npm run visual                arnés visual, para cambios de UI
+npm run shots                 los shots, de uno en uno; `-- hud` filtra por nombre
 ```
+
+Un shot (`test/*.shots.ts`) abre la consola de verdad en Chromium y afirma sobre
+lo que ve. `npm test` no los descubre —sólo mira `test/*.test.ts`— y
+`npm run visual` corre sus propias escenas, así que hasta que existió
+`npm run shots` sólo se corrían si alguien tecleaba el nombre del fichero de
+memoria: `hud-improve.shots.ts` estuvo semanas en rojo con la suite en verde y
+el panel de AUTOMEJORA sin red. Si tocas la UI, corre los que la miran y di
+cuáles en la entrega; cada uno levanta su hub, su Vite y su flota, así que van
+en serie y cuestan minutos, no segundos.
 
 Al entregar, decir qué se corrió y qué salió. «Los tests pasan», sin decir
 cuáles, no es verificación. Un fallo reportado a tiempo cuesta mucho menos que

@@ -980,6 +980,7 @@ wake a session that has already stopped executing.
 ```bash
 npm test                # 270+ assertions: collector, hub, MCP, CAPCOM routing, derived state
 npm run visual          # drives the real console, writes test/shots/
+npm run shots           # every test/*.shots.ts, one after another
 npm run stress          # 24 → 3,000 agents, frame rate and draw counts
 npm run mock            # a synthetic fleet to develop against
 ```
@@ -994,6 +995,18 @@ field and a window at 402×874. Take one group at a time with
 `npx tsx test/visual.ts boot | console | mobile`, watch it with `--headed`,
 leave the servers up with `--keep`. Looking at those frames is part of
 finishing a change, not an optional extra.
+
+`npm run shots` is the gate for the other kind: a `test/*.shots.ts` opens the
+real console in Chromium, seeds a state and asserts thirty things about what it
+sees — the panels, the folds, the meters, the tethers. They are not in
+`npm test`, which only discovers `test/*.test.ts` and would grow by a quarter of
+an hour if they were, and `npm run visual` runs its own scenes: until this
+existed nobody ran them unless they typed the filename from memory, and
+`hud-improve.shots.ts` sat red for weeks while the suite reported 1338/1338.
+They run one at a time — each brings up its own hub, Vite, fleet and browser —
+and always isolated, so the gate never writes into the operator's `~/.orca`.
+Filter by name (`npm run shots -- hud`), list them with `--list`, watch one with
+`--headed`.
 
 `test/field-stress.ts` measures the claim the field makes instead of asserting
 it. For 24, 120, 600 and 3,000 agents it scales the synthetic fleet

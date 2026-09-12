@@ -29,6 +29,7 @@
  * "léeme cualquier archivo de ese portátil".
  */
 
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -81,6 +82,16 @@ const SKIP_DIRS = new Set([
  * ahogar el índice sí.
  */
 const MAX_BURST = 24;
+
+/**
+ * Cuántos veredictos de `git check-ignore` se recuerdan por proyecto.
+ *
+ * La respuesta para una ruta no cambia salvo que alguien edite un `.gitignore`,
+ * y un render por lotes pregunta por los mismos directorios una y otra vez.
+ * Al llenarse se vacía entero: reconstruirlo cuesta un `git` y olvidar de más
+ * no rompe nada.
+ */
+const MAX_IGNORE_MEMO = 4_000;
 
 /** Tools cuyo `file_path` es, literalmente, un archivo que acaba de aparecer. */
 export const ARTIFACT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
@@ -161,6 +172,8 @@ export class ArtifactIndex {
   private trees = new Map<string, fs.FSWatcher>();
   /** ruta absoluta → proyecto, de lo que el árbol vio y el tick aún no miró. */
   private seen = new Map<string, string>();
+  /** ruta absoluta → la ignora git. Ver `gitIgnores()`. */
+  private ignored = new Map<string, boolean>();
   /** archivo de declaración → mtime ya procesado. Ver `takeDecl()`. */
   private decls = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
@@ -190,6 +203,7 @@ export class ArtifactIndex {
     this.watchers.clear();
     this.trees.clear();
     this.seen.clear();
+    this.ignored.clear();
   }
 
   track(projectId: string, projectPath: string): void {
@@ -518,13 +532,52 @@ export class ArtifactIndex {
     }
     fresh.sort((a, b) => b.at - a.at);
 
-    for (const f of fresh.slice(0, MAX_BURST)) {
+    const keep = await this.dropIgnored(fresh.slice(0, MAX_BURST));
+    for (const f of keep) {
       const agentId = this.deps.resolveAgent(f.projectId, null);
       // Sin nadie a quien colgárselo no hay registro: un artefacto sin dueño
       // no tiene dónde vivir en la consola, y adivinar un dueño es peor.
       if (!agentId) continue;
       this.observe({ path: f.file, projectId: f.projectId, agentId, at: f.at });
     }
+  }
+
+  /**
+   * Quita del lote lo que el propio proyecto declara que no es suyo.
+   *
+   * `.gitignore` es la única lista de «esto no es trabajo» que un repo escribe
+   * de verdad y mantiene al día, así que es mejor que cualquier lista de
+   * directorios que pudiéramos inventar aquí — que además nunca cerraría:
+   * mañana hay otro directorio. Se midió el día que esto entró en servicio:
+   * veintitrés capturas del arnés visual (`test/shots/`, ignorado) en diez
+   * minutos, todas atribuidas a agentes que no las habían hecho.
+   *
+   * Esto vale SÓLO para lo que aparece solo. Una declaración —`orca-show`—
+   * nunca se filtra por aquí: un render de vídeo vive en un directorio
+   * ignorado casi siempre, porque los binarios no se commitean, y colar ahí
+   * este filtro mataría justo el caso que motivó la captura. Que el agente lo
+   * publique sigue siendo la forma de decir «éste sí».
+   */
+  private async dropIgnored(
+    batch: { file: string; projectId: string; at: number }[],
+  ): Promise<{ file: string; projectId: string; at: number }[]> {
+    if (batch.length === 0) return batch;
+    const ask = new Map<string, string[]>();   // proyecto → rutas sin veredicto
+    for (const f of batch) {
+      if (this.ignored.has(f.file)) continue;
+      const root = this.tracked.get(f.projectId)?.projectPath;
+      if (!root) continue;
+      const list = ask.get(root) ?? [];
+      list.push(f.file);
+      ask.set(root, list);
+    }
+    for (const [root, files] of ask) {
+      const hits = await gitIgnores(root, files);
+      if (hits === null) continue;   // no es un repo, o git no contestó
+      if (this.ignored.size > MAX_IGNORE_MEMO) this.ignored.clear();
+      for (const f of files) this.ignored.set(f, hits.has(f));
+    }
+    return batch.filter((f) => this.ignored.get(f.file) !== true);
   }
 
   /**
@@ -591,6 +644,38 @@ export class ArtifactIndex {
 }
 
 /* ── helpers de módulo ────────────────────────────────────────────── */
+
+/**
+ * Cuáles de esas rutas ignora git, o null si no se puede saber.
+ *
+ * Un solo proceso para todo el lote — `check-ignore` lee las rutas por stdin —
+ * y sin bloqueos de git, porque esto corre mientras la flota trabaja en el
+ * mismo árbol. Que devuelva null (no es un repo, git no está, se pasó el
+ * tiempo) significa exactamente «no sé», y entonces no se filtra nada: perder
+ * un resultado por una duda es peor que dejar pasar una captura de más.
+ */
+function gitIgnores(root: string, files: string[]): Promise<Set<string> | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v: Set<string> | null): void => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const child = execFile('git', ['-C', root, 'check-ignore', '--stdin'], {
+        timeout: 3_000, maxBuffer: 4 * 1024 * 1024, shell: false, windowsHide: true,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      }, (err, stdout) => {
+        // 0 = alguna ignorada, 1 = ninguna. Cualquier otra cosa es un fallo.
+        const code = (err as NodeJS.ErrnoException & { code?: number } | null)?.code;
+        if (err && code !== 1) return done(null);
+        done(new Set(String(stdout).split('\n').map((l) => l.trim()).filter(Boolean)));
+      });
+      child.on('error', () => done(null));
+      child.stdin?.on('error', () => done(null));
+      child.stdin?.end(files.join('\n') + '\n');
+    } catch {
+      done(null);
+    }
+  });
+}
 
 async function readdirQuiet(dir: string): Promise<string[] | null> {
   try {

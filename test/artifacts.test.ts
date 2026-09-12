@@ -16,6 +16,7 @@
  * Todo corre en directorios temporales propios: nada toca ~/.orca ni ~/.claude.
  */
 
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -395,6 +396,17 @@ export async function testExplicitPublication(): Promise<TestResult> {
     writeFileSync(join(decls, 'show_bad.json'), JSON.stringify({
       path: '/etc/hosts', title: 'nope', agentId: 'a1',
     }));
+    /*
+     * Ni un binario dentro del proyecto declarándose `file`. La extensión manda
+     * incluso sobre un `kind` declarado, y por eso `kind` sólo puede reetiquetar
+     * lo que ya califica: si pudiera saltarse la lista, un `{"path": ".env",
+     * "kind": "text"}` convertiría este canal en una forma de sacar los secretos
+     * del proyecto por el hub.
+     */
+    writeFileSync(join(dir, 'entrega.zip'), 'PK\u0003\u0004binario');
+    writeFileSync(join(decls, 'show_zip.json'), JSON.stringify({
+      path: join(dir, 'entrega.zip'), title: 'todo junto', kind: 'file', agentId: 'a1',
+    }));
 
     const seen: string[] = [];
     idx.onArtifact((a) => seen.push(a.title));
@@ -417,7 +429,7 @@ export async function testExplicitPublication(): Promise<TestResult> {
     await sleep(200);
     assert(seen.length === before, `se re-emitió ${seen.length - before} veces sin cambiar nada`);
 
-    return ok(name, `1 declaración válida entra con su título, /etc/hosts no, y no repite`);
+    return ok(name, `1 declaración válida entra con su título; /etc/hosts y un .zip declarado file, no`);
   } catch (err) {
     return fail(name, String(err));
   } finally {
@@ -654,6 +666,64 @@ export async function testTreeNeedsAnOwner(): Promise<TestResult> {
   }
 }
 
+/* ── 8 · lo que el repo ya declara que no es trabajo ──────────────── */
+
+/**
+ * `.gitignore` filtra lo que aparece solo, y NO filtra lo que se publica.
+ *
+ * Medido el día que la captura por efecto entró en servicio: veintitrés
+ * capturas del arnés visual —`test/shots/`, ignorado por el repo— en diez
+ * minutos, atribuidas a agentes que no las habían hecho. `.gitignore` es la
+ * única lista de «esto no es trabajo» que un repo mantiene al día.
+ *
+ * La otra mitad importa igual: un render de vídeo vive en un directorio
+ * ignorado casi siempre, porque los binarios no se commitean. Si el filtro
+ * alcanzara a las declaraciones, mataría el caso que motivó todo esto.
+ */
+export async function testTreeRespectsGitignore(): Promise<TestResult> {
+  const name = 'lo que git ignora no entra solo, pero sí se puede publicar';
+  const dir = tempDir('orca-art-ign-');
+  const idx = index();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir, stdio: 'ignore' });
+    writeFileSync(join(dir, '.gitignore'), 'shots/\n');
+    mkdirSync(join(dir, 'shots'), { recursive: true });
+    mkdirSync(join(dir, 'out'), { recursive: true });
+
+    idx.track('p1', dir);
+    idx.start(50);
+    await sleep(200);
+
+    const shot = join(dir, 'shots', 'console-01.png');
+    const render = join(dir, 'out', 'render.png');
+    writeFileSync(shot, makePng(64, 1));
+    writeFileSync(render, makePng(64, 2));
+
+    await until(() => idx.list().length > 0, 5_000, 'el render del árbol');
+    await sleep(400);
+
+    const paths = idx.list().map((a) => a.path);
+    assert(paths.includes(render), 'el render de out/ no entró');
+    assert(!paths.includes(shot), `una captura ignorada se coló: ${paths.join(' ')}`);
+
+    // Y ahora el agente dice que esa captura SÍ es el resultado.
+    idx.observe({
+      path: shot, projectId: 'p1', agentId: 'a1', at: Date.now(),
+      declaredIn: dir, title: 'La captura que quería enseñar',
+    });
+    const declared = idx.get(artifactId(MACHINE, shot));
+    assert(declared !== null, 'publicar algo ignorado por git debería entrar igual');
+    assert(declared!.source === 'declared', `entró como ${declared!.source}`);
+
+    return ok(name, 'shots/ ignorado no entra solo; publicado entra con su título');
+  } catch (err) {
+    return fail(name, String(err));
+  } finally {
+    idx.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /* ── suite ────────────────────────────────────────────────────────── */
 
 export default {
@@ -669,6 +739,7 @@ export default {
     testHubCapKeepsWhatWasDeclared,
     testTreeCatchesWhatBashMade,
     testTreeNeedsAnOwner,
+    testTreeRespectsGitignore,
     testHubServesArtifact,
   ],
 };

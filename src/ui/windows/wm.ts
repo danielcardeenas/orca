@@ -125,6 +125,7 @@ import { typing } from '../keys.ts';
 import { dur, EASE, REDUCE, T } from '../motion.ts';
 import { getSound } from '../hud/sound.ts';
 import { longPress } from '../hud/longpress.ts';
+import { share, spend, wheelPixels } from './chain.ts';
 import {
   assemble, cascade, check, collapse, collapseShort, echoKbd, foldTo, sendToCanvas, stopAssemble,
   unfoldFrom, wipe,
@@ -217,6 +218,12 @@ export interface WmEvents {
   project?(x: number, y: number): { x: number; y: number };
   unproject?(x: number, y: number): { x: number; y: number };
   onZoom?(e: WheelEvent): void;
+  /**
+   * What a canvas window could not scroll, in pixels, at the point the
+   * gesture is over. The field takes it as its own wheel, so one unbroken
+   * movement runs a conversation out and then pans the canvas.
+   */
+  onPan?(dx: number, dy: number, clientX: number, clientY: number): void;
   agentOrigin?(id: string): { x: number; y: number } | null;
   onLocateWindow?(bounds: { minX: number; minY: number; maxX: number; maxY: number }): void;
   plane?(): { origin: { x: number; y: number }; ppu: number };
@@ -1358,7 +1365,27 @@ export class WindowManager {
     el.querySelector('[data-w-close]')!.addEventListener('click', () => this.close(win));
     el.querySelector('[data-w-min]')!.addEventListener('click', () => this.minimize(win));
     el.addEventListener('wheel', e => {
-      if (win.mode === 'canvas' && (e.ctrlKey || e.metaKey) && this.ev.onZoom) { e.preventDefault(); this.ev.onZoom(e); }
+      // On the canvas the window stands in the space, so the space answers
+      // for what the window cannot spend. In front it is a page over the
+      // glass: running a list out there must not drag the field underneath.
+      if (win.mode !== 'canvas') return;
+      if (e.ctrlKey || e.metaKey) {
+        if (!this.ev.onZoom) return;
+        e.preventDefault(); this.ev.onZoom(e);
+        return;
+      }
+      if (!this.ev.onPan) return;
+      const px = wheelPixels(e);
+      const rest = share(e.target as Element | null, el, px.dx, px.dy);
+      // The window takes the whole gesture: leave it to the browser. Doing it
+      // by hand here would trade the wheel's own smoothing for jumps on every
+      // ordinary scroll, to fix a frame that is not happening.
+      if (Math.abs(rest.dx) < 1 && Math.abs(rest.dy) < 1) return;
+      // Something is left: now we own the event, both halves of it, so the
+      // window's last pixels and the field's first arrive in the same frame.
+      e.preventDefault();
+      spend(rest.take);
+      this.ev.onPan(rest.dx, rest.dy, e.clientX, e.clientY);
     }, { passive: false });
     el.querySelector('[data-w-front]')!.addEventListener('click', () => win.mode === 'canvas' ? this.bringForward(win) : this.returnToCanvas(win));
     const pin = el.querySelector<HTMLElement>('[data-w-pin]');

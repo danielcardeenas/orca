@@ -1,11 +1,17 @@
 import { WindowManager } from '../src/ui/windows/wm.ts';
 import { mountTray } from '../src/ui/hud/tray.ts';
 import { mountFile } from '../src/ui/windows/kinds/file.ts';
+import { lockPageZoom } from '../src/ui/zoom-lock.ts';
+// La barrera del zoom nativo, puesta como en la consola real: lo que esta
+// suite comprueba del visor de imágenes sólo vale con ella delante.
+lockPageZoom();
 export const plane = { origin: { x: 600, y: 400 }, ppu: 40 };
 export let mounts = 0;
 export const located: Array<{ minX: number; minY: number; maxX: number; maxY: number }> = [];
 /** Pinches the windows handed to the field. */
 export let zooms = 0;
+/** What the windows could not scroll, handed to the field as a pan. */
+export const panned: Array<{ dx: number; dy: number }> = [];
 let tray: ReturnType<typeof mountTray> | undefined;
 /** Where the anchor tile is on the glass; the suite moves it off screen. */
 export const tile = { x: 250, y: 200, w: 180, h: 140, visible: true, ahead: true };
@@ -21,6 +27,7 @@ export const wm = new WindowManager(document.body, {
   },
   plane: () => plane, onFocus() {}, onTray: () => tray?.render(),
   onZoom: () => { zooms++; },
+  onPan: (dx, dy) => { panned.push({ dx, dy }); },
 });
 wm.register('file', (ctx) => mountFile(ctx, {} as never));
 wm.register('help', ({ body }) => {

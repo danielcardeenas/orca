@@ -149,6 +149,19 @@ html, body {
   padding: 0;
   height: 100%;
   overflow: hidden;
+  /*
+   * The only zoom is the field camera (`zoom-lock.ts` closes the other three
+   * channels). `touch-action` is not inherited — it is resolved against the
+   * whole ancestor chain — so declaring it here shuts pinch-zoom and
+   * double-tap zoom off for the entire page: HUD, panels and windows
+   * included. It used to sit on `.field` alone, and a pinch anywhere else
+   * scaled the console off its grid.
+   *
+   * `pan-x pan-y` and not `none`: lists inside windows and panels still have
+   * to scroll under a finger. `.field { touch-action: none }` still wins over
+   * the canvas — `none` is the stricter value, and the chain intersects.
+   */
+  touch-action: pan-x pan-y;
 }
 
 body {

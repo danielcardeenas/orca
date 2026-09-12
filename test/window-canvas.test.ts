@@ -207,6 +207,63 @@ export default {
       await change(f => { f.plane.origin.x += 4000; });
       assert.equal(await placed(), 'canvas', 'and takes it back when the camera returns');
 
+      /* ── The scroll chains to the field ─────────────────────────────
+         A window on the canvas stands *in* the space, so running its list out
+         and pushing on has to move the field — the same gesture, without
+         lifting off. The split happens inside one event, so neither the
+         window nor the field ever moves by the whole delta. */
+      await change(f => {
+        for (const w of f.wm.all()) f.wm.close(w);
+        f.panned.length = 0;
+        f.plane.origin.x = 600; f.plane.origin.y = 400; f.plane.ppu = 40;
+        f.wm.returnToCanvas(f.wm.open({ kind: 'help', key: 'chain', callsign: 'CHAIN', w: 380, h: 560 }));
+      });
+      const over = await page.locator('.win__scroll').first().boundingBox(); assert(over);
+      assert(over.height > 40, `The list is worth aiming at: ${over.height}`);
+      await page.mouse.move(over.x + over.width / 2, over.y + over.height / 2);
+      const chain = () => page.evaluate(() => {
+        const f = (window as any).fixture as BrowserFixture;
+        const el = document.querySelector('.win__scroll') as HTMLElement;
+        return { top: Math.round(el.scrollTop), max: Math.round(el.scrollHeight - el.clientHeight),
+          panned: f.panned.map(p => ({ dx: Math.round(p.dx), dy: Math.round(p.dy) })) };
+      });
+      const start = await chain();
+      assert(start.max > 200, `The list has somewhere to go: ${start.max}`);
+      // With room left the browser does the scrolling, as it always has: the
+      // field hears nothing, and the wheel keeps its own smoothing.
+      await page.mouse.wheel(0, 60); await page.waitForTimeout(250);
+      const inside = await chain();
+      assert(inside.top > 0, `The list scrolled: ${inside.top}`);
+      assert.deepEqual(inside.panned, [], 'and the field stayed still');
+      // Twenty pixels from the end, a sixty-pixel wheel spends twenty and
+      // hands forty on: one frame, one movement, nothing counted twice.
+      await page.evaluate(() => { const e = document.querySelector('.win__scroll') as HTMLElement; e.scrollTop = e.scrollHeight - e.clientHeight - 20; });
+      await page.mouse.wheel(0, 60); await page.waitForTimeout(150);
+      const edge = await chain();
+      assert.equal(edge.top, edge.max, 'The list finishes its last twenty');
+      assert.deepEqual(edge.panned, [{ dx: 0, dy: 40 }], 'and the field takes exactly the rest');
+      // Exhausted, the whole gesture is the field's.
+      await page.mouse.wheel(0, 60); await page.waitForTimeout(150);
+      const spent = await chain();
+      assert.deepEqual(spent.panned.at(-1), { dx: 0, dy: 60 });
+      assert.equal(spent.top, edge.max, 'and the list does not move again');
+      // Upwards, and sideways: the list has no horizontal scroll, so a
+      // sideways wheel belongs to the field from the first pixel.
+      await page.evaluate(() => { (document.querySelector('.win__scroll') as HTMLElement).scrollTop = 0; });
+      await page.mouse.wheel(0, -60); await page.waitForTimeout(150);
+      assert.deepEqual((await chain()).panned.at(-1), { dx: 0, dy: -60 }, 'Upwards too');
+      await page.mouse.wheel(50, 0); await page.waitForTimeout(150);
+      assert.deepEqual((await chain()).panned.at(-1), { dx: 50, dy: 0 }, 'and sideways');
+      // In front the window is a page over the glass: running a list out
+      // there must not drag the field along underneath it.
+      await change(f => { f.wm.bringForward(f.wm.all()[0]!); f.panned.length = 0; });
+      const up = await page.locator('.win__scroll').first().boundingBox(); assert(up);
+      await page.mouse.move(up.x + up.width / 2, up.y + up.height / 2);
+      await page.evaluate(() => { const e = document.querySelector('.win__scroll') as HTMLElement; e.scrollTop = e.scrollHeight; });
+      await page.mouse.wheel(0, 60); await page.waitForTimeout(150);
+      assert.deepEqual((await chain()).panned, [], 'A window in front keeps the field still');
+      await change(f => { f.wm.returnToCanvas(f.wm.all()[0]!); });
+
       /* ── `+` is the pair of `-` ──────────────────────────────────── */
       const first = () => page.evaluate(() => {
         const f = (window as any).fixture as BrowserFixture, w = f.wm.all()[0]!;

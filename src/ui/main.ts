@@ -72,12 +72,15 @@ import { esc } from './util.ts';
 import { keyHold, typing as typingIn } from './keys.ts';
 import { applyToRoot, gsapDefaults } from './motion.ts';
 import { applyFonts } from './fonts.ts';
+import { lockPageZoom } from './zoom-lock.ts';
 
 // One motion contract for CSS, GSAP and the shaders, before anything mounts.
 applyToRoot();
 gsapDefaults();
 // And the two faces, before the boot paints its first glyph.
 applyFonts();
+// El único zoom es la cámara del campo. Antes de que haya nada que pellizcar.
+lockPageZoom();
 
 const app = document.getElementById('app')!;
 const params = new URL(location.href).searchParams;
@@ -136,6 +139,13 @@ const wm = new WindowManager(app, {
   onZoom: (e) => fieldEl.dispatchEvent(new WheelEvent('wheel', {
     clientX: e.clientX, clientY: e.clientY, deltaY: e.deltaY, deltaMode: e.deltaMode,
     ctrlKey: e.ctrlKey, metaKey: e.metaKey, bubbles: true, cancelable: true,
+  })),
+  // Lo que una ventana del canvas ya no puede scrollear sigue al campo por la
+  // misma puerta que el pellizco: la ventana es hermana del campo en el DOM,
+  // no su hija, así que el encadenado nativo no llega. Va en píxeles
+  // (`deltaMode: 0`) porque el remanente ya viene convertido.
+  onPan: (dx, dy, clientX, clientY) => fieldEl.dispatchEvent(new WheelEvent('wheel', {
+    clientX, clientY, deltaX: dx, deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true,
   })),
   onTray: (list) => tray.render(list),
   onStack: (list) => { tray.render(list); document.body.classList.toggle('has-tray', wm.trayRow().length > 0); },

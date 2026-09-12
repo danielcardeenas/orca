@@ -30,8 +30,15 @@
 .hyg__strays-head b { color: var(--ink-bright); font-weight: 400; }
 
 /* La lista tiene su propio alto: es lo accionable, y no debe empujar el
-   informe de disco fuera de la ventana por muchos restos que haya. */
-.hyg__stray-list { max-height: 220px; overflow: auto; overscroll-behavior: contain; }
+   informe de disco fuera de la ventana por muchos restos que haya.
+
+   Sin `overscroll-behavior: contain`, que es lo que llevaba: esta lista vive
+   dentro de una ventana, y una ventana en el canvas devuelve al campo el
+   gesto que no puede gastar (`windows/chain.ts`). `contain` es justo el freno
+   que corta ese encadenado, y aquí cortarlo deja el gesto muerto — el padre
+   en el DOM tampoco scrollea. Lo conservan el HUD y los diálogos, donde
+   arrastrar el campo por debajo sí sería un defecto. */
+.hyg__stray-list { max-height: 220px; overflow: auto; }
 
 .hyg__stray {
   position: relative;

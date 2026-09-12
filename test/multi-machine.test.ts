@@ -113,7 +113,7 @@ function box(o: {
 const spawnInput = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   project_id: 'AX', machine: null, mission: MISSION, parent_agent_id: null, background: true,
   squad: null, lead: false, runtime: null, model: null, mission_id: null, permission_mode: null,
-  budget_tokens: null, budget_usd: null, budget_min: null, ...over,
+  budget_tokens: null, budget_min: null, ...over,
 });
 
 function parse<T>(out: { result: string }): T { return JSON.parse(out.result) as T; }
@@ -245,8 +245,8 @@ const tests = [
       lead_mission: 'Lead the audit: split the work below across your members and consolidate one report.',
       members: [{ mission: MISSION, model: null }, { mission: MISSION, model: null }],
       lead_model: null, background: true, runtime: null, permission_mode: null,
-      budget_tokens: null, budget_usd: null, budget_min: null,
-      squad_budget_tokens: null, squad_budget_usd: null, squad_budget_min: null, shared_worktree: false,
+      budget_tokens: null, budget_min: null,
+      squad_budget_tokens: null, squad_budget_min: null, shared_worktree: false,
     });
     const spawns = sent.filter((s) => s.cmd.k === 'spawn');
     return ok(

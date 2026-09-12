@@ -885,7 +885,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
      * una segunda contabilidad que un día discrepa de la que se enseña.
      */
     improveBudget: (ref, tokens) => {
-      const limit = { tokens, usd: null, min: null };
+      const limit = { tokens, min: null };
       if (ref.agentId) budgets.set({ kind: 'agent', ref: ref.agentId }, limit);
       else if (ref.shortId) budgets.setPendingByShortId(ref.shortId, limit);
     },
@@ -981,7 +981,12 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   // nada de él. Sin esto, un fantasma —sesión de tmux desaparecida, estado
   // congelado en `working`— avisaba en bucle y ninguna herramienta lo alcanzaba.
   const budgets = options.budgets
-    ?? new BudgetBook(store.dir, budgetConfig(), { liveness: () => ({ machines: world.state.machines }) });
+    ?? new BudgetBook(store.dir, budgetConfig(), {
+      liveness: () => ({ machines: world.state.machines }),
+      // Un techo que se borra por no tener ya a quién frenar es un hecho, no un
+      // aviso: va al log del hub y no a CAPCOM, que no puede hacer nada con él.
+      onPrune: (keys) => log(`techos retirados por no quedar sujeto: ${keys.join(', ')}`),
+    });
   const budgetNote = (level: 'warn' | 'alert', text: string, agentId: string | null): void => {
     world.pushFeed('', [{
       id: newId('f_bud'), at: Date.now(), level, source: 'BUDGET', text,

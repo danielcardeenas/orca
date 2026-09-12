@@ -1,9 +1,10 @@
 /**
  * Presupuestos por worker, escuadrón y misión.
  *
- * Lo que se comprueba es la política, no la fontanería: que la unidad por
- * defecto son TOKENS y no dólares, que el dinero sólo cuenta con el modo
- * encendido, que el 80 % avisa una vez, que el 100 % con progreso reciente NO
+ * Lo que se comprueba es la política, no la fontanería: que las unidades son
+ * TOKENS y minutos activos y que el dinero ya no es ninguna —un techo en
+ * dólares de un libro viejo se cae al cargarlo—, que un techo cuyo sujeto ya
+ * no está en la flota se borra solo, que el 80 % avisa una vez, que el 100 % con progreso reciente NO
  * para, que el 100 % sin progreso sí para, que los defaults del entorno
  * alcanzan a quien no tiene techo propio y que el techo de un escuadrón se
  * reparte entre sus miembros.
@@ -24,7 +25,7 @@
  * por su canal y al feed.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -70,9 +71,12 @@ function emptyMetrics(): Agent['metrics'] {
 }
 
 /** Un techo, con los ejes que no se nombran a null. */
-function cap(over: { tokens?: number | null; usd?: number | null; min?: number | null }) {
-  return { tokens: over.tokens ?? null, usd: over.usd ?? null, min: over.min ?? null };
+function cap(over: { tokens?: number | null; min?: number | null }) {
+  return { tokens: over.tokens ?? null, min: over.min ?? null };
 }
+
+/** El plazo de `pruneOrphans`, aquí para no repetir el número mágico. */
+const ORPHAN_GRACE = 10 * 60_000;
 
 function book(env: Record<string, string> = {}, now: () => number): BudgetBook {
   return new BudgetBook(null, budgetConfig(env as NodeJS.ProcessEnv), { now });
@@ -510,36 +514,76 @@ const broodBrake = test('el freno corta por número de descendientes vivos y por
   return eq('con ORCA_SWARM_ACTION=stop para al ancestro, que es lo único parable', dev[0]!.stopIds, ['root']);
 });
 
-/* ── 10 · el dinero, apagado por defecto ──────────────────────────── */
+/* ── 10 · el dinero, fuera; los techos de los muertos, también ───── */
 
-const moneyIsOptional = test('el techo en dólares se guarda y se ignora; ORCA_BUDGET_MONEY=1 lo enciende y marca el suelo', () => {
-  let now = T0;
-  const off = book({}, () => now);
-  off.set({ kind: 'agent', ref: 'k9' }, cap({ usd: 1 }));
-  const fleet = { k9: agent({ id: 'k9', metrics: { costUSD: 5 } }) };
-  const r1 = eq('con el dinero apagado, un techo en dólares no dispara nada', kinds(off.tick(fleet, {}, (now += 1000))), []);
-  if (!r1.pass) return r1;
-  const r2 = eq('pero sigue en el libro, para cuando haga falta', off.get({ kind: 'agent', ref: 'k9' }), cap({ usd: 1 }));
-  if (!r2.pass) return r2;
+const moneyIsGone = test('un techo en dólares guardado antes del 2026-09-12 se ignora al cargarlo, y si era su único eje el techo entero se va', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orca-budget-money-'));
+  try {
+    let now = T0;
+    // El libro de un ORCA anterior: dos techos en dólares, uno con minutos y
+    // otro sin nada más. Escrito a mano porque la versión que los ponía ya no
+    // existe, que es justamente la situación que hay que aguantar.
+    writeFileSync(join(dir, 'budgets.json'), JSON.stringify({
+      limits: {
+        'agent:solo': { tokens: null, usd: 12, min: null },
+        'agent:mixto': { tokens: null, usd: 12, min: 60 },
+      },
+      pendingByShortId: {}, fired: {}, activeMs: {}, retired: [],
+    }));
+    const b = new BudgetBook(dir, budgetConfig({} as NodeJS.ProcessEnv), { now: () => now });
 
-  const on = book({ ORCA_BUDGET_MONEY: '1' }, () => now);
-  on.set({ kind: 'agent', ref: 'k9' }, cap({ usd: 6 }));
-  const ev = on.tick(fleet, {}, (now += 1000));
-  const r3 = eq('encendido, el mismo techo avisa', kinds(ev), ['warn']);
-  if (!r3.pass) return r3;
-  return ok('coste reportado: sin marca de suelo', ev[0]!.text.includes('$5.00 of $6.00') && !ev[0]!.text.includes('≥'), ev[0]?.text);
+    const r1 = eq('el que sólo tenía dólares desaparece', b.get({ kind: 'agent', ref: 'solo' }), null);
+    if (!r1.pass) return r1;
+    const r2 = eq('el que además tenía minutos conserva los minutos y pierde los dólares',
+      b.get({ kind: 'agent', ref: 'mixto' }), cap({ min: 60 }));
+    if (!r2.pass) return r2;
+
+    // Y lo que se guarda de vuelta ya no lleva dinero: el eje no vuelve por
+    // una relectura. Cualquier anotación reescribe el fichero entero.
+    b.set({ kind: 'agent', ref: 'nuevo' }, cap({ tokens: M }));
+    const onDisk = JSON.parse(readFileSync(join(dir, 'budgets.json'), 'utf8')) as { limits: Record<string, unknown> };
+    return ok('el disco no vuelve a tener un eje en dólares',
+      !JSON.stringify(onDisk.limits).includes('usd'), JSON.stringify(onDisk.limits));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-const estimateIsAFloor = test('un coste estimado se marca como SUELO, nunca como total, y pondera la caché', () => {
+const orphansArePruned = test('un techo cuyo sujeto ya no está en la flota se borra, pero no a la primera ni con la flota vacía', () => {
   let now = T0;
-  const b = book({ ORCA_BUDGET_MONEY: '1', ORCA_BUDGET_USD_PER_MTOK: '10' }, () => now);
-  b.set({ kind: 'agent', ref: 'k9' }, cap({ usd: 1 }));
-  // 60k entrada + 30k salida + 100k de caché a 0.1 = 100k ponderados → $1.00
-  const fleet = { k9: agent({ id: 'k9', metrics: { inputTokens: 60_000, outputTokens: 30_000, cacheReadTokens: 100_000 } }) };
-  const ev = b.tick(fleet, {}, (now += 1000));
-  const r = eq('se pasa', kinds(ev), ['over']);
-  if (!r.pass) return r;
-  return ok('y la cifra dice que es un suelo', ev[0]!.text.includes('≥$1.00 of $1.00'), ev[0]?.text);
+  const pruned: string[][] = [];
+  const b = new BudgetBook(null, budgetConfig({} as NodeJS.ProcessEnv), { now: () => now, onPrune: (k) => pruned.push(k) });
+  b.set({ kind: 'agent', ref: 'muerto' }, cap({ tokens: M }));
+  b.set({ kind: 'agent', ref: 'k9' }, cap({ tokens: M }));
+  b.set({ kind: 'squad', ref: 'sin-nadie' }, cap({ tokens: M }));
+
+  // Una flota vacía es lo que se ve mientras el collector no ha hablado: ahí
+  // no se poda nada, o un relevo del hub desarmaría a todo el mundo.
+  b.tick({}, {}, (now += ORPHAN_GRACE + 1000));
+  const r1 = eq('flota vacía: no se toca ningún techo', b.all().length, 3);
+  if (!r1.pass) return r1;
+
+  const fleet = { k9: agent({ id: 'k9', squad: 'vivo-01' }) };
+  b.tick(fleet, {}, (now += 1000));
+  const r2 = eq('primera pasada con flota: se marcan, no se borran', b.all().length, 3);
+  if (!r2.pass) return r2;
+
+  b.tick(fleet, {}, (now += 60_000));
+  const r3 = eq('dentro del plazo tampoco', b.all().length, 3);
+  if (!r3.pass) return r3;
+
+  b.tick(fleet, {}, (now += ORPHAN_GRACE));
+  const left = b.all().map((e) => `${e.scope.kind}:${e.scope.ref}`);
+  const r4 = eq('pasado el plazo se van los dos huérfanos y se queda el vivo', left, ['agent:k9']);
+  if (!r4.pass) return r4;
+  const r5 = eq('y se dice cuáles', pruned.flat().sort(), ['agent:muerto', 'squad:sin-nadie']);
+  if (!r5.pass) return r5;
+
+  // Reaparecer cancela la marca: un agente desarchivado conserva su freno.
+  b.set({ kind: 'agent', ref: 'vuelve' }, cap({ tokens: M }));
+  b.tick(fleet, {}, (now += 1000));
+  b.tick({ ...fleet, vuelve: agent({ id: 'vuelve' }) }, {}, (now += ORPHAN_GRACE + 1000));
+  return eq('el que volvió sigue con techo', !!b.get({ kind: 'agent', ref: 'vuelve' }), true);
 });
 
 /* ── 11 · disco y parsing ─────────────────────────────────────────── */
@@ -576,13 +620,13 @@ const rearmAndPersist = test('subir el techo re-arma los avisos; los límites y 
 });
 
 const limitParsing = test('budgetLimit acepta números, nulos y rechaza basura', () => {
-  const r1 = eq('los tres ejes', budgetLimit(1000, 5, 30), { tokens: 1000, usd: 5, min: 30 });
+  const r1 = eq('los dos ejes', budgetLimit(1000, 30), { tokens: 1000, min: 30 });
   if (!r1.pass) return r1;
-  const r2 = eq('nulos', budgetLimit(null, null, undefined), { tokens: null, usd: null, min: null });
+  const r2 = eq('nulos', budgetLimit(null, undefined), { tokens: null, min: null });
   if (!r2.pass) return r2;
-  const r3 = ok('negativo rechazado', 'error' in budgetLimit(null, -1, null));
+  const r3 = ok('negativo rechazado', 'error' in budgetLimit(null, -1));
   if (!r3.pass) return r3;
-  return ok('y dice qué campo', (budgetLimit(-1, null, null) as { error: string }).error.includes('budget_tokens'));
+  return ok('y dice qué campo', (budgetLimit(-1, null) as { error: string }).error.includes('budget_tokens'));
 });
 
 /* ── 12 · en el hub: set_budget, inspect_agent, el aviso agrupado ── */
@@ -614,16 +658,17 @@ const throughTheHub = test('set_budget pone el techo, inspect_agent enseña el �
     hub.world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id: 'a1#s2', callsign: 'S2', subagent: true, parentId: 'a1#s1', depth: 2, startedAt: now, updatedAt: now, metrics: { inputTokens: 0.1 * M } }) }, 'm1');
     const ctx = hubContext(hub);
 
-    const twice = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: 'x', mission_id: null, budget_tokens: 2 * M, budget_usd: null, budget_min: null });
+    const twice = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: 'x', mission_id: null, budget_tokens: 2 * M, budget_min: null });
     checks.push(ok('dos objetivos: rechazado', twice.isError === true, twice.result));
-    const bad = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, mission_id: null, budget_tokens: -3, budget_usd: null, budget_min: null });
+    const bad = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, mission_id: null, budget_tokens: -3, budget_min: null });
     checks.push(ok('límite negativo: rechazado', bad.isError === true, bad.result));
 
-    const set = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, mission_id: null, budget_tokens: 2.5 * M, budget_usd: null, budget_min: 30 });
+    const set = await runTool(ctx, 'set_budget', { agent_id: 'K9', squad: null, mission_id: null, budget_tokens: 2.5 * M, budget_min: 30 });
     checks.push(ok('set_budget por callsign, en tokens', !set.isError && set.summary === 'budget on K9: 2.5M tokens / 30 min active', set.summary));
-    const parsed = JSON.parse(set.result) as { status: { tokens: number; pct: number; level: string }; policy: { unit: string; money_mode: boolean } };
+    const parsed = JSON.parse(set.result) as { status: { tokens: number; pct: number; level: string }; policy: { unit: string } };
     checks.push(eq('devuelve el consumo del ancestro y su cría contra el techo nuevo', [parsed.status.tokens, parsed.status.pct, parsed.status.level], [2 * M, 80, 'warn']));
-    checks.push(eq('y dice que la unidad son tokens y el dinero está apagado', [parsed.policy.unit, parsed.policy.money_mode], ['tokens', false]));
+    checks.push(ok('y dice que las unidades son uso, nunca dinero',
+      parsed.policy.unit === 'tokens, or minutes seen working; never dollars', parsed.policy.unit));
 
     const insp = await runTool(ctx, 'inspect_agent', { agent_id: 'K9' });
     const seen = JSON.parse(insp.result) as {
@@ -661,7 +706,7 @@ const throughTheHub = test('set_budget pone el techo, inspect_agent enseña el �
     const failedStop = await until(() => hub.world.state.feed.some((f) => f.source === 'BUDGET' && f.text.includes('did not go through')), 6000);
     checks.push(ok('un stop que no llega queda en el feed', failedStop));
 
-    const removed = await runTool(ctx, 'set_budget', { agent_id: 'a1', squad: null, mission_id: null, budget_tokens: null, budget_usd: null, budget_min: null });
+    const removed = await runTool(ctx, 'set_budget', { agent_id: 'a1', squad: null, mission_id: null, budget_tokens: null, budget_min: null });
     checks.push(ok('todos nulos quitan el techo', !removed.isError && removed.summary === 'budget on K9: removed' && hub.budgets.get({ kind: 'agent', ref: 'a1' }) === null, removed.summary));
 
     return checks.find((c) => !c.pass) ?? ok('a través del hub', true, `${checks.length} checks`);
@@ -679,7 +724,7 @@ const mod: TestModule = {
     ghostsAreSilent, adviceIsExecutable,
     envDefaults, squadShared, missionBudget,
     broodIsCharged, broodBrake,
-    moneyIsOptional, estimateIsAFloor,
+    moneyIsGone, orphansArePruned,
     rearmAndPersist, limitParsing,
     throughTheHub,
   ],

@@ -443,16 +443,12 @@ export const CEO_TOOLS: ToolSpec[] = [
           type: ['number', 'null'],
           description: 'Consumption ceiling for this agent in TOKENS — input + output + cache writes (cache reads do not count), its own and every Task subagent it launches. This is the default unit, because the operator pays in subscription quota and not in dollars. At 80% you get a [BUDGET 80%] line; at 100% the hub stops it if it has made no progress lately, and only warns you if it is still working. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or no limit.',
         },
-        budget_usd: {
-          type: ['number', 'null'],
-          description: 'Spend ceiling in dollars. IGNORED unless the hub runs with ORCA_BUDGET_MONEY=1: on a subscription those dollars are not real money. It is stored either way, so turning money mode on later brings it back. Null: the ORCA_DEFAULT_BUDGET_USD default, or no limit.',
-        },
         budget_min: {
           type: ['number', 'null'],
           description: 'Time ceiling in minutes the agent is seen WORKING — thinking, running a tool, booting. Not wall clock: an idle or finished agent accrues nothing and never trips this. Null: the ORCA_DEFAULT_BUDGET_MIN default, or no limit.',
         },
       },
-      required: ['project_id', 'machine', 'mission', 'parent_agent_id', 'background', 'squad', 'lead', 'runtime', 'model', 'mission_id', 'permission_mode', 'budget_tokens', 'budget_usd', 'budget_min'],
+      required: ['project_id', 'machine', 'mission', 'parent_agent_id', 'background', 'squad', 'lead', 'runtime', 'model', 'mission_id', 'permission_mode', 'budget_tokens', 'budget_min'],
       additionalProperties: false,
     },
     strict: true,
@@ -515,17 +511,15 @@ export const CEO_TOOLS: ToolSpec[] = [
           description: 'How much every agent of the squad may do without asking. Null or "auto" (the default): it never leaves a prompt waiting — Claude decides for itself, Codex runs with approvals and sandbox off. "plan": read-only. "acceptEdits": shell commands ask — only with the operator at the terminal. "bypassPermissions": never asks, no sandbox; on Codex it is what "auto" already does.',
         },
         budget_tokens: { type: ['number', 'null'], description: 'Token ceiling for EACH agent of the squad, lead included — input + output + cache writes (cache reads do not count), its own and its Task subagents\'. The default unit. Null: the ORCA_DEFAULT_BUDGET_TOKENS default, or none.' },
-        budget_usd: { type: ['number', 'null'], description: 'Dollar ceiling for EACH agent. Stored always, evaluated only with ORCA_BUDGET_MONEY=1. Null: the ORCA_DEFAULT_BUDGET_USD default, or none.' },
         budget_min: { type: ['number', 'null'], description: 'Ceiling in minutes seen WORKING for EACH agent, not wall clock. Null: the default, or none.' },
         squad_budget_tokens: { type: ['number', 'null'], description: 'Token ceiling for the WHOLE squad, summed over every member and their Task subagents. At 100% the members that have gone quiet are stopped; the ones still working are reported. Null: none.' },
-        squad_budget_usd: { type: ['number', 'null'], description: 'Dollar ceiling for the whole squad. Evaluated only with ORCA_BUDGET_MONEY=1. Null: none.' },
         squad_budget_min: { type: ['number', 'null'], description: 'Ceiling in minutes seen working for the whole squad, summed over its members. Null: none.' },
         shared_worktree: {
           type: 'boolean',
           description: 'Only matters when the collector runs workers in git worktrees (ORCA_WORKTREES=1). True: the whole squad shares one worktree and one branch, named after the squad, so members see each other\'s files and `land` integrates them together. False (the default): one worktree per member, landed one by one. Share it when the members edit the same files on purpose; keep them apart when they should not.',
         },
       },
-      required: ['project_id', 'machine', 'preset', 'squad', 'lead_mission', 'members', 'lead_model', 'background', 'runtime', 'mission_id', 'permission_mode', 'budget_tokens', 'budget_usd', 'budget_min', 'squad_budget_tokens', 'squad_budget_usd', 'squad_budget_min', 'shared_worktree'],
+      required: ['project_id', 'machine', 'preset', 'squad', 'lead_mission', 'members', 'lead_model', 'background', 'runtime', 'mission_id', 'permission_mode', 'budget_tokens', 'budget_min', 'squad_budget_tokens', 'squad_budget_min', 'shared_worktree'],
       additionalProperties: false,
     },
     strict: true,
@@ -613,7 +607,7 @@ export const CEO_TOOLS: ToolSpec[] = [
   {
     name: 'set_budget',
     description:
-      'Put a consumption ceiling on one agent (its own tokens plus every Task subagent it launches), one squad (shared by every member) or one ORCA mission (shared by every agent assigned to it), or change one already set. Name exactly one of agent_id, squad, mission_id. All limits null removes the budget. The unit is TOKENS: the operator runs on subscriptions, so quota is what runs out, not dollars — budget_usd is stored but only evaluated when the hub runs with ORCA_BUDGET_MONEY=1. The hub warns you at 80% with a [BUDGET 80%] line; at 100% it stops agents that have made no progress in the last few minutes (ORCA_BUDGET_ACTION=stop, the default) and only reports the ones still working. An idle, finished or already-stopped agent consumes nothing and never generates a line. Raising a budget re-arms its warnings, so this is also how you let an over-budget agent go on. Returns the current consumption against the new ceiling.',
+      'Put a consumption ceiling on one agent (its own tokens plus every Task subagent it launches), one squad (shared by every member) or one ORCA mission (shared by every agent assigned to it), or change one already set. Name exactly one of agent_id, squad, mission_id. All limits null removes the budget. A ceiling is USE, in one of two measured units: TOKENS (input + output + cache writes) or MINUTES SEEN WORKING. There is no ceiling in dollars — this fleet runs on a flat plan, so a dollar figure measures nothing anyone is charged for. The hub warns you at 80% with a [BUDGET 80%] line; at 100% it stops agents that have made no progress in the last few minutes (ORCA_BUDGET_ACTION=stop, the default) and only reports the ones still working. An idle, finished or already-stopped agent consumes nothing and never generates a line. Raising a budget re-arms its warnings, so this is also how you let an over-budget agent go on. Returns the current consumption against the new ceiling.',
     input_schema: {
       type: 'object',
       properties: {
@@ -621,10 +615,9 @@ export const CEO_TOOLS: ToolSpec[] = [
         squad: { type: ['string', 'null'], description: 'Squad label, e.g. "audit-01". Null unless this is a squad budget.' },
         mission_id: { type: ['string', 'null'], description: 'ORCA mission id, e.g. "mission_ab12". Null unless this is a mission budget.' },
         budget_tokens: { type: ['number', 'null'], description: 'Tokens (input + output + cache writes; cache reads do not count), or null for no token limit. The default unit.' },
-        budget_usd: { type: ['number', 'null'], description: 'Dollars, or null. Stored always; evaluated only with ORCA_BUDGET_MONEY=1.' },
         budget_min: { type: ['number', 'null'], description: 'Minutes seen WORKING, or null for no time limit. Never wall clock since launch.' },
       },
-      required: ['agent_id', 'squad', 'mission_id', 'budget_tokens', 'budget_usd', 'budget_min'],
+      required: ['agent_id', 'squad', 'mission_id', 'budget_tokens', 'budget_min'],
       additionalProperties: false,
     },
     strict: true,
@@ -1619,7 +1612,7 @@ async function spawnAgent(ctx: CeoContext, input: Record<string, unknown>): Prom
     return { result: PERMISSION_MODE_HELP, summary: 'spawn refused: bad permission_mode', isError: true };
   }
 
-  const budget = budgetLimit(input.budget_tokens, input.budget_usd, input.budget_min);
+  const budget = budgetLimit(input.budget_tokens, input.budget_min);
   if ('error' in budget) return { result: budget.error, summary: 'spawn refused: bad budget', isError: true };
 
   const missionId = optionalMissionRef(input);
@@ -1875,9 +1868,9 @@ async function launchSquad(ctx: CeoContext, input: Record<string, unknown>): Pro
   if (!permissionMode) {
     return { result: PERMISSION_MODE_HELP, summary: 'launch refused: bad permission_mode', isError: true };
   }
-  const memberBudget = budgetLimit(input.budget_tokens, input.budget_usd, input.budget_min);
+  const memberBudget = budgetLimit(input.budget_tokens, input.budget_min);
   if ('error' in memberBudget) return { result: memberBudget.error, summary: 'launch refused: bad budget', isError: true };
-  const squadBudget = budgetLimit(input.squad_budget_tokens, input.squad_budget_usd, input.squad_budget_min);
+  const squadBudget = budgetLimit(input.squad_budget_tokens, input.squad_budget_min);
   if ('error' in squadBudget) return { result: `squad_${squadBudget.error}`, summary: 'launch refused: bad squad budget', isError: true };
 
   const squad = plan.fixedSquad ?? ctx.nextSquadName(plan.base);
@@ -2330,13 +2323,10 @@ function hangBudget(ctx: CeoContext, ack: SpawnAck | undefined, limit: BudgetLim
   else if (ack?.shortId) ctx.budgets.setPendingByShortId(ack.shortId, limit);
 }
 
-const usd2 = (n: number): number => Number(n.toFixed(2));
-
 /**
  * An agent's budget picture as the model reads it: rounded, and only the
- * ceilings that reach it. `tokens` is the unit; `spent_usd` is a FLOOR when
- * `estimated`, never a total, and it is only a ceiling anyone is measured
- * against when the hub runs in money mode.
+ * ceilings that reach it. Two units, both measured: tokens off the transcript
+ * and minutes the hub saw it working.
  */
 function budgetView(b: AgentBudget): Record<string, unknown> | null {
   if (b.lines.length === 0) return null;
@@ -2345,16 +2335,14 @@ function budgetView(b: AgentBudget): Record<string, unknown> | null {
     pct: Math.round(b.pct * 100),
     tokens: Math.round(b.tokens),
     tokens_human: fmtTokens(b.tokens),
-    spent_usd: usd2(b.spent_usd),
-    usd_is_floor: b.estimated,
     active_min: Math.round(b.active_min),
     live_subagents_charged: b.descendants,
     last_progress_sec_ago: b.last_progress_at === null ? null : Math.max(0, Math.round((Date.now() - b.last_progress_at) / 1000)),
     retired: b.retired,
     limits: b.lines.map((l) => ({
       scope: l.scope, ref: l.ref,
-      limit_tokens: l.limit_tokens, limit_usd: l.limit_usd, limit_min: l.limit_min,
-      tokens: Math.round(l.tokens), spent_usd: usd2(l.spent_usd), active_min: Math.round(l.active_min),
+      limit_tokens: l.limit_tokens, limit_min: l.limit_min,
+      tokens: Math.round(l.tokens), active_min: Math.round(l.active_min),
       pct: Math.round(l.pct * 100),
     })),
   };
@@ -2363,29 +2351,28 @@ function budgetView(b: AgentBudget): Record<string, unknown> | null {
 function scopeView(s: ScopeBudget | null): Record<string, unknown> | null {
   if (!s) return null;
   return {
-    limit_tokens: s.limit.tokens, limit_usd: s.limit.usd, limit_min: s.limit.min,
+    limit_tokens: s.limit.tokens, limit_min: s.limit.min,
     tokens: Math.round(s.tokens), tokens_human: fmtTokens(s.tokens),
-    spent_usd: usd2(s.spent_usd), usd_is_floor: s.estimated, active_min: Math.round(s.active_min),
+    active_min: Math.round(s.active_min),
     live_subagents_charged: s.descendants,
     pct: Math.round(s.pct * 100), level: s.level, agents: s.agent_ids.length,
   };
 }
 
 /**
- * A project's budgets, summed: how many agents carry a ceiling, what they
- * have spent against it, and how many are past 80% or 100%. Null when no
+ * A project's budgets, summed: how many agents carry a ceiling, how much they
+ * have used against it, and how many are past 80% or 100%. Null when no
  * agent in it has one, so a fleet without budgets reads as before.
  */
 function projectBudget(ctx: CeoContext, projectId: string): Record<string, unknown> | null {
   if (!ctx.budgets) return null;
-  let agents = 0, tokens = 0, spent = 0, limit = 0, capped = true, warn = 0, over = 0;
+  let agents = 0, tokens = 0, limit = 0, capped = true, warn = 0, over = 0;
   for (const a of ctx.agents()) {
     if (a.projectId !== projectId || a.role === 'capcom' || a.subagent) continue;
     const b = ctx.budgets.agentStatus(a);
     if (b.lines.length === 0) continue;
     agents++;
     tokens += b.tokens;
-    spent += b.spent_usd;
     // Only the agent's own ceiling adds up per project; a squad's or a mission's
     // is shared and would be counted once per member.
     const own = b.lines.find((l) => l.scope === 'agent' || l.scope === 'default');
@@ -2395,7 +2382,7 @@ function projectBudget(ctx: CeoContext, projectId: string): Record<string, unkno
   if (agents === 0) return null;
   return {
     agents, tokens: Math.round(tokens), tokens_human: fmtTokens(tokens),
-    limit_tokens: capped ? limit : null, spent_usd: usd2(spent), warn, over,
+    limit_tokens: capped ? limit : null, warn, over,
   };
 }
 
@@ -2409,7 +2396,7 @@ function setBudget(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
   if (named !== 1) {
     return { result: 'name exactly one of agent_id, squad or mission_id', summary: 'set_budget refused: ambiguous target', isError: true };
   }
-  const limit = budgetLimit(input.budget_tokens, input.budget_usd, input.budget_min);
+  const limit = budgetLimit(input.budget_tokens, input.budget_min);
   if ('error' in limit) return { result: limit.error, summary: 'set_budget refused: bad limit', isError: true };
 
   let scope: BudgetScope;
@@ -2439,7 +2426,6 @@ function setBudget(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
   const words = hasLimit(limit)
     ? [
       limit.tokens !== null ? `${fmtTokens(limit.tokens)} tokens` : null,
-      limit.usd !== null ? `$${limit.usd}${cfg.money ? '' : ' (stored, money mode off)'}` : null,
       limit.min !== null ? `${limit.min} min active` : null,
     ].filter(Boolean).join(' / ')
     : 'removed';
@@ -2449,8 +2435,7 @@ function setBudget(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
       budget: hasLimit(limit) ? limit : null,
       status,
       policy: {
-        unit: cfg.money ? 'tokens + usd' : 'tokens',
-        money_mode: cfg.money,
+        unit: 'tokens, or minutes seen working; never dollars',
         at_100_percent: cfg.action,
         progress_window_min: cfg.progressMs / 60_000,
         time_axis: 'minutes seen working, not wall clock since launch',

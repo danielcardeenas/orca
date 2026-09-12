@@ -24,9 +24,24 @@
  * no de una tarifa inventada, así que la cifra no puede quedarse corta como se
  * quedaba la estimación en dólares.
  *
- * El dinero sigue en el modelo de datos, apagado: `ORCA_BUDGET_MONEY=1` lo
- * enciende para un proyecto que sí consuma API de pago. Apagado, un techo en
- * dólares se guarda y no se evalúa.
+ * El dinero ya no está: ni como eje, ni guardado, ni apagado a la espera. Esta
+ * flota se paga con PLAN PLANO —Claude incluido, sin llamadas a la API—, así
+ * que un techo en dólares no medía un cobro sino una estimación de algo que
+ * nadie paga, y un eje que nunca se evalúa es una segunda contabilidad
+ * esperando a discrepar de la primera. Se fue el 2026-09-12; un techo en
+ * dólares que quede en disco de antes se ignora al cargarlo, y si ése era su
+ * único eje, el techo entero desaparece.
+ *
+ * ## Los techos de los muertos
+ *
+ * Un techo sobrevive al agente que frenaba. Veintitrés quedaron en el libro
+ * apuntando a agentes archivados o ya ni eso, y no había forma de que se
+ * fueran solos: `retire()` saca al agente del ciclo, pero su techo se queda.
+ * `pruneOrphans` los recoge — un techo cuyo sujeto no está en la flota se
+ * marca, y se borra si SIGUE sin estar `ORPHAN_GRACE_MS` después. Dos pasadas
+ * separadas en el tiempo, porque una flota vacía es también lo que se ve
+ * mientras el collector todavía no ha hablado, y podar ahí dejaría sin freno a
+ * quien está arrancando.
  *
  * ## El tiempo
  *
@@ -80,13 +95,10 @@
  * anterior.
  *
  * Environment:
- *   ORCA_BUDGET_MONEY          1 = el eje en dólares cuenta (por defecto no).
  *   ORCA_DEFAULT_BUDGET_TOKENS techo en tokens para todo worker sin techo propio. Vacío = ninguno.
- *   ORCA_DEFAULT_BUDGET_USD    igual, en dólares. Sólo con ORCA_BUDGET_MONEY=1.
  *   ORCA_DEFAULT_BUDGET_MIN    igual, en minutos ACTIVOS.
  *   ORCA_BUDGET_ACTION         warn | stop (por defecto stop) — qué hace el 100 % sin progreso.
  *   ORCA_BUDGET_PROGRESS_MIN   minutos de silencio antes de "sin progreso" (por defecto 3).
- *   ORCA_BUDGET_USD_PER_MTOK   $/millón de tokens para estimar mientras el CLI no ha escrito coste (por defecto 6).
  *   ORCA_MAX_DESCENDANTS       subagentes Task vivos bajo un agente antes de avisar (por defecto 8).
  *   ORCA_MAX_AGENT_DEPTH       generaciones de subagentes Task permitidas (por defecto 2).
  *   ORCA_SWARM_ACTION          warn | stop (por defecto warn) — qué hace alcanzar el freno.
@@ -107,8 +119,6 @@ import { adviceFor, CONSUMING_STATES, isLiveAgent, type LivenessView } from './l
 export interface BudgetLimit {
   /** Tokens in + out + cache writes, cache reads excluded (`ceilingTokens`). The default unit. */
   tokens: number | null;
-  /** Dollars. Inert unless ORCA_BUDGET_MONEY=1. */
-  usd: number | null;
   /** Minutes the agent was seen working. */
   min: number | null;
 }
@@ -126,16 +136,11 @@ export function scopeKey(s: BudgetScope): string { return `${s.kind}:${s.ref}`; 
 export type BudgetAction = 'warn' | 'stop';
 
 export interface BudgetConfig {
-  /** True when the dollar axis is evaluated at all. */
-  money: boolean;
   defaultTokens: number | null;
-  defaultUsd: number | null;
   defaultMin: number | null;
   action: BudgetAction;
   /** How long an agent may go without a tool call or an edit before it counts as stalled. */
   progressMs: number;
-  /** Flat $/1M tokens for the estimate while `costUSD` is still 0. */
-  usdPerMTok: number;
   /** Live `Task` descendants allowed under one agent. */
   maxDescendants: number;
   /** Generations of `Task` subagents allowed below one session. */
@@ -146,19 +151,20 @@ export interface BudgetConfig {
 
 export const WARN_AT = 0.8;
 export const DEFAULT_PROGRESS_MIN = 3;
-export const DEFAULT_USD_PER_MTOK = 6;
 export const DEFAULT_MAX_DESCENDANTS = 8;
 export const DEFAULT_MAX_DEPTH = 2;
 
-/**
- * Una lectura de caché no cuesta lo que una de entrada; para la ESTIMACIÓN en
- * dólares se pondera a la décima parte, que es la proporción que cobran los
- * proveedores. El eje en tokens no la cuenta: ver `ceilingTokens`.
- */
-const CACHE_USD_WEIGHT = 0.1;
-
 /** Un hueco mayor que esto entre dos pasadas no fue trabajo: fue el hub sin mirar. */
 const ACTIVE_SAMPLE_CAP_MS = 60_000;
+
+/**
+ * Cuánto aguanta un techo cuyo sujeto no aparece en la flota antes de que el
+ * libro lo borre. No es un plazo de cortesía: es la segunda pasada. Un mundo
+ * sin el agente puede ser un mundo que todavía no lo tiene —el collector
+ * tarda en hablar tras un relevo del hub—, y borrar ahí le quitaría el freno
+ * justo a quien está arrancando.
+ */
+const ORPHAN_GRACE_MS = 10 * 60_000;
 
 function envNumber(v: string | undefined, fallback: number | null): number | null {
   if (v === undefined || v.trim() === '') return fallback;
@@ -176,13 +182,10 @@ export function budgetConfig(env: NodeJS.ProcessEnv = process.env): BudgetConfig
   const action = env['ORCA_BUDGET_ACTION']?.trim().toLowerCase();
   const swarm = env['ORCA_SWARM_ACTION']?.trim().toLowerCase();
   return {
-    money: envFlag(env['ORCA_BUDGET_MONEY']),
     defaultTokens: envNumber(env['ORCA_DEFAULT_BUDGET_TOKENS'], null),
-    defaultUsd: envNumber(env['ORCA_DEFAULT_BUDGET_USD'], null),
     defaultMin: envNumber(env['ORCA_DEFAULT_BUDGET_MIN'], null),
     action: action === 'warn' ? 'warn' : 'stop',
     progressMs: (envNumber(env['ORCA_BUDGET_PROGRESS_MIN'], DEFAULT_PROGRESS_MIN) ?? DEFAULT_PROGRESS_MIN) * 60_000,
-    usdPerMTok: envNumber(env['ORCA_BUDGET_USD_PER_MTOK'], DEFAULT_USD_PER_MTOK) ?? DEFAULT_USD_PER_MTOK,
     maxDescendants: envNumber(env['ORCA_MAX_DESCENDANTS'], DEFAULT_MAX_DESCENDANTS) ?? DEFAULT_MAX_DESCENDANTS,
     maxDepth: envNumber(env['ORCA_MAX_AGENT_DEPTH'], DEFAULT_MAX_DEPTH) ?? DEFAULT_MAX_DEPTH,
     swarmAction: swarm === 'stop' ? 'stop' : 'warn',
@@ -190,7 +193,7 @@ export function budgetConfig(env: NodeJS.ProcessEnv = process.env): BudgetConfig
 }
 
 /** A limit as a tool hands it in: numbers, nulls, or nothing. */
-export function budgetLimit(tokens: unknown, usd: unknown, min: unknown): BudgetLimit | { error: string } {
+export function budgetLimit(tokens: unknown, min: unknown): BudgetLimit | { error: string } {
   const one = (v: unknown, name: string): number | null | { error: string } => {
     if (v === undefined || v === null || v === '') return null;
     const n = typeof v === 'number' ? v : Number(v);
@@ -199,20 +202,22 @@ export function budgetLimit(tokens: unknown, usd: unknown, min: unknown): Budget
   };
   const t = one(tokens, 'budget_tokens');
   if (typeof t === 'object' && t !== null) return t;
-  const u = one(usd, 'budget_usd');
-  if (typeof u === 'object' && u !== null) return u;
   const m = one(min, 'budget_min');
   if (typeof m === 'object' && m !== null) return m;
-  return { tokens: t, usd: u, min: m };
+  return { tokens: t, min: m };
 }
 
 export function hasLimit(l: BudgetLimit | null | undefined): l is BudgetLimit {
-  return !!l && (l.tokens !== null || l.usd !== null || l.min !== null);
+  return !!l && (l.tokens !== null || l.min !== null);
 }
 
-/** A limit as it is normalised off disk or off a tool: every axis present. */
+/**
+ * A limit as it is normalised off disk or off a tool: every axis present. Un
+ * `usd` guardado antes del 2026-09-12 se cae aquí, y con él el techo entero si
+ * era su único eje: `hasLimit` dice que no queda nada que evaluar.
+ */
 function normalizeLimit(l: Partial<BudgetLimit> | null | undefined): BudgetLimit {
-  return { tokens: l?.tokens ?? null, usd: l?.usd ?? null, min: l?.min ?? null };
+  return { tokens: l?.tokens ?? null, min: l?.min ?? null };
 }
 
 /* ── What the book reports ────────────────────────────────────────── */
@@ -221,12 +226,6 @@ function normalizeLimit(l: Partial<BudgetLimit> | null | undefined): BudgetLimit
 export interface Consumption {
   /** `ceilingTokens`: input + output + cache writes. Measured, never estimated. */
   tokens: number;
-  spent_usd: number;
-  /**
-   * True when part of `spent_usd` came from the token estimate rather than a
-   * cost the CLI wrote. The figure is then a FLOOR: the truth is that or more.
-   */
-  estimated: boolean;
   /** Minutes the book actually saw these agents working. */
   active_min: number;
   /** Live `Task` subagents whose consumption is folded in. */
@@ -239,12 +238,9 @@ export interface BudgetLine {
   scope: BudgetScopeKind | 'default';
   ref: string | null;
   limit_tokens: number | null;
-  limit_usd: number | null;
   limit_min: number | null;
   /** Consumption of the whole scope: the agent and its brood, or the squad / mission together. */
   tokens: number;
-  spent_usd: number;
-  estimated: boolean;
   active_min: number;
   descendants: number;
   /** Worst of the axes in play, 0..∞ (1 = at the ceiling). */
@@ -316,6 +312,8 @@ interface Persisted {
   pendingByShortId: Record<string, Partial<BudgetLimit>>;
   /** Notices already sent, so a restart does not repeat them. */
   fired: Record<string, { warn?: number; over?: number }>;
+  /** Techos cuyo sujeto no aparece en la flota, y desde cuándo. Ver `pruneOrphans`. */
+  orphanedAt?: Record<string, number>;
   /** Minutes seen working, per agent, so a hub restart does not reset the clock. */
   activeMs: Record<string, number>;
   /** Agents taken out of the cycle by a stop. They never warn again. */
@@ -332,6 +330,8 @@ export interface BudgetBookOptions {
    * entonces vale el criterio mínimo: terminado o retirado.
    */
   liveness?: () => Omit<LivenessView, 'retired'>;
+  /** Qué hacer cuando el libro borra el techo de alguien que ya no está. */
+  onPrune?: (keys: string[]) => void;
 }
 
 export class BudgetBook {
@@ -345,7 +345,9 @@ export class BudgetBook {
   /** Ms each agent was seen in a consuming state, and when it was last sampled. */
   private active = new Map<string, { ms: number; at: number }>();
   /** What each scope measured on the previous sweep, to tell growth from a clock. */
-  private seen = new Map<string, { tokens: number; usd: number; min: number }>();
+  private seen = new Map<string, { tokens: number; min: number }>();
+  /** Cuándo se vio por primera vez que el sujeto de un techo no estaba. */
+  private orphanedAt = new Map<string, number>();
   /** Agents whose brood is already over the cap, so the notice is said once. */
   private swarmFired = new Set<string>();
   /**
@@ -356,11 +358,13 @@ export class BudgetBook {
   private file: string | null;
   private now: () => number;
   private livenessView: (() => Omit<LivenessView, 'retired'>) | null;
+  private onPrune: ((keys: string[]) => void) | null;
 
   constructor(dir: string | null, cfg: BudgetConfig = budgetConfig(), opts: BudgetBookOptions = {}) {
     this.cfg = cfg;
     this.now = opts.now ?? Date.now;
     this.livenessView = opts.liveness ?? null;
+    this.onPrune = opts.onPrune ?? null;
     this.file = dir ? path.join(dir, 'budgets.json') : null;
     if (this.file && fs.existsSync(this.file)) {
       try {
@@ -374,6 +378,9 @@ export class BudgetBook {
           if (hasLimit(l)) this.pendingByShortId.set(k, l);
         }
         for (const [k, v] of Object.entries(raw.fired ?? {})) this.fired.set(k, v);
+        for (const [k, v] of Object.entries(raw.orphanedAt ?? {})) {
+          if (Number.isFinite(v)) this.orphanedAt.set(k, v);
+        }
         for (const [k, v] of Object.entries(raw.activeMs ?? {})) {
           if (Number.isFinite(v) && v > 0) this.active.set(k, { ms: v, at: this.now() });
         }
@@ -448,27 +455,9 @@ export class BudgetBook {
 
   /* ── measurement ──────────────────────────────────────────────── */
 
-  /**
-   * The ceiling as it is actually evaluated: with the money off, a dollar
-   * ceiling is remembered and ignored.
-   */
-  private effective(limit: BudgetLimit): BudgetLimit {
-    return this.cfg.money ? limit : { tokens: limit.tokens, usd: null, min: limit.min };
-  }
-
   /** The tokens this agent's ceiling is measured in. See shared/tokens.ts. */
   tokensOf(a: Agent): number {
     return ceilingTokens(a.metrics);
-  }
-
-  /** Dollars this agent has spent, estimated from tokens when the CLI has not said. */
-  spend(a: Agent): { usd: number; estimated: boolean } {
-    const m = a.metrics;
-    if (m.costUSD > 0) return { usd: m.costUSD, estimated: false };
-    const weighted = (m.inputTokens ?? 0) + (m.outputTokens ?? 0) + (m.cacheWriteTokens ?? 0)
-      + (m.cacheReadTokens ?? 0) * CACHE_USD_WEIGHT;
-    if (weighted <= 0) return { usd: 0, estimated: false };
-    return { usd: (weighted / 1_000_000) * this.cfg.usdPerMTok, estimated: true };
   }
 
   /**
@@ -551,23 +540,18 @@ export class BudgetBook {
 
   private measure(subjects: Agent[], agents: Record<string, Agent>, now = this.now()): Consumption {
     const { all, descendants } = this.charged(subjects, agents, now);
-    let tokens = 0, spent = 0, estimated = false, activeMs = 0;
+    let tokens = 0, activeMs = 0;
     for (const a of all) {
       tokens += this.tokensOf(a);
-      const s = this.spend(a);
-      spent += s.usd;
-      estimated ||= s.estimated;
       activeMs += this.activeMs(a.id);
     }
-    return { tokens, spent_usd: spent, estimated, active_min: activeMs / 60_000, descendants };
+    return { tokens, active_min: activeMs / 60_000, descendants };
   }
 
   private pct(limit: BudgetLimit, c: Consumption): number {
-    const l = this.effective(limit);
     let p = 0;
-    if (l.tokens !== null) p = Math.max(p, c.tokens / l.tokens);
-    if (l.usd !== null) p = Math.max(p, c.spent_usd / l.usd);
-    if (l.min !== null) p = Math.max(p, c.active_min / l.min);
+    if (limit.tokens !== null) p = Math.max(p, c.tokens / limit.tokens);
+    if (limit.min !== null) p = Math.max(p, c.active_min / limit.min);
     return p;
   }
 
@@ -605,8 +589,8 @@ export class BudgetBook {
   }
 
   private defaultLimit(): BudgetLimit | null {
-    const l = { tokens: this.cfg.defaultTokens, usd: this.cfg.defaultUsd, min: this.cfg.defaultMin };
-    return hasLimit(this.effective(l)) ? l : null;
+    const l = { tokens: this.cfg.defaultTokens, min: this.cfg.defaultMin };
+    return hasLimit(l) ? l : null;
   }
 
   scopeStatus(scope: BudgetScope, agents: Record<string, Agent>, missions: Record<string, CapcomMission>, now = this.now()): ScopeBudget | null {
@@ -628,8 +612,8 @@ export class BudgetBook {
       if (st) {
         lines.push({
           scope: scope.kind, ref: scope.ref,
-          limit_tokens: st.limit.tokens, limit_usd: st.limit.usd, limit_min: st.limit.min,
-          tokens: st.tokens, spent_usd: st.spent_usd, estimated: st.estimated,
+          limit_tokens: st.limit.tokens, limit_min: st.limit.min,
+          tokens: st.tokens,
           active_min: st.active_min, descendants: st.descendants, pct: st.pct,
         });
       }
@@ -642,7 +626,7 @@ export class BudgetBook {
     if (dflt && !a.subagent && !family.some(member => this.get({ kind: 'agent', ref: member.id })) && a.role !== 'capcom') {
       lines.push({
         scope: 'default', ref: null,
-        limit_tokens: dflt.tokens, limit_usd: dflt.usd, limit_min: dflt.min,
+        limit_tokens: dflt.tokens, limit_min: dflt.min,
         ...own, pct: this.pct(dflt, own),
       });
     }
@@ -736,6 +720,7 @@ export class BudgetBook {
    */
   tick(agents: Record<string, Agent>, missions: Record<string, CapcomMission> = {}, now = this.now()): BudgetEvent[] {
     this.resolvePending(agents);
+    this.pruneOrphans(agents, missions, now);
     this.observeProgress(agents, now);
     this.observeActive(agents, now);
     const events: BudgetEvent[] = [];
@@ -755,7 +740,7 @@ export class BudgetBook {
 
     for (const scope of scopes) {
       const limit = this.get(scope) ?? this.defaultLimit();
-      if (!limit || !hasLimit(this.effective(limit))) continue;
+      if (!limit || !hasLimit(limit)) continue;
       const members = this.members(scope, agents, missions);
       if (members.length === 0) continue;
       const live = members.filter((a) => this.alive(a, now));
@@ -765,16 +750,16 @@ export class BudgetBook {
 
       // Nadie vivo, nada que decir. Un escuadrón que el operador paró hace
       // horas no vuelve a hablar: ni al 80 %, ni al 100 %, ni nunca.
-      if (live.length === 0) { this.seen.set(key, { tokens: m.tokens, usd: m.spent_usd, min: m.active_min }); continue; }
+      if (live.length === 0) { this.seen.set(key, { tokens: m.tokens, min: m.active_min }); continue; }
 
       // El reloj no dispara nada por sí solo. Un ámbito cuyos agentes vivos
       // están todos parados y cuya medida no ha subido desde la pasada
       // anterior no da noticia: es exactamente el agente ocho horas en idle
       // que disparaba tres avisos seguidos.
       const prev = this.seen.get(key);
-      const grew = !!prev && (m.tokens > prev.tokens + 1e-9 || m.spent_usd > prev.usd + 1e-9 || m.active_min > prev.min + 1e-9);
+      const grew = !!prev && (m.tokens > prev.tokens + 1e-9 || m.active_min > prev.min + 1e-9);
       const consuming = live.some((a) => CONSUMING_STATES.has(a.state));
-      this.seen.set(key, { tokens: m.tokens, usd: m.spent_usd, min: m.active_min });
+      this.seen.set(key, { tokens: m.tokens, min: m.active_min });
       if (!consuming && !grew) continue;
 
       const fired = this.fired.get(key) ?? {};
@@ -859,6 +844,62 @@ export class BudgetBook {
     return events;
   }
 
+  /**
+   * Borrar los techos que ya no frenan a nadie.
+   *
+   * Un techo sobrevive a su sujeto: `retire()` saca al agente del ciclo y
+   * `archive` lo saca del mundo, pero su línea sigue en el libro para siempre.
+   * Veintitrés se habían acumulado así, y el único efecto de un techo huérfano
+   * es confundir a quien lee el libro creyendo que la flota tiene frenos.
+   *
+   * La regla es la misma asimetría de la vitalidad, aplicada al revés: aquí lo
+   * caro no es dar por ido a quien no lo está —un techo de más no rompe nada—
+   * sino borrar el freno de alguien que sí está. Por eso hacen falta DOS
+   * observaciones separadas por `ORPHAN_GRACE_MS`, y ninguna cuenta mientras
+   * la flota esté vacía: un hub recién relevado la ve vacía hasta que el
+   * collector habla, y podar ahí desarmaría a la flota entera de una pasada.
+   *
+   * Si el sujeto reaparece —una sesión desarchivada, un escuadrón que vuelve a
+   * tener miembros— la marca se borra y el techo se queda donde estaba.
+   */
+  private pruneOrphans(agents: Record<string, Agent>, missions: Record<string, CapcomMission>, now: number): void {
+    if (Object.keys(agents).length === 0) return;
+
+    const present = (scope: BudgetScope): boolean => {
+      switch (scope.kind) {
+        case 'agent': return !!agents[scope.ref];
+        case 'squad': return Object.values(agents).some((a) => a.squad === scope.ref);
+        case 'mission': return !!missions[scope.ref];
+      }
+    };
+
+    const pruned: string[] = [];
+    let changed = false;
+    for (const { scope } of this.all()) {
+      const key = scopeKey(scope);
+      if (present(scope)) {
+        if (this.orphanedAt.delete(key)) changed = true;
+        continue;
+      }
+      const since = this.orphanedAt.get(key);
+      if (since === undefined) { this.orphanedAt.set(key, now); changed = true; continue; }
+      if (now - since < ORPHAN_GRACE_MS) continue;
+      this.limits.delete(key);
+      this.fired.delete(key);
+      this.seen.delete(key);
+      this.orphanedAt.delete(key);
+      pruned.push(key);
+      changed = true;
+    }
+    // Una marca de un techo que ya no está en el libro —lo quitó `clear`— no
+    // tiene a quién esperar.
+    for (const key of [...this.orphanedAt.keys()]) {
+      if (!this.limits.has(key)) { this.orphanedAt.delete(key); changed = true; }
+    }
+    if (changed) this.save();
+    if (pruned.length > 0) this.onPrune?.(pruned);
+  }
+
   private resolvePending(agents: Record<string, Agent>): void {
     if (this.pendingByShortId.size === 0) return;
     let changed = false;
@@ -899,26 +940,21 @@ export class BudgetBook {
   }
 
   /**
-   * Las cifras de una línea. En tokens porque ésa es la unidad; en dólares
-   * sólo con el dinero encendido, y entonces con `≥` cuando parte de la cifra
-   * es una estimación — un número que se queda corto es peor que ninguno, así
-   * que se dice que es un suelo y no un total.
+   * Las cifras de una línea: uso contra techo, en las dos unidades que quedan.
+   * Las dos son MEDIDAS —los tokens salen del transcript, los minutos de haber
+   * visto al agente trabajando—, así que ninguna necesita el `≥` que llevaba
+   * la estimación en dólares para avisar de que se quedaba corta.
    */
   private figures(limit: BudgetLimit, c: Consumption, pct: number): string {
-    const l = this.effective(limit);
     const parts: string[] = [];
-    if (l.tokens !== null) {
-      parts.push(`${fmtTokens(c.tokens)} of ${fmtTokens(l.tokens)} tokens (${Math.round((c.tokens / l.tokens) * 100)}%)`);
+    if (limit.tokens !== null) {
+      parts.push(`${fmtTokens(c.tokens)} of ${fmtTokens(limit.tokens)} tokens (${Math.round((c.tokens / limit.tokens) * 100)}%)`);
     }
-    if (l.usd !== null) {
-      const money = (n: number) => `$${n.toFixed(2)}`;
-      parts.push(`${c.estimated ? '≥' : ''}${money(c.spent_usd)} of ${money(l.usd)} (${Math.round((c.spent_usd / l.usd) * 100)}%)`);
-    }
-    if (l.min !== null) {
-      parts.push(`${Math.round(c.active_min)}m of ${l.min}m active (${Math.round((c.active_min / l.min) * 100)}%)`);
+    if (limit.min !== null) {
+      parts.push(`${Math.round(c.active_min)}m of ${limit.min}m active (${Math.round((c.active_min / limit.min) * 100)}%)`);
     }
     if (c.descendants > 0) parts.push(`includes ${c.descendants} live Task subagent${c.descendants === 1 ? '' : 's'}`);
-    const axes = [l.tokens, l.usd, l.min].filter((v) => v !== null).length;
+    const axes = [limit.tokens, limit.min].filter((v) => v !== null).length;
     return axes > 1 ? `${parts.join(' · ')} · ${Math.round(pct * 100)}% used` : parts.join(' · ');
   }
 
@@ -954,6 +990,7 @@ export class BudgetBook {
       limits: Object.fromEntries(this.limits),
       pendingByShortId: Object.fromEntries(this.pendingByShortId),
       fired: Object.fromEntries(this.fired),
+      orphanedAt: Object.fromEntries(this.orphanedAt),
       activeMs: Object.fromEntries([...this.active].filter(([, v]) => v.ms > 0).map(([k, v]) => [k, Math.round(v.ms)])),
       retired: [...this.retiredIds],
     };

@@ -70,7 +70,7 @@ export default { suite: 'Worker recovery', tests: [
   test('handoff does not reset per-agent spend or time budgets', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-recovery-budget-'));
     try {
-      const budgets = new BudgetBook(dir, budgetConfig({})); budgets.set({ kind: 'agent', ref: sourceId }, { tokens: 10_000, usd: null, min: null });
+      const budgets = new BudgetBook(dir, budgetConfig({})); budgets.set({ kind: 'agent', ref: sourceId }, { tokens: 10_000, min: null });
       const original = agent({ startedAt: 1000, uptimeMs: 60000, metrics: { costUSD: 8, inputTokens: 8000 } as any });
       const next = agent({ id: targetId, startedAt: 61000, uptimeMs: 0, metrics: { costUSD: 3, inputTokens: 3000 } as any, continuation: { fromId: sourceId, at: 61000, archive: '/backup', historyPath: '/history', checkpointPath: '/checkpoint' } });
       const status = budgets.agentStatus(next, { [sourceId]: original, [targetId]: next }, {}, 121000);

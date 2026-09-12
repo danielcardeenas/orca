@@ -327,6 +327,20 @@
   padding: 3px 8px; background: var(--shell); border-bottom: 1px solid var(--line-soft);
 }
 .srf__bar .px { font-size: 9px; }
+/* Quién y hace cuánto, al lado del título: `CS-7 · 3M`. */
+.srf__who { color: var(--ink-dim); margin-left: 6px; }
+/*
+ * El pie de una superficie con textura: qué es, quién lo hizo y hace cuánto.
+ * Un cuadro con imagen no puede decir nada de eso por sí mismo. Letra fija —
+ * no escala con el zoom, como los rótulos — bajo el borde inferior del cuadro,
+ * y se retira antes que él (`CAP_MIN_PX` en `field/media.ts`).
+ */
+.srf-cap {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform;
+  pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--ink-dim);
+}
+.srf-cap b { font-weight: normal; color: var(--ink-bright); }
 .srf__x { background: transparent; border: 0; color: var(--ink-dim); font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; padding: 0 2px; }
 .srf__x:hover { color: var(--lime); }
 /*
@@ -404,6 +418,22 @@
 .chip-art:hover { border-color: var(--lime); }
 .chip-art:hover .chip__n,
 .chip-art:hover .chip__k { color: var(--lime); }
+/*
+ * La baldosa bajo el puntero enciende su franja entera con sus tirantes: es
+ * el hover en sentido inverso (`field/tether.ts`), y dice «esto es lo que
+ * hizo» sin bajar el puntero a las fichas.
+ */
+.chip-art.is-hot { border-color: var(--lime); }
+/*
+ * El pie de la ficha bajo el puntero: el título que le puso el agente y hace
+ * cuánto, en una línea bajo la ficha. No es una previsualización — la imagen
+ * no se infla —, es lo que 33 px no pueden decir. Uno por capa.
+ */
+.chip-cap {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform;
+  pointer-events: none; white-space: nowrap; color: var(--ink-bright);
+  background: var(--shell); border: 1px solid var(--line); padding: 1px 4px;
+}
 /* Un vídeo es su primer fotograma y una marca, nunca un vídeo reproduciéndose. */
 .chip__play {
   position: absolute; right: 1px; bottom: 0;

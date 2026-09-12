@@ -24,7 +24,8 @@
  * drift from parent to child, slowly and about eighteen pixels long at any
  * zoom; an ask's dashes are faster, longer and amber, so the two motions never
  * read as one. Only `hot` (the selection), `frame` (a region's or a squad's
- * outline) and the retracting answer stay solid.
+ * outline), the retracting answer and a `tether` (an output's line to whoever
+ * made it, field/tether.ts — a label, not a relationship) stay solid.
  *
  * **Zoom decides what is wiring and what is noise.** Every segment carries a
  * `span`: 1 for a pipe that leaves its region or reaches a distant tile, 0
@@ -57,8 +58,27 @@ import { dur, shaderMotion, T } from '../motion.ts';
  * an agent it launched, with no ports and, for `age`, how much of it is left
  * — 1 while the agent lives, less once it is done.
  */
-export type PipeKind = 'lineage' | 'notice' | 'ask' | 'collision' | 'hot' | 'core' | 'frame' | 'command';
-const KIND_ID: Record<PipeKind, number> = { lineage: 0, notice: 1, ask: 2, collision: 3, hot: 4, core: 5, frame: 6, command: 7 };
+/**
+ * `tether` es el tirante de un output (field/tether.ts): la línea de una ficha
+ * de estantería o de una superficie colocada hasta la baldosa que la hizo. Sin
+ * puertos propios —el campo pone uno en el origen, al tamaño que toque— y con
+ * `age` como «caliente»: 0 en reposo, 1 con el puntero sobre el output o su
+ * origen. Sólido y tenue en reposo, sólido y entero caliente.
+ */
+export type PipeKind = 'lineage' | 'notice' | 'ask' | 'collision' | 'hot' | 'core' | 'frame' | 'command' | 'tether';
+const KIND_ID: Record<PipeKind, number> = { lineage: 0, notice: 1, ask: 2, collision: 3, hot: 4, core: 5, frame: 6, command: 7, tether: 8 };
+
+/**
+ * Alfa del tirante en reposo y caliente. En reposo por debajo del bus de
+ * linaje (0.8, a rachas): un tirante es una etiqueta, no una relación de
+ * trabajo, y con veinte outputs en pantalla veinte líneas a 0.8 serían la
+ * imagen entera. Pero en reposo va en `--ink-dim` y no en el gris del bus:
+ * el gris de línea a menos de 0.5 desaparece en el suelo, y una línea que no
+ * se ve no es tenue, es que no está. Caliente, casi opaco: es la única línea
+ * que el operador está mirando.
+ */
+export const TETHER_REST = 0.5;
+export const TETHER_HOT = 0.95;
 
 /**
  * Tile width in pixels below which only spanning pipes are drawn, and above
@@ -164,13 +184,18 @@ const FRAG = /* glsl */ `
       // Frame: a region's or a squad's outline. Structure you steer by from
       // any distance, so it neither dashes nor hides.
       a = 0.9 * uFar;
-    } else {
+    } else if (kind < 7.5) {
       // Command: CAPCOM to what it launched. Dashes twice the bus's length
       // at a third of its weight, drifting out from the post; age is what
       // is left of it once the agent is done. It spans the fleet, so the
       // zoom never hides it — the preference does.
       float ph = fract((vAlong - uTime * drift) / (period * 2.0));
       a = age * mix(0.30, 0.65, vSel.x) * uFar * (ph < 0.6 ? 1.0 : 0.0);
+    } else {
+      // Tether: an output to whoever made it. Solid — it is a label, not
+      // traffic, so nothing drifts along it — faint at rest and near-opaque
+      // while the pointer is on the output or its origin (age is 0 → 1).
+      a = mix(${TETHER_REST.toFixed(2)}, ${TETHER_HOT.toFixed(2)}, age) * uFar;
     }
     // In focus, only what the selection is wired to keeps its weight.
     a *= mix(1.0, mix(0.12, 1.0, vSel.x), uFocus);
@@ -511,7 +536,8 @@ export function createPipes(scene: THREE.Scene): PipesHandle {
         n++;
       }
       // A command tie has no ports: it is not a pipe anything travels down.
-      if (kind !== 'command') for (const p of [pts[0]!, pts[pts.length - 1]!]) drawPort(p.x, p.y, z, color, 1, sel, false, local);
+      // A tether draws its own, at the origin only, sized by whether it is hot.
+      if (kind !== 'command' && kind !== 'tether') for (const p of [pts[0]!, pts[pts.length - 1]!]) drawPort(p.x, p.y, z, color, 1, sel, false, local);
       return off;
     },
 

@@ -14,7 +14,7 @@
 
 import type { Artifact } from '../../shared/types.ts';
 import { authedUrl } from '../net/client.ts';
-import { esc } from '../util.ts';
+import { ago, esc } from '../util.ts';
 import { opaqueLabel } from './surface.ts';
 
 /** Una ficha lista para pintar: su sitio en la pantalla y lo que lleva dentro. */
@@ -39,6 +39,12 @@ export interface ShelfItem {
    * atención pide, y eso es exactamente lo que hace la baldosa.
    */
   dim: boolean;
+  /**
+   * El puntero está sobre la baldosa de este agente: la franja entera se
+   * enciende con sus tirantes (`tether.ts`), que es el hover en sentido
+   * inverso — de la baldosa a lo que hizo.
+   */
+  hot: boolean;
 }
 
 export interface ShelvesEvents {
@@ -46,6 +52,13 @@ export interface ShelvesEvents {
   onOpenArtifact(id: string, x: number, y: number): void;
   /** Clic en el contador: el índice de ese agente, que es la galería. */
   onOpenGallery(agentId: string): void;
+  /**
+   * El puntero entra en una ficha, o sale de todas (`null, null`). Una ficha
+   * normal trae su artefacto; el contador trae sólo al agente, porque no es
+   * un output sino la puerta a todos los suyos. El campo lo usa para encender
+   * el tirante de esa ficha y la baldosa de la que cuelga.
+   */
+  onHoverChip(artId: string | null, agentId: string | null): void;
 }
 
 export interface ShelvesHandle {
@@ -105,6 +118,39 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
   interface Rec { el: HTMLElement; sig: string }
   const live = new Map<string, Rec>();
   const pool: HTMLElement[] = [];
+  /*
+   * El pie de la ficha bajo el puntero: qué es y de cuándo, en una línea
+   * debajo de la ficha. Uno solo para toda la capa, porque sólo hay un
+   * puntero. No es una previsualización — la imagen no se infla, que es la
+   * peor interacción posible sobre una baldosa que se está leyendo —, es el
+   * título que el agente le puso y hace cuánto, que es lo que una ficha de
+   * 33 px no puede decir por sí sola.
+   */
+  const cap = document.createElement('div');
+  cap.className = 'chip-cap px px--tiny';
+  cap.hidden = true;
+  layer.appendChild(cap);
+  /** La plaza (`agente:i`) de la ficha bajo el puntero, o null. */
+  let hoverKey: string | null = null;
+
+  function hoverTo(el: HTMLElement | null) {
+    const key = el?.dataset.key ?? null;
+    if (key === hoverKey) return;
+    hoverKey = key;
+    if (!el) { cap.hidden = true; ev.onHoverChip(null, null); return; }
+    ev.onHoverChip(el.dataset.art ?? null, el.dataset.agent ?? null);
+  }
+  layer.addEventListener('pointerover', (e) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art');
+    if (el) hoverTo(el);
+  });
+  layer.addEventListener('pointerout', (e) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art');
+    if (!el) return;
+    // De la imagen al borde de la misma ficha no es salir de ella.
+    const to = (e.relatedTarget as HTMLElement | null)?.closest?.<HTMLElement>('.chip-art') ?? null;
+    if (to !== el) hoverTo(null);
+  });
 
   function take(): HTMLElement {
     const el = pool.pop();
@@ -160,13 +206,15 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
           // su galería, y una ficha que no sabe de quién es no se puede mirar
           // desde fuera — ni en el arnés ni en las herramientas del navegador.
           rec.el.dataset.agent = it.agentId;
-          const sig = `${c.art?.id ?? `+${c.more}`}|${c.art?.url ?? ''}|${c.art?.at ?? 0}|${it.dim ? 'd' : ''}`;
+          rec.el.dataset.key = key;
+          const sig = `${c.art?.id ?? `+${c.more}`}|${c.art?.url ?? ''}|${c.art?.at ?? 0}|${it.dim ? 'd' : ''}|${it.hot ? 'h' : ''}`;
           if (sig !== rec.sig) {
             rec.sig = sig;
             rec.el.innerHTML = content(c);
             rec.el.className = 'chip-art'
               + (c.art ? '' : ' chip-art--more')
-              + (it.dim ? ' is-dim' : '');
+              + (it.dim ? ' is-dim' : '')
+              + (it.hot ? ' is-hot' : '');
             if (c.art) {
               rec.el.dataset.art = c.art.id;
               rec.el.title = `${c.art.title} · ${c.art.path}`;
@@ -179,10 +227,20 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
           el.style.transform = `translate3d(${Math.round(c.sx)}px, ${Math.round(c.sy)}px, 0)`;
           el.style.width = `${Math.round(c.px)}px`;
           el.style.height = `${Math.round(c.px)}px`;
+          // El pie sigue a su ficha fotograma a fotograma: la cámara se mueve
+          // con easing y un pie leído hace medio segundo cuelga del aire.
+          if (key === hoverKey) {
+            cap.textContent = c.art ? `${c.art.title} · ${ago(c.art.at)}` : `${c.more} MORE`;
+            cap.style.transform = `translate3d(${Math.round(c.sx)}px, ${Math.round(c.sy + c.px + 3)}px, 0)`;
+            cap.hidden = false;
+          }
         }
       }
       for (const [key, rec] of live) {
         if (want.has(key)) continue;
+        // La ficha bajo el puntero se va con el zoom o con el recorte: el
+        // puntero ya no está sobre nada, y el campo tiene que saberlo.
+        if (key === hoverKey) hoverTo(null);
         rec.el.hidden = true;
         // Un nodo que vuelve al pool no se lleva su contenido: si lo hiciera,
         // la ficha siguiente enseñaría la imagen de otro agente durante un
@@ -198,6 +256,7 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
       layer.innerHTML = '';
       live.clear();
       pool.length = 0;
+      hoverKey = null;
     },
   };
 }

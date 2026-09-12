@@ -1,5 +1,11 @@
 # Artefactos en el canvas: reconocimiento y propuesta
 
+> **Nota del 2026-09-12 (misión 26).** Lo de abajo sigue vigente. Encima de
+> ello, cada output del canvas lleva ahora un tirante hasta su origen y un pie
+> con quién y cuándo: [CANVAS-CONEXIONES-2026-09-12.md](CANVAS-CONEXIONES-2026-09-12.md).
+> El «sin previsualización al pasar por encima» de §3.8 se mantiene: el hover
+> sobre una ficha saca una línea de texto, nunca la imagen.
+
 Misión `mission_mty0u9wtmoc471tc`, squad `canvas-artefactos-01`, miembro 2 (la
 presentación). El compañero 1 lleva la captura y el camino de datos; este
 documento sólo responde a la pregunta 2 del operador: **cómo mostrarlo en el

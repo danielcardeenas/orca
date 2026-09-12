@@ -1040,6 +1040,14 @@ void start();
    * fixtures en el índice del operador.
    */
   artifact: (a: Artifact) => store.putArtifactForTest(a),
+  /** `PLACE IN FIELD` sin la ventana: para fotografiar el tirante de una superficie (tether.shots.ts). */
+  place: (id: string) => c.placeArtifact(id),
+  /**
+   * Sacar a un agente del campo sin que el hub lo olvide, como el DISMISS de
+   * la ventana de flota: así se fotografía un artefacto cuyo autor ya no tiene
+   * baldosa y cuya escuadra sigue (tether.shots.ts). El almacén lo recuerda.
+   */
+  dismiss: (ids: string[]) => { store.dismiss(ids); field.feed(); },
   callsignOf: (id: string) => store.knownAgent(id)?.callsign ?? null,
   machineOf: (id: string) => store.knownAgent(id)?.machineId ?? null,
   // Un informe de higiene que el hub nunca vio, para el arnés visual: una foto

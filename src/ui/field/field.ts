@@ -54,6 +54,7 @@ import { createGround, GROUND_Z } from './ground.ts';
 import { createLabels, rememberMachine, rememberProjectCode, rememberProjectName, type LabelItem } from './labels.ts';
 import { createMedia } from './media.ts';
 import { shelfChips, shelfIds, shelfVisible } from './shelf.ts';
+import { chipStem, originPortScale, tetherHot, tetherRoute, tetherWeight, type Rect, type Tether } from './tether.ts';
 import { createShelves, type ShelfItem } from './shelves.ts';
 import { createPipes, laneShift, pathLength, routeGutter, routeGutterMsg, routeLineage, routeMessage, spanOf, type Pt } from './pipes.ts';
 import { absorbedChildren } from './blocks.ts';
@@ -385,10 +386,14 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   const halo = createCommandHalo(scene);
   const ground = createGround(scene);
   const labels = createLabels(labelsLayer);
-  const media = createMedia(scene, surfacesLayer, camera, (id) => ev.onUnplaceArtifact(id));
+  // Quién hizo una superficie, para su pie: el agente de este feed, o el que
+  // el almacén recuerda si ya se archivó — un artefacto sobrevive a su autor.
+  const media = createMedia(scene, surfacesLayer, camera, (id) => ev.onUnplaceArtifact(id),
+    (id) => byId.get(id)?.callsign ?? store.knownAgent(id)?.callsign ?? null);
   const shelves = createShelves(shelvesLayer, {
     onOpenArtifact: (id, x, y) => ev.onOpenArtifact(id, x, y),
     onOpenGallery: (agentId) => ev.onOpenGallery(agentId),
+    onHoverChip: (artId, agentId) => { hoverArt = artId; hoverOrigin = artId ? null : agentId; },
   });
 
   const reduce = REDUCE.value;
@@ -402,7 +407,28 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   /** The operator's placed files; see `setExtraMedia`. */
   let extraMedia: Artifact[] = [];
   const selected = new Set<string>();
+  /** Lo que hay bajo el puntero en el lienzo: un agente, una superficie o una escuadra (`pickAt`). */
   let hover: string | null = null;
+  /**
+   * La ficha de estantería bajo el puntero, que es DOM y no pasa por `pickAt`:
+   * su artefacto, o su agente si es el contador (`shelves.ts`). Encienden el
+   * tirante de esa ficha y la baldosa de la que cuelga (`tether.ts`).
+   */
+  let hoverArt: string | null = null;
+  let hoverOrigin: string | null = null;
+  /** La superficie bajo el puntero aunque tape una baldosa (`mediaAt`), que `hover` no dice. */
+  let hoverMedia: string | null = null;
+  /** Los tirantes de las fichas de este fotograma, en unidades de mundo. Los consume `buildPipes`. */
+  const stems: Tether[] = [];
+  /**
+   * Resueltos una vez por fotograma, antes del bucle de baldosas: el artefacto
+   * bajo el puntero venga de donde venga —ficha o superficie—, y los orígenes
+   * calientes: la baldosa o la escuadra bajo el puntero, y el agente del
+   * contador bajo el puntero. `tether.ts` decide con esto qué tirante se
+   * enciende, y el bucle de baldosas qué baldosa.
+   */
+  let hovArt: string | null = null;
+  const hotOrigins = new Set<string>();
   let active = false;
   let dirty = true;
   /** Until the operator moves the camera, the field keeps framing what arrives. */
@@ -1589,6 +1615,61 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     pipes.port(tail.x, tail.y, z + 0.003, landed ? C_INK : C_INK_DIM, 1, sel, !landed, 1 - span);
   }
 
+  /**
+   * De dónde sale el tirante de una superficie colocada (`tether.ts`): la
+   * baldosa de su agente, y si ya no tiene baldosa —archivado, fuera de
+   * `w.agents`— el puerto de su escuadra, si la escuadra sigue en el campo.
+   * Sin ninguna de las dos no hay tirante: un archivo del operador
+   * (`extraMedia`, sin agente) no es el output de nadie, y a uno huérfano no
+   * se le inventa un origen, que es la regla que la estantería ya sigue.
+   * `key` es lo que `hover` trae cuando el puntero está sobre ese origen.
+   */
+  function tetherOrigin(a: Artifact): { rect: Rect; z: number; key: string } | null {
+    if (!a.agentId) return null;
+    const s = layout.spots.get(a.agentId);
+    if (s) return { rect: { x: s.x, y: s.y, w: TILE_W * s.scale, h: TILE_H * s.scale }, z: s.z, key: a.agentId };
+    // `knownAgent` lee el almacén vivo, que un mundo reproducido no es.
+    const known = replay ? undefined : store.knownAgent(a.agentId);
+    const sq = known ? squadOf(known) : null;
+    if (!known || !sq) return null;
+    const hit = blockFor(sq, island(known));
+    if (!hit) return null;
+    const p = squadPortAt(hit.q);
+    return { rect: { x: p.x, y: p.y, w: 0, h: 0 }, z: SQ_Z + 0.004, key: hit.key };
+  }
+
+  /**
+   * Tirantes (`tether.ts`): cada output del canvas, unido a quien lo hizo.
+   *
+   * Las fichas cuelgan de su baldosa por el hilo que el bucle de baldosas dejó
+   * en `stems`; cada superficie colocada lleva un camino ortogonal hasta su
+   * origen y un puerto en él. Tenues en reposo y lima calientes — el output
+   * bajo el puntero, o todos los de la baldosa bajo el puntero —, y el foco
+   * los trata como a cualquier pipe: sólo los del seleccionado guardan su
+   * peso. Varias superficies de un agente convergen en el mismo punto de su
+   * baldosa, así que N outputs leen como un haz.
+   */
+  function drawTethers() {
+    for (const t of stems) {
+      pipes.add(t.pts, t.z, t.hot ? C_LIME : C_INK_DIM, 'tether', t.hot, tetherWeight(t.hot > 0), t.sel, 1);
+    }
+    for (const m of media.rects()) {
+      if (!m.shown) continue;
+      const a = artById.get(m.id);
+      if (!a) continue;
+      const o = tetherOrigin(a);
+      if (!o) continue;
+      const hot = tetherHot(a, o.key, hovArt, hotOrigins);
+      const sel = selected.has(a.agentId) ? 1 : 0;
+      const pts = tetherRoute({ x: m.x, y: m.y, w: m.w, h: m.h }, o.rect);
+      const z = Math.min(o.z, m.z) - 0.02;
+      const color = hot ? C_LIME : C_INK_DIM;
+      pipes.add(pts, z, color, 'tether', hot ? 1 : 0, tetherWeight(hot), sel, 1);
+      const end = pts[pts.length - 1]!;
+      pipes.port(end.x, end.y, z + 0.003, color, originPortScale(hot), sel);
+    }
+  }
+
   function buildPipes(now: number) {
     pipes.begin();
     const w = world();
@@ -1715,6 +1796,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       if (!p || !c) continue;
       tie(a, leadId, p, c, Math.min(p.z, c.z) - 0.035, 0.8, 0.35);
     }
+    drawTethers();
     // Traffic: unanswered asks always, everything else while it is fresh.
     // Pairs drawn here are pairs the wait below must not draw twice.
     const drawn = new Set<string>();
@@ -1811,12 +1893,40 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   const ray = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
 
-  function pickAt(sx: number, sy: number): { kind: 'agent' | 'media' | 'squad'; id: string } | null {
+  /** The pointer's ray into the world, or null when it runs parallel to the plane. */
+  function rayAt(sx: number, sy: number): { o: THREE.Vector3; d: THREE.Vector3 } | null {
     const r = canvas.getBoundingClientRect();
     ndc.set(((sx - r.left) / r.width) * 2 - 1, -((sy - r.top) / r.height) * 2 + 1);
     ray.setFromCamera(ndc, camera.three);
     const o = ray.ray.origin, d = ray.ray.direction;
-    if (Math.abs(d.z) < 1e-6) return null;
+    return Math.abs(d.z) < 1e-6 ? null : { o, d };
+  }
+
+  /**
+   * La superficie bajo el puntero, haya o no baldosa debajo. `pickAt` prueba
+   * los agentes antes que media a propósito —una baldosa bajo un cuadro sigue
+   * ganando el clic y el arrastre—, pero para el tirante lo que cuenta es lo
+   * que se ve, y lo que se ve es el cuadro: pasar el puntero por una imagen
+   * que tapa a un vecino tiene que encender la línea de la imagen, no la del
+   * vecino enterrado.
+   */
+  function mediaAt(sx: number, sy: number): string | null {
+    const hit = rayAt(sx, sy);
+    if (!hit) return null;
+    const { o, d } = hit;
+    for (const m of media.rects()) {
+      if (!m.shown) continue;
+      const t = (m.z - o.z) / d.z;
+      const x = o.x + d.x * t, y = o.y + d.y * t;
+      if (Math.abs(x - m.x) <= m.w / 2 && Math.abs(y - m.y) <= m.h / 2) return m.id;
+    }
+    return null;
+  }
+
+  function pickAt(sx: number, sy: number): { kind: 'agent' | 'media' | 'squad'; id: string } | null {
+    const hit = rayAt(sx, sy);
+    if (!hit) return null;
+    const { o, d } = hit;
     let best: string | null = null;
     let bestZ = -Infinity;
     for (const s of layout.spots.values()) {
@@ -1970,6 +2080,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       const hit = pickAt(e.clientX, e.clientY);
       const id = hit ? hit.id : null;
       if (id !== hover) { hover = id; ev.onHover(id); }
+      hoverMedia = mediaAt(e.clientX, e.clientY);
       return;
     }
     const dx = e.clientX - lastX, dy = e.clientY - lastY;
@@ -2334,6 +2445,18 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     let haloDrawn = false;
     labelItems.length = 0;
     shelfItems.length = 0;
+    stems.length = 0;
+    // El hover de los tirantes, resuelto una vez: ver `hovArt` y `hotOrigins`.
+    hovArt = hoverArt ?? hoverMedia ?? (hover !== null && artById.has(hover) ? hover : null);
+    hotOrigins.clear();
+    if (hover !== null && !artById.has(hover)) hotOrigins.add(hover);
+    if (hoverOrigin !== null) hotOrigins.add(hoverOrigin);
+    /*
+     * La baldosa de la que cuelga el output bajo el puntero se enciende como
+     * si el puntero estuviera sobre ella: es el realce del extremo de origen,
+     * y sale gratis del `sel` que el shader ya tiene para el hover.
+     */
+    const hotTile = hoverOrigin ?? (hovArt !== null ? artById.get(hovArt)?.agentId ?? null : null);
     for (const a of agents) {
       const s = layout.spots.get(a.id);
       if (!s) continue;
@@ -2363,7 +2486,7 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       // CAPCOM idle is CAPCOM listening: it never fades the way a worker does.
       alpha = a.state === 'done' ? 0.35 : a.state === 'dead' ? 0.55 : a.state === 'idle' && a.role !== 'capcom' ? 0.8 : 1;
       const isSel = selected.has(a.id);
-      const sel = isSel ? 2 : hover === a.id ? 1 : 0;
+      const sel = isSel ? 2 : hover === a.id || hotTile === a.id ? 1 : 0;
       const near = focusNear.has(a.id);
       const focusA = isSel ? FOCUS_A.sel : near ? FOCUS_A.near : FOCUS_A.far;
       /*
@@ -2420,12 +2543,22 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
           const chips = shelfChips(ids, { x: s.x, y: s.y, z: s.z, scale, trayOf: s.trayOf });
           if (chips.length) {
             const dim = a.state === 'dead' || a.state === 'done';
+            const hot = hotOrigins.has(a.id);
             const items = chips.map((c) => {
               const c0 = camera.project(c.x - c.w / 2, c.y + c.h / 2, c.z);
               const c1 = camera.project(c.x + c.w / 2, c.y - c.h / 2, c.z);
+              /*
+               * El hilo del que cuelga la ficha (`tether.ts`), en unidades de
+               * mundo: `buildPipes` lo dibuja con los demás tirantes. Caliente
+               * el de la ficha bajo el puntero, o todos si el puntero está
+               * sobre la baldosa o sobre el contador.
+               */
+              const id = c.id ?? `+${a.id}`;
+              const stemHot = hot || tetherHot({ id }, a.id, hovArt, hotOrigins);
+              stems.push({ id, pts: chipStem(c, { y: s.y, scale }), z: c.z, hot: stemHot ? 1 : 0, sel: isSel ? 1 : 0 });
               return { art: artById.get(c.id ?? '') ?? null, more: c.more, sx: c0.x, sy: c0.y, px: Math.max(1, c1.x - c0.x) };
             });
-            shelfItems.push({ agentId: a.id, chips: items, dim });
+            shelfItems.push({ agentId: a.id, chips: items, dim, hot });
           }
         }
       }
@@ -2437,10 +2570,12 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
     labels.update(labelItems);
     shelves.update(shelfItems);
 
+    // Las superficies se proyectan antes que los pipes: el tirante de una
+    // superficie sigue a si se dibuja o no (`MediaRect.shown`) este fotograma.
+    media.reproject();
     buildPipes(wallNow);
     pipes.step(dt);
     ground.update(cx, cy, camera.pxPerUnit(GROUND_Z), renderer.domElement.width, renderer.domElement.height);
-    media.reproject();
     placeRegions();
     renderer.render(scene, camera.three);
   }

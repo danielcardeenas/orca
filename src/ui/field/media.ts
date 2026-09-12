@@ -5,18 +5,38 @@
  * the space: an image or a video as a textured quad next to the agent that
  * made it, HTML or text as a sandboxed DOM surface projected over the canvas.
  * Work appears where you are, instead of as a path in a log line.
+ *
+ * Una superficie sola no dice de quién es ni de cuándo, así que cada una lleva
+ * dos cosas más, que no viven aquí del todo: un **pie** DOM con qué · quién ·
+ * hace cuánto (`.srf-cap` bajo un cuadro, `.srf__who` en la barra de una
+ * superficie DOM), y un **tirante** hasta la baldosa que la hizo, que dibuja
+ * `field.ts` con `tether.ts` a partir de `rects()` — por eso `MediaRect` dice
+ * si la superficie se está dibujando: un tirante a una superficie retirada
+ * sería una línea a la nada.
  */
 
 import * as THREE from 'three';
 import type { Artifact } from '../../shared/types.ts';
-import { esc } from '../util.ts';
+import { ago, esc } from '../util.ts';
 import { authedUrl } from '../net/client.ts';
 import { MEDIA_W, opaqueLabel, surfaceIsOpaque, surfacePlays, surfaceShows } from './surface.ts';
 import type { FieldCamera } from './camera.ts';
 
 const MAX_MEDIA = 40;
+/**
+ * Ancho dibujado, en píxeles, a partir del cual una superficie lleva su pie.
+ * Por debajo el pie sería más ancho que la imagen que describe; y a ese
+ * tamaño la superficie ya es una mancha con un tirante, que es suficiente.
+ */
+const CAP_MIN_PX = 120;
+/** Cada cuánto se reescribe el «hace N» de los pies, en milisegundos. */
+const CAP_REFRESH_MS = 15_000;
 
-export interface MediaRect { id: string; x: number; y: number; z: number; w: number; h: number }
+export interface MediaRect {
+  id: string; x: number; y: number; z: number; w: number; h: number;
+  /** Se está dibujando este fotograma: en pantalla y con tamaño de imagen. El tirante sigue a esto. */
+  shown: boolean;
+}
 
 export interface MediaHandle {
   update(artifacts: Artifact[]): void;
@@ -32,10 +52,20 @@ interface Entry {
   art: Artifact;
   x: number; y: number; z: number;
   w: number; h: number;
+  /** Se dibujó en el último `reproject`. */
+  shown: boolean;
   mesh?: THREE.Mesh;
   frame?: THREE.Mesh;
   video?: HTMLVideoElement;
   el?: HTMLElement;
+  /**
+   * El pie: qué es, quién lo hizo y hace cuánto, en una línea bajo la
+   * superficie. Un cuadro con textura no puede decir nada de eso por sí
+   * mismo, y una imagen flotando sobre el campo sin las tres cosas es una
+   * foto en el suelo. En una superficie DOM va dentro de su barra (`who`).
+   */
+  cap?: HTMLElement;
+  who?: HTMLElement;
 }
 
 export function createMedia(
@@ -43,8 +73,24 @@ export function createMedia(
   surfaces: HTMLElement,
   camera: FieldCamera,
   onClose: (id: string) => void,
+  /** El indicativo de un agente, o null si el campo ya no lo conoce. */
+  callsignOf: (agentId: string) => string | null = () => null,
 ): MediaHandle {
   const entries = new Map<string, Entry>();
+  let capAt = 0;
+
+  /** Quién y cuándo, como lo lee una persona: `CS-7 · 3M`. Sin agente, sólo el cuándo. */
+  function whoWhen(a: Artifact, now: number): string {
+    const cs = a.agentId ? callsignOf(a.agentId) : null;
+    return cs ? `${cs} · ${ago(a.at, now)}` : ago(a.at, now);
+  }
+  function writeCaptions(now: number) {
+    capAt = now;
+    for (const e of entries.values()) {
+      if (e.cap) e.cap.innerHTML = `<b>${esc(e.art.title)}</b> · ${esc(whoWhen(e.art, now))}`;
+      if (e.who) e.who.textContent = whoWhen(e.art, now);
+    }
+  }
   const loader = new THREE.TextureLoader();
   // The frame sits a hair behind the picture, closer than the depth buffer
   // can tell apart from a few dozen units out. It never writes depth and is
@@ -62,7 +108,7 @@ export function createMedia(
   function mount(a: Artifact) {
     const { w, h } = sizeOf(a);
     const p = a.placement!;
-    const e: Entry = { art: a, x: p.x, y: p.y, z: p.z, w, h };
+    const e: Entry = { art: a, x: p.x, y: p.y, z: p.z, w, h, shown: false };
     const url = authedUrl(a.url);
     if ((a.kind === 'image' || a.kind === 'video') && url) {
       let tex: THREE.Texture;
@@ -99,12 +145,22 @@ export function createMedia(
       mesh.renderOrder = 1;
       scene.add(frame, mesh);
       e.mesh = mesh; e.frame = frame;
+      // El pie, DOM proyectado como los rótulos: a tamaño de letra fijo, no
+      // escala con el zoom, y se retira antes que la imagen (`CAP_MIN_PX`).
+      const cap = document.createElement('div');
+      cap.className = 'srf-cap px px--tiny';
+      cap.dataset.id = a.id;
+      cap.hidden = true;
+      surfaces.appendChild(cap);
+      e.cap = cap;
     } else {
       const el = document.createElement('div');
       el.className = 'srf';
       el.dataset.id = a.id;
-      el.innerHTML = `<div class="srf__bar"><span class="px px--tiny">${esc(a.title)}</span>`
+      el.innerHTML = `<div class="srf__bar"><span class="px px--tiny">${esc(a.title)}`
+        + `<span class="srf__who" data-who></span></span>`
         + `<button class="srf__x" type="button" data-close>×</button></div>`;
+      e.who = el.querySelector<HTMLElement>('[data-who]')!;
       if (a.kind === 'html' && url) {
         const f = document.createElement('iframe');
         f.setAttribute('sandbox', '');
@@ -152,6 +208,7 @@ export function createMedia(
     if (e.frame) { scene.remove(e.frame); e.frame.geometry.dispose(); }
     if (e.video) { e.video.pause(); e.video.src = ''; }
     e.el?.remove();
+    e.cap?.remove();
   }
 
   /** CSS px per world unit at which a surface reads 1:1 — reading distance. */
@@ -180,9 +237,16 @@ export function createMedia(
         mount(a);
         n++;
       }
+      // Quién y cuándo, una vez por feed: un indicativo que llega, o un
+      // artefacto reescrito, cambian el pie y no hay que esperar al reloj.
+      writeCaptions(Date.now());
     },
 
     reproject() {
+      const now = Date.now();
+      // El «hace N» envejece solo: se reescribe cada quince segundos, que es
+      // la resolución con la que `ago` cambia de palabra.
+      if (now - capAt > CAP_REFRESH_MS) writeCaptions(now);
       for (const e of entries.values()) {
         const p = camera.project(e.x - e.w / 2, e.y + e.h / 2, e.z);
         const pxWide = e.w * camera.pxPerUnit(e.z);
@@ -195,6 +259,7 @@ export function createMedia(
          */
         if (e.mesh) {
           const shows = p.visible && surfaceShows(pxWide);
+          e.shown = shows;
           e.mesh.visible = shows;
           if (e.frame) e.frame.visible = shows;
           if (e.video) {
@@ -202,12 +267,22 @@ export function createMedia(
             if (play && e.video.paused) void e.video.play().catch(() => { /* sigue en pausa */ });
             else if (!play && !e.video.paused) e.video.pause();
           }
+          if (e.cap) {
+            const capShows = shows && pxWide >= CAP_MIN_PX;
+            e.cap.hidden = !capShows;
+            if (capShows) {
+              const q = camera.project(e.x - e.w / 2, e.y - e.h / 2, e.z);
+              e.cap.style.transform = `translate3d(${q.x.toFixed(1)}px, ${(q.y + 3).toFixed(1)}px, 0)`;
+              e.cap.style.maxWidth = `${Math.round(pxWide)}px`;
+            }
+          }
           continue;
         }
         if (!e.el) continue;
-        if (!p.visible) { e.el.style.display = 'none'; continue; }
+        if (!p.visible) { e.el.style.display = 'none'; e.shown = false; continue; }
         const scale = camera.pxPerUnit(e.z) / BASE;
-        if (scale < 0.18) { e.el.style.display = 'none'; continue; }
+        if (scale < 0.18) { e.el.style.display = 'none'; e.shown = false; continue; }
+        e.shown = true;
         e.el.style.display = '';
         e.el.style.transform = `translate3d(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px, 0) scale(${scale.toFixed(4)})`;
       }
@@ -215,7 +290,7 @@ export function createMedia(
 
     rects() {
       const out: MediaRect[] = [];
-      for (const e of entries.values()) out.push({ id: e.art.id, x: e.x, y: e.y, z: e.z, w: e.w, h: e.h });
+      for (const e of entries.values()) out.push({ id: e.art.id, x: e.x, y: e.y, z: e.z, w: e.w, h: e.h, shown: e.shown });
       return out;
     },
 

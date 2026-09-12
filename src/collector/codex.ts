@@ -37,7 +37,7 @@ import { MAX_TALK, MAX_TALK_TEXT, MAX_TALK_RESULT } from '../shared/types.ts';
 import type { Agent, AgentMetrics, AgentState, TalkItem } from '../shared/types.ts';
 import type { BlockSignal, Lineage, Liveness, ProducedFile } from './derive.ts';
 import { PERMISSION_SUSPECT_MS, REAP_AFTER_MS, TPS_WINDOW_MS } from './derive.ts';
-import { isRecord, num, oneLine, stableCallsign, str, tsMs } from './util.ts';
+import { fullText, isRecord, num, oneLine, stableCallsign, str, tsMs } from './util.ts';
 import type { LineBatch, TranscriptRef } from './watch.ts';
 
 interface Pending { callId: string; name: string; detail: string; at: number }
@@ -64,6 +64,8 @@ export class CodexDeriver {
   private approvalPolicy: string | null = null;
   private lastPrompt: string | null = null;
   private lastSay: string | null = null;
+  /** Lo mismo que `lastSay` pero entero: es lo que la misión guarda. */
+  private lastReport: string | null = null;
   private sawAssistant = false;
   private turnOpen = false;
   private interrupted = false;
@@ -235,7 +237,7 @@ export class CodexDeriver {
         this.turnOpen = false;
         this.pending.clear();
         const last = str(p['last_agent_message']);
-        if (last) { this.lastSay = oneLine(last, 400); this.sawAssistant = true; this.apiFailure = null; }
+        if (last) { this.lastSay = oneLine(last, 400); this.lastReport = fullText(last); this.sawAssistant = true; this.apiFailure = null; }
         return;
       }
       case 'turn_aborted':
@@ -259,6 +261,7 @@ export class CodexDeriver {
         } else if (SAY_ITEMS.has(kind) && text) {
           this.speak('say', text, at, 'event');
           this.lastSay = oneLine(text, 400);
+          this.lastReport = fullText(text);
           this.sawAssistant = true; this.apiFailure = null;
         }
         return;
@@ -276,7 +279,7 @@ export class CodexDeriver {
       }
       case 'agent_message': {
         const text = str(p['message']);
-        if (text) { this.lastSay = oneLine(text, 400); this.sawAssistant = true; this.apiFailure = null; }
+        if (text) { this.lastSay = oneLine(text, 400); this.lastReport = fullText(text); this.sawAssistant = true; this.apiFailure = null; }
         return;
       }
       case 'token_count': {
@@ -310,7 +313,7 @@ export class CodexDeriver {
         const text = firstText(p['content']);
         if (role === 'assistant') {
           this.sawAssistant = true; this.apiFailure = null;
-          if (text) { this.lastSay = oneLine(text, 400); this.speak('say', text, at); }
+          if (text) { this.lastSay = oneLine(text, 400); this.lastReport = fullText(text); this.speak('say', text, at); }
         } else if (role === 'user' && text && !/^# AGENTS\.md instructions|^<skills_instructions>|^<environment_context>/.test(text)) {
           this.speak('prompt', text, at);
           this.lastPrompt = oneLine(text, 400);
@@ -479,6 +482,7 @@ export class CodexDeriver {
       toolDetail: tool?.detail ?? null,
       lastPrompt: this.lastPrompt,
       lastSay: this.lastSay,
+      lastReport: this.lastReport,
       startedAt,
       updatedAt: Math.max(this.lastLineAt, this.lastMtimeMs) || now,
       uptimeMs: Math.max(0, now - startedAt),

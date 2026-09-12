@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { MissionStore } from '../src/hub/missions.ts';
-import { MISSION_ID_PREFIX, missionDebt, missionGlimpse, missionLeadOf, missionPrompt, visibleMissions } from '../src/shared/missions.ts';
+import { clipMissionText, MISSION_ID_PREFIX, missionDebt, missionGlimpse, missionLeadOf, missionPrompt, visibleMissions } from '../src/shared/missions.ts';
+import { oneLine } from '../src/collector/util.ts';
+import { MAX_REPORT } from '../src/shared/types.ts';
 import { newId } from '../src/shared/protocol.ts';
 import type { Agent } from '../src/shared/types.ts';
 import { startHub } from '../src/hub/server.ts';
@@ -294,5 +296,64 @@ export default { suite: 'Mission conversations', tests: [
     } finally {
       sockets.forEach((s) => s.close()); await hub.close(); rmSync(dir, { recursive: true, force: true });
     }
+  }),
+  test('la misión guarda el informe entero del agente, no la línea de su tarjeta', () => {
+    temporary((dir) => {
+      const s = new MissionStore(dir);
+      s.create('mission_r', 'Report'); s.assign('mission_r', ['w1', 'w2']);
+      const now = Date.now();
+      const base = (a: Record<string, unknown>) => ({ startedAt: now, updatedAt: now, ...a }) as unknown as Agent;
+      // Un informe real: párrafos, saltos de línea y bastante más de lo que
+      // cabe en un tile. `lastSay` es lo que el collector recorta a 200.
+      const report = `# Informe\n\n${'Lo entregado y por qué.\n'.repeat(60)}`;
+      assert.ok(report.length > 1_000);
+      s.observe({
+        w1: base({ id: 'w1', state: 'done', lastSay: oneLine(report, 200), lastReport: report }),
+        // Un collector viejo no manda `lastReport`: sigue valiendo `lastSay`.
+        w2: base({ id: 'w2', state: 'done', lastSay: 'Sin informe largo' }),
+      });
+      const kept = s.get('mission_r').messages;
+      assert.equal(kept.length, 2);
+      assert.equal(kept[0]!.text, report.trim(), 'el informe se guarda entero, con sus saltos de línea');
+      assert.equal(kept[1]!.text, 'Sin informe largo');
+      // Volver a verlo no lo escribe dos veces: el dedupe mira el mismo texto
+      // que se guardó, no la línea recortada.
+      s.observe({
+        w1: base({ id: 'w1', state: 'done', lastSay: oneLine(report, 200), lastReport: report }),
+        w2: base({ id: 'w2', state: 'done', lastSay: 'Sin informe largo' }),
+      });
+      assert.equal(s.get('mission_r').messages.length, 2, 'el mismo informe no entra dos veces');
+    });
+    return ok('el registro de la misión guarda lo que el agente entregó, no sus primeros 200 caracteres', true);
+  }),
+  test('cuando el tope duro hace falta, el propio texto dice que se recortó y dónde está el resto', () => {
+    temporary((dir) => {
+      const s = new MissionStore(dir);
+      s.create('mission_c', 'Clip'); s.assign('mission_c', ['w1']);
+      const now = Date.now();
+      const huge = 'x'.repeat(MAX_REPORT + 5_000);
+      s.observe({ w1: { id: 'w1', state: 'done', lastSay: 'x…', lastReport: huge, startedAt: now, updatedAt: now } as unknown as Agent });
+      const text = s.get('mission_c').messages[0]!.text;
+      assert.ok(text.length > MAX_REPORT, 'se guarda todo lo que cabe, no una frase');
+      assert.match(text, /\[ORCA: truncated here — 8000 of 13000 characters kept\. The rest is in the transcript of w1\.\]$/);
+      // Un texto que cabe no lleva marca ninguna.
+      assert.equal(clipMissionText('corto'), 'corto');
+      // Y el aviso no depende de que haya agente: el operador también escribe.
+      assert.match(clipMissionText('y'.repeat(MAX_REPORT + 1)), /The rest is in the author's transcript\.\]$/);
+    });
+    return ok('un recorte se anuncia en lugar de dejar la frase a medias', true);
+  }),
+  test('el prompt de la misión recorta, lo dice, y dice dónde está el resto', () => {
+    const long = 'y'.repeat(3_000);
+    const mission = {
+      id: 'mission_p', title: 'P', status: 'active' as const, createdAt: 0, updatedAt: 0, agentIds: ['w1'], messages: [
+        { id: 'a', role: 'agent' as const, agentId: 'w1', text: long, at: 1_000 },
+        { id: 'b', role: 'human' as const, text: 'y esto es corto', at: 2_000 },
+      ],
+    };
+    const prompt = missionPrompt(mission);
+    assert.match(prompt, /\[…1000 more characters\. Call inspect_mission\("mission_p"\) for this message in full\.\]/);
+    assert.ok(prompt.includes('y esto es corto') && !prompt.includes('y esto es corto\n[…'), 'lo que cabe entero no lleva aviso');
+    return ok('CAPCOM ve el recorte en vez de creerse que el informe terminaba ahí', true);
   }),
 ] };

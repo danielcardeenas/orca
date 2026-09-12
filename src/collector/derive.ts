@@ -18,7 +18,7 @@ import { CLAUDE_INTERRUPT_MARK } from '../shared/interrupt.ts';
 import { MAX_TALK, MAX_TALK_RESULT, MAX_TALK_TEXT } from '../shared/types.ts';
 import { ARTIFACT_TOOLS, kindOf } from './artifacts.ts';
 import type { LineBatch, TranscriptRef } from './watch.ts';
-import { isRecord, num, oneLine, stableCallsign, str, tsMs } from './util.ts';
+import { fullText, isRecord, num, oneLine, stableCallsign, str, tsMs } from './util.ts';
 
 /* ── umbrales ─────────────────────────────────────────────────────── */
 
@@ -166,6 +166,8 @@ export class SessionDeriver {
   private cliName: string | null = null;
   private lastPrompt: string | null = null;
   private lastSay: string | null = null;
+  /** Lo mismo que `lastSay` pero entero: es lo que la misión guarda. */
+  private lastReport: string | null = null;
   private model: string | null = null;
   private permissionMode: string | null = null;
   private mode: string | null = null;
@@ -417,6 +419,7 @@ export class SessionDeriver {
         summary: oneLine(`${str(l['error']) ?? 'api_error'}: ${text || 'CLI API request failed'}`, 500) };
       this.pending.clear();
       this.lastSay = oneLine(text, 200);
+      this.lastReport = fullText(text);
       this.say(str(l['uuid']), 0, { at: this.lastAssistantAt, kind: 'say', text });
       // Synthetic errors have zero usage and model <synthetic>. Preserve the
       // real model/context counters; neither proves successful model progress.
@@ -456,6 +459,7 @@ export class SessionDeriver {
         const t = str(raw['text']);
         if (t) {
           this.lastSay = oneLine(t, 200);
+          this.lastReport = fullText(t);
           this.say(lineId, i, { at: this.lastAssistantAt, kind: 'say', text: t, msgId });
         }
       } else if (bt === 'thinking') {
@@ -773,6 +777,7 @@ export class SessionDeriver {
       toolDetail: working ? (this.currentTool()?.detail ?? null) : null,
       lastPrompt: this.lastPrompt,
       lastSay: this.lastSay,
+      lastReport: this.lastReport,
       startedAt,
       updatedAt: this.lastActivityAt || Math.max(this.lastLineAt, this.lastMtimeMs) || now,
       uptimeMs: Math.max(0, now - startedAt),

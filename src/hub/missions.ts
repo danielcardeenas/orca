@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Agent } from '../shared/types.ts';
 import { newId } from '../shared/protocol.ts';
-import { MISSION_ID, type CapcomMission, type MissionDispatch, type MissionMessage, type MissionStatus } from '../shared/missions.ts';
+import { clipMissionText, MISSION_ID, type CapcomMission, type MissionDispatch, type MissionMessage, type MissionStatus } from '../shared/missions.ts';
 
 /**
  * Un miembro de squad con su líder vivo: reporta al líder, no a la misión.
@@ -95,7 +95,7 @@ export class MissionStore {
     // operador le escribe, que es justo cuando debería tomar su nombre.
     if (role === 'human' && (mission.title === 'New mission' || mission.title === 'New task')) mission.title = text.trim().replace(/\s+/g, ' ').slice(0, 100);
     mission.messages.push({
-      id: newId('msg'), role, text: text.slice(0, 8000), at: Date.now(),
+      id: newId('msg'), role, text: clipMissionText(text, agentId), at: Date.now(),
       ...(agentId ? { agentId } : {}),
       ...(to && role === 'human' ? { to } : {}),
     });
@@ -182,9 +182,16 @@ export class MissionStore {
         if (underLiveLead(a, agents)) continue;
         const since = a.startedAt >= mission.createdAt ? mission.createdAt : mission.agentSince?.[id] ?? mission.createdAt;
         if (a.updatedAt < since) continue;
+        // Lo que se guarda es el informe entero, no la línea de la tarjeta.
+        // `lastSay` viene aplanado y cortado a 200 caracteres para caber en un
+        // tile, y durante mucho tiempo fue también lo único que quedaba de un
+        // handoff: la misión guardaba media frase de un informe de siete mil
+        // caracteres. Un collector viejo no manda `lastReport`; ahí se sigue
+        // con lo que había, que es mejor que no anotar nada.
+        const said = a.lastReport?.trim() || a.lastSay;
         const last = [...mission.messages].reverse().find((m) => m.agentId === id);
-        if (last?.text === a.lastSay.slice(0, 8000)) continue;
-        mission = this.message(mission.id, 'agent', a.lastSay, undefined, id);
+        if (last?.text === clipMissionText(said, id)) continue;
+        mission = this.message(mission.id, 'agent', said, undefined, id);
       }
     }
   }

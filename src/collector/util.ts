@@ -11,6 +11,7 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { MAX_REPORT } from '../shared/types.ts';
 
 export const COLLECTOR_VERSION = '0.1.0';
 
@@ -184,6 +185,19 @@ export function oneLine(text: unknown, max = 160): string {
   if (typeof text !== 'string') return '';
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > max ? flat.slice(0, max - 1) + '…' : flat;
+}
+
+/**
+ * Lo que el agente dijo, entero: sin aplanar y con el tope del informe.
+ *
+ * El complemento de `oneLine`. Un tile quiere una línea; el registro de la
+ * misión quiere el informe, con sus saltos de línea y su markdown, porque es
+ * lo único que queda cuando el transcript del agente ya no se mira.
+ */
+export function fullText(text: unknown, max = MAX_REPORT): string {
+  if (typeof text !== 'string') return '';
+  const t = text.trim();
+  return t.length > max ? t.slice(0, max) : t;
 }
 
 export function num(v: unknown, fallback = 0): number {

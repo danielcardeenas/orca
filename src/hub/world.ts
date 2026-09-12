@@ -28,7 +28,7 @@ import type {
   Project, SessionRollup, WorldState,
   TalkItem,
 } from '../shared/types.ts';
-import { AGENT_STATES, LIVE_STATES, MAX_TALK, MAX_TALK_TEXT, TERMINAL_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
+import { AGENT_STATES, LIVE_STATES, MAX_REPORT, MAX_TALK, MAX_TALK_TEXT, TERMINAL_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
 import { ceilingTokens } from '../shared/tokens.ts';
 import { squadName } from '../shared/squads.ts';
 import { capcomOf } from '../shared/capcom.ts';
@@ -385,6 +385,7 @@ export function sanitizeAgentPatch(raw: unknown): Partial<Agent> {
   if (has(o, 'toolDetail')) p.toolDetail = sOrNull(o['toolDetail']);
   if (has(o, 'lastPrompt')) p.lastPrompt = sOrNull(o['lastPrompt'], MAX_TEXT);
   if (has(o, 'lastSay')) p.lastSay = sOrNull(o['lastSay'], MAX_TEXT);
+  if (has(o, 'lastReport')) p.lastReport = sOrNull(o['lastReport'], MAX_REPORT);
   if (has(o, 'startedAt')) p.startedAt = n(o['startedAt']);
   if (has(o, 'updatedAt')) p.updatedAt = n(o['updatedAt']);
   if (has(o, 'uptimeMs')) p.uptimeMs = n(o['uptimeMs']);
@@ -442,6 +443,9 @@ export function sanitizeAgent(raw: unknown, machineId: string): Agent | null {
     toolDetail: sOrNull(o['toolDetail']),
     lastPrompt: sOrNull(o['lastPrompt'], MAX_TEXT),
     lastSay: sOrNull(o['lastSay'], MAX_TEXT),
+    // El informe entero, con su propio tope: `MAX_TEXT` es la medida de un
+    // campo de vista y aquí lo que se guarda es lo que el agente entregó.
+    lastReport: sOrNull(o['lastReport'], MAX_REPORT),
     startedAt: n(o['startedAt'], now),
     updatedAt: n(o['updatedAt'], now),
     uptimeMs: n(o['uptimeMs']),

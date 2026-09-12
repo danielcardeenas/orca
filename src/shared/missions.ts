@@ -1,4 +1,4 @@
-import type { Agent } from './types.ts';
+import { MAX_REPORT, type Agent } from './types.ts';
 
 export type MissionStatus = 'active' | 'completed' | 'failed';
 export interface MissionMessage {
@@ -16,6 +16,22 @@ export interface MissionMessage {
    */
   to?: string;
 }
+/**
+ * Lo que se guarda de una línea de misión.
+ *
+ * El registro de la misión es lo que sobrevive al reciclado de CAPCOM: si se
+ * recorta aquí, el trabajo entregado se pierde y no hay dónde recuperarlo. Por
+ * eso el tope es el del informe entero y no el de una vista, y por eso, cuando
+ * de verdad se pasa, el propio texto lo dice en lugar de terminar a mitad de
+ * frase y aparentar que el agente dejó la frase colgada. Quien enseña una
+ * misión recorta al enseñarla; nadie recorta al escribirla.
+ */
+export function clipMissionText(text: string, agentId?: string): string {
+  if (text.length <= MAX_REPORT) return text;
+  const where = agentId ? `the transcript of ${agentId}` : "the author's transcript";
+  return `${text.slice(0, MAX_REPORT)}\n\n[ORCA: truncated here — ${MAX_REPORT} of ${text.length} characters kept. The rest is in ${where}.]`;
+}
+
 export interface CapcomMission {
   id: string;
   title: string;
@@ -445,8 +461,21 @@ export function leadPrompt(mission: CapcomMission, text: string): string {
     + text;
 }
 
+/**
+ * El prompt sí recorta —ocho informes enteros son un prompt de sesenta mil
+ * caracteres— pero lo dice y dice dónde está el resto. Sin eso, CAPCOM lee
+ * media frase creyendo que es todo lo que el agente entregó, que es
+ * exactamente el problema que el almacenamiento completo vino a arreglar.
+ */
+const PROMPT_LINE = 2_000;
+
 export function missionPrompt(mission: CapcomMission): string {
-  const history = mission.messages.slice(-8).map((m) => `${m.role}${m.agentId ? ` (${m.agentId})` : ''}: ${m.text.slice(0, 2000)}`).join('\n');
+  const history = mission.messages.slice(-8).map((m) => {
+    const body = m.text.length > PROMPT_LINE
+      ? `${m.text.slice(0, PROMPT_LINE)}\n[…${m.text.length - PROMPT_LINE} more characters. Call inspect_mission("${mission.id}") for this message in full.]`
+      : m.text;
+    return `${m.role}${m.agentId ? ` (${m.agentId})` : ''}: ${body}`;
+  }).join('\n');
   return `[ORCA MISSION ${mission.id}] ${mission.title}\nThis is a separate mission conversation. Use only its context below; do not transfer decisions from other missions. Pass mission_id="${mission.id}" to spawn_agent and launch_squad. Publish your response with report_mission(mission_id="${mission.id}", text=your response, status="active" or "completed" or "failed"). Plain CLI prose is not delivered to this mission. Mark completed only when the requested work is actually done.\nAssigned agents: ${mission.agentIds.join(', ') || 'none'}\nConversation:\n${history}`;
 }
 

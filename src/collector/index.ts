@@ -2072,6 +2072,11 @@ export function diffAgent(prev: Agent, next: Agent): Partial<Agent> | null {
     'background', 'shortId', 'pane', 'projectId'] as const) {
     if (prev[k] !== next[k]) set(k);
   }
+  // `lastReport` es el mismo hecho que `lastSay` sin recortar, y el hub lo usa
+  // para escribir en la misión: van juntos o no van. Separados, un frame que
+  // trae la línea nueva y deja el informe viejo hace que la misión guarde el
+  // informe del turno anterior debajo del titular del actual.
+  if (prev.lastReport !== next.lastReport || 'lastSay' in patch) set('lastReport');
   if (JSON.stringify(prev.block) !== JSON.stringify(next.block)) set('block');
   if (JSON.stringify(prev.continuation) !== JSON.stringify(next.continuation)) set('continuation');
   if (JSON.stringify(prev.modelControl) !== JSON.stringify(next.modelControl)) set('modelControl');

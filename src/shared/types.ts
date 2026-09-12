@@ -231,6 +231,22 @@ export interface Agent {
   lastPrompt: string | null;
   /** Last thing the agent said, trimmed. Feeds the deck's activity column. */
   lastSay: string | null;
+  /**
+   * Lo mismo que `lastSay`, pero entero: sin aplanar a una línea y con el tope
+   * de `MAX_REPORT`, no el de una tarjeta.
+   *
+   * Existe porque `lastSay` es la fuente de la que la misión saca lo que un
+   * agente entregó (`MissionStore.observe`), y `lastSay` está recortado a 200
+   * caracteres para caber en un tile. El resultado era que el registro de la
+   * misión —lo único que sobrevive al reciclado de CAPCOM— guardaba media
+   * frase de un informe de siete mil caracteres, y el informe completo sólo
+   * quedaba en el transcript del agente, que nadie lee. Un tile sigue
+   * queriendo la línea; la misión quiere el informe.
+   *
+   * Opcional: un collector viejo hablándole a un hub nuevo no lo manda, y
+   * entonces la misión vuelve a caer en `lastSay`, que es lo que había.
+   */
+  lastReport?: string | null;
 
   startedAt: number;
   updatedAt: number;
@@ -438,6 +454,15 @@ export interface TalkItem {
   /** For assistant blocks: the API message they belong to. */
   msgId?: string;
 }
+
+/**
+ * Tope de lo que un agente entrega: `Agent.lastReport` y, con él, la línea que
+ * la misión guarda. Generoso a propósito —un informe de handoff son varios
+ * miles de caracteres— y el mismo número en el collector, en el saneado del
+ * hub y en el almacén de misiones, para que el recorte ocurra en un solo
+ * sitio y se pueda anunciar cuando ocurre.
+ */
+export const MAX_REPORT = 8_000;
 
 /** Past this a block is a file, not a line in a chat. */
 export const MAX_TALK_TEXT = 8_000;

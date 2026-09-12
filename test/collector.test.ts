@@ -182,6 +182,15 @@ const testWorkingToIdle: Test = () => check('derive: tool_result cierra el tool,
   assert.strictEqual(s.state, 'idle');
   assert.strictEqual(s.tool, null, 'idle no puede reportar tool');
   assert.strictEqual(s.lastSay, 'Listo');
+
+  // El informe con el que un agente cierra su turno es lo que la misión
+  // guarda: `lastSay` lo aplana a una línea de 200 para el tile, y `lastReport`
+  // lo conserva entero, con sus saltos de línea.
+  const report = `# Informe\n\n${'Lo entregado, con detalle.\n'.repeat(40)}`;
+  d.ingest(batch(r, [assistantLine({ at: now + 500, stop: 'end_turn', text: report })]));
+  const done = d.snapshot(now + 600);
+  assert.strictEqual(done.lastSay!.length, 200, 'la línea del tile sigue recortada');
+  assert.strictEqual(done.lastReport, report.trim(), 'el informe entero viaja aparte');
 });
 
 const testBlockedByAsk: Test = () => check('derive: AskUserQuestion bloquea de inmediato', () => {
@@ -986,6 +995,15 @@ const testDiff: Test = () => check('index: diffAgent sólo emite cambios percept
     block: { kind: 'question', summary: 's', since: 1 },
   }));
   assert.ok(bl?.block);
+
+  // `lastSay` y `lastReport` son el mismo hecho a dos resoluciones, y el hub
+  // escribe el segundo en la misión: si viajaran por separado, un frame con la
+  // línea nueva y el informe viejo dejaría en la misión el informe anterior.
+  const said = diffAgent(fakeAgent({ lastSay: 'viejo', lastReport: 'viejo entero' }),
+    fakeAgent({ lastSay: 'nuevo', lastReport: 'nuevo entero' }));
+  assert.strictEqual(said?.lastSay, 'nuevo');
+  assert.strictEqual(said?.lastReport, 'nuevo entero');
+  assert.strictEqual(diffAgent(a, fakeAgent()), null, 'sin informe nuevo no hay patch');
 });
 
 /*

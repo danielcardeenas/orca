@@ -1,7 +1,7 @@
 # El dinero sale de ORCA, el uso ocupa su lugar
 
 **2026-09-12 · misión `mission_mty0dljurtf23kl5`.** Qué se cambió, qué se
-decidió y qué queda pendiente de un relevo.
+decidió y qué se comprobó en la flota de verdad.
 
 ## La regla
 
@@ -153,27 +153,78 @@ sigue parseando y vale cero, que es la verdad de un tramo que no lo midió.
 
 ---
 
-## 5 · El relevo pendiente
+## 4b · ¿Y comparar modelos? Tampoco se queda
 
-**Ni el hub ni el collector de producción se recargaron.** Están corriendo el
-código de antes de esta entrega. Hace falta un relevo — `SERVER CODE CHANGED`,
-o `npm run prod` — y hasta entonces:
+La misión dejaba una puerta abierta: si una estimación de coste seguía siendo
+útil para **comparar modelos**, podía quedarse rotulada como estimación de un
+plan plano. No se quedó ninguna, y conviene decir por qué en vez de dejarlo en
+un silencio.
 
-- los 23 techos siguen en `~/.orca/hub/budgets.json` y el hub los tiene en
-  memoria. **Editar el fichero a mano no sirve**: el hub lo sobreescribe entero
-  en su siguiente anotación. Los borra el código nuevo, solo, en la segunda
-  pasada tras el relevo;
-- la consola sigue pintando el gauge `SPEND` y las celdas `COST`;
-- `journal_stats` sigue devolviendo `cost`.
+La única superficie que podía servir para eso era el coste medio por proyecto
+de `journal_stats`. No compara modelos:
 
-**Qué mirar para confirmar que el relevo prendió**, en este orden:
+- **Mezcla adaptadores, no modelos.** Codex escribe `$0.00` en todo su
+  transcript. Un proyecto llevado con Codex sale gratis y uno llevado con
+  Claude sale caro, diga lo que diga el modelo que hubo detrás. Eso no es una
+  comparación: es una lista de qué CLI reporta coste.
+- **La tarifa no es la del plan.** El `costUSD` de Claude sale del `cost-state`,
+  calculado con precios de API. Comparar dos modelos con una tarifa que no se
+  paga es comparar dos ficciones.
+- **Los tokens sí comparan, y de verdad.** `usage.tokens` con `measured` sale
+  del transcript de los dos CLI, con la misma regla, y dice lo único que aquí
+  se agota: cuánta cuota costó el trabajo. Si algún día hace falta ponerle
+  precio a esa cifra para comparar proveedores, se hace sobre el uso medido y
+  en el momento de la comparación, no guardando dólares en cada entrada.
 
-1. En el log del hub, a los ~10 minutos de arrancar:
-   `techos retirados por no quedar sujeto: agent:4ee5ac1c-…, agent:…` — 23
-   claves en una o dos líneas. Si no sale, mirar que la flota no esté vacía:
-   con cero agentes en el mundo la poda no corre a propósito.
-2. `cat ~/.orca/hub/budgets.json` después de eso: `limits` vacío, y ni un `usd`
-   en el fichero.
+---
+
+## 5 · El relevo: no quedó pendiente, ocurrió solo
+
+La misión pedía no reiniciar nada y avisar del relevo pendiente. **No se
+reinició nada a mano, y aun así el relevo ocurrió**: el hub y el collector de
+producción corren bajo `tsx`, que vigila `src/`, así que guardar en
+`src/hub/budgets.ts`, `src/hub/server.ts`, `src/hub/world.ts`,
+`src/hub/journal.ts` y `src/collector/index.ts` los relanzó por su cuenta. Es
+un efecto conocido de cómo está levantada la flota, no una decisión de esta
+entrega, y conviene que quede escrito porque cambia lo que hay que mirar.
+
+Medido a las 15:22 del 2026-09-12:
+
+| Qué | Evidencia |
+|---|---|
+| Hub relevado | pid 41058, arrancado 15:18:56 |
+| Collector relevado | pid 40681, arrancado 15:18:55, bajo `tools/supervise.mjs` |
+| Consola reconstruida | `dist/assets/index-jXkFfBEB.js`, 15:14 · 4 veces `TOKENS`, 0 veces `SPEND` |
+| `/api/health` | publica `"tokens": 5397599` donde publicaba `costUSD` |
+| `~/.orca/hub/budgets.json` | reescrito a las 15:02 con la forma nueva: `{tokens, min}`, **ni un `usd` en el fichero** |
+
+### Los 23 techos: se fueron, y esto es lo que pasó
+
+No hizo falta borrarlos a mano. Al relevarse el hub:
+
+1. los que sólo tenían dólares se cayeron al cargar, porque `normalizeLimit` ya
+   no lee ese eje y `hasLimit` dijo que no quedaba nada que evaluar;
+2. los que además tenían minutos sobrevivieron a la carga como techos de
+   tiempo, y `pruneOrphans` los marcó en la primera pasada y los borró en la
+   siguiente, pasados los diez minutos, por no quedar sujeto;
+3. los 3 en tokens de los revisores, igual.
+
+Lo que hay ahora en el libro son **5 techos, todos en tokens**, puestos por
+CAPCOM después del relevo: uno de 400k, uno de escuadrón de 1,8M y tres de
+600k. Ni un eje en dólares, ni un techo huérfano.
+
+El mecanismo se ensayó además en frío antes de esto, sobre una copia del
+`budgets.json` de 23 techos y la flota real: 23 cargados → 0 en dólares → 5
+marcados en la primera pasada → 5 borrados en la segunda, once minutos después,
+y el disco reescrito sin un solo `usd`.
+
+### Qué mirar si hace falta comprobarlo otra vez
+
+1. `cat ~/.orca/hub/budgets.json` — ni un `usd`, ni un techo de alguien que no
+   esté en la flota.
+2. En el log del hub, cuando poda: `techos retirados por no quedar sujeto: …`.
+   Si no sale nunca, comprobar que la flota no esté vacía: con cero agentes en
+   el mundo la poda no corre, a propósito.
 3. En la consola (`localhost:4478/?k=$(cat ~/.orca/token)`): el mástil dice
    `TOKENS` y no `SPEND`; una baldosa cualquiera dice `TOKENS` bajo su cifra;
    el menú de la cubierta ofrece `BY USE`.
@@ -231,5 +282,13 @@ npm test -- worker-recovery    que un handoff no reinicia el consumo
 npm test -- multi-machine      los esquemas de spawn sin budget_usd
 ```
 
-La suite completa se corrió al cerrar la entrega; el resultado está en el
-mensaje de entrega y en el último commit.
+La suite completa se corrió al cerrar la entrega: **1338/1338** antes de los
+últimos commits y **1362/1362** después, sin un solo fallo.
+
+Una nota sobre correr la suite en un árbol compartido: una pasada intermedia
+dio 1354/1355, con `forge-field` cayendo en
+`Cannot access 'TILE_W' before initialization`. No era de esta entrega —
+`npm test -- forge-field` pasa aislado, antes y después—: otro agente commiteó
+`src/ui/field/shelf.ts` mientras Vite servía ese módulo a la prueba. Si vuelve
+a salir, mirar primero `git log` de lo que el error nombra antes de buscarlo en
+el propio cambio.

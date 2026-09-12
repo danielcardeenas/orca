@@ -1049,6 +1049,8 @@ void start();
    */
   dismiss: (ids: string[]) => { store.dismiss(ids); field.feed(); },
   callsignOf: (id: string) => store.knownAgent(id)?.callsign ?? null,
+  /** El parentesco de un agente, para que el arnés encuentre un padre con hijo en la fila de abajo (shelf-routes.shots.ts). */
+  kinOf: (id: string) => { const a = store.knownAgent(id); return a ? { parentId: a.parentId, childIds: a.childIds } : null; },
   machineOf: (id: string) => store.knownAgent(id)?.machineId ?? null,
   // Un informe de higiene que el hub nunca vio, para el arnés visual: una foto
   // de restos no puede depender de que la máquina tenga restos de verdad.

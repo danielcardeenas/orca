@@ -159,6 +159,18 @@ export interface Spot {
   scale: number;
   /** The parent whose tray this spot stands in, or null for a tile. */
   trayOf: string | null;
+  /**
+   * Lo que la fila de esta baldosa reserva bajo ella para la estantería:
+   * `SHELF_H` si alguien de la fila declaró algo, 0 si no. Las rutas de los
+   * pipes lo restan al buscar el canalón bajo la fila (`routeGutter`), que
+   * sin esto caía en medio de la franja de fichas. Es de la fila, no de la
+   * baldosa: una baldosa sin fichas en una fila que las tiene también tiene
+   * ese aire debajo, y un pipe que saliera de ella tiene que bajar hasta el
+   * mismo canalón que los de sus vecinas. 0 en una celda de bandeja, en
+   * CAPCOM, en la cubierta y en una baldosa que el operador fijó fuera de
+   * su celda, que no están en ninguna fila.
+   */
+  shelf: number;
 }
 
 /** A parent's tray: the cell it occupies and who stands in it. */
@@ -568,9 +580,10 @@ export function layoutFleet(
       if (b && Math.abs(gy - b.minY) < 1e-9) squadShelf.set(sq, SHELF_H);
     }
 
-    for (const { e, gx, gy } of cells) {
+    for (const { e, row, gx, gy } of cells) {
       const sq = entrySquad(e);
       const off = sq ? shift.get(sq) : undefined;
+      const rowShelf = s.shelfRow[row] ? SHELF_H : 0;
       let tx = gx + (off?.dx ?? 0);
       let ty = gy + (off?.dy ?? 0);
 
@@ -598,8 +611,8 @@ export function layoutFleet(
           const kz = depthOf(k);
           const old = prev.spots.get(k.id);
           spots.set(k.id, old
-            ? { ...old, tx: kx, ty: ky, tz: kz, pinned: false, projectId: island(k), scale: g.scale, trayOf: e.parent.id }
-            : { id: k.id, x: kx, y: ky, z: kz, tx: kx, ty: ky, tz: kz, pinned: false, projectId: island(k), scale: g.scale, trayOf: e.parent.id });
+            ? { ...old, tx: kx, ty: ky, tz: kz, pinned: false, projectId: island(k), scale: g.scale, trayOf: e.parent.id, shelf: 0 }
+            : { id: k.id, x: kx, y: ky, z: kz, tx: kx, ty: ky, tz: kz, pinned: false, projectId: island(k), scale: g.scale, trayOf: e.parent.id, shelf: 0 });
         });
         void TRAY_INSET;
         minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
@@ -615,9 +628,12 @@ export function layoutFleet(
       if (placed?.pinned) { tx = placed.x; ty = placed.y; pinned = true; }
 
       const old = prev.spots.get(a.id);
+      // Una baldosa fijada fuera de su celda no está en la fila: sus pipes van
+      // directos (`offGrid`) y no buscan canalón.
+      const shelf = pinned ? 0 : rowShelf;
       const spot: Spot = old
-        ? { ...old, tx, ty, tz, pinned, projectId: island(a), scale: 1, trayOf: null }
-        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(a), scale: 1, trayOf: null };
+        ? { ...old, tx, ty, tz, pinned, projectId: island(a), scale: 1, trayOf: null, shelf }
+        : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(a), scale: 1, trayOf: null, shelf };
       spots.set(a.id, spot);
 
       minX = Math.min(minX, tx - TILE_W); maxX = Math.max(maxX, tx + TILE_W);
@@ -697,8 +713,8 @@ export function layoutFleet(
     const tz = depthOf(command);
     const old = prev.spots.get(command.id);
     spots.set(command.id, old
-      ? { ...old, tx, ty, tz, pinned, projectId: island(command), scale: CAPCOM_SCALE, trayOf: null }
-      : { id: command.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(command), scale: CAPCOM_SCALE, trayOf: null });
+      ? { ...old, tx, ty, tz, pinned, projectId: island(command), scale: CAPCOM_SCALE, trayOf: null, shelf: 0 }
+      : { id: command.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned, projectId: island(command), scale: CAPCOM_SCALE, trayOf: null, shelf: 0 });
     minX = Math.min(minX, tx - hw); maxX = Math.max(maxX, tx + hw);
     minY = Math.min(minY, ty - hh); maxY = Math.max(maxY, ty + hh);
   }
@@ -826,8 +842,8 @@ function layoutDeck(agents: Agent[], projects: Map<string, Project>, prev: Layou
     const tz = depthOf(a);
     const old = prev.spots.get(a.id);
     spots.set(a.id, old
-      ? { ...old, tx, ty, tz, pinned: false, projectId: islandOf(a), scale: 1, trayOf: null }
-      : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned: false, projectId: islandOf(a), scale: 1, trayOf: null });
+      ? { ...old, tx, ty, tz, pinned: false, projectId: islandOf(a), scale: 1, trayOf: null, shelf: 0 }
+      : { id: a.id, x: tx, y: ty, z: tz, tx, ty, tz, pinned: false, projectId: islandOf(a), scale: 1, trayOf: null, shelf: 0 });
   });
 
   const bounds: Bounds = {

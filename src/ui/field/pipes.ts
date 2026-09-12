@@ -107,6 +107,18 @@ export function lodOf(pxPerUnit: number): number {
 
 export interface Pt { x: number; y: number }
 
+/**
+ * A tile the gutter routes run between. `shelf` is what the tile's row keeps
+ * under it for the shelf of chips (`Spot.shelf`, layout.ts): `SHELF_H` when
+ * someone in the row declared an artifact, else 0 or absent. The gutter under
+ * such a row starts that much lower, and a route that forgot it ran its
+ * horizontal leg through the chips — the bus out of a parent's bottom port
+ * crossed its own first chip. Only the gutter *under* a row moves: the strip
+ * hangs off the tile's bottom edge, so the gap above the next row stays where
+ * it was, and a row with no shelf routes exactly as it always did.
+ */
+export interface RoutePt extends Pt { shelf?: number }
+
 /** The body colour a hollow port is punched out with — `--body` in tokens.css. */
 const C_BODY = new THREE.Color(0x1c1f29);
 
@@ -695,7 +707,7 @@ function simplify(pts: Pt[]): Pt[] {
  * child in the same row goes down, along the gutter under the row, and up into
  * the bottom port. No leg ever crosses a tile.
  */
-export function routeGutter(P: Pt, C: Pt, gaps: { x: number; y: number }, lane: -1 | 0 | 1): Pt[] {
+export function routeGutter(P: RoutePt, C: RoutePt, gaps: { x: number; y: number }, lane: -1 | 0 | 1): Pt[] {
   const lx = lane * laneShift(gaps.x);
   const ly = lane * laneShift(gaps.y);
   const px = P.x - TILE_W * 0.32;
@@ -704,10 +716,12 @@ export function routeGutter(P: Pt, C: Pt, gaps: { x: number; y: number }, lane: 
   // any row, which is what makes the long descent safe.
   const vx = C.x - TILE_W / 2 - gaps.x / 2 + lx;
   const dy = C.y - P.y;
+  // The shelf strip under each tile's row: the gutter below starts under it.
+  const ps = P.shelf ?? 0, cs = C.shelf ?? 0;
 
   // Same row (tiles that overlap vertically): both drop into the gutter below.
   if (Math.abs(dy) < TILE_H) {
-    const gy = Math.min(P.y, C.y) - TILE_H / 2 - gaps.y / 2 + ly;
+    const gy = Math.min(P.y, C.y) - TILE_H / 2 - Math.max(ps, cs) - gaps.y / 2 + ly;
     return simplify([
       { x: px, y: P.y - TILE_H / 2 },
       { x: px, y: gy },
@@ -720,11 +734,18 @@ export function routeGutter(P: Pt, C: Pt, gaps: { x: number; y: number }, lane: 
   const sy = down ? -1 : 1;                       // out of the parent this way
   const pEdge = P.y + sy * TILE_H / 2;            // the port the pipe leaves by
   const cEdge = C.y - sy * TILE_H / 2;            // the port it arrives at
-  const gy1 = pEdge + sy * gaps.y / 2 + ly;       // gutter beside the parent
-  const gy2 = cEdge - sy * gaps.y / 2 + ly;       // gutter beside the child
+  // Whichever tile the pipe leaves or enters by its BOTTOM edge has its row's
+  // strip between that edge and the gutter: the parent when going down, the
+  // child when going up. The other end's gutter sits above a top edge, where
+  // there is no strip.
+  const strip = down ? ps : cs;
+  const gy1 = pEdge + sy * gaps.y / 2 + ly - (down ? ps : 0);   // gutter beside the parent
+  const gy2 = cEdge - sy * gaps.y / 2 + ly - (down ? 0 : cs);   // gutter beside the child
 
   // Directly below (or above) in the same column, one gutter apart: a drop.
-  if (Math.abs(C.x - P.x) < EPS && Math.abs(cEdge - pEdge) <= gaps.y + EPS) {
+  // The strip is part of that gutter: the drop crosses it at the port's x,
+  // which falls in the gap between the first two chips (`shelf.ts`).
+  if (Math.abs(C.x - P.x) < EPS && Math.abs(cEdge - pEdge) <= gaps.y + strip + EPS) {
     return [{ x: px, y: pEdge }, { x: cx, y: cEdge }];
   }
 
@@ -746,12 +767,13 @@ export function routeGutter(P: Pt, C: Pt, gaps: { x: number; y: number }, lane: 
  * gutter beside the target into its side port. Two tiles side by side in one
  * row are a straight run through the gutter between them.
  */
-export function routeGutterMsg(A: Pt, B: Pt, gaps: { x: number; y: number }, lane: -1 | 0 | 1): Pt[] {
+export function routeGutterMsg(A: RoutePt, B: RoutePt, gaps: { x: number; y: number }, lane: -1 | 0 | 1): Pt[] {
   const lx = lane * laneShift(gaps.x);
   const ly = lane * laneShift(gaps.y);
   const ay = A.y + TILE_H * 0.12;
   const by = B.y + TILE_H * 0.12;
   const dx = B.x - A.x, dy = B.y - A.y;
+  const as = A.shelf ?? 0, bs = B.shelf ?? 0;
   const dir = dx > EPS ? 1 : dx < -EPS ? -1 : 0;
   // Same column: both ports on the same side, so the run is one gutter.
   const sa = dir === 0 ? 1 : dir;
@@ -768,9 +790,13 @@ export function routeGutterMsg(A: Pt, B: Pt, gaps: { x: number; y: number }, lan
   }
   // The horizontal gutter to cross by: beside the target's row, or under both
   // when they share one — a run along a row would cross every tile in it.
+  // Under a row means under its shelf strip too; above a row, the strip of
+  // the row above hangs off that row's tiles and the gap is below it.
   const hy = sameRow
-    ? Math.min(A.y, B.y) - TILE_H / 2 - gaps.y / 2 + ly
-    : B.y + (dy < 0 ? 1 : -1) * (TILE_H / 2 + gaps.y / 2) + ly;
+    ? Math.min(A.y, B.y) - TILE_H / 2 - Math.max(as, bs) - gaps.y / 2 + ly
+    : dy < 0
+      ? B.y + TILE_H / 2 + gaps.y / 2 + ly
+      : B.y - TILE_H / 2 - bs - gaps.y / 2 + ly;
 
   return simplify([
     { x: ax, y: ay },

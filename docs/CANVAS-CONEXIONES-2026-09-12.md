@@ -120,16 +120,13 @@ distintos siguen siendo dos cosas.
 
 ## 4. Lo que queda, dicho claro
 
-- **Los pipes no saben que la estantería existe.** Visto en las fotos, y no
-  es de esta pieza: la rejilla reserva el alto de la franja, pero
-  `routeGutter` y `routeGutterMsg` siguen calculando «el canalón bajo la
-  fila» desde `TILE_H`, así que el bus de linaje que sale del puerto inferior
-  de un padre con estantería baja por en medio de su primera ficha, y un
-  ask que cruza por debajo de la fila pasa entre la baldosa y las fichas.
-  Los hilos del tirante conviven con eso porque son cinco, cortos y en su
-  columna, pero la solución de fondo es que las rutas resten `SHELF_H` en
-  las filas que la llevan. Lo dejo anotado en vez de tocarlo: es `pipes.ts`
-  y `layout.ts` a la vez, y va con pruebas propias.
+- **Los pipes no saben que la estantería existe.** ~~Visto en las fotos, y no
+  es de esta pieza~~ — **resuelto el mismo día, §6.** La rejilla reservaba el
+  alto de la franja, pero `routeGutter` y `routeGutterMsg` calculaban «el
+  canalón bajo la fila» desde `TILE_H`, así que el bus de linaje que sale del
+  puerto inferior de un padre con estantería corría por en medio de sus
+  fichas, y un ask que cruza por debajo de la fila pasaba entre la baldosa y
+  las fichas.
 - **Un tirante pasa por debajo de un vecino enterrado.** `placeNear` deja la
   primera superficie a dos unidades de su baldosa, encima del vecino de la
   derecha, y el tirante —un pipe, dibujado bajo las baldosas como todos—
@@ -196,6 +193,58 @@ con `orca-show`, y mirar los cinco hilos entre la baldosa y su franja; pasar
 el puntero por una ficha y por la baldosa. `PLACE IN FIELD` desde la ventana
 del artefacto o desde la galería, arrastrar la superficie a cualquier sitio
 del campo, y el tirante la sigue.
+
+## 6. Las rutas saben que la estantería existe (misión `mission_mty82s5wo0q8ko6w`, mismo día)
+
+El primer punto de §4, hecho. Es un cambio de rutas, no de diseño: el
+tirante de arriba no se toca.
+
+**Qué cambia.** `Spot` lleva `shelf`: lo que su FILA reserva debajo
+(`SHELF_H` si alguien de la fila declaró algo, 0 si no). Lo pone
+`layout.ts` a partir del mismo `shelfRow` que ya bajaba las filas de
+debajo, así que no hay una segunda fuente de verdad. `routeGutter` y
+`routeGutterMsg` aceptan `RoutePt` (`Pt` con `shelf` opcional) y restan esa
+franja **sólo al canalón que está bajo un borde inferior**: el del padre
+cuando el hijo está abajo, el del hijo cuando está arriba, el de la fila
+cuando los dos comparten fila. El canalón sobre un borde superior no se
+mueve, porque la franja cuelga de las baldosas de la fila de arriba y el
+hueco queda debajo de ella. Una fila sin estantería enruta exactamente como
+antes, número a número; una con estantería baja su canalón `SHELF_H`, ni
+más ni menos, y la bajada recta a un hijo justo debajo sigue siendo recta,
+franja incluida.
+
+**Lo que no cambia y por qué.** El pipe sigue saliendo por el puerto
+inferior de la baldosa (`x − 0.32·TILE_W`): el puerto es la forma de la
+baldosa —la pestaña que el shader dibuja bajo el borde— y no se mueve por
+las fichas. Ese tramo vertical cruza la franja a la fuerza, y cae en el
+hueco entre la primera y la segunda ficha (probado contra `shelfChips`),
+por debajo del DOM de las fichas. Lo que ya no pasa es que un tramo
+horizontal corra por dentro de la franja.
+
+**Lo que queda.** Una baldosa que el operador fijó fuera de su celda lleva
+`shelf: 0`: sus pipes van directos (`offGrid`) y cruzan lo que haya, como
+siempre. CAPCOM y la cubierta, igual. Las rutas entre regiones salen por
+las puertas de la región, cuyo pad ya contaba `shelfTotal`.
+
+**Verificación.**
+
+```
+npm test -- shelf-routes                        12/12: fila con/sin estantería, subida, bajada, misma fila, ask, 2280 rutas sin pisar baldosa ni franja, y la rejilla de verdad
+ORCA_VISUAL_ISOLATED=1 npx tsx test/shelf-routes.shots.ts   test/shots/shelf-routes-0{1,2}.png: el líder de la escuadra del arnés con estantería y el bus a un miembro de la fila de abajo, por debajo de las fichas
+```
+
+El arnés visual afirma lo que no depende de la suerte —que la rejilla dio
+`shelf` a la fila y que la de abajo bajó eso— y **hace skip, no fallo**, si
+la escuadra no ofrece un miembro con baldosa propia en la fila de abajo en
+esa corrida. La flota sintética no vale para este par: padre e hijo van
+contiguos en la rejilla y sólo caen en filas distintas en un salto de fila
+que el siguiente nacimiento deshace. Un rojo que depende del fixture
+envenena la suite. La foto que hay al escribir esto salió con la escuadra:
+`Z1` con cinco fichas y el bus a `Z4`, una fila más abajo, bajando por el
+hueco entre la primera y la segunda ficha y corriendo por debajo de la fila
+(`shelf-routes-02-close.png`); antes de dar con la escuadra, la flota
+sintética sólo dejó un primer plano de diagnóstico con una baldosa en
+tránsito por delante.
 
 ## Filtros que cubren este documento
 

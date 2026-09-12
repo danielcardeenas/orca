@@ -41,7 +41,9 @@ const MAX_HOPS = 8;
 
 /** Un id de sesión, o null. */
 export function sessionId(env = process.env, { walk = true } = {}) {
-  const direct = clean(env.CLAUDE_SESSION_ID);
+  // Lo que el CLI exporta se acepta tal cual: es suyo, y otro proveedor puede
+  // no usar un uuid. La forma sólo se exige donde hace falta (el pane).
+  const direct = String(env.CLAUDE_SESSION_ID ?? '').trim();
   if (direct) return direct;
 
   const pane = clean(String(env.ORCA_PANE ?? '').replace(/^orca-/, ''));

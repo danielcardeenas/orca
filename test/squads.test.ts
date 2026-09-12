@@ -502,7 +502,7 @@ const whoamiPrefersTheStrongestEvidence = test('un comando sabe de qué agente e
     ['CLAUDE_SESSION_ID gana', sessionId({ CLAUDE_SESSION_ID: A, ORCA_PANE: `orca-${B}` }, no) === A],
     ['ORCA_PANE cuando no hay otra', sessionId({ ORCA_PANE: `orca-${B}` }, no) === B],
     ['un pane que no es un uuid no vale', sessionId({ ORCA_PANE: 'orca-capcom' }, no) === null],
-    ['una sesión que no es un uuid no vale', sessionId({ CLAUDE_SESSION_ID: 'sess-1' }, no) === null],
+    ['una sesión del CLI se respeta aunque no sea un uuid', sessionId({ CLAUDE_SESSION_ID: 'sess-1' }, no) === 'sess-1'],
     ['sin nada, no se inventa', sessionId({}, no) === null],
   ];
   const bad = checks.filter(([, pass]) => !pass).map(([why]) => why);

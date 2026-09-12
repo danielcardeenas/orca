@@ -53,7 +53,7 @@ function project(id: string, code: string, machineId = 'm1'): Project {
     gitBranch: 'main', gitDirty: false, keyNames: [], sessionIds: [],
     rollup: {
       total: 0, byState: { booting: 0, thinking: 0, working: 0, blocked: 0, idle: 0, done: 0, dead: 0 },
-      costUSD: 0, tokensPerSec: 0, blocked: 0,
+      tokens: 0, tokensPerSec: 0, blocked: 0,
     },
   };
 }

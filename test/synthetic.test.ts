@@ -577,25 +577,25 @@ const containment = [
     const world = new World();
     world.upsertMachine(machine('m-real'));
     world.upsertMachine(machine('m-fake', true));
-    const spend = (id: string, machineId: string, projectId: string, usd: number): void => {
+    const use = (id: string, machineId: string, projectId: string, toks: number): void => {
       const a = agent({ id, machineId, projectId });
-      a.metrics.costUSD = usd;
+      a.metrics.inputTokens = toks;
       world.applyCollector({ t: 'agent:new', machineId, agent: a }, machineId);
     };
-    spend('r1', 'm-real', 'p-real', 12);
-    spend('f1', 'm-fake', 'p-fake', 1000);
+    use('r1', 'm-real', 'p-real', 12_000);
+    use('f1', 'm-fake', 'p-fake', 1_000_000);
     world.settle();
-    // Con los dos dentro: el arnés cuenta como agente y no cuenta como dinero.
-    const before = world.state.fleet.costUSD;
+    // Con los dos dentro: el arnés cuenta como agente y no cuenta como consumo.
+    const before = world.state.fleet.tokens;
     const agentsBefore = world.state.fleet.total;
     world.purgeSynthetic();
     world.settle();
     return ok(
-      'el total de la flota son dólares de verdad',
-      Math.abs(before - 12) < 1e-9 && agentsBefore === 2
-      && Math.abs(world.state.fleet.costUSD - 12) < 1e-9 && world.state.fleet.total === 1,
-      `con el arnés dentro: $${before.toFixed(2)} sobre ${agentsBefore} agentes · tras purgarlo: `
-      + `$${world.state.fleet.costUSD.toFixed(2)} sobre ${world.state.fleet.total} agentes`,
+      'el total de la flota es trabajo de verdad',
+      before === 12_000 && agentsBefore === 2
+      && world.state.fleet.tokens === 12_000 && world.state.fleet.total === 1,
+      `con el arnés dentro: ${before} tokens sobre ${agentsBefore} agentes · tras purgarlo: `
+      + `${world.state.fleet.tokens} tokens sobre ${world.state.fleet.total} agentes`,
     );
   }),
 

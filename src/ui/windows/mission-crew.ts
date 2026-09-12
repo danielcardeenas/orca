@@ -52,7 +52,7 @@ export interface CrewMember {
   /** Del diario, y sólo del diario: `null` es «nadie lo midió», nunca 0. */
   linesAdded: number | null;
   linesRemoved: number | null;
-  costUSD: number | null;
+  tokens: number | null;
   durationMs: number | null;
   /** Tiene baldosa: el campo puede seleccionarlo y volar hasta él. */
   onField: boolean;
@@ -121,7 +121,7 @@ function member(id: string, a: Agent | undefined, d: DebriefAgent | undefined): 
     say: d?.brief ?? d?.lastSay ?? a?.title ?? null,
     linesAdded: d?.linesAdded ?? null,
     linesRemoved: d?.linesRemoved ?? null,
-    costUSD: d?.costUSD ?? null,
+    tokens: d?.tokens ?? null,
     durationMs: d?.durationMs ?? null,
     onField: !!a,
   };

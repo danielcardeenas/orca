@@ -42,6 +42,7 @@ import type {
   SessionRollup, TalkItem,
 } from '../shared/types.ts';
 import { MAX_TALK, TERMINAL_STATES, emptyRollup } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import { hiddenInWorkspace, type ExcludedWorkspace } from '../shared/workspaces.ts';
 import { ArtifactIndex } from './artifacts.ts';
 import { CapcomSession, capcomDir, wantsCapcom } from './capcom.ts';
@@ -2099,11 +2100,11 @@ export function rollup(agents: Agent[]): SessionRollup {
   for (const a of agents) {
     r.total++;
     r.byState[a.state]++;
-    r.costUSD += a.metrics.costUSD;
+    r.tokens += ceilingTokens(a.metrics);
     r.tokensPerSec += a.metrics.tokensPerSec;
     if (a.state === 'blocked') r.blocked++;
   }
-  r.costUSD = Math.round(r.costUSD * 100) / 100;
+  r.tokens = Math.round(r.tokens);
   // El rollup alimenta un mosaico, no la escena 3D: décimas de token/s sólo
   // servirían para reenviar el proyecto entero varias veces por segundo.
   r.tokensPerSec = Math.round(r.tokensPerSec);

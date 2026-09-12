@@ -49,7 +49,7 @@
  *             entregó, se enseña eso, rotulado como NO PUBLICADO: el trabajo
  *             existe aunque falte el sello. Si no hay nada, se dice.
  *   CHANGED   el diario del hub (`mission:debrief` → `shared/debrief.ts`):
- *             líneas tocadas, coste, duración y aterrizajes de rama, por
+ *             líneas tocadas, uso, duración y aterrizajes de rama, por
  *             agente. Sobrevive al archivado de la flota, que es justo cuando
  *             esta ventana se abre. Un número que nadie midió sale «—», no 0.
  *   FILES     las rutas escritas en la conversación, resueltas contra el
@@ -89,7 +89,7 @@ import { bindAttach } from '../attach.ts';
 import { drafts, draftKey, type DraftBinding } from '../../drafts.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
-import { ago, clock, dur, esc, money } from '../../util.ts';
+import { ago, clock, dur, esc, tokens } from '../../util.ts';
 import { mdLite } from '../markdown.ts';
 import { refIndex } from '../refs.ts';
 import { linkPaths, findPaths, baseName, type PathMatch } from '../paths.ts';
@@ -374,7 +374,7 @@ export function mountMission(ctx: WinCtx, c: Console) {
       <span class="px px--tiny mission-win__st">${esc(crewWord(x))}</span>
       <span class="mono mission-win__rt">${esc((x.runtime ?? '—').toUpperCase())}</span>
       <span class="mono mission-win__lines">${x.linesAdded === null && x.linesRemoved === null ? '—' : `+${x.linesAdded ?? 0} −${x.linesRemoved ?? 0}`}</span>
-      <span class="mono mission-win__cost">${x.costUSD === null ? '—' : money(x.costUSD)}</span>
+      <span class="mono mission-win__cost">${x.tokens === null ? '—' : tokens(x.tokens)}</span>
       <button class="mission-win__say mono" type="button" data-open="${esc(x.id)}" title="open ${esc(x.callsign)}">${esc(say.slice(0, 140) || 'no brief filed')}</button>
     </div>`;
   }
@@ -511,14 +511,14 @@ export function mountMission(ctx: WinCtx, c: Console) {
     // decirlo es la diferencia entre un total y una lectura a medias.
     const running = parte.agents.some((a) => a.live);
     const totals = t.measured
-      ? `<p class="px px--tiny mission-win__tot">+${t.linesAdded} −${t.linesRemoved} LINES · ${money(t.costUSD)}${t.durationMs ? ` · ${dur(t.durationMs)}` : ''} · ${t.measured} OF ${t.agents} AGENTS MEASURED${running ? ' · SO FAR, SOME ARE STILL RUNNING' : ''}</p>`
+      ? `<p class="px px--tiny mission-win__tot">+${t.linesAdded} −${t.linesRemoved} LINES · ${tokens(t.tokens)} TOK${t.durationMs ? ` · ${dur(t.durationMs)}` : ''} · ${t.measured} OF ${t.agents} AGENTS MEASURED${running ? ' · SO FAR, SOME ARE STILL RUNNING' : ''}</p>`
       : `<p class="px px--tiny mission-win__tot">NONE OF ITS ${t.agents} AGENTS FILED A FINAL RECORD YET</p>`;
     const rows = parte.agents.map((a) => `
       <div class="mission-win__crew ${a.live ? 'is-live' : ''} ${a.final === 'dead' ? 'is-dead' : ''}">
         <button class="mission-win__cs" type="button" data-go="${esc(a.id)}" title="fly to ${esc(a.callsign ?? a.id)}">${esc(a.callsign ?? '??')}</button>
         <span class="px px--tiny mission-win__st">${esc(crewWord(a))}</span>
         <span class="mono mission-win__lines">${lines(a)}</span>
-        <span class="mono mission-win__cost">${a.costUSD === null ? '—' : money(a.costUSD)}</span>
+        <span class="mono mission-win__cost">${a.tokens === null ? '—' : tokens(a.tokens)}</span>
         <span class="mono mission-win__dur">${a.durationMs === null ? '—' : dur(a.durationMs)}</span>
         <span class="mono mission-win__brief">${esc((a.brief ?? a.lastSay ?? '').replace(/\s+/g, ' ').slice(0, 120) || '—')}</span>
       </div>`).join('');
@@ -711,7 +711,7 @@ export function mountMission(ctx: WinCtx, c: Console) {
     const s = JSON.stringify([
       tab, m.updatedAt, m.status, m.messages.length, [...openReports],
       store.outgoing.filter((x) => x.missionId === m.id).map((x) => [x.id, x.status]),
-      parte?.agents.map((a) => [a.id, a.state, a.final, a.linesAdded, a.costUSD]), parteError,
+      parte?.agents.map((a) => [a.id, a.state, a.final, a.linesAdded, a.tokens]), parteError,
       lead?.agent.id, lead?.live, lead?.agent.callsign,
       // La nómina se mueve con la flota y no con la conversación: sin esto, un
       // agente que pasa a WORKING no repinta su fila hasta que alguien hable.

@@ -25,6 +25,7 @@ import { isForgeSquad } from '../../shared/forge.ts';
 import { HARNESS_LABEL, harnessHostSlug, harnessIsland, isHarnessIsland } from '../../shared/synthetic.ts';
 import { OFF_FLEET_LABEL, islandOf, isOffFleet } from '../../shared/workspaces.ts';
 import type { Agent, AgentState, Placement, Project } from '../../shared/types.ts';
+import { ceilingTokens } from '../../shared/tokens.ts';
 import { TRAY_CELLS } from './blocks.ts';
 
 /**
@@ -220,7 +221,7 @@ export interface Region {
 export interface Bounds { minX: number; minY: number; maxX: number; maxY: number }
 
 /** What the deck is ordered by. The order is the whole point of the mode. */
-export type DeckSort = 'state' | 'project' | 'cost' | 'age';
+export type DeckSort = 'state' | 'project' | 'use' | 'age';
 
 /**
  * Two ways to stand the fleet up.
@@ -712,8 +713,12 @@ function deckOrder(agents: Agent[], projects: Map<string, Project>, sort: DeckSo
       list.sort((p, q) => code(p).localeCompare(code(q)) || byState(p, q));
       break;
     }
-    case 'cost':
-      list.sort((p, q) => q.metrics.costUSD - p.metrics.costUSD || tieBreak(p, q));
+    case 'use':
+      // Por consumo, que es la medida desde el 2026-09-12: quien más cuota ha
+      // gastado arriba. Antes era por dólares, que con plan plano no ordenaban
+      // nada — y en Codex, que escribe $0, dejaban la cubierta en orden de
+      // desempate.
+      list.sort((p, q) => ceilingTokens(q.metrics) - ceilingTokens(p.metrics) || tieBreak(p, q));
       break;
     case 'age':
       list.sort(tieBreak);

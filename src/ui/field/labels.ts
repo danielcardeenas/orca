@@ -31,7 +31,7 @@ import { originLabel } from '../../shared/origin.ts';
  *      │▌ mid  flex 1   x 7–66 %        ▐█████│  ← bite, x 70–100 %, < 320 px
  *      │▌               (x 7–96 % from 320 px)│
  *      │▌ bot  auto     x 7–96 %  NOW ────────│
- *      │▌                $ TOK/S UP TURNS [P] │
+ *      │▌           TOKENS TOK/S UP TURNS [P] │
  *      │▌ (shader's speed band, 0–10 %)       │
  *      └───────────────────────────────────────┘
  *
@@ -55,7 +55,8 @@ import { originLabel } from '../../shared/origin.ts';
 import type { ForgeView } from './forge.ts';
 import type { Agent } from '../../shared/types.ts';
 import { islandOf } from '../../shared/workspaces.ts';
-import { esc, money, nameOf, plain, runtimeCode, tokens } from '../util.ts';
+import { esc, nameOf, plain, runtimeCode, tokens } from '../util.ts';
+import { ceilingTokens } from '../../shared/tokens.ts';
 
 export interface LabelItem {
   agent: Agent;
@@ -256,7 +257,7 @@ export function createLabels(layer: HTMLElement): LabelsHandle {
       + `<span class="lbl__mk">${k}</span></div>`;
     const rate = a.state === 'working';
     return `<div class="lbl__grid">`
-      + cell(money(m.costUSD), 'COST')
+      + cell(tokens(ceilingTokens(m)), 'TOKENS')
       + cell(rate ? tokens(Math.round(m.tokensPerSec)) : '—', 'TOK/S', !rate)
       + cell(uptime(a.uptimeMs), 'UPTIME')
       + cell(String(m.turns), 'TURNS')

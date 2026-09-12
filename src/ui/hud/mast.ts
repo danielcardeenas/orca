@@ -6,7 +6,7 @@
  *
  *   - **Counters land, they do not jump.** A number that changes scrambles
  *     for three frames of ~60 ms (A9, the comp's mixing glyph column) and
- *     then lands on the real value. Only the digits scramble, so `$12.40`
+ *     then lands on the real value. Only the digits scramble, so `12.4M`
  *     keeps its shape and the column never reflows. `NEED YOU` is the one
  *     exception: it is amber, it is the queue, and it cuts — the alarm ring
  *     in `alarm.ts` is already the gesture that says it rose.
@@ -26,7 +26,8 @@ import { AGENT_STATES, type AgentState } from '../../shared/types.ts';
 import { drawBits, inlineORCA, sizeOf } from '../gfx/logo.ts';
 import { fullscreenOn, onFullscreen, toggleFullscreen } from './fullscreen.ts';
 import type { Console } from '../console.ts';
-import { esc, hexNoise, money } from '../util.ts';
+import { esc, hexNoise, tokens } from '../util.ts';
+import { ceilingTokens } from '../../shared/tokens.ts';
 import { typing } from '../keys.ts';
 import { mountClock } from './clock.ts';
 
@@ -41,7 +42,7 @@ const GAUGES: { k: string; cls: string; cut?: boolean; pick: (f: ReturnType<type
   { k: 'NEED YOU', cls: 'is-blocked', cut: true, pick: (f) => String(f.blocked) },
   { k: 'IDLE', cls: '', pick: (f) => String(f.byState.idle) },
   { k: 'DEAD', cls: 'is-dead', pick: (f) => String(f.byState.dead) },
-  { k: 'SPEND', cls: '', pick: (f) => money(f.costUSD) },
+  { k: 'TOKENS', cls: '', pick: (f) => tokens(f.tokens) },
   { k: 'TOK/S', cls: '', pick: (f) => String(Math.round(f.tokensPerSec)) },
 ];
 
@@ -51,7 +52,7 @@ const SCRAMBLE_MS = 60;
 const DIGITS = '0123456789';
 
 /**
- * Land `v` on `n`. The three scrambled frames keep every non-digit — the `$`,
+ * Land `v` on `n`. The three scrambled frames keep every non-digit — the `M`,
  * the `.`, the `—` — so the width never moves and the eye keeps its column.
  *
  * `want` holds the value each element is heading for, because `render()` runs
@@ -79,14 +80,14 @@ function lander() {
 
 function rollup() {
   const byState = Object.fromEntries(AGENT_STATES.map((s) => [s, 0])) as Record<AgentState, number>;
-  let costUSD = 0, tokensPerSec = 0, blocked = 0;
+  let used = 0, tokensPerSec = 0, blocked = 0;
   for (const a of Object.values(store.world.agents)) {
     byState[a.state]++;
-    costUSD += a.metrics.costUSD;
+    used += ceilingTokens(a.metrics);
     tokensPerSec += a.metrics.tokensPerSec;
     if (a.state === 'blocked' && a.block?.kind !== 'peer') blocked++;
   }
-  return { byState, costUSD, tokensPerSec, blocked };
+  return { byState, tokens: used, tokensPerSec, blocked };
 }
 
 export function mountMast(host: HTMLElement, c: Console): { setTilt(on: boolean): void; setDeck(sort: string | null): void; dispose(): void } {

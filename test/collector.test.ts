@@ -1049,7 +1049,9 @@ const testRollup: Test = () => check('index: rollup agrega por estado y cuenta b
   assert.strictEqual(r.blocked, 2);
   assert.strictEqual(r.byState.blocked, 2);
   assert.strictEqual(r.byState.working, 1);
-  assert.strictEqual(r.costUSD, 4);
+  // 4 agentes × (1 entrada + 1 salida + 1 lectura de caché): sin `cacheWriteTokens`,
+  // `ceilingTokens` cae a la suma vieja, con la lectura dentro. Ver shared/tokens.ts.
+  assert.strictEqual(r.tokens, 12);
   assert.strictEqual(r.tokensPerSec, 4);
 });
 

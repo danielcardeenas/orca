@@ -290,7 +290,7 @@ function fieldMenu(d: CtxDeps) {
     { sep: true },
     { head: inDeck ? `DECK · BY ${sort}` : 'DECK' },
     ...(inDeck ? [{ label: 'BACK TO THE FIELD', key: 'd', run: () => c.deck() } as MenuItem] : []),
-    ...(['state', 'project', 'cost', 'age'] as const)
+    ...(['state', 'project', 'use', 'age'] as const)
       .filter((s) => s !== sort)
       .map((s): MenuItem => ({ label: `BY ${s.toUpperCase()}`, key: inDeck ? undefined : s === 'state' ? 'd' : undefined, run: () => c.deck(s) })),
     { sep: true },

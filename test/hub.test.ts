@@ -140,8 +140,8 @@ export function testRollupsAreIncrementalAndCorrect(): TestResult {
     world.applyCollector({
       t: 'snapshot', machineId: 'm1',
       projects: [
-        { id: 'p1', machineId: 'm1', slug: 'p1', name: 'uno', path: '/p1', code: 'P1', gitBranch: 'main', gitDirty: false, keyNames: [], sessionIds: [], rollup: { total: 0, byState: { booting: 0, thinking: 0, working: 0, blocked: 0, idle: 0, done: 0, dead: 0 }, costUSD: 0, tokensPerSec: 0, blocked: 0 } },
-        { id: 'p2', machineId: 'm1', slug: 'p2', name: 'dos', path: '/p2', code: 'P2', gitBranch: 'main', gitDirty: true, keyNames: [], sessionIds: [], rollup: { total: 0, byState: { booting: 0, thinking: 0, working: 0, blocked: 0, idle: 0, done: 0, dead: 0 }, costUSD: 0, tokensPerSec: 0, blocked: 0 } },
+        { id: 'p1', machineId: 'm1', slug: 'p1', name: 'uno', path: '/p1', code: 'P1', gitBranch: 'main', gitDirty: false, keyNames: [], sessionIds: [], rollup: { total: 0, byState: { booting: 0, thinking: 0, working: 0, blocked: 0, idle: 0, done: 0, dead: 0 }, tokens: 0, tokensPerSec: 0, blocked: 0 } },
+        { id: 'p2', machineId: 'm1', slug: 'p2', name: 'dos', path: '/p2', code: 'P2', gitBranch: 'main', gitDirty: true, keyNames: [], sessionIds: [], rollup: { total: 0, byState: { booting: 0, thinking: 0, working: 0, blocked: 0, idle: 0, done: 0, dead: 0 }, tokens: 0, tokensPerSec: 0, blocked: 0 } },
       ],
       agents: [
         agentFixture({ id: 'a1', projectId: 'p1', state: 'working' }),
@@ -163,13 +163,13 @@ export function testRollupsAreIncrementalAndCorrect(): TestResult {
     // Métricas: el patch de métricas debe fundirse, no reemplazar.
     world.applyCollector({
       t: 'agent', machineId: 'm1', id: 'a1',
-      patch: { metrics: { costUSD: 2.5, tokensPerSec: 40 } as Agent['metrics'] },
+      patch: { metrics: { costUSD: 2.5, inputTokens: 2_500, tokensPerSec: 40 } as Agent['metrics'] },
     }, 'm1');
     world.settle();
     const a1 = world.state.agents['a1'];
     assert(a1 && a1.metrics.costUSD === 2.5, 'costo fundido');
     assert(a1 && a1.metrics.turns === 0, 'los contadores no presentes en el patch sobreviven');
-    assert(Math.abs(world.state.fleet.costUSD - 2.5) < 1e-9, `costo de flota ${world.state.fleet.costUSD}`);
+    assert(world.state.fleet.tokens === 2_500, `uso de flota ${world.state.fleet.tokens}`);
     assert(world.state.fleet.tokensPerSec === 40, 'tokens/seg de flota');
 
     // Cambio de estado → se refleja en el rollup del proyecto.
@@ -177,7 +177,7 @@ export function testRollupsAreIncrementalAndCorrect(): TestResult {
     world.settle();
     assert(world.state.fleet.blocked === 0, 'ya no hay bloqueados');
     assert(world.state.projects['p1']?.rollup.byState.done === 1, 'p1 con 1 done');
-    return ok(name, `flota total=${world.state.fleet.total} costo=$${world.state.fleet.costUSD.toFixed(2)}`);
+    return ok(name, `flota total=${world.state.fleet.total} uso=${world.state.fleet.tokens} tokens`);
   } catch (err) { return fail(name, String(err)); }
 }
 
@@ -738,7 +738,7 @@ export async function testHttpEndpoints(): Promise<TestResult> {
         const posture = await (await fetch(`http://127.0.0.1:${hub.port}/api/health`)).json() as Record<string, unknown>;
         assert(posture['ok'] === true, 'la postura sigue diciendo que el hub está vivo');
         assert('harness' in posture && 'capcom' in posture, 'la postura conserva harness y capcom');
-        for (const leak of ['agents', 'projects', 'costUSD', 'connections', 'keys']) {
+        for (const leak of ['agents', 'projects', 'tokens', 'connections', 'keys']) {
           assert(!(leak in posture), `/api/health sin token no debe publicar ${leak}`);
         }
         const machines = posture['machines'] as Record<string, unknown>;

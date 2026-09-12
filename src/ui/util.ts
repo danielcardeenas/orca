@@ -136,9 +136,6 @@ export function nameOf(a: Pick<Agent, 'title' | 'mission'>): string {
   return title;
 }
 
-export function money(n: number): string {
-  return n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
-}
 export function tokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;

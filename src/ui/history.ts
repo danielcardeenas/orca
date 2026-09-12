@@ -22,6 +22,7 @@
  */
 
 import type { Agent, Project, WorldState } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import { emptyRollup, emptyWorld } from '../shared/types.ts';
 import type { HistoryRange, HistorySummary, Snapshot } from '../hub/history.ts';
 
@@ -87,7 +88,7 @@ export function worldFromSnapshot(snapshot: Snapshot, live: WorldState): WorldSt
   w.keys = live.keys;
 
   for (const [id, t] of Object.entries(snapshot.agents)) {
-    const [state, costUSD, tokensPerSec, projectId, parentId, callsign] = t;
+    const [state, costUSD, tokensPerSec, projectId, parentId, callsign, used] = t;
     const prev = live.agents[id];
     const base: Agent = prev ? { ...prev } : blankAgent(id, snapshot.at);
     base.id = id;
@@ -97,7 +98,13 @@ export function worldFromSnapshot(snapshot: Snapshot, live: WorldState): WorldSt
     base.callsign = callsign;
     base.childIds = [];
     base.updatedAt = snapshot.at;
-    base.metrics = { ...base.metrics, costUSD, tokensPerSec };
+    // El uso de ese instante entra como entrada: `ceilingTokens` lo devuelve
+    // tal cual, que es lo que el rollup del replay tiene que sumar. Una
+    // instantánea anterior al 2026-09-12 no lo trae y vale cero.
+    base.metrics = {
+      ...base.metrics, costUSD, tokensPerSec,
+      inputTokens: used ?? 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    };
     // The tile inverts to amber off `state`, but the window chrome and the
     // "needs you" wording read `block`. Without a stand-in the replay would
     // show a blocked tile whose panel claims nothing is wrong.
@@ -129,7 +136,7 @@ export function worldFromSnapshot(snapshot: Snapshot, live: WorldState): WorldSt
     for (const acc of [r, fleet]) {
       acc.total += 1;
       acc.byState[a.state] += 1;
-      acc.costUSD += a.metrics.costUSD;
+      acc.tokens += ceilingTokens(a.metrics);
       acc.tokensPerSec += a.metrics.tokensPerSec;
       if (a.state === 'blocked') acc.blocked += 1;
     }

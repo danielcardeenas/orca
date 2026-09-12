@@ -39,6 +39,8 @@ interface Spec {
   id: string;
   state: AgentState;
   cost?: number;
+  /** Tokens de techo del agente en ese instante; se reparten como entrada. */
+  tokens?: number;
   project?: string;
   parent?: string | null;
   callsign?: string;
@@ -57,7 +59,7 @@ function agent(sp: Spec): Agent {
     model: 'claude-opus-5', tool: null, toolDetail: null,
     lastPrompt: null, lastSay: null, startedAt: now, updatedAt: now, uptimeMs: 0,
     metrics: {
-      costUSD: sp.cost ?? 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+      costUSD: sp.cost ?? 0, inputTokens: sp.tokens ?? 0, outputTokens: 0, cacheReadTokens: 0,
       thinkingTokens: 0, tokensPerSec: sp.tps ?? 0, linesAdded: 0, linesRemoved: 0,
       toolCalls: 0, toolDurationMs: 0, apiDurationMs: 0, turns: 0,
     },
@@ -207,25 +209,25 @@ export function testSummaryCountsTransitions(): TestResult {
 
     // t0 — la línea base, antes del intervalo: dos agentes trabajando.
     h.push(worldOf([
-      { id: 'a', state: 'working', cost: 1 },
-      { id: 'b', state: 'working', cost: 2 },
+      { id: 'a', state: 'working', cost: 1, tokens: 1000 },
+      { id: 'b', state: 'working', cost: 2, tokens: 2000 },
     ]), t);
 
     const since = t + 1;
     t += 20_000;
     // t1 — nace c, a se bloquea.
     h.push(worldOf([
-      { id: 'a', state: 'blocked', cost: 1.5 },
-      { id: 'b', state: 'working', cost: 2.5 },
-      { id: 'c', state: 'booting', cost: 0 },
+      { id: 'a', state: 'blocked', cost: 1.5, tokens: 1500 },
+      { id: 'b', state: 'working', cost: 2.5, tokens: 2500 },
+      { id: 'c', state: 'booting', cost: 0, tokens: 0 },
     ]), t);
 
     t += 20_000;
     // t2 — a sigue bloqueado (no cuenta dos veces), b termina, c muere.
     const last = worldOf([
-      { id: 'a', state: 'blocked', cost: 1.5 },
-      { id: 'b', state: 'done', cost: 3 },
-      { id: 'c', state: 'dead', cost: 0.25 },
+      { id: 'a', state: 'blocked', cost: 1.5, tokens: 1500 },
+      { id: 'b', state: 'done', cost: 3, tokens: 3000 },
+      { id: 'c', state: 'dead', cost: 0.25, tokens: 250 },
     ], [
       feedLine(since - 5_000, 'alert', 'esto pasó antes y no cuenta'),
       feedLine(since + 1_000, 'trace', 'ruido'),
@@ -244,8 +246,8 @@ export function testSummaryCountsTransitions(): TestResult {
       `bloqueos: un agente que se queda bloqueado se cuenta una vez, no una por instantánea (${s.blocked.length})`);
     assert(s.stillBlocked.length === 1 && s.stillBlocked[0]!.id === 'a',
       'a sigue bloqueado en el mundo vivo');
-    // Gasto del intervalo: a 0.5 + b 1.0 + c 0.25 = 1.75, no el total de 4.75.
-    assert(Math.abs(s.costUSD - 1.75) < 1e-6, `gasto del intervalo: esperaba 1.75, dio ${s.costUSD}`);
+    // Uso del intervalo: a 500 + b 1000 + c 250 = 1750, no el total de 4750.
+    assert(s.tokens === 1_750, `uso del intervalo: esperaba 1750, dio ${s.tokens}`);
     assert(s.lines.length === 2 && s.lines.every((f) => f.level === 'warn' || f.level === 'alert'),
       `líneas: sólo warn/alert del intervalo (${JSON.stringify(s.lines.map((f) => f.text))})`);
 
@@ -367,7 +369,7 @@ export async function testHttpRoutes(): Promise<TestResult> {
 
       const sum = await (await fetch(`${base}/api/history/summary?since=${now - 3_600_000}&token=${TOKEN}`)).json() as HistorySummary;
       assert(sum.snapshots > 0, 'el resumen debería cubrir la última hora');
-      assert(typeof sum.costUSD === 'number' && Array.isArray(sum.lines), 'forma del resumen');
+      assert(typeof sum.tokens === 'number' && Array.isArray(sum.lines), 'forma del resumen');
 
       return ok(name, `4.301 instantáneas → ${range.snapshots.length} con paso ${range.step / 1000}s`);
     } finally {

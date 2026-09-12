@@ -48,7 +48,8 @@ import { bindAttach } from '../attach.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { glyphBurst, slabFlash } from '../fx.ts';
-import { ago, clock, esc, money, stateVar, stateWord, tokens } from '../../util.ts';
+import { ago, clock, esc, stateVar, stateWord, tokens } from '../../util.ts';
+import { ceilingTokens } from '../../../shared/tokens.ts';
 import { talkStepHtml } from '../talk-step.ts';
 import { echoLanded, foldTalk, pendingEchoes, timeOrdered, toolLabel, type TalkGroup } from '../talk.ts';
 import { refIndex, type RefIndex } from '../refs.ts';
@@ -685,7 +686,7 @@ export function mountCeo(ctx: WinCtx, c: Console) {
     const parts: string[] = [];
     if (a) {
       if (store.linkUp && store.authed()) parts.push(`<span class="px px--tiny capcom__stat">${Math.round(a.metrics.tokensPerSec)} TOK/S</span>`);
-      parts.push(`<span class="px px--tiny capcom__stat">${esc(money(a.metrics.costUSD))}</span>`);
+      parts.push(`<span class="px px--tiny capcom__stat">${esc(tokens(ceilingTokens(a.metrics)))} TOK</span>`);
       parts.push('<span class="capcom__acts"><button class="chip" type="button" data-term>TERM</button><button class="chip" type="button" data-fly>FLY</button></span>');
     }
     status.hidden = !a;

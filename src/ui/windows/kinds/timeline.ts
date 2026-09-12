@@ -45,7 +45,7 @@ import { store } from '../../store.ts';
 import { getSound } from '../../hud/sound.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
-import { esc, money } from '../../util.ts';
+import { esc, tokens } from '../../util.ts';
 import { typing } from '../../keys.ts';
 import {
   fetchHistory, fetchSummary, nearestSnapshot, worldFromSnapshot,
@@ -332,7 +332,7 @@ export function mountTimeline(ctx: WinCtx, c: Console) {
     awayEl.innerHTML = `
       <div class="tl__stats row row--wrap">
         <span class="px px--tiny">AWAY ${esc(gone)}</span>
-        <span class="px px--tiny">SPENT ${esc(money(s.costUSD))}</span>
+        <span class="px px--tiny">USED ${esc(tokens(s.tokens))} TOK</span>
         <span class="px px--tiny">${s.born.length} BORN</span>
         <span class="px px--tiny">${s.finished.length} DONE</span>
         <span class="px px--tiny ${s.died.length ? 'is-red' : ''}">${s.died.length} DEAD</span>

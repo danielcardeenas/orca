@@ -26,7 +26,8 @@ import type { ArchiveFilter } from '../../../shared/archive.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
 import { slabBusy, slabFlash } from '../fx.ts';
-import { ago, clock, esc, money, stateVar, stateWord } from '../../util.ts';
+import { ago, clock, esc, stateVar, stateWord, tokens } from '../../util.ts';
+import { ceilingTokens } from '../../../shared/tokens.ts';
 import { longPress } from '../../hud/longpress.ts';
 
 type Scope = 'project' | 'machine' | 'group' | 'squad' | 'all';
@@ -42,7 +43,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
       <div class="chips"><button class="chip" type="button" data-cleanup>CLEAN UP INACTIVE</button><button class="chip" type="button" data-history>SHOW HISTORY</button><button class="chip" type="button" data-archive>ARCHIVE FINISHED</button></div>
       <p class="mono">Filters apply to the field. Cleanup hides finished sessions and sessions idle for over an hour. History restores visibility; no processes are stopped. Archive removes finished sessions from the hub for every console; transcripts stay on disk and a resumed session comes back.</p>
     </div>
-    <div class="sec row row--split" style="padding:8px 12px"><span class="px px--tiny" data-sum></span><span class="px px--tiny" data-cost></span></div>
+    <div class="sec row row--split" style="padding:8px 12px"><span class="px px--tiny" data-sum></span><span class="px px--tiny" data-use></span></div>
     <div class="win__scroll scroll" data-list></div>
     <div class="slab-row" style="padding:8px;border-top:1px solid var(--line-soft)">
       <textarea class="input" rows="2" data-say aria-label="Message"
@@ -66,7 +67,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
   // Una vez al montar: las filas se repintan, la lista no.
   longPress(list, { allow: (t) => !!t.closest('[data-agent], [data-project], [data-machine], [data-squad]') });
   const sum = body.querySelector<HTMLElement>('[data-sum]')!;
-  const cost = body.querySelector<HTMLElement>('[data-cost]')!;
+  const use = body.querySelector<HTMLElement>('[data-use]')!;
   const sayIn = body.querySelector<HTMLTextAreaElement>('[data-say]')!;
   // The unsent line to this scope survives a reload (drafts.ts); the window key names the scope.
   const draft = drafts.bind(sayIn, draftKey('fleet', ctx.win.spec.key));
@@ -172,7 +173,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
       ${scope === 'squad' ? `<span class="arow__lead">${lead ? 'LEAD' : ''}</span>` : ''}
       <span class="arow__cs">${esc(a.callsign)}<br/><span class="win__pj">${esc(pr?.code ?? '')}</span></span>
       <span class="arow__t mono"><span class="origin-badge" data-origin-kind="${agentOrigin(a)}">${originLabel(a)}</span><br/>${esc(a.title || a.mission || '')}<br/><span style="color:var(--ink-dim)">${a.state === 'working' && a.tool ? esc(a.tool) + ' ' + esc(a.toolDetail ?? '') : esc(stateWord(a))}${was ? ` · WAS CAPCOM UNTIL ${esc(clock(was.at))}` : ''}</span></span>
-      <span class="arow__m">${money(a.metrics.costUSD)}<br/>${ago(a.updatedAt, Date.now())}</span>
+      <span class="arow__m">${tokens(ceilingTokens(a.metrics))}<br/>${ago(a.updatedAt, Date.now())}</span>
     </div>`;
   }
 
@@ -192,7 +193,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     const live = ms.filter((a) => a.state !== 'done' && a.state !== 'dead');
     const now = Date.now();
     const blocked = ms.filter((a) => a.state === 'blocked' && a.block?.kind !== 'peer').length;
-    const costUSD = ms.reduce((s, a) => s + a.metrics.costUSD, 0);
+    const used = ms.reduce((s, a) => s + ceilingTokens(a.metrics), 0);
     const tps = ms.reduce((s, a) => s + a.metrics.tokensPerSec, 0);
 
     if (scope === 'project') {
@@ -219,7 +220,7 @@ export function mountFleet(ctx: WinCtx, c: Console) {
     }
     ctx.setState(blocked ? 'blocked' : null, blocked ? 'var(--amber)' : live.length ? 'var(--lime)' : undefined);
     sum.textContent = `${live.length} LIVE · ${blocked} NEED YOU · ${ms.length} TOTAL`;
-    cost.textContent = `${money(costUSD)} · ${Math.round(tps)} TOK/S`;
+    use.textContent = `${tokens(used)} TOK · ${Math.round(tps)} TOK/S`;
 
     // The squad label is part of the picture: an agent enlisted since the last
     // frame regroups the list, and a signature that ignores it would not redraw.

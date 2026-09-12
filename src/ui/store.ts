@@ -11,6 +11,7 @@ import type {
   Machine, Project, WorldState, CeoMessage,
 } from '../shared/types.ts';
 import { emptyWorld, emptyRollup } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import { mergeTalk } from '../shared/talk.ts';
 import type { PatchOp } from '../shared/protocol.ts';
 import { agentOrigin } from '../shared/origin.ts';
@@ -676,7 +677,7 @@ export class Store {
     for (const a of Object.values(this.world.agents)) {
       r.total++;
       r.byState[a.state]++;
-      r.costUSD += a.metrics.costUSD;
+      r.tokens += ceilingTokens(a.metrics);
       r.tokensPerSec += a.metrics.tokensPerSec;
       if (a.state === 'blocked') r.blocked++;
     }

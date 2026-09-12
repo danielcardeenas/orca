@@ -37,7 +37,7 @@ function clone(machineId: string, over: Partial<Project> = {}): Project {
     name: 'ax', path: '/Users/dan/projects/ax', code: 'AX',
     gitBranch: 'main', gitDirty: false, keyNames: [], sessionIds: [],
     rollup: {
-      total: 1, blocked: 0, costUSD: 0, tokensPerSec: 0,
+      total: 1, blocked: 0, tokens: 0, tokensPerSec: 0,
       byState: { booting: 0, thinking: 0, working: 1, blocked: 0, idle: 0, done: 0, dead: 0 },
     },
     ...over,

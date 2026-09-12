@@ -24,6 +24,7 @@
  */
 
 import type { CapcomMission } from './missions.ts';
+import { ceilingTokens } from './tokens.ts';
 
 /** Lo que el parte lee de una línea del diario. Estructural: `JournalEntry` encaja. */
 export interface DebriefEntry {
@@ -44,8 +45,8 @@ export interface DebriefEntry {
   startedAt?: number;
   /* end */
   state?: string;
-  costUSD?: number;
   durationMs?: number;
+  tokens?: { input: number; output: number; cacheRead: number; thinking: number; cacheWrite?: number };
   lines?: { added: number; removed: number };
   toolCalls?: number;
   lastSay?: string | null;
@@ -75,7 +76,7 @@ export interface DebriefFleetAgent {
   startedAt?: number;
   updatedAt?: number;
   lastSay?: string | null;
-  metrics?: { linesAdded?: number; linesRemoved?: number; costUSD?: number; toolCalls?: number };
+  metrics?: { linesAdded?: number; linesRemoved?: number; toolCalls?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
 }
 
 /** Un agente de la misión, con lo que se sabe de él aunque ya no esté. */
@@ -102,7 +103,8 @@ export interface DebriefAgent {
   /** null, nunca 0, cuando nadie lo midió. */
   linesAdded: number | null;
   linesRemoved: number | null;
-  costUSD: number | null;
+  /** Uso, en tokens de techo. Sustituyó a `costUSD` el 2026-09-12. */
+  tokens: number | null;
   durationMs: number | null;
   toolCalls: number | null;
   worktree: string | null;
@@ -126,7 +128,7 @@ export interface DebriefTotals {
   dead: number;
   linesAdded: number;
   linesRemoved: number;
-  costUSD: number;
+  tokens: number;
   durationMs: number;
   /** De cuántos agentes hay medida de verdad. `0` con agentes es «nadie lo apuntó». */
   measured: number;
@@ -148,6 +150,27 @@ const FINAL = new Set(['done', 'dead']);
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * El uso de un fin del diario, con la regla de los techos. Null cuando esa
+ * entrada no anotó tokens —una anterior a que el diario los guardara—, que no
+ * es lo mismo que un cero.
+ */
+function endTokens(end: { tokens?: { input: number; output: number; cacheRead: number; cacheWrite?: number } } | undefined): number | null {
+  const t = end?.tokens;
+  if (!t) return null;
+  return ceilingTokens({
+    inputTokens: t.input, outputTokens: t.output, cacheReadTokens: t.cacheRead,
+    ...(typeof t.cacheWrite === 'number' ? { cacheWriteTokens: t.cacheWrite } : {}),
+  });
+}
+
+/** Lo mismo desde la flota viva, para un agente que todavía no ha terminado. */
+function liveTokens(live: { metrics?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number } } | undefined): number | null {
+  const m = live?.metrics;
+  if (!m) return null;
+  return ceilingTokens(m);
 }
 
 /**
@@ -224,7 +247,7 @@ export function buildDebrief(
       lastSay: end?.lastSay ?? live?.lastSay ?? null,
       linesAdded: lines ? lines.added : null,
       linesRemoved: lines ? lines.removed : null,
-      costUSD: num(end?.costUSD) ?? num(live?.metrics?.costUSD),
+      tokens: endTokens(end) ?? liveTokens(live),
       durationMs: num(end?.durationMs),
       toolCalls: num(end?.toolCalls) ?? num(live?.metrics?.toolCalls),
       worktree: live?.worktree ?? null,
@@ -236,14 +259,14 @@ export function buildDebrief(
     agents: agents.length,
     done: agents.filter((a) => a.final === 'done').length,
     dead: agents.filter((a) => a.final === 'dead').length,
-    linesAdded: 0, linesRemoved: 0, costUSD: 0, durationMs: 0, measured: 0,
+    linesAdded: 0, linesRemoved: 0, tokens: 0, durationMs: 0, measured: 0,
   };
   for (const a of agents) {
-    if (a.linesAdded === null && a.costUSD === null && a.durationMs === null) continue;
+    if (a.linesAdded === null && a.tokens === null && a.durationMs === null) continue;
     totals.measured++;
     totals.linesAdded += a.linesAdded ?? 0;
     totals.linesRemoved += a.linesRemoved ?? 0;
-    totals.costUSD += a.costUSD ?? 0;
+    totals.tokens += a.tokens ?? 0;
     totals.durationMs += a.durationMs ?? 0;
   }
 

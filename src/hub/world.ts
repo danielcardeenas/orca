@@ -29,6 +29,7 @@ import type {
   TalkItem,
 } from '../shared/types.ts';
 import { AGENT_STATES, LIVE_STATES, MAX_TALK, MAX_TALK_TEXT, TERMINAL_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import { squadName } from '../shared/squads.ts';
 import { capcomOf } from '../shared/capcom.ts';
 import type { ExcludedWorkspace } from '../shared/workspaces.ts';
@@ -315,7 +316,7 @@ function workspaceKind(v: unknown): ExcludedWorkspace | undefined {
 function metrics(raw: unknown): AgentMetrics {
   const o = obj(raw) ?? {};
   return {
-    tokens: n(o['tokens']),
+    costUSD: n(o['costUSD']),
     inputTokens: n(o['inputTokens']),
     outputTokens: n(o['outputTokens']),
     cacheReadTokens: n(o['cacheReadTokens']),

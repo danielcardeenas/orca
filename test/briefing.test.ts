@@ -45,7 +45,7 @@ function project(over: Partial<Project> = {}): Project {
     id: 'p1', machineId: 'm1', slug: '-tmp-ax', name: 'axolots', path: '/tmp/ax', code: 'AX',
     gitBranch: 'main', gitDirty: false, keyNames: [], sessionIds: [],
     rollup: {
-      total: 2, blocked: 1, costUSD: 1.5, tokensPerSec: 0,
+      total: 2, blocked: 1, tokens: 1_500, tokensPerSec: 0,
       byState: { booting: 0, thinking: 0, working: 1, blocked: 1, idle: 0, done: 0, dead: 0 },
     },
     ...over,

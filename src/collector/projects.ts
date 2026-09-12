@@ -218,7 +218,7 @@ export class ProjectRegistry {
       && rec.project.sessionIds.every((s, i) => s === sessionIds[i])
       && rec.project.rollup.total === rollup.total
       && rec.project.rollup.blocked === rollup.blocked
-      && rec.project.rollup.costUSD === rollup.costUSD;
+      && rec.project.rollup.tokens === rollup.tokens;
     rec.project.sessionIds = sessionIds;
     rec.project.rollup = rollup;
     return !same;

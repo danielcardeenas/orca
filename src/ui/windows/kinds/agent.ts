@@ -5,7 +5,7 @@ import { agentOrigin, originLabel } from '../../../shared/origin.ts';
 /**
  * An agent's interior.
  *
- * What it is doing, what it is waiting on, what it has cost, who spawned it
+ * What it is doing, what it is waiting on, what it has used, who spawned it
  * and whom it spawned, what it said to others, what it made — and a line to
  * talk to it. Everything on it is live.
  *
@@ -24,7 +24,8 @@ import { authedUrl, hub, uploadFile } from '../../net/client.ts';
 import { bindAttach } from '../attach.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
-import { ago, dur, esc, money, runtimeOf, stateVar, stateWord, tokens, nameOf } from '../../util.ts';
+import { ago, dur, esc, runtimeOf, stateVar, stateWord, tokens, nameOf } from '../../util.ts';
+import { ceilingTokens } from '../../../shared/tokens.ts';
 import { glyphBurst, slabBusy, slabFlash } from '../fx.ts';
 import { mountAgentConversation } from '../agent-conversation.ts';
 import { mountTerminal } from './terminal.ts';
@@ -178,7 +179,7 @@ export function mountAgent(ctx: WinCtx, c: Console) {
     const now = Date.now();
     const s = [
       a.origin, a.role, a.state, a.block?.summary, a.tool, a.toolDetail, a.lastSay, a.lastPrompt, a.mission, a.title,
-      a.metrics.costUSD.toFixed(2), a.metrics.outputTokens, a.metrics.tokensPerSec.toFixed(0), a.metrics.turns,
+      ceilingTokens(a.metrics), a.metrics.outputTokens, a.metrics.tokensPerSec.toFixed(0), a.metrics.turns,
       a.childIds.join(','), esca?.id, esca?.status, esca?.permission?.phase, logsOpen, logsText.length,
       store.trafficFor(a.id).slice(0, 8).map((x) => x.id + (x.answer ? 'a' : '')).join(','),
       store.artifactsOf(a.id).map((x) => x.id).join(','),
@@ -248,7 +249,7 @@ export function mountAgent(ctx: WinCtx, c: Console) {
       ${block}
       <div class="sec">
         <div class="grid4">
-          <div><div class="num">${money(a.metrics.costUSD)}</div><div class="num__k px">COST</div></div>
+          <div><div class="num">${tokens(ceilingTokens(a.metrics))}</div><div class="num__k px">TOKENS</div></div>
           <div><div class="num">${tokens(a.metrics.inputTokens)}</div><div class="num__k px">TOK IN</div></div>
           <div><div class="num">${tokens(a.metrics.outputTokens)}</div><div class="num__k px">TOK OUT</div></div>
           <div><div class="num ${a.metrics.tokensPerSec > 0 ? 'is-lime' : ''}">${Math.round(a.metrics.tokensPerSec)}</div><div class="num__k px">TOK/S</div></div>

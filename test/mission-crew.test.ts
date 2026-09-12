@@ -28,14 +28,14 @@ function filed(id: string, extra: Partial<DebriefAgent> = {}): DebriefAgent {
     id, callsign: id.toUpperCase(), state: null, live: false, lead: false, squad: null,
     runtime: null, model: null, projectId: null, project: null, brief: null, final: null,
     startedAt: null, endedAt: null, lastSay: null, linesAdded: null, linesRemoved: null,
-    costUSD: null, durationMs: null, toolCalls: null, worktree: null, branch: null, ...extra,
+    tokens: null, durationMs: null, toolCalls: null, worktree: null, branch: null, ...extra,
   };
 }
 
 function parte(agents: DebriefAgent[]): MissionDebrief {
   return {
     missionId: 'm', journal: true, agents, landings: [],
-    totals: { agents: agents.length, done: 0, dead: 0, linesAdded: 0, linesRemoved: 0, costUSD: 0, durationMs: 0, measured: 0 },
+    totals: { agents: agents.length, done: 0, dead: 0, linesAdded: 0, linesRemoved: 0, tokens: 0, durationMs: 0, measured: 0 },
   };
 }
 
@@ -78,7 +78,7 @@ const mod: TestModule = {
     test('un agente que voló y ya no está en la flota sigue en la nómina, sin baldosa', () => {
       const crew = missionCrew(
         mission(['gone']),
-        parte([filed('gone', { projectId: 'p1', squad: 'sq', final: 'done', linesAdded: 12, linesRemoved: 3, costUSD: 0.42 })]),
+        parte([filed('gone', { projectId: 'p1', squad: 'sq', final: 'done', linesAdded: 12, linesRemoved: 3, tokens: 4_200 })]),
         () => undefined,
         projectOf,
       );
@@ -91,19 +91,19 @@ const mod: TestModule = {
       const fleet: Record<string, Agent> = { a1: agent('a1', 'working', { squad: 'sq' }) };
       const crew = missionCrew(
         mission(['a1']),
-        parte([filed('a1', { state: 'idle', live: false, squad: null, costUSD: 1.5, linesAdded: 40, linesRemoved: 1 })]),
+        parte([filed('a1', { state: 'idle', live: false, squad: null, tokens: 15_000, linesAdded: 40, linesRemoved: 1 })]),
         (id) => fleet[id],
         projectOf,
       );
       const m = squadMembers(crew.regions[0]!.squads[0]!)[0]!;
-      return eq('read', [m.state, m.live, m.squad, m.costUSD, m.linesAdded], ['working', true, 'sq', 1.5, 40]);
+      return eq('read', [m.state, m.live, m.squad, m.tokens, m.linesAdded], ['working', true, 'sq', 15_000, 40]);
     }),
 
     test('una medida que nadie tomó es null, nunca 0', () => {
       const fleet: Record<string, Agent> = { a1: agent('a1', 'working') };
       const crew = missionCrew(mission(['a1']), null, (id) => fleet[id], projectOf);
       const m = crew.regions[0]!.squads[0]!.members[0]!;
-      return eq('measures', [m.linesAdded, m.linesRemoved, m.costUSD, m.durationMs], [null, null, null, null]);
+      return eq('measures', [m.linesAdded, m.linesRemoved, m.tokens, m.durationMs], [null, null, null, null]);
     }),
 
     test('CAPCOM no es tripulación aunque esté asignado a la misión', () => {

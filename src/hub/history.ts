@@ -12,7 +12,12 @@
  * Guardar `title`, `toolDetail` y `lastSay` multiplicaría por veinte el coste
  * de 24 h de historia para pintar un texto que en modo replay nadie lee.
  *
- *   agents[id] = [state, costUSD, tokensPerSec, projectId, parentId|'', callsign]
+ *   agents[id] = [state, costUSD, tokensPerSec, projectId, parentId|'', callsign, tokens?]
+ *
+ * El séptimo campo, `tokens`, entró el 2026-09-12 con la unidad nueva: es
+ * `ceilingTokens` del agente en ese instante. El segundo, `costUSD`, es
+ * histórico — se sigue escribiendo porque el agente lo trae y porque 24 h de
+ * historia ya en disco lo llevan en esa posición, y no lo presenta nadie.
  *
  * Además de la cadencia fija hay una instantánea inmediata cuando un agente
  * cruza a `blocked` o a `dead`, coalescida a una cada 5 s. Son los dos únicos
@@ -43,6 +48,7 @@ import { dirname, join } from 'node:path';
 
 import type { AgentState, FeedItem, WorldState } from '../shared/types.ts';
 import { AGENT_STATES } from '../shared/types.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
 import { readJsonlTail } from './jsonl.ts';
 import { ORCA_DIR } from './auth.ts';
 
@@ -79,16 +85,23 @@ export const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 
 /* ── forma ────────────────────────────────────────────────────────── */
 
-/** `[state, costUSD, tokensPerSec, projectId, parentId|'', callsign]` */
-export type SnapAgent = [AgentState, number, number, string, string, string];
+/**
+ * `[state, costUSD, tokensPerSec, projectId, parentId|'', callsign, tokens?]`
+ *
+ * Sin el séptimo: una instantánea anterior al 2026-09-12. El uso de ese tramo
+ * no se midió, y el replay lo dice en vez de inventar un cero.
+ */
+export type SnapAgent = [AgentState, number, number, string, string, string, number?];
 
 export interface Snapshot {
   at: number;
   agents: Record<string, SnapAgent>;
   /** Agentes en `blocked` en este instante. Es lo que dibuja el histograma. */
   blocked: number;
-  /** Gasto acumulado de la flota en este instante. */
+  /** Gasto acumulado de la flota en este instante. Histórico: ver `SnapAgent`. */
   costUSD: number;
+  /** Uso acumulado de la flota en este instante, en tokens de techo. */
+  tokens: number;
   /** Líneas de telemetría emitidas por el hub hasta aquí, monótono. */
   feedCursor: number;
 }
@@ -113,8 +126,12 @@ export interface HistorySummary {
   blocked: SummaryRow[];
   /** De los que se bloquearon, los que siguen bloqueados *ahora*. */
   stillBlocked: SummaryRow[];
-  /** Gasto del intervalo, no gasto total. Por agente y sumado. */
-  costUSD: number;
+  /**
+   * Uso del intervalo, no uso total: por agente, lo que subió entre la primera
+   * y la última instantánea que le vieron. Cero sobre un tramo anterior al
+   * 2026-09-12, que no midió tokens.
+   */
+  tokens: number;
   /** Cuántas líneas de telemetría pasaron, aunque ya no quepan en el frame. */
   feedLines: number;
   /** Las últimas `warn`/`alert` del intervalo que el frame todavía conserva. */
@@ -163,7 +180,9 @@ export function snapshotOf(w: WorldState, at: number, feedCursor: number): Snaps
   const agents: Record<string, SnapAgent> = Object.create(null) as Record<string, SnapAgent>;
   let blocked = 0;
   let costUSD = 0;
+  let tokens = 0;
   for (const a of Object.values(w.agents)) {
+    const used = ceilingTokens(a.metrics);
     agents[a.id] = [
       a.state,
       r4(a.metrics.costUSD),
@@ -171,11 +190,13 @@ export function snapshotOf(w: WorldState, at: number, feedCursor: number): Snaps
       a.projectId,
       a.parentId ?? '',
       a.callsign,
+      used,
     ];
     if (a.state === 'blocked') blocked += 1;
     costUSD += a.metrics.costUSD;
+    tokens += used;
   }
-  return { at, agents, blocked, costUSD: r4(costUSD), feedCursor };
+  return { at, agents, blocked, costUSD: r4(costUSD), tokens, feedCursor };
 }
 
 /* ── validación de lo que vuelve del disco ────────────────────────── */
@@ -183,11 +204,12 @@ export function snapshotOf(w: WorldState, at: number, feedCursor: number): Snaps
 const STATE_SET = new Set<string>(AGENT_STATES);
 
 function isSnapAgent(v: unknown): v is SnapAgent {
-  if (!Array.isArray(v) || v.length !== 6) return false;
+  if (!Array.isArray(v) || (v.length !== 6 && v.length !== 7)) return false;
   return typeof v[0] === 'string' && STATE_SET.has(v[0])
     && typeof v[1] === 'number' && Number.isFinite(v[1])
     && typeof v[2] === 'number' && Number.isFinite(v[2])
-    && typeof v[3] === 'string' && typeof v[4] === 'string' && typeof v[5] === 'string';
+    && typeof v[3] === 'string' && typeof v[4] === 'string' && typeof v[5] === 'string'
+    && (v.length === 6 || (typeof v[6] === 'number' && Number.isFinite(v[6])));
 }
 
 /** Una línea del archivo no es de fiar: puede venir de otra versión, de un
@@ -208,12 +230,14 @@ export function parseSnapshot(v: unknown): Snapshot | null {
     if (t[0] === 'blocked') blocked += 1;
   }
   const cost = o['costUSD'];
+  const tokens = o['tokens'];
   const cursor = o['feedCursor'];
   return {
     at,
     agents,
     blocked: typeof o['blocked'] === 'number' ? o['blocked'] : blocked,
     costUSD: typeof cost === 'number' && Number.isFinite(cost) ? cost : 0,
+    tokens: typeof tokens === 'number' && Number.isFinite(tokens) ? tokens : 0,
     feedCursor: typeof cursor === 'number' && Number.isFinite(cursor) ? cursor : 0,
   };
 }
@@ -418,13 +442,13 @@ export class History {
     const walk = seed && !base ? range.filter((s) => s.at > seed.at) : range;
 
     const prev = new Map<string, SnapAgent>();
-    const firstCost = new Map<string, number>();
-    const lastCost = new Map<string, number>();
+    const firstUse = new Map<string, number>();
+    const lastUse = new Map<string, number>();
     if (seed) {
       for (const [id, t] of Object.entries(seed.agents)) {
         prev.set(id, t);
-        firstCost.set(id, t[1]);
-        lastCost.set(id, t[1]);
+        firstUse.set(id, t[6] ?? 0);
+        lastUse.set(id, t[6] ?? 0);
       }
     }
 
@@ -438,18 +462,18 @@ export class History {
         const p = prev.get(id);
         if (!p) {
           born.push(row(id, t, s.at));
-          firstCost.set(id, t[1]);
+          firstUse.set(id, t[6] ?? 0);
         }
         if (t[0] === 'done' && p?.[0] !== 'done') finished.push(row(id, t, s.at));
         if (t[0] === 'dead' && p?.[0] !== 'dead') died.push(row(id, t, s.at));
         if (t[0] === 'blocked' && p?.[0] !== 'blocked') blocked.push(row(id, t, s.at));
         prev.set(id, t);
-        lastCost.set(id, t[1]);
+        lastUse.set(id, t[6] ?? 0);
       }
     }
 
-    let costUSD = 0;
-    for (const [id, last] of lastCost) costUSD += Math.max(0, last - (firstCost.get(id) ?? 0));
+    let tokens = 0;
+    for (const [id, last] of lastUse) tokens += Math.max(0, last - (firstUse.get(id) ?? 0));
 
     // Quién sigue bloqueado se lee del mundo vivo, no de la última instantánea:
     // es la lista sobre la que el operador va a actuar ahora mismo.
@@ -476,7 +500,7 @@ export class History {
       died: died.slice(-MAX_SUMMARY_ROWS),
       blocked: blocked.slice(-MAX_SUMMARY_ROWS),
       stillBlocked: stillBlocked.slice(-MAX_SUMMARY_ROWS),
-      costUSD: r4(costUSD),
+      tokens: Math.round(tokens),
       feedLines: Math.max(0, feedTo - feedFrom),
       lines: loud.slice(-MAX_SUMMARY_LINES),
       // El frame guarda 500 líneas: si la más vieja que queda es posterior a

@@ -43,7 +43,7 @@ function agent(id: string, o: Partial<Agent> = {}): Agent {
   return {
     id, callsign: id.toUpperCase(), state: 'working', role: 'worker', squad: null, lead: false,
     startedAt: T0 - 50_000, updatedAt: T0, projectId: 'p1', runtime: 'claude', model: 'claude-sonnet-5',
-    metrics: { linesAdded: 4, linesRemoved: 1, costUSD: 0.25, toolCalls: 9 },
+    metrics: { linesAdded: 4, linesRemoved: 1, inputTokens: 2_500, toolCalls: 9 },
     ...o,
   } as unknown as Agent;
 }
@@ -54,7 +54,7 @@ function launch(agentId: string, o: Partial<DebriefEntry> = {}): DebriefEntry {
 function end(agentId: string, o: Partial<DebriefEntry> = {}): DebriefEntry {
   return {
     at: T0 - 1_000, kind: 'end', agentId, callsign: agentId.toUpperCase(), state: 'done',
-    costUSD: 1.5, durationMs: 60_000, lines: { added: 100, removed: 20 }, toolCalls: 30, lastSay: 'done', ...o,
+    tokens: { input: 15_000, output: 0, cacheRead: 0, thinking: 0, cacheWrite: 0 }, durationMs: 60_000, lines: { added: 100, removed: 20 }, toolCalls: 30, lastSay: 'done', ...o,
   };
 }
 
@@ -69,7 +69,7 @@ const mod: TestModule = {
       const a = d.agents[0]!;
       return all(
         eq('quién', [a.id, a.callsign, a.state, a.live, a.final], ['a1', 'A1', null, false, 'done']),
-        eq('qué cambió', [a.linesAdded, a.linesRemoved, a.costUSD, a.durationMs], [100, 20, 1.5, 60_000]),
+        eq('qué cambió', [a.linesAdded, a.linesRemoved, a.tokens, a.durationMs], [100, 20, 15_000, 60_000]),
         eq('por qué existió', a.brief, 'do a1'),
       );
     }),
@@ -79,7 +79,7 @@ const mod: TestModule = {
       const d = buildDebrief(m, [launch('a1')], NOBODY);
       const a = d.agents[0]!;
       return all(
-        eq('sin medir', [a.linesAdded, a.linesRemoved, a.costUSD, a.durationMs, a.toolCalls, a.final],
+        eq('sin medir', [a.linesAdded, a.linesRemoved, a.tokens, a.durationMs, a.toolCalls, a.final],
           [null, null, null, null, null, null]),
         eq('measured', d.totals.measured, 0),
         eq('agentes', d.totals.agents, 1),
@@ -92,8 +92,8 @@ const mod: TestModule = {
       const running = buildDebrief(m, [launch('a1')], live).agents[0]!;
       const done = buildDebrief(m, [launch('a1'), end('a1')], live).agents[0]!;
       return all(
-        eq('corriendo lee el mundo', [running.linesAdded, running.costUSD, running.live], [4, 0.25, true]),
-        eq('acabado lee el diario', [done.linesAdded, done.costUSD], [100, 1.5]),
+        eq('corriendo lee el mundo', [running.linesAdded, running.tokens, running.live], [4, 2_500, true]),
+        eq('acabado lee el diario', [done.linesAdded, done.tokens], [100, 15_000]),
       );
     }),
 
@@ -121,14 +121,14 @@ const mod: TestModule = {
       const m = mission({ agentIds: ['a1', 'a2', 'a3'] });
       const d = buildDebrief(m, [
         launch('a1'), end('a1'),
-        launch('a2'), end('a2', { state: 'dead', lines: { added: 3, removed: 0 }, costUSD: 0.5, durationMs: 1_000 }),
+        launch('a2'), end('a2', { state: 'dead', lines: { added: 3, removed: 0 }, tokens: { input: 5_000, output: 0, cacheRead: 0, thinking: 0, cacheWrite: 0 }, durationMs: 1_000 }),
         launch('a3'),
       ], NOBODY);
       return all(
         eq('líneas', [d.totals.linesAdded, d.totals.linesRemoved], [103, 20]),
         eq('final', [d.totals.done, d.totals.dead], [1, 1]),
         eq('medidos de tres', [d.totals.measured, d.totals.agents], [2, 3]),
-        eq('coste', Number(d.totals.costUSD.toFixed(2)), 2),
+        eq('uso', d.totals.tokens, 20_000),
       );
     }),
 

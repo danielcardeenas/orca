@@ -347,7 +347,7 @@ export function mountCommand(host: HTMLElement, c: Console): CommandHandle {
       case 'fleet': c.openFleet(); break;
       case 'tilt': c.field.setTilt(!c.field.tilted()); break;
       case 'full': case 'fullscreen': void toggleFullscreen(); break;
-      case 'deck': { const s = arg.toLowerCase(); c.deck((['state', 'project', 'cost', 'age'] as const).find((x) => x === s)); break; }
+      case 'deck': { const s = arg.toLowerCase(); c.deck((['state', 'project', 'use', 'age'] as const).find((x) => x === s)); break; }
       case 'help': c.openHelp(); break;
       case 'settings': c.openSettings(); break;
       case 'hygiene': c.openHygiene(); break;

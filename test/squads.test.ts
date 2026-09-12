@@ -27,6 +27,7 @@ import { squadsOf, squadName } from '../src/shared/squads.ts';
 import type { Agent } from '../src/shared/types.ts';
 import type { SpawnAck } from '../src/shared/protocol.ts';
 import { leadBrief, memberBrief, squadBrief, withBrief } from '../src/collector/briefs.ts';
+import { HUMAN_COMMAND, WORKER_COMMANDS } from '../src/collector/shims.ts';
 import { ArtifactIndex } from '../src/collector/artifacts.ts';
 import { CommandRunner } from '../src/collector/commands.ts';
 import type { AgentHandle, CommandDeps } from '../src/collector/commands.ts';
@@ -204,6 +205,29 @@ const briefsSayTheRightThing = test('el brief nombra el escuadrón y usa comando
   return ok('el brief nombra el escuadrón y usa comandos reales',
     leadOk && memberOk && orphanOk && noSquad,
     'líder: reparte y habla con el humano; miembro: reporta y no lo hace');
+});
+
+/**
+ * El pie promete comandos, y `shims.ts` es quien los pone en el PATH.
+ *
+ * Es la regla que ya está escrita en la cabecera de `briefs.ts` — «cualquier
+ * comando que se añada aquí hay que añadirlo allí» — y hasta ahora sólo estaba
+ * escrita. Cuando se rompió costó caro: durante tres días el pie prometía
+ * comandos inexistentes, y de catorce agentes al menos seis quemaron turnos
+ * buscándolos. Un `grep` de `orca-\w+` sobre los dos pies lo cierra.
+ */
+const briefOnlyPromisesReachableCommands = test('el pie no nombra ningún comando que no esté en el PATH', () => {
+  const reachable = new Set<string>([...WORKER_COMMANDS, HUMAN_COMMAND]);
+  const named = (text: string): string[] => [...new Set(text.match(/orca-[a-z]+/g) ?? [])];
+  const lead = named(leadBrief('audit-01'));
+  const member = named(memberBrief('audit-01', 'K9'));
+  const missing = [...lead, ...member].filter((c) => !reachable.has(c));
+  // Y el que hace que el canvas tenga algo que enseñar tiene que estar.
+  const showsUp = lead.includes('orca-show') && member.includes('orca-show');
+  return ok('el pie no nombra ningún comando que no esté en el PATH',
+    missing.length === 0 && showsUp,
+    missing.length ? `prometidos y no instalados: ${missing.join(' ')}`
+      : `${lead.length} en el del líder, ${member.length} en el del miembro, orca-show en los dos`);
 });
 
 const briefRidesTheEnd = test('withBrief pega el pie al final, nunca al principio', () => {
@@ -586,6 +610,7 @@ const tests = [
   diffCarriesSquad,
   messageScopeSquad,
   briefsSayTheRightThing,
+  briefOnlyPromisesReachableCommands,
   briefRidesTheEnd,
   spawnAckHasAgentId,
   hostedAckDoesNotWait,

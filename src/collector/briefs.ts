@@ -17,6 +17,8 @@
  *  - English, and short. It is a footer on somebody else's brief, not a manual.
  *  - Only real commands, with the flags they really take. `orca-tell`,
  *    `orca-read`, `orca-ask` — see docs/MESSAGING.md and skill/orca-talk.
+ *    `orca-show` too: what an agent publishes with it is what the canvas can
+ *    put next to that agent, and without a line here nobody ever calls it.
  *    "Real" now includes REACHABLE: the collector puts these on the worker's
  *    PATH at spawn time (`shims.ts`). Until 2026-09-08 it did not, and the
  *    footer promised commands that did not exist — measured across fourteen
@@ -58,6 +60,7 @@ export function leadBrief(squad: string): string {
     '- For a member blocked by quota: orca-recover inspect <callsign> --models, then orca-recover decide <callsign> <decision.json>. Choose wait with a review time, model change, provider handoff, or one retry. Include your supervisor_id and the exact observed incident; consider task difficulty, urgency and budget. Do not repeat an exhausted option blindly.',
     '- Unblock a member yourself: orca-tell --reply <messageId> "<answer>"',
     `- Need another pair of hands: orca-spawn "<complete brief>" — it joins ${squad} as your child and reports to you`,
+    '- If you produce something a person would want to LOOK at — an image, a video, a rendered page, a diagram — publish it: orca-show <path> "<what it is>". ORCA already picks up most files you write, but only you know which of the forty frames is the result; what you publish is what shows up on the canvas next to you. The file has to live inside the project.',
     '',
     'These are real commands on your PATH, put there by ORCA when it launched you.',
     '',
@@ -109,6 +112,7 @@ export function memberBrief(squad: string, leadCallsign: string | null): string 
     '- Read your mail at the start of every turn: orca-read',
     '- While waiting for new instructions, use orca-read --wait --timeout 60 instead of repeated checks.',
     '- For choices, include the options in an orca-tell ask and have your lead reply with the selected values. Native CLI question forms cannot be answered through ORCA peer mail.',
+    '- If you produce something a person would want to LOOK at — an image, a video, a rendered page, a diagram — publish it: orca-show <path> "<what it is>". ORCA already picks up most files you write, but only you know which of the forty frames is the result; what you publish is what shows up on the canvas next to you. The file has to live inside the project.',
     '',
     'These are real commands on your PATH, put there by ORCA when it launched'
       + ' you. If one is missing, it is a bug in ORCA, not something to hunt for:'

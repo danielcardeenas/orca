@@ -329,6 +329,16 @@
 .srf__bar .px { font-size: 9px; }
 .srf__x { background: transparent; border: 0; color: var(--ink-dim); font-family: var(--font-display, 'Tiny5', monospace); font-size: 10px; padding: 0 2px; }
 .srf__x:hover { color: var(--lime); }
+/*
+ * Un artefacto que no se puede mirar por dentro —un .zip, un binario— dice qué
+ * es y cuánto pesa, centrado, y nada más. No hay nada más que se pueda decir
+ * con verdad, y llenar el hueco con el archivo pintado como texto era poner
+ * caracteres de reemplazo sobre el lienzo.
+ */
+.srf__opaque {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin: 0; height: 100%; color: var(--ink-mid); letter-spacing: 0.08em;
+}
 
 /* ── Lasso ────────────────────────────────────────────────────────── */
 

@@ -431,14 +431,26 @@ const c: Console = {
     const a = store.world.artifacts?.[id];
     if (!a) return;
     const n = Object.values(store.world.artifacts).filter((x) => x.placement && x.agentId === a.agentId).length;
-    a.placement = field.placeNear(a.agentId, n);
+    const at = field.placeNear(a.agentId, n);
+    /*
+     * No tile, no place. The field is a map of the fleet, and a surface on open
+     * ground with nothing under it that made it is the map lying: it says an
+     * agent is there. The gallery is the place that survives its author, so
+     * that is where this artifact is still readable.
+     */
+    if (!at) {
+      const who = store.knownAgent(a.agentId)?.callsign ?? 'its agent';
+      c.note(`${who} is no longer on the field: ${a.title} stays in the gallery`, 'warn');
+      return;
+    }
+    a.placement = at;
     getSound()?.play('placed');
     saveArtifactPlacements();
     field.feed();
     wm.closeKey(`art:${id}`);
     // Fly to where the tile and its new surface both fit.
     const s = field.spotOf(a.agentId);
-    if (s) field.flyToPoint((s.x + a.placement.x) / 2, (s.y + a.placement.y) / 2, 7.5);
+    if (s) field.flyToPoint((s.x + at.x) / 2, (s.y + at.y) / 2, 7.5);
   },
   unplaceArtifact(id) {
     if (placedFiles.remove(id)) { syncPlacedFiles(); return; }

@@ -11,9 +11,9 @@ import * as THREE from 'three';
 import type { Artifact } from '../../shared/types.ts';
 import { esc } from '../util.ts';
 import { authedUrl } from '../net/client.ts';
+import { MEDIA_W, opaqueLabel, surfaceIsOpaque, surfacePlays, surfaceShows } from './surface.ts';
 import type { FieldCamera } from './camera.ts';
 
-export const MEDIA_W = 2.4;
 const MAX_MEDIA = 40;
 
 export interface MediaRect { id: string; x: number; y: number; z: number; w: number; h: number }
@@ -53,6 +53,8 @@ export function createMedia(
   const frameMat = new THREE.MeshBasicMaterial({ color: 0x2a2e38, depthWrite: false });
 
   function sizeOf(a: Artifact): { w: number; h: number } {
+    // Una ficha opaca es una tarjeta con dos palabras: ni una foto ni una página.
+    if (surfaceIsOpaque(a.kind)) return { w: MEDIA_W, h: MEDIA_W * 0.22 };
     const ratio = a.width && a.height ? a.height / a.width : (a.kind === 'html' || a.kind === 'text' ? 0.7 : 0.62);
     return { w: MEDIA_W, h: MEDIA_W * ratio };
   }
@@ -66,9 +68,11 @@ export function createMedia(
       let tex: THREE.Texture;
       if (a.kind === 'video') {
         const v = document.createElement('video');
-        v.src = url; v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
+        v.src = url; v.muted = true; v.loop = true; v.playsInline = true;
         v.crossOrigin = 'anonymous';
-        void v.play().catch(() => { /* autoplay may need a gesture; the quad stays black until then */ });
+        // Quién reproduce es `reproject`, que es quien sabe si se está mirando.
+        // Arrancar aquí dejaría decodificando a un vídeo fuera de cuadro hasta
+        // el primer frame, y a uno que nunca entra en cuadro, para siempre.
         tex = new THREE.VideoTexture(v);
         e.video = v;
       } else {
@@ -107,6 +111,16 @@ export function createMedia(
         f.src = url;
         f.title = a.title;
         el.appendChild(f);
+      } else if (surfaceIsOpaque(a.kind)) {
+        /*
+         * Un `.zip` no tiene dentro nada que mirar, y bajarlo para pintarlo como
+         * texto es lo que pone caracteres de reemplazo sobre el lienzo. Se dice
+         * lo único que se puede decir con verdad: qué es y cuánto pesa.
+         */
+        const k = document.createElement('p');
+        k.className = 'srf__opaque px';
+        k.textContent = opaqueLabel(a.path, a.bytes);
+        el.appendChild(k);
       } else {
         const pre = document.createElement('pre');
         pre.className = 'mono';
@@ -170,8 +184,27 @@ export function createMedia(
 
     reproject() {
       for (const e of entries.values()) {
-        if (!e.el) continue;
         const p = camera.project(e.x - e.w / 2, e.y + e.h / 2, e.z);
+        const pxWide = e.w * camera.pxPerUnit(e.z);
+        /*
+         * Un cuadro que ya no es una imagen se retira, en vez de quedarse como
+         * una mancha de color sobre la silueta de la flota (`surface.ts`). Y un
+         * vídeo que nadie está mirando deja de decodificar: seguir subiendo un
+         * fotograma por frame a la GPU desde fuera de cuadro cuesta un
+         * decodificador de hardware, y de ésos hay cuatro.
+         */
+        if (e.mesh) {
+          const shows = p.visible && surfaceShows(pxWide);
+          e.mesh.visible = shows;
+          if (e.frame) e.frame.visible = shows;
+          if (e.video) {
+            const play = surfacePlays(p.visible, pxWide);
+            if (play && e.video.paused) void e.video.play().catch(() => { /* sigue en pausa */ });
+            else if (!play && !e.video.paused) e.video.pause();
+          }
+          continue;
+        }
+        if (!e.el) continue;
         if (!p.visible) { e.el.style.display = 'none'; continue; }
         const scale = camera.pxPerUnit(e.z) / BASE;
         if (scale < 0.18) { e.el.style.display = 'none'; continue; }

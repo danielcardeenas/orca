@@ -170,8 +170,12 @@ export interface FieldHandle {
   arranged(): boolean;
   /** Forget every placement, agents and squads alike. */
   resetArrangement(): void;
-  /** Where to put an artifact pulled from this agent. */
-  placeNear(agentId: string, index: number): { x: number; y: number; z: number };
+  /**
+   * Where to put an artifact pulled from this agent, or null when the agent has
+   * no tile on the field — archived, or on a machine that is gone. Never a made
+   * up anchor: see `placeNear`.
+   */
+  placeNear(agentId: string, index: number): { x: number; y: number; z: number } | null;
   /**
    * Surfaces that are not the hub's: the operator's own files, placed on the
    * field (ui/placed-files.ts). Drawn with the artifacts, next feed.
@@ -2568,9 +2572,18 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       dirty = true;
     },
     setExtraMedia(list) { extraMedia = list; dirty = true; },
+    /*
+     * An artifact goes beside its own agent or it does not go on the field at
+     * all. This used to fall back to the camera — it dropped the surface
+     * wherever the operator happened to be looking, with nothing under it that
+     * explained why it was there, and the placement then kept it there. An
+     * artifact outlives its agent by design (`hub/world.ts` evicts by age and
+     * by cap, not by the life of whoever made it), so that was not the rare
+     * case: it was most of them. Null, and the console says why.
+     */
     placeNear(agentId, index) {
       const s = layout.spots.get(agentId);
-      if (!s) return { x: camera.cam.x, y: camera.cam.y, z: 0.1 };
+      if (!s) return null;
       return { x: s.x + TILE_W * 0.5 + 1.5 + (index % 3) * 2.7, y: s.y + TILE_H * 0.4 - Math.floor(index / 3) * 2.0, z: s.z + 0.05 };
     },
     stats: () => ({ agents: agents.length, drawn, segments: pipes.segments(), fps: Math.round(fps) }),

@@ -1014,6 +1014,14 @@ void start();
   spotOf: (id: string) => field.spotOf(id),
   // The mission panel, for the visual harness: a mission the hub never saw, agents it did.
   mission: (m: import('../shared/missions.ts').CapcomMission) => store.upsertMission(m),
+  /**
+   * Los artefactos que el hub sirvió, para comprobar de fuera qué llegó. Sólo
+   * lectura y sin bytes, como `missionsSeen`: el arnés necesita saber cuál de
+   * ellos tiene una imagen de verdad detrás para mirar si su ficha la carga.
+   */
+  artifactsSeen: () => Object.values(store.world.artifacts ?? {}).map((a) => ({
+    id: a.id, agentId: a.agentId, kind: a.kind, source: a.source, hasUrl: !!a.url,
+  })),
   /** Las misiones que el hub sirvió, para comprobar de fuera qué llegó. Sólo lectura. */
   missionsSeen: () => Object.values(store.world.missions ?? {}).map((m) => ({ id: m.id, title: m.title, status: m.status, messages: m.messages.length })),
   agentIds: () => Object.values(store.world.agents).filter((a) => a.role !== 'capcom' && a.state !== 'done' && a.state !== 'dead').map((a) => a.id),

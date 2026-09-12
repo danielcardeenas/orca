@@ -57,15 +57,20 @@ async function tileBox(page: Page, id: string): Promise<{ x: number; y: number; 
 }
 
 /**
- * Las fichas cuando ya no se mueven.
+ * Las cinco fichas de un agente, cuando estén y cuando ya no se muevan.
  *
- * La cámara llega a un sitio con easing, así que las coordenadas de una ficha
- * leídas a mitad del vuelo ya no valen cuando se pincha: el clic cae en el
- * lienzo y se lee como un paneo. Se espera a dos muestras iguales, que es lo
- * que dice que el vuelo acabó, y no a un número de milisegundos que acierta
- * unas veces.
+ * Dos esperas en una, y las dos hacen falta contra una flota viva. Que ESTÉN:
+ * un hijo que sólo habla con su padre se pliega en su bandeja, y una celda de
+ * bandeja no tiene estantería a propósito, así que la franja de ese agente
+ * desaparece hasta que hable con alguien más — es el precio de la regla, y en
+ * el mock pasa cada pocos segundos. Y que NO SE MUEVAN: la cámara llega con
+ * easing y una ventana que se abre la desplaza, así que unas coordenadas leídas
+ * hace medio segundo pinchan el lienzo en vez de la ficha.
  */
-async function settled(page: Page, agentId: string): Promise<Awaited<ReturnType<typeof chips>>> {
+async function shelfOf(page: Page, agentId: string, n = 5): Promise<Awaited<ReturnType<typeof chips>>> {
+  await page.waitForFunction(({ id, want }) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
+    .filter((el) => !el.hidden && el.dataset.agent === id).length === want,
+  { id: agentId, want: n }, { timeout: 20_000 });
   let prev = '';
   for (let i = 0; i < 30; i++) {
     const now = await chips(page, agentId);
@@ -75,6 +80,47 @@ async function settled(page: Page, agentId: string): Promise<Awaited<ReturnType<
     await sleep(250);
   }
   return chips(page, agentId);
+}
+
+/**
+ * Seis declarados y uno observado a nombre de un agente, sin pasar por el hub.
+ *
+ * Seis para que salga el contador: cuatro fichas y un «+2». Y el observado para
+ * comprobar lo contrario de todo esto — que apareciendo sin que nadie lo elija
+ * no cuelga de ninguna baldosa, aunque sea el más nuevo de los siete.
+ */
+async function declare(page: Page, agentId: string): Promise<void> {
+  await page.evaluate((who) => {
+    const api = (window as never as { __orca: { artifact(a: unknown): void } }).__orca;
+    /*
+     * Los más nuevos de ese agente, a propósito. El mock también publica cosas
+     * declaradas suyas, y la estantería cuelga lo más nuevo: con un `at` viejo
+     * las cuatro fichas visibles eran las del mock y las de la prueba quedaban
+     * detrás del contador — la prueba miraba entonces algo que no había puesto.
+     */
+    const now = Date.now();
+    for (let i = 0; i < 6; i++) {
+      api.artifact({
+        id: `art_fix_${who}_${i}`, agentId: who, projectId: 'p', machineId: 'm',
+        kind: i === 5 ? 'file' : 'image', path: i === 5 ? '/p/out/build.zip' : `/p/out/frame-${i}.png`,
+        title: i === 5 ? 'el paquete' : `fotograma ${i}`, url: null,
+        bytes: i === 5 ? 4_404_019 : 2048, width: 640, height: 400,
+        at: now + i, open: false, placement: null, source: 'declared',
+      });
+    }
+    api.artifact({
+      id: `art_fix_${who}_obs`, agentId: who, projectId: 'p', machineId: 'm',
+      kind: 'image', path: '/p/test/shots/capture.png', title: 'capture.png', url: null,
+      bytes: 9000, width: 100, height: 100, at: now + 99, open: false, placement: null, source: 'observed',
+    });
+  }, agentId);
+}
+
+/** Cuántos declarados tiene un agente según el mundo de la consola. */
+async function declaredCount(page: Page, agentId: string): Promise<number> {
+  return page.evaluate((who) => (window as never as {
+    __orca: { artifactsSeen(): { agentId: string; source: string }[] };
+  }).__orca.artifactsSeen().filter((a) => a.agentId === who && a.source === 'declared').length, agentId);
 }
 
 async function main() {
@@ -96,56 +142,55 @@ async function main() {
     /* ── El agente al que se le van a colgar cosas ──────────────────── */
 
     /*
-     * Uno con baldosa PROPIA, no el primero que devuelva la flota. Un hijo que
-     * sólo habla con su padre está plegado en su bandeja, y una celda de bandeja
-     * no tiene estantería a propósito: es demasiado pequeña para nada y dice
-     * sólo su estado, la misma regla que ya siguen los rótulos. Elegir a ciegas
-     * hacía que esta prueba pasara o fallara según a quién le tocara el primer
-     * hueco del mock.
+     * Uno con baldosa PROPIA, y probando hasta que uno aguante.
+     *
+     * La flota sintética está viva mientras corre esto: un hijo que sólo habla
+     * con su padre se pliega en su bandeja entre que se elige y se vuela, y una
+     * celda de bandeja no tiene estantería a propósito — es demasiado pequeña
+     * para nada y dice sólo su estado, la misma regla que siguen los rótulos.
+     * Elegir uno a ciegas hacía que esta prueba pasara o fallara según lo que
+     * el mock decidiera en ese segundo, que es una prueba que no dice nada.
      */
-    const who = await page.evaluate(() => {
+    const candidatos = await page.evaluate(() => {
       const api = (window as never as {
         __orca: { agentIds(): string[]; spotOf(id: string): { scale: number; trayOf: string | null } | undefined };
       }).__orca;
-      return api.agentIds().find((id) => {
+      return api.agentIds().filter((id) => {
         const s = api.spotOf(id);
         return !!s && s.trayOf === null && s.scale >= 1;
-      }) ?? '';
-    });
-    assert.ok(who, 'la flota sintética dio algún agente con baldosa propia');
-    const antes = await chips(page, who);
-
-    await page.evaluate((agentId) => {
-      const api = (window as never as { __orca: { artifact(a: unknown): void } }).__orca;
-      // Seis declarados: cuatro fichas y un contador que tiene que decir +2.
-      for (let i = 0; i < 6; i++) {
-        api.artifact({
-          id: `art_fix_${i}`, agentId, projectId: 'p', machineId: 'm',
-          kind: i === 5 ? 'file' : 'image', path: i === 5 ? '/p/out/build.zip' : `/p/out/frame-${i}.png`,
-          title: i === 5 ? 'el paquete' : `fotograma ${i}`, url: null,
-          bytes: i === 5 ? 4_404_019 : 2048, width: 640, height: 400,
-          at: 1_000 + i, open: false, placement: null, source: 'declared',
-        });
-      }
-      // Y uno observado, que NO debe colgar de nadie: su sitio es la galería.
-      api.artifact({
-        id: 'art_fix_obs', agentId, projectId: 'p', machineId: 'm',
-        kind: 'image', path: '/p/test/shots/capture.png', title: 'capture.png', url: null,
-        bytes: 9000, width: 100, height: 100, at: 9_999, open: false, placement: null, source: 'observed',
       });
-    }, who);
+    });
+    assert.ok(candidatos.length, 'la flota sintética dio algún agente con baldosa propia');
 
-    // El zoom tiene que estar cerca: la estantería sube un peldaño después de
-    // las palabras, y de lejos no se dibuja a propósito.
-    await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), who);
-    const shown = await settled(page, who);
-    assert.equal(shown.length, 5,
-      `cuatro fichas y un contador, no ${shown.length} (antes tenía ${antes.length})`);
+    let who = '';
+    for (const cand of candidatos.slice(0, 4)) {
+      await declare(page, cand);
+      await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), cand);
+      try {
+        await page.waitForFunction(
+          (id) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
+            .filter((el) => !el.hidden && el.dataset.agent === id).length === 5,
+          cand, { timeout: 10_000 });
+        who = cand;
+        break;
+      } catch { /* se plegó, se fue de cuadro o se murió: el siguiente */ }
+    }
+    assert.ok(who, `ninguno de los ${Math.min(4, candidatos.length)} candidatos mantuvo su baldosa el tiempo de colgarle nada`);
+
+    const shown = await shelfOf(page, who);
+    assert.equal(shown.length, 5, `cuatro fichas y un contador, no ${shown.length}`);
     const counter = shown.filter((c) => !c.art);
     assert.equal(counter.length, 1, 'exactamente una ficha contador');
-    assert.match(counter[0]!.more, /\+2/, `el contador dice lo que queda, no "${counter[0]!.more}"`);
+    /*
+     * Lo que queda, exacto y contado contra el mundo — no «+2» a pelo: el mock
+     * puede haberle publicado cosas declaradas a este agente antes de que la
+     * prueba llegara, y un número escrito a mano aquí falla según el segundo.
+     */
+    const declarados = await declaredCount(page, who);
+    assert.match(counter[0]!.more, new RegExp(`\\+${declarados - 4}(?!\\d)`),
+      `el contador dice lo que queda de ${declarados} declarados, no "${counter[0]!.more}"`);
     // El observado no está, aunque sea el más nuevo de todos.
-    assert.ok(!shown.some((c) => c.art === 'art_fix_obs'), 'lo observado no cuelga de ninguna baldosa');
+    assert.ok(!shown.some((c) => c.art?.endsWith('_obs')), 'lo observado no cuelga de ninguna baldosa');
 
     /* ── Y está DEBAJO de la baldosa, que es el punto entero ────────── */
 
@@ -164,29 +209,106 @@ async function main() {
 
     /* ── Clic en una ficha: se abre su artefacto ─────────────────────── */
 
-    const first = (await settled(page, who)).find((c) => c.art)!;
-    await page.mouse.click(Math.round(first.x + first.w / 2), Math.round(first.y + first.w / 2));
-    await sleep(900);
-    const artWin = await page.evaluate(() => [...document.querySelectorAll('.win')]
-      .some((w) => (w.textContent ?? '').includes('/p/out/')));
-    assert.ok(artWin, 'un clic en una ficha abre la ventana de su artefacto');
+    /*
+     * Por selector y no por coordenadas que calcule la prueba: la cámara llega
+     * con easing y una ventana que se abre la mueve, así que un par de píxeles
+     * leídos hace medio segundo aciertan unas veces. Playwright pincha el
+     * centro del elemento en el momento de pinchar, que es lo que hace una
+     * persona.
+     */
+    await shelfOf(page, who);
+    await page.click(`.chip-art[data-agent="${who}"][data-art]`);
+    /*
+     * Se espera a que la ventana esté, no un número de milisegundos. Un `sleep`
+     * aquí es una prueba que falla cuando la máquina está ocupada y pasa cuando
+     * no, que es lo mismo que no probar nada. La ficha que se pincha es la
+     * primera, que es la más nueva, que es una de las que puso esta prueba: de
+     * ahí que la ruta se pueda afirmar.
+     */
+    await page.waitForFunction(() => [...document.querySelectorAll('.win')]
+      .some((w) => (w.textContent ?? '').includes('/p/out/')), null, { timeout: 15_000 })
+      .catch(() => { throw new Error('un clic en una ficha no abrió la ventana de su artefacto'); });
     await page.screenshot({ path: join(SHOTS, 'shelf-02-artifact.png') });
     await page.evaluate(() => document.querySelectorAll<HTMLElement>('.win [data-w-close]').forEach((b) => b.click()));
     await sleep(500);
 
     /* ── Clic en el contador: la galería, filtrada por ese agente ────── */
 
-    const c2 = (await settled(page, who)).find((c) => !c.art)!;
-    await page.mouse.click(Math.round(c2.x + c2.w / 2), Math.round(c2.y + c2.w / 2));
-    await sleep(900);
+    await shelfOf(page, who);
+    await page.click(`.chip-art[data-agent="${who}"]:not([data-art])`);
+    await page.waitForFunction(() => [...document.querySelectorAll('.win')]
+      .some((w) => (w.textContent ?? '').includes('GALLERY')), null, { timeout: 15_000 })
+      .catch(() => { throw new Error('el contador no abrió la galería'); });
     const gal = await page.evaluate(() => [...document.querySelectorAll('.win')]
       .map((w) => w.textContent ?? '').find((t) => t.includes('GALLERY')) ?? '');
-    assert.ok(gal.includes('GALLERY'), 'el contador abre la galería');
-    // Filtrada: los siete del agente, y no «ANY AGENT» encendido.
-    assert.match(gal, /7 SHOWN|GALLERY · 7|SHOWN/, `la galería llega filtrada, no entera: "${gal.slice(0, 80)}"`);
+    /*
+     * Y llega FILTRADA, que es el punto: la galería entera no responde a «qué
+     * hizo éste». Lo dice su propio subtítulo, «N SHOWN», que sólo aparece
+     * cuando lo que se ve es menos que el total.
+     */
+    assert.match(gal, /SHOWN/, `la galería llega filtrada, no entera: "${gal.slice(0, 80)}"`);
     await page.screenshot({ path: join(SHOTS, 'shelf-03-gallery.png') });
     await page.evaluate(() => document.querySelectorAll<HTMLElement>('.win [data-w-close]').forEach((b) => b.click()));
     await sleep(500);
+
+    /* ── Y una ficha con imagen de verdad, no un glifo ───────────────── */
+
+    /*
+     * Los artefactos de arriba los inventa la prueba, así que no tienen bytes y
+     * su ficha es la de glifo. Eso deja sin probar justo el camino que el
+     * operador va a ver: una imagen que el hub sirve de verdad. Para eso valen
+     * los artefactos que la flota sintética publica ella misma — el hub les pone
+     * url y va a buscar los bytes al collector — y lo que se comprueba es lo
+     * único que importa: que el <img> de la ficha CARGÓ (`naturalWidth`), no que
+     * exista la etiqueta.
+     */
+    // El mock publica sus artefactos con el tiempo: se espera a que haya uno con
+    // bytes detrás en vez de mirar si ya lo había, que es una carrera.
+    await page.waitForFunction(() => (window as never as {
+      __orca: { artifactsSeen(): { kind: string; source: string; hasUrl: boolean; id: string }[] };
+    }).__orca.artifactsSeen()
+      .some((a) => a.kind === 'image' && a.source === 'declared' && a.hasUrl && !a.id.startsWith('art_fix_')),
+    null, { timeout: 90_000 });
+
+    const real = await page.evaluate(() => {
+      const api = (window as never as {
+        __orca: {
+          artifactsSeen(): { id: string; agentId: string; kind: string; source: string; hasUrl: boolean }[];
+          spotOf(id: string): { scale: number; trayOf: string | null } | undefined;
+        };
+      }).__orca;
+      return api.artifactsSeen().find((a) => a.kind === 'image' && a.source === 'declared' && a.hasUrl
+        && !a.id.startsWith('art_fix_')
+        && (() => { const s = api.spotOf(a.agentId); return !!s && s.trayOf === null && s.scale >= 1; })()) ?? null;
+    });
+    assert.ok(real, 'la flota sintética publicó alguna imagen declarada con bytes detrás');
+    await page.evaluate((id) => (window as never as { __orca: { fly(i: string): void } }).__orca.fly(id), real.agentId);
+    await page.waitForFunction((id) => [...document.querySelectorAll<HTMLElement>('.chip-art')]
+      .some((el) => !el.hidden && el.dataset.agent === id && !!el.querySelector('img')),
+    real.agentId, { timeout: 20_000 });
+
+    const conImagen = await page.evaluate(async (who2) => {
+      const chipsEls = [...document.querySelectorAll<HTMLElement>('.chip-art')]
+        .filter((el) => !el.hidden && el.dataset.agent === who2);
+      for (const el of chipsEls) {
+        const img = el.querySelector('img');
+        if (!img) continue;
+        if (img.complete && img.naturalWidth > 0) return { src: img.getAttribute('src') ?? '', w: img.naturalWidth };
+        try {
+          await new Promise<void>((res, rej) => {
+            img.addEventListener('load', () => res(), { once: true });
+            img.addEventListener('error', () => rej(new Error('error')), { once: true });
+            setTimeout(() => rej(new Error('timeout')), 4000);
+          });
+          return { src: img.getAttribute('src') ?? '', w: img.naturalWidth };
+        } catch { /* la siguiente */ }
+      }
+      return null;
+    }, real.agentId);
+    assert.ok(conImagen && conImagen.w > 0,
+      'alguna ficha de la flota sintética lleva una imagen que el hub sirvió de verdad');
+    console.log(`[shelf] una ficha con imagen real: ${conImagen!.w}px de ancho natural`);
+    await page.screenshot({ path: join(SHOTS, 'shelf-05-real.png') });
 
     /* ── De lejos no se dibuja: la silueta manda ─────────────────────── */
 

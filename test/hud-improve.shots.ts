@@ -73,17 +73,8 @@ async function main() {
 
     // Un agente de verdad de la flota hace de revisor: la fila tiene que
     // enseñar SU estado y su callsign, no un texto inventado.
-    const crew = await page.evaluate(() => {
-      const id = window.__orca!.agentIds()[0] ?? null;
-      return {
-        id,
-        callsign: id ? (window.__orca!.callsignOf?.(id) ?? null) : null,
-        machineId: id ? (window.__orca!.machineOf?.(id) ?? null) : null,
-      };
-    });
-    await seed(page, crew);
-    // Las fichas entran con el gesto de llegada; que termine antes del obturador.
-    await page.waitForTimeout(900);
+    let crew = await pickCrew(page);
+    await reseed(page, crew);
 
     /* ── Se distingue de la flota ─────────────────────────────────── */
 
@@ -255,6 +246,9 @@ async function main() {
 
     /* ── El revisor en vuelo ──────────────────────────────────────── */
 
+    // Antes de mirar su fila, que siga siendo alguien. Ver `stillThere`.
+    crew = await stillThere(page, crew);
+
     const row = page.locator('.improve__agent');
     assert.equal(await row.isVisible(), true, 'a review in flight shows its agent');
     const agent = await page.evaluate(() => {
@@ -326,6 +320,24 @@ async function main() {
     // Y vuelve sola: el cliente reconecta y la sección vuelve a pedir.
     await page.waitForFunction(() => document.querySelector('.improve')?.classList.contains('is-offline') === false, null, { timeout: 30_000 });
     assert.doesNotMatch((await page.locator('.improve__when').textContent()) ?? '', /NO LINK/, 'and it recovers without a reload');
+
+    /*
+     * Y se vuelve a sembrar, porque volver el enlace se lleva el tablero por
+     * delante: la sección repide el tablero al hub en cuanto reconecta —que es
+     * justo lo que se acaba de comprobar— y el hub de este arnés no tiene
+     * estas propuestas, así que contesta con el suyo, vacío, y la lista se
+     * queda en «NO REVIEW HAS RUN YET».
+     *
+     * Sin esto, todo lo que va debajo se medía sobre una lista sin una sola
+     * ficha. Así llevaba roto el compás del pliegue —comprobado contra 0
+     * filas— sin que nadie se enterara, porque ningún `npm test` corre esto.
+     * La comprobación de aquí abajo es la que lo dice en voz alta: si la
+     * siembra se vuelve a perder, el fallo nombra la causa en vez de aparecer
+     * tres gestos más allá disfrazado de animación rota.
+     */
+    await reseed(page, crew);
+    assert.ok(await page.locator('.imp').count() > 1,
+      'el tablero vuelve a la pantalla tras la reconexión, y hay filas que plegar');
 
     /* ── El pliegue se recuerda, y ⌥I la devuelve ─────────────────── */
 
@@ -460,6 +472,9 @@ async function main() {
     await small.waitForFunction(() => !!document.querySelector('.secbar'), null, { timeout: 60_000 });
     await fontsReady(small);
     await small.waitForTimeout(800);
+    // En el teléfono esta fila es el único camino al revisor y se TOCA: si el
+    // agente se recicló mientras tanto, el botón estaría apagado con razón.
+    crew = await stillThere(page, crew);
     await seed(small, crew);
     await small.waitForTimeout(500);
 
@@ -510,6 +525,50 @@ async function main() {
 
 void ROOT;
 await main();
+
+/** Quién hace de revisor: un agente de la flota, con lo que la fila enseña de él. */
+type Crew = { id: string | null; callsign: string | null; machineId: string | null };
+
+/** Uno vivo de la flota, y lo que la consola sabe de él ahora mismo. */
+async function pickCrew(page: Page): Promise<Crew> {
+  return await page.evaluate(() => {
+    const id = window.__orca!.agentIds()[0] ?? null;
+    return {
+      id,
+      callsign: id ? (window.__orca!.callsignOf?.(id) ?? null) : null,
+      machineId: id ? (window.__orca!.machineOf?.(id) ?? null) : null,
+    };
+  });
+}
+
+/**
+ * ¿El revisor sigue siendo alguien a quien la consola puede llegar?
+ *
+ * La flota sintética recicla a los que terminan cada 20-60 s —`retire()` en
+ * `test/fake-collector.ts`, y a `--speed=3` eso es cada siete—, así que el
+ * agente que se eligió al empezar puede haberse ido para cuando se fotografía
+ * su fila, un minuto de gestos más tarde. La sección hace entonces lo correcto:
+ * apagar el camino hacia una sesión que ya no existe. Pero la comprobación de
+ * abajo dice «and it can be reached from here», y fallaba por una carrera con
+ * la flota, no por lo que está mirando.
+ *
+ * Se pregunta por `callsignOf`, que lee el mismo almacén que decide si el botón
+ * se apaga (`store.knownAgent`, ver `paintAgent` en src/ui/hud/improve.ts): si
+ * contesta, el botón estará vivo. Si no, se elige otro y se vuelve a sembrar el
+ * tablero con él, que es lo que ata la fila a un agente de verdad.
+ */
+async function stillThere(page: Page, crew: Crew): Promise<Crew> {
+  if (crew.id && await page.evaluate((id) => window.__orca!.callsignOf?.(id) != null, crew.id)) return crew;
+  const next = await pickCrew(page);
+  await reseed(page, next);
+  return next;
+}
+
+/** Sembrar, y darle al gesto de llegada tiempo de terminar antes del obturador. */
+async function reseed(page: Page, crew: Crew): Promise<void> {
+  await seed(page, crew);
+  await page.waitForTimeout(900);
+}
 
 /**
  * El tablero de la foto, puesto en el store de la consola.

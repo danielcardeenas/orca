@@ -780,6 +780,11 @@ export function sanitizeArtifact(raw: unknown, machineId: string): Artifact | nu
   };
 }
 
+/** Quién sobrevive a un techo: lo que un agente publicó, antes que lo demás. */
+function rankArtifact(a: Artifact): number {
+  return a.source === 'declared' ? 0 : 1;
+}
+
 /* ── rollups ──────────────────────────────────────────────────────── */
 
 /**
@@ -1354,12 +1359,18 @@ export class World {
    * Desaloja artefactos por edad y por techo. Ver ARTIFACT_RETENTION_MS: lo
    * reciente se queda, y cuando aun así sobran, se va lo más viejo. Nada de esto
    * borra el archivo del disco del agente; sólo deja de estar en la consola.
+   *
+   * El techo protege lo que alguien eligió. Una corrida del arnés visual mete
+   * diez capturas de golpe, y un render por lotes muchas más; sin esta regla,
+   * media hora de trabajo de la flota empuja fuera la gráfica que un agente
+   * publicó a propósito. La edad sigue mandando dentro de cada grupo.
    */
   private evictArtifacts(now: number): void {
     const all = Object.values(this.state.artifacts);
     if (all.length === 0) return;
-    // Más nuevos primero: lo que se tira es siempre la cola.
-    all.sort((a, x) => x.at - a.at);
+    // Lo declarado primero y, dentro de cada grupo, lo más nuevo: lo que se
+    // tira es siempre la cola.
+    all.sort((a, x) => rankArtifact(a) - rankArtifact(x) || x.at - a.at);
     for (let i = 0; i < all.length; i++) {
       const a = all[i]!;
       if (now - a.at <= ARTIFACT_RETENTION_MS && i < MAX_ARTIFACTS) continue;

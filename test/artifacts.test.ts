@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { ArtifactIndex, MAX_ARTIFACTS, artifactId, sizeFromHeader } from '../src/collector/artifacts.ts';
 import { SessionDeriver } from '../src/collector/derive.ts';
 import type { LineBatch, TranscriptRef } from '../src/collector/watch.ts';
-import { World } from '../src/hub/world.ts';
+import { World, MAX_ARTIFACTS as HUB_MAX_ARTIFACTS } from '../src/hub/world.ts';
 import { startHub } from '../src/hub/server.ts';
 import type { Hub } from '../src/hub/server.ts';
 import { createAuth } from '../src/hub/auth.ts';
@@ -490,6 +490,85 @@ export async function testDeclaredBeatsObserved(): Promise<TestResult> {
   }
 }
 
+/**
+ * El techo no puede tirar lo que alguien eligió.
+ *
+ * Medido en la flota real el día que se escribió esto: una corrida del arnés
+ * visual metió diez capturas en el índice en un minuto. Con el techo por edad
+ * a secas, media hora de trabajo de una flota empuja fuera la gráfica que un
+ * agente publicó a propósito, que es justo la que el operador quería ver.
+ */
+export async function testCapKeepsWhatWasDeclared(): Promise<TestResult> {
+  const name = 'el techo expulsa lo observado antes que lo declarado';
+  const dir = tempDir('orca-art-cap-');
+  const idx = index();
+  try {
+    const png = join(dir, 'the-one.png');
+    writeFileSync(png, makePng(64, 2));
+    // Lo declarado es lo más VIEJO del índice: por edad se iría el primero.
+    idx.observe({
+      path: png, projectId: 'p1', agentId: 'a1', at: 1_000,
+      declaredIn: dir, title: 'La gráfica que importa',
+    });
+    const id = artifactId(MACHINE, png);
+
+    // Y ahora el arnés, por decirlo así.
+    for (let i = 0; i < MAX_ARTIFACTS + 20; i++) {
+      const f = join(dir, `shot-${i}.png`);
+      writeFileSync(f, makePng(8, i % 200));
+      idx.observe({ path: f, projectId: 'p1', agentId: 'a1', at: 2_000 + i });
+    }
+
+    assert(idx.list().length === MAX_ARTIFACTS, `el techo no se respetó: ${idx.list().length}`);
+    const kept = idx.get(id);
+    assert(kept !== null, 'el techo se llevó por delante lo que el agente publicó');
+    assert(kept!.source === 'declared', 'y lo que quedó ya no es lo declarado');
+
+    return ok(name, `${MAX_ARTIFACTS + 20} capturas no tiran una declaración de hace un siglo`);
+  } catch (err) {
+    return fail(name, String(err));
+  } finally {
+    idx.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** La misma regla, en el otro techo: el del hub, que es el que ve la consola. */
+export async function testHubCapKeepsWhatWasDeclared(): Promise<TestResult> {
+  const name = 'el techo del hub también deja caer lo observado primero';
+  try {
+    const world = new World({});
+    world.upsertMachine({
+      id: MACHINE, hostname: 'mac', platform: 'darwin', version: '0.1.0',
+      online: true, lastSeen: Date.now(), connectedAt: Date.now(),
+      load: { sessions: 0, activeSessions: 0, cpuPct: null, memPct: null },
+    });
+    const now = Date.now();
+    const base = {
+      agentId: 'a1', projectId: 'p1', machineId: MACHINE, kind: 'image',
+      path: '/tmp/x.png', title: 'x', url: null, bytes: 10,
+      width: null, height: null, open: false, placement: null,
+    };
+    // El declarado es, otra vez, el más viejo de todos.
+    world.upsertArtifact(MACHINE, {
+      ...base, id: 'art_declared000001', source: 'declared', at: now - 3600_000,
+    });
+    for (let i = 0; i < HUB_MAX_ARTIFACTS + 10; i++) {
+      world.upsertArtifact(MACHINE, {
+        ...base, id: `art_shot${String(i).padStart(11, '0')}`, source: 'observed', at: now - i,
+      });
+    }
+    world.sweep();
+    const left = Object.keys(world.state.artifacts).length;
+    assert(left <= HUB_MAX_ARTIFACTS, `el techo del hub no se respetó: ${left}`);
+    assert(world.state.artifacts['art_declared000001'] !== undefined,
+      'el hub tiró lo declarado para quedarse con capturas de arnés');
+    return ok(name, `${HUB_MAX_ARTIFACTS + 10} observados, y la declaración de hace una hora sigue`);
+  } catch (err) {
+    return fail(name, String(err));
+  }
+}
+
 /* ── 7 · lo que sale de un proceso, no de una tool ────────────────── */
 
 /**
@@ -586,6 +665,8 @@ export default {
     testWorldStoresAndServesUrl,
     testExplicitPublication,
     testDeclaredBeatsObserved,
+    testCapKeepsWhatWasDeclared,
+    testHubCapKeepsWhatWasDeclared,
     testTreeCatchesWhatBashMade,
     testTreeNeedsAnOwner,
     testHubServesArtifact,

@@ -324,10 +324,20 @@ export class ArtifactIndex {
     return file;
   }
 
-  /** El más viejo se va cuando se pasa el techo. Ver MAX_ARTIFACTS. */
+  /**
+   * El más viejo se va cuando se pasa el techo. Ver MAX_ARTIFACTS.
+   *
+   * Con una excepción, y es la que importa: lo que un agente publicó a
+   * propósito se va el último. Una corrida del arnés visual produce diez
+   * capturas en un minuto y un render por lotes cientos, y sin esto la gráfica
+   * que alguien eligió enseñar se cae del índice empujada por trabajo
+   * intermedio que nadie miró nunca.
+   */
   private evict(): void {
     if (this.items.size <= MAX_ARTIFACTS) return;
-    const ordered = [...this.items.values()].sort((a, b) => a.at - b.at);
+    const rank = (a: Artifact): number => (a.source === 'declared' ? 1 : 0);
+    const ordered = [...this.items.values()]
+      .sort((a, b) => rank(a) - rank(b) || a.at - b.at);
     const excess = this.items.size - MAX_ARTIFACTS;
     for (let i = 0; i < excess; i++) {
       const victim = ordered[i]!;

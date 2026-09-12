@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ProviderHandoffs, transcriptMarkdown } from '../src/collector/provider-handoff.ts';
+import { ProviderHandoffs, transcriptMarkdown, demoteArchivedRules } from '../src/collector/provider-handoff.ts';
+import { capcomBrief } from '../src/collector/briefs.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
 import { CapcomSession } from '../src/collector/capcom.ts';
 import { test, ok } from './harness.ts';
@@ -24,7 +25,66 @@ function rig() {
   async function settle() { for (let i = 0; i < 100 && service.locked(a.id); i++) await Promise.resolve(); }
   return { dir, source, a, deps, service, settle, holds, activations, dispose: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
+
+/**
+ * Los ficheros de reglas que un CLI cargaría desde un cwd: el suyo y el de
+ * todos sus ancestros hasta la raíz que se le dé. Es el camino que convirtió
+ * un respaldo en instrucciones, así que la prueba lo recorre igual.
+ */
+function rulesOnPath(cwd: string, root: string, name = 'CLAUDE.md'): string[] {
+  const out: string[] = [];
+  for (let dir = cwd; dir.startsWith(root); dir = path.dirname(dir)) {
+    const file = path.join(dir, name);
+    if (fs.existsSync(file)) out.push(file);
+    if (dir === root) break;
+  }
+  return out;
+}
 export default { suite: 'Provider handoff', tests: [
+  test('the rules backup leaves the ancestor chain, so a relieved session loads its brief once', () => {
+    const r = rig(); try {
+      // Como en producción: el brief vivo del directorio de CAPCOM, que es
+      // ancestro de todo cwd de relevo y no se puede quitar de ahí.
+      const brief = capcomBrief();
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) fs.writeFileSync(path.join(r.dir, name), brief);
+      const plan = r.service.review(r.a.id, 'codex', 'gpt-6-astra', 'hygiene pending', 'continuity');
+      // El respaldo se conserva, byte a byte, y no en un ancestro del destino.
+      assert.equal(fs.existsSync(path.join(plan.archive, 'CLAUDE.md')), false);
+      assert.equal(fs.existsSync(path.join(plan.archive, 'AGENTS.md')), false);
+      assert.equal(fs.readFileSync(path.join(plan.archive, 'rules', 'CLAUDE.md'), 'utf8'), brief);
+      assert.equal(fs.readFileSync(path.join(plan.archive, 'rules', 'AGENTS.md'), 'utf8'), brief);
+      assert.match(fs.readFileSync(plan.checkpointPath, 'utf8'), /copies in rules\/ inside this archive/);
+      // Y el relevo sigue arrancando con su brief completo en su propio cwd.
+      assert.equal(fs.readFileSync(path.join(plan.cwd!, 'CLAUDE.md'), 'utf8'), brief);
+      assert.equal(fs.readFileSync(path.join(plan.cwd!, 'AGENTS.md'), 'utf8'), brief);
+      // Lo que se cobraba: tres ficheros de reglas en la cadena, dos idénticos.
+      // Lo que queda: el del cwd y el vivo del directorio de CAPCOM.
+      assert.deepEqual(rulesOnPath(plan.cwd!, r.dir), [path.join(plan.cwd!, 'CLAUDE.md'), path.join(r.dir, 'CLAUDE.md')]);
+      assert.deepEqual(rulesOnPath(plan.cwd!, r.dir, 'AGENTS.md'), [path.join(plan.cwd!, 'AGENTS.md'), path.join(r.dir, 'AGENTS.md')]);
+      return ok('backup kept, ancestor chain clean, destination brief intact', true);
+    } finally { r.dispose(); }
+  }),
+  test('a clean reset loads the brief exactly once, and earlier archives stop charging for theirs', () => {
+    const r = rig(); try {
+      const brief = capcomBrief();
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) fs.writeFileSync(path.join(r.dir, name), brief);
+      // Un archivo escrito antes del arreglo: el respaldo en la raíz, que es
+      // ancestro del cwd de la sesión que manda ahora mismo.
+      const old = path.join(r.dir, 'handoffs', 'aaaaaaaa-1111-4111-8111-111111111111');
+      fs.mkdirSync(path.join(old, 'runtime'), { recursive: true });
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) fs.writeFileSync(path.join(old, name), brief);
+      const plan = r.service.review(r.a.id, 'codex', 'gpt-6-astra', '', 'clean');
+      assert.equal(fs.existsSync(path.join(old, 'CLAUDE.md')), false);
+      assert.equal(fs.readFileSync(path.join(old, 'rules', 'CLAUDE.md'), 'utf8'), brief);
+      assert.deepEqual(rulesOnPath(path.join(old, 'runtime'), r.dir), [path.join(r.dir, 'CLAUDE.md')]);
+      // El destino limpio: su brief corto, y el brief largo una sola vez.
+      const chain = rulesOnPath(plan.cwd!, r.dir);
+      assert.deepEqual(chain, [path.join(plan.cwd!, 'CLAUDE.md'), path.join(r.dir, 'CLAUDE.md')]);
+      assert.equal(chain.filter(f => fs.readFileSync(f, 'utf8') === brief).length, 1);
+      assert.equal(demoteArchivedRules(path.join(r.dir, 'handoffs')), 0);
+      return ok('clean reset pays the brief once; pre-existing archives migrate', true);
+    } finally { r.dispose(); }
+  }),
   test('review archives exact bytes and requires confirmation before destination preparation', async () => {
     const r = rig(); try {
       const plan = r.service.review(r.a.id, 'claude', 'sonnet', 'task-123 remains pending');

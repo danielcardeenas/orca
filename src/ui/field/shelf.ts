@@ -2,7 +2,7 @@
  * La estantería: lo que un agente ha hecho, bajo su baldosa.
  *
  * El canvas dice la forma de la flota, y esa forma está hecha de baldosas de un
- * tamaño conocido a un paso conocido (`layout.ts`: TILE_W 1.0, paso 1.24). Una
+ * tamaño conocido a un paso conocido (`grid.ts`: TILE_W 1.0, paso 1.24). Una
  * superficie de media mide 2,4 unidades —dos baldosas y media— así que un
  * artefacto anclado a un agente por su cuenta entierra a sus vecinos. Lo que
  * aparece solo tiene que medir lo que mide una baldosa.
@@ -19,7 +19,7 @@
  */
 
 import type { Artifact } from '../../shared/types.ts';
-import { TILE_H, TILE_W } from './layout.ts';
+import { TILE_H, TILE_W } from './grid.ts';
 import { TIER_PX } from './labels.ts';
 
 /** Fichas de artefacto visibles. La quinta plaza es siempre el contador. */

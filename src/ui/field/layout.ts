@@ -27,6 +27,8 @@ import { OFF_FLEET_LABEL, islandOf, isOffFleet } from '../../shared/workspaces.t
 import type { Agent, AgentState, Placement, Project } from '../../shared/types.ts';
 import { ceilingTokens } from '../../shared/tokens.ts';
 import { TRAY_CELLS } from './blocks.ts';
+import { DECK_GAP_X, DECK_GAP_Y, GAP_X, GAP_Y, TILE_H, TILE_W } from './grid.ts';
+import { SHELF_H } from './shelf.ts';
 
 /**
  * Where the operator left a squad.
@@ -83,13 +85,13 @@ export function islandIn(
 /** The key a squad block is filed under: its project and its name. */
 export const squadKey = (projectId: string, name: string) => `${projectId}\u0000${name}`;
 
-export const TILE_W = 1.0;
-export const TILE_H = 0.78;
-export const GAP_X = 0.24;
-export const GAP_Y = 0.26;
-/** The deck breathes a little more than a region, the way the comp's does. */
-export const DECK_GAP_X = 0.3;
-export const DECK_GAP_Y = 0.32;
+/*
+ * Las medidas de la rejilla viven en `grid.ts` y se reexportan desde aquí:
+ * la estantería las necesita para medir sus fichas y el layout le reserva
+ * hueco a la estantería, y con las constantes aquí dentro eso era un ciclo.
+ * Quien las pedía a `layout.ts` sigue pidiéndolas a `layout.ts`.
+ */
+export { TILE_W, TILE_H, GAP_X, GAP_Y, DECK_GAP_X, DECK_GAP_Y } from './grid.ts';
 /** Padding between a region's tiles and its outline. */
 const RGN_PAD = 0.55;
 /**
@@ -287,6 +289,16 @@ export function layoutFleet(
    * que es quien tiene las máquinas; el layout no deduce nada por el nombre.
    */
   harness: Map<string, string> = new Map(),
+  /**
+   * Los agentes que cuelgan una estantería de su baldosa (`shelf.ts`): los que
+   * han declarado algo. La rejilla de su isla les hace hueco debajo, igual que
+   * se lo hace a una bandeja, para que la franja no caiga encima de la fila de
+   * abajo. Vacío es lo de siempre: ni un milímetro se mueve.
+   *
+   * Quién tiene estantería lo trae la consola, que es quien tiene los
+   * artefactos; el layout no lo deduce del agente.
+   */
+  shelved: Set<string> = new Set(),
 ): Layout {
   if (mode.kind === 'deck') return layoutDeck(agents, projects, prev, mode.sort);
   const order = prev.order;
@@ -352,9 +364,42 @@ export function layoutFleet(
     const cols = Math.max(2, Math.min(12, Math.ceil(Math.sqrt(n * 1.35))));
     const cells = packCells(list, cols);
     const rows = Math.max(1, Math.ceil(((cells[cells.length - 1] ?? 0) + 1) / cols));
+    /*
+     * La estantería se reserva, no se superpone.
+     *
+     * Una franja de fichas bajo una baldosa cae justo donde está la fila de
+     * abajo, y una capa encima de la rejilla enterraría a los vecinos — que es
+     * el error que esto tenía que no cometer. Así que la fila que lleva
+     * estantería mide más, y las de abajo bajan: el hueco es de la rejilla, y
+     * entonces no hay nada que pueda quedar debajo.
+     *
+     * Una fila con estantería mide lo mismo lleve una que cinco, y el alto que
+     * pide una baldosa es el mismo para un artefacto que para cuarenta
+     * (`shelfHeight`): así la flota se recoloca una vez, cuando el primer
+     * agente de la fila declara algo, y no cada vez que alguien escribe.
+     *
+     * `rowDrop` es lo que ha bajado la fila `r` respecto a la rejilla de
+     * siempre. Sin nadie con estantería es todo ceros y la isla mide lo que
+     * midió siempre.
+     */
+    const shelfRow = new Array<boolean>(rows).fill(false);
+    list.forEach((e, i) => {
+      const cell = cells[i] ?? i;
+      const row = Math.floor(cell / cols);
+      if (row >= rows) return;
+      const has = e.kind === 'tile' ? shelved.has(e.a.id) : e.kids.some((k) => shelved.has(k.id));
+      // Una celda de bandeja no tiene estantería (`shelfHeight`), así que una
+      // bandeja no pide hueco por sus hijos: sólo una baldosa lo pide.
+      if (has && e.kind === 'tile') shelfRow[row] = true;
+    });
+    const rowDrop = new Array<number>(rows).fill(0);
+    for (let r = 1; r < rows; r++) rowDrop[r] = rowDrop[r - 1]! + (shelfRow[r - 1] ? SHELF_H : 0);
+    // La última fila también necesita su franja dentro de la isla, antes del
+    // borde: de ahí que el alto sume TODAS las reservas y no sólo las de arriba.
+    const shelfTotal = (rowDrop[rows - 1] ?? 0) + (shelfRow[rows - 1] ? SHELF_H : 0);
     const w = cols * TILE_W + (cols - 1) * GAP_X + RGN_PAD * 2;
-    const h = rows * TILE_H + (rows - 1) * GAP_Y + RGN_PAD * 2 + 0.5; // room for the label
-    return { id, list, cells, cols, rows, w, h };
+    const h = rows * TILE_H + (rows - 1) * GAP_Y + shelfTotal + RGN_PAD * 2 + 0.5; // room for the label
+    return { id, list, cells, cols, rows, w, h, rowDrop, shelfRow };
   });
   // El arnés no cuenta para el espaciado: una flota de fixtures con veinte
   // teselas separaría las islas de verdad mientras corren las pruebas y las
@@ -483,7 +528,10 @@ export function layoutFleet(
     const cells = s.list.map((e, i) => {
       const cell = s.cells[i] ?? i;
       const col = cell % s.cols, row = Math.floor(cell / s.cols);
-      return { e, gx: x0 + col * (TILE_W + GAP_X), gy: y0 - row * (TILE_H + GAP_Y) };
+      // `rowDrop` es lo que las estanterías de las filas de arriba han bajado
+      // esta fila. Ver el cálculo del alto de la isla.
+      const drop = s.rowDrop[row] ?? 0;
+      return { e, row, gx: x0 + col * (TILE_W + GAP_X), gy: y0 - row * (TILE_H + GAP_Y) - drop };
     });
     const boxes = new Map<string, { minX: number; minY: number; maxX: number; maxY: number; n: number; lead: string | null }>();
     for (const { e, gx, gy } of cells) {
@@ -504,6 +552,20 @@ export function layoutFleet(
       const p = squadPlacements.get(squadKey(s.id, name));
       if (!p) continue;
       shift.set(name, { dx: p.x - (b.minX + b.maxX) / 2, dy: p.y - (b.minY + b.maxY) / 2 });
+    }
+    /*
+     * Lo que la estantería de la fila de abajo de un escuadrón le añade al
+     * contorno. Sin esto la franja cruzaría la línea del escuadrón, y una
+     * imagen a caballo de un contorno lee como si no fuera de nadie.
+     */
+    const squadShelf = new Map<string, number>();
+    for (const { e, row, gy } of cells) {
+      const sq = entrySquad(e);
+      // Sólo la fila de abajo del escuadrón: las de arriba ya tienen su hueco
+      // dentro de la caja, porque la rejilla bajó a las de debajo.
+      if (!sq || !s.shelfRow[row] || e.kind !== 'tile') continue;
+      const b = boxes.get(sq);
+      if (b && Math.abs(gy - b.minY) < 1e-9) squadShelf.set(sq, SHELF_H);
     }
 
     for (const { e, gx, gy } of cells) {
@@ -572,9 +634,12 @@ export function layoutFleet(
         count: b.n + forge.filter((a) => squadOf(a) === name && island(a) === s.id).length,
         leadId: (!region.harness && forgeLeads.get(name)) || b.lead,
         cx: (b.minX + b.maxX) / 2 + (off?.dx ?? 0),
-        cy: (b.minY + b.maxY) / 2 + (off?.dy ?? 0),
+        // La franja sólo cuelga: la caja crece hacia abajo y su centro baja con
+        // ella. Creciendo por los dos lados el contorno se metería en la fila de
+        // arriba, donde no hay nada de este escuadrón.
+        cy: (b.minY + b.maxY) / 2 + (off?.dy ?? 0) - (squadShelf.get(name) ?? 0) / 2,
         hw: (b.maxX - b.minX) / 2 + TILE_W / 2 + SQUAD_PAD,
-        hh: (b.maxY - b.minY) / 2 + TILE_H / 2 + SQUAD_PAD,
+        hh: (b.maxY - b.minY) / 2 + TILE_H / 2 + SQUAD_PAD + (squadShelf.get(name) ?? 0) / 2,
         moved: !!off,
       });
     }

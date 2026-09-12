@@ -334,6 +334,17 @@ const PULSE_SPEED = 9;
 /** Runtime ids for `swarm.write`. 9 is CAPCOM, which is a role, not a CLI. */
 const RUNTIME_ID: Record<string, number> = { claude: 0, codex: 1, grok: 2 };
 
+/**
+ * Los agentes que cuelgan una estantería de su baldosa: los que han declarado
+ * algo (`shelf.ts`). Uno solo recorrido de los artefactos por feed, en vez de
+ * uno por agente.
+ */
+function shelvedAgents(artifacts: Record<string, Artifact> | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const a of Object.values(artifacts ?? {})) if (a.source === 'declared') out.add(a.agentId);
+  return out;
+}
+
 export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   root.innerHTML = `
     <canvas class="field__canvas" data-canvas></canvas>
@@ -421,6 +432,8 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
   const pendingAgents = new Set<string>();
   /** child id → parent id for every child folded into its parent's block this feed. */
   let absorbed = new Map<string, string>();
+  /** Quién cuelga una estantería de su baldosa; ver `shelvedAgents`. */
+  let shelved = new Set<string>();
   /** How many of those each project holds — the number on its YOU node. */
   const pendingByProject = new Map<string, number>();
   const byCallsign = new Map<string, string>();
@@ -692,7 +705,14 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
      * The deck lists everyone — order is its whole point — so it folds nobody.
      */
     absorbed = lmode.kind === 'field' ? absorbedChildren(agents, Object.values(w.messages ?? {})) : new Map();
-    layout = layoutFleet(agents, projects, placements, layout, lmode, squadPlaced, regionPlaced, absorbed, harness);
+    /*
+     * Quién cuelga una estantería de su baldosa: quien haya declarado algo
+     * (`shelf.ts`). La rejilla le hace hueco debajo, así que la franja no puede
+     * caer encima de la fila de abajo. La cubierta no: es una rejilla estricta
+     * cuyo sentido entero es el orden, y una fila más alta que otra la rompe.
+     */
+    shelved = lmode.kind === 'field' ? shelvedAgents(w.artifacts) : new Set<string>();
+    layout = layoutFleet(agents, projects, placements, layout, lmode, squadPlaced, regionPlaced, absorbed, harness, shelved);
     // The router reads the gutters off the layout: the deck's are wider.
     gaps.x = layout.gapX; gaps.y = layout.gapY;
     regionById.clear();

@@ -9,7 +9,7 @@
  */
 
 import {
-  CHIP_MAX, SHELF_H, SHELF_PX, shelfChips, shelfHeight, shelfIds, shelfVisible, type ShelfTile,
+  BADGE_PX, CHIP_MAX, SHELF_H, SHELF_PAD, SHELF_PX, badgeVisible, shelfBadge, shelfChips, shelfHeight, shelfIds, shelfVisible, type ShelfTile,
 } from '../src/ui/field/shelf.ts';
 import { CELL_SCALE, TILE_H, TILE_W } from '../src/ui/field/layout.ts';
 import { TIER_PX } from '../src/ui/field/labels.ts';
@@ -182,6 +182,41 @@ export default {
         && shelfVisible(TIER_PX[4]!);
       return ok('de lejos la estantería desaparece, y lo hace en un peldaño de los rótulos', pass,
         `umbral ${SHELF_PX} px, un peldaño de [${TIER_PX.join(', ')}]`);
+    }),
+
+    test('la escalera: tarjeta entre el primer rótulo y la fila, nada de las dos por debajo', () => {
+      /*
+       * Tres peldaños y sin huecos ni solapes: por debajo de 44 px sólo la
+       * marca del shader; de 44 a 190 la tarjeta; de 190 en adelante la fila.
+       * Un zoom en que hubiera tarjeta Y fila dibujaría dos veces lo mismo, y
+       * uno sin ninguna de las dos dejaría al operador sin saber que hay algo.
+       */
+      const pass = BADGE_PX === TIER_PX[0]
+        && !badgeVisible(BADGE_PX - 1) && !shelfVisible(BADGE_PX - 1)
+        && badgeVisible(BADGE_PX) && !shelfVisible(BADGE_PX)
+        && badgeVisible(SHELF_PX - 1) && !shelfVisible(SHELF_PX - 1)
+        && !badgeVisible(SHELF_PX) && shelfVisible(SHELF_PX);
+      return ok('la escalera: tarjeta entre el primer rótulo y la fila, nada de las dos por debajo', pass,
+        `tarjeta de ${BADGE_PX} a ${SHELF_PX - 1} px, fila desde ${SHELF_PX}`);
+    }),
+
+    test('la tarjeta enseña el más nuevo, cuenta todos y cuelga del borde izquierdo, en la franja', () => {
+      const t = tile({ x: 3, y: -1 });
+      const b = shelfBadge(['nuevo', 'b', 'c', 'd', 'e', 'f'], t)!;
+      const izquierda = t.x - TILE_W / 2;
+      const techo = b.y + b.h / 2;
+      const pass = !!b && b.id === 'nuevo' && b.count === 6
+        && Math.abs((b.x - b.w / 2) - izquierda) < 1e-9
+        && techo <= t.y - TILE_H / 2 - SHELF_PAD + 1e-9
+        && b.y - b.h / 2 >= t.y - TILE_H / 2 - SHELF_H - 1e-9;
+      return ok('la tarjeta enseña el más nuevo, cuenta todos y cuelga del borde izquierdo, en la franja', pass,
+        `enseña ${b.id}, cuenta ${b.count}, borde izquierdo en ${(b.x - b.w / 2).toFixed(3)} contra ${izquierda.toFixed(3)}, techo ${techo.toFixed(3)}`);
+    }),
+
+    test('sin outputs, o en una celda de bandeja, no hay tarjeta', () => {
+      const pass = shelfBadge([], tile()) === null
+        && shelfBadge(['a'], tile({ scale: CELL_SCALE, trayOf: 'padre' })) === null;
+      return ok('sin outputs, o en una celda de bandeja, no hay tarjeta', pass);
     }),
   ],
 } satisfies TestModule;

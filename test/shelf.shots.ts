@@ -336,6 +336,60 @@ async function main() {
     await page.screenshot({ path: join(SHOTS, 'shelf-04-far.png') });
     console.log(`[shelf] la franja se va con ${tiles} baldosas todavía en pantalla`);
 
+    /* ── Y en su lugar queda la tarjeta: que hay resultados, y cuántos ── */
+
+    /*
+     * El primer fotograma sin fichas es el peldaño de en medio (`shelf.ts`,
+     * entre 44 y 190 px de baldosa): ahí la baldosa cuelga la tarjeta con el
+     * más nuevo y la cuenta, a píxeles fijos, así que de lejos se sigue viendo
+     * que este agente produjo algo sin acercarse. Con cuatro o más declarados
+     * la cuenta va escrita; se comprueba contra el mundo, como el contador.
+     */
+    const badge = await page.evaluate((id) => {
+      const el = document.querySelector<HTMLElement>(`.chip-badge[data-agent="${id}"]`);
+      if (!el || el.hidden) return null;
+      const r = el.getBoundingClientRect();
+      return { text: el.textContent ?? '', h: r.height, art: el.dataset.art ?? null };
+    }, who);
+    assert.ok(badge, 'sin fichas, la baldosa cuelga la tarjeta');
+    const total = await declaredCount(page, who);
+    assert.match(badge.text, new RegExp(`×${total}(?!\\d)`), `la tarjeta dice cuántos hay (${total}), no "${badge.text}"`);
+    assert.ok(badge.h >= 18 && badge.h <= 30, `la tarjeta mide en píxeles fijos, no ${badge.h.toFixed(0)}`);
+    assert.equal(badge.art, null, 'con varios outputs la tarjeta es la puerta a la galería, no un artefacto');
+    await page.screenshot({ path: join(SHOTS, 'shelf-06-badge.png') });
+    /*
+     * Más lejos aún, por debajo del rótulo, la tarjeta también se va y la
+     * marca la lleva el shader. Se encuadra la flota entera antes de alejarse
+     * —la rueda hace zoom hacia el puntero, y desde un rincón la flota se iba
+     * de cuadro— y se para en el primer fotograma sin tarjeta, con la flota
+     * dibujada. La marca es WebGL y no se puede afirmar desde el DOM: queda
+     * la foto, y un recorte de la baldosa para verla de cerca.
+     */
+    await page.evaluate(() => (window as never as { __orca: { frame(): void } }).__orca.frame());
+    await sleep(1200);
+    // Ctrl+rueda es zoom; la rueda a secas panea y se llevaba la flota de cuadro.
+    let conTarjeta = true;
+    for (let i = 0; i < 12 && conTarjeta; i++) {
+      await page.mouse.move(VIEW.w / 2, VIEW.h / 2);
+      await page.keyboard.down('Control'); await page.mouse.wheel(0, 160); await page.keyboard.up('Control');
+      await sleep(600);
+      conTarjeta = await page.evaluate((id) => { const el = document.querySelector<HTMLElement>(`.chip-badge[data-agent="${id}"]`); return !!el && !el.hidden; }, who);
+    }
+    await page.mouse.move(VIEW.w - 20, VIEW.h - 20);
+    await sleep(300);
+    tiles = await drawn();
+    assert.ok(!conTarjeta, 'de muy lejos la tarjeta también se va');
+    assert.ok(tiles > 0, `la flota sigue dibujada sin tarjeta, y había ${tiles} baldosas`);
+    await page.screenshot({ path: join(SHOTS, 'shelf-07-mark.png') });
+    const marked = await page.evaluate((id) => (window as never as {
+      __orca: { screenOf(i: string): { x: number; y: number; w: number; h: number } | null };
+    }).__orca.screenOf(id), who);
+    if (marked && marked.w > 4) {
+      const x = Math.max(0, marked.x - marked.w), y = Math.max(0, marked.y - marked.h);
+      await page.screenshot({ path: join(SHOTS, 'shelf-08-mark-close.png'), clip: { x, y, width: Math.min(VIEW.w - x, marked.w * 3), height: Math.min(VIEW.h - y, marked.h * 3) } });
+    }
+    console.log(`[shelf] la tarjeta dice ×${total} en el peldaño de en medio y se va con ${tiles} baldosas en pantalla`);
+
     assert.deepEqual(errors, [], 'no page errors');
     console.log('[shelf] ok · 4 fichas y un contador bajo la baldosa, el clic abre, y de lejos se va');
   } finally {

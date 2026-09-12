@@ -446,6 +446,28 @@
  */
 .chip-art.is-dim { opacity: 0.55; }
 .field__layer.is-focus .chip-art { opacity: 0.12; }
+/*
+ * La tarjeta de zoom medio (`shelf.ts`, entre 44 y 190 px de baldosa): la
+ * miniatura del output más nuevo y la cuenta, a píxeles fijos como los
+ * rótulos, colgada de la esquina inferior izquierda de la baldosa. De lejos
+ * no hace falta ver cada resultado: hace falta ver que los hay y cuántos.
+ */
+.chip-badge {
+  position: absolute; left: 0; top: 0;
+  transform-origin: 0 0; will-change: transform;
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 5px 0 0; overflow: hidden; pointer-events: auto;
+  background: var(--screen); border: 1px solid var(--line);
+  font-family: var(--font-display, 'Tiny5', monospace);
+}
+.chip-badge .badge__thumb { display: block; width: 20px; height: 20px; overflow: hidden; background: var(--shell); }
+.chip-badge .badge__thumb img,
+.chip-badge .badge__thumb video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.chip-badge .badge__thumb .chip__k { display: block; font-size: 7px; line-height: 20px; text-align: center; color: var(--ink-dim); }
+.chip-badge .chip__n { font-size: 10px; color: var(--ink-mid); }
+.chip-badge:hover, .chip-badge.is-hot { border-color: var(--lime); }
+.chip-badge:hover .chip__n, .chip-badge.is-hot .chip__n { color: var(--lime); }
+.chip-badge.is-dim { opacity: 0.55; }
 
 @media (prefers-reduced-motion: reduce) {
   .field.is-live { transition: none; }

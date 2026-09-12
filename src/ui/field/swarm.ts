@@ -52,7 +52,7 @@ const VERT = /* glsl */ `
   attribute float iSeed;
   attribute float iSigil; // 15 bits, the 5x5 glyph (gfx/sigil.ts)
   attribute vec4 iAux; // last state change (shader clock), alpha under focus, squad lead, runtime id
-  attribute vec4 iForm; // scale, plates (0-2), topology bits (1 child · 2 parent · 4 external), life (0 live · 1 done · 2 dead)
+  attribute vec4 iForm; // scale, plates (0-2), topology bits (1 child · 2 parent · 4 external · 8 outputs), life (0 live · 1 done · 2 dead)
   varying vec2 vUv;
   varying vec3 vColor;
   varying vec4 vFlags;
@@ -293,6 +293,22 @@ const FRAG = /* glsl */ `
       float on = mix(bit, 1.0 - bit, lead);
       // CAPCOM's mark is cyan ink: the C reads as the command's own seal.
       col = mix(col, mix(mix(mix(uInk, uCyan, isCap), uAuto, isRev), uBody, full), inSg * on);
+      /*
+       * The outputs mark (shelf.ts): the tile has results hanging under it.
+       * A framed square with a dot — a picture in a frame — in the
+       * bottom-right corner, the sigil's size, clear of the bite (y 0.30 to
+       * 0.70), the done-ticket perforation (y 0.09) and the speed band.
+       * It is what says "this one produced something" from any distance the
+       * tile itself can be seen at; from 190 px up the shelf is there to say
+       * it, so the mark slides away where the label's metrics row arrives.
+       */
+      float hasOut = mod(floor(topo / 8.0), 2.0) * (1.0 - smoothstep(190.0, 260.0, uPxPerUnit * vForm.x));
+      vec2 om = (t - vec2(0.80, 0.13)) / 0.155;
+      float inOm = step(0.0, om.x) * step(om.x, 1.0) * step(0.0, om.y) * step(om.y, 1.0);
+      vec2 oc = floor(clamp(om, 0.0, 0.9999) * 5.0);
+      float ring = step(oc.x, 0.0) + step(4.0, oc.x) + step(oc.y, 0.0) + step(4.0, oc.y);
+      float omDot = step(abs(oc.x - 2.0), 0.0) * step(abs(oc.y - 2.0), 0.0);
+      col = mix(col, mix(uInk, uBody, full), inOm * min(1.0, ring + omDot) * hasOut);
       /*
        * Life (§2.3). Done: a perforation along the bottom margin — the tear
        * line of a used ticket. It runs at y 0.09, in the strip under the

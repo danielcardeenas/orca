@@ -53,7 +53,7 @@ import type { Rect as PxRect } from './framing.ts';
 import { createGround, GROUND_Z } from './ground.ts';
 import { createLabels, rememberMachine, rememberProjectCode, rememberProjectName, type LabelItem } from './labels.ts';
 import { createMedia } from './media.ts';
-import { shelfChips, shelfIds, shelfVisible } from './shelf.ts';
+import { badgeVisible, shelfBadge, shelfChips, shelfIds, shelfVisible } from './shelf.ts';
 import { chipStem, originPortScale, tetherHot, tetherRoute, tetherWeight, type Rect, type Tether } from './tether.ts';
 import { createShelves, type ShelfItem } from './shelves.ts';
 import { createPipes, laneShift, pathLength, routeGutter, routeGutterMsg, routeLineage, routeMessage, spanOf, type Pt } from './pipes.ts';
@@ -2501,7 +2501,9 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
       const hasParent = !cell && !!a.parentId && byId.has(a.parentId);
       const hasKids = !cell && a.childIds.some((id) => byId.has(id));
       const plates = cell ? 0 : squadOf(a) ? (isLead(a) ? 2 : 1) : 0;
-      const topo = (hasParent ? 1 : 0) + (hasKids ? 2 : 0) + (!cell && a.origin === 'external' ? 4 : 0);
+      // Bit 8: la baldosa tiene resultados colgando (`shelf.ts`). La marca del
+      // shader es lo único que lo dice cuando ni la tarjeta ni la fila caben.
+      const topo = (hasParent ? 1 : 0) + (hasKids ? 2 : 0) + (!cell && a.origin === 'external' ? 4 : 0) + (!cell && shelved.has(a.id) ? 8 : 0);
       const life = a.state === 'done' ? 1 : a.state === 'dead' ? 2 : 0;
       swarm.write(
         slot, s.x, s.y, s.z, Math.max(0.001, scale), color, alert, speed, sel, alpha, hash(a.id),
@@ -2558,7 +2560,25 @@ export function createField(root: HTMLElement, ev: FieldEvents): FieldHandle {
               stems.push({ id, pts: chipStem(c, { y: s.y, scale }), z: c.z, hot: stemHot ? 1 : 0, sel: isSel ? 1 : 0 });
               return { art: artById.get(c.id ?? '') ?? null, more: c.more, sx: c0.x, sy: c0.y, px: Math.max(1, c1.x - c0.x) };
             });
-            shelfItems.push({ agentId: a.id, chips: items, dim, hot });
+            shelfItems.push({ agentId: a.id, chips: items, dim, hot, badge: null });
+          }
+        } else if (p.visible && shelved.has(a.id) && badgeVisible(bw)) {
+          /*
+           * El peldaño de en medio (`shelf.ts`): la tarjeta con el más nuevo y
+           * la cuenta, colgada del borde inferior por un solo hilo. Con un solo
+           * output el hilo es el suyo; con varios, el de la baldosa, como el
+           * del contador.
+           */
+          const ids = shelfIds(artifacts, a.id);
+          const b = shelfBadge(ids, { x: s.x, y: s.y, z: s.z, scale, trayOf: s.trayOf });
+          if (b) {
+            const dim = a.state === 'dead' || a.state === 'done';
+            const hot = hotOrigins.has(a.id);
+            const id = b.count === 1 ? b.id : `+${a.id}`;
+            const stemHot = hot || tetherHot({ id }, a.id, hovArt, hotOrigins);
+            stems.push({ id, pts: chipStem(b, { y: s.y, scale }), z: b.z, hot: stemHot ? 1 : 0, sel: isSel ? 1 : 0 });
+            const c0 = camera.project(b.x - b.w / 2, b.y + b.h / 2, b.z);
+            shelfItems.push({ agentId: a.id, chips: [], dim, hot, badge: { art: artById.get(b.id) ?? null, count: b.count, sx: c0.x, sy: c0.y } });
           }
         }
       }

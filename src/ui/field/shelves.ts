@@ -29,10 +29,26 @@ export interface ChipItem {
   px: number;
 }
 
+/**
+ * La tarjeta de zoom medio (`shelfBadge`): el output más nuevo y la cuenta,
+ * a píxeles fijos, colgada de la esquina inferior izquierda de la baldosa.
+ * Sustituye a la fila entre 44 y 190 px de baldosa.
+ */
+export interface BadgeItem {
+  /** El más nuevo, o null si el mundo aún no lo tiene. */
+  art: Artifact | null;
+  count: number;
+  /** Esquina superior izquierda en píxeles del lienzo. La tarjeta mide lo que su CSS. */
+  sx: number;
+  sy: number;
+}
+
 /** La estantería de un agente, con sus fichas ya proyectadas. */
 export interface ShelfItem {
   agentId: string;
   chips: ChipItem[];
+  /** La tarjeta, cuando la baldosa está en el peldaño de la tarjeta y no en el de la fila. */
+  badge: BadgeItem | null;
   /**
    * El agente ya no trabaja: la franja se atenúa con su baldosa. Un artefacto
    * de alguien que terminó sigue siendo su artefacto — lo que cambia es cuánta
@@ -114,6 +130,21 @@ function content(c: ChipItem): string {
   return `<span class="chip__k">${esc(opaqueLabel(a.path, a.bytes))}</span>`;
 }
 
+/**
+ * Qué lleva dentro la tarjeta: una miniatura del más nuevo (o su extensión,
+ * si no la tiene) y la cuenta. Con uno solo no hay cuenta que decir.
+ */
+function badgeContent(b: BadgeItem): string {
+  const a = b.art;
+  const url = a ? chipSrc(a) : null;
+  let thumb: string;
+  if (a && a.kind === 'image' && url) thumb = `<img src="${esc(url)}" alt="" loading="lazy" decoding="async" draggable="false" />`;
+  else if (a && a.kind === 'video' && url) thumb = `<video src="${esc(url)}" muted playsinline preload="metadata"></video>`;
+  else thumb = `<span class="chip__k">${esc(a ? opaqueLabel(a.path, a.bytes).split(' · ')[0] ?? '' : '')}</span>`;
+  const n = b.count > 1 ? `<span class="chip__n">×${b.count}</span>` : '';
+  return `<span class="badge__thumb">${thumb}</span>${n}`;
+}
+
 export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHandle {
   interface Rec { el: HTMLElement; sig: string }
   const live = new Map<string, Rec>();
@@ -141,14 +172,14 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
     ev.onHoverChip(el.dataset.art ?? null, el.dataset.agent ?? null);
   }
   layer.addEventListener('pointerover', (e) => {
-    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art');
+    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art, .chip-badge');
     if (el) hoverTo(el);
   });
   layer.addEventListener('pointerout', (e) => {
-    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art');
+    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art, .chip-badge');
     if (!el) return;
     // De la imagen al borde de la misma ficha no es salir de ella.
-    const to = (e.relatedTarget as HTMLElement | null)?.closest?.<HTMLElement>('.chip-art') ?? null;
+    const to = (e.relatedTarget as HTMLElement | null)?.closest?.<HTMLElement>('.chip-art, .chip-badge') ?? null;
     if (to !== el) hoverTo(null);
   });
 
@@ -170,7 +201,7 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
    * sobre una ficha no es el principio de un paneo.
    */
   layer.addEventListener('pointerdown', (e) => {
-    if ((e.target as HTMLElement).closest('.chip-art')) e.stopPropagation();
+    if ((e.target as HTMLElement).closest('.chip-art, .chip-badge')) e.stopPropagation();
   });
 
   /*
@@ -178,7 +209,7 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
    * recicla nodos por fotograma, y un oyente por nodo reciclado es una fuga.
    */
   layer.addEventListener('click', (e) => {
-    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art');
+    const el = (e.target as HTMLElement).closest<HTMLElement>('.chip-art, .chip-badge');
     if (!el) return;
     e.stopPropagation();
     const id = el.dataset.art;
@@ -232,6 +263,44 @@ export function createShelves(layer: HTMLElement, ev: ShelvesEvents): ShelvesHan
           if (key === hoverKey) {
             cap.textContent = c.art ? `${c.art.title} · ${ago(c.art.at)}` : `${c.more} MORE`;
             cap.style.transform = `translate3d(${Math.round(c.sx)}px, ${Math.round(c.sy + c.px + 3)}px, 0)`;
+            cap.hidden = false;
+          }
+        }
+        /*
+         * La tarjeta de zoom medio: un nodo por agente, en la misma capa y el
+         * mismo pool. Con un solo output lleva su `data-art` y se comporta
+         * como una ficha (clic abre, hover enciende su hilo); con varios es
+         * la puerta a la galería del agente, como el contador.
+         */
+        const b = it.badge;
+        if (b && drawn < MAX_CHIPS) {
+          const key = `${it.agentId}:badge`;
+          want.add(key);
+          drawn++;
+          let rec = live.get(key);
+          if (!rec) { rec = { el: take(), sig: '' }; live.set(key, rec); }
+          rec.el.dataset.agent = it.agentId;
+          rec.el.dataset.key = key;
+          const sig = `badge|${b.art?.id ?? ''}|${b.art?.url ?? ''}|${b.count}|${it.dim ? 'd' : ''}|${it.hot ? 'h' : ''}`;
+          if (sig !== rec.sig) {
+            rec.sig = sig;
+            rec.el.innerHTML = badgeContent(b);
+            rec.el.className = 'chip-badge' + (it.dim ? ' is-dim' : '') + (it.hot ? ' is-hot' : '');
+            if (b.count === 1 && b.art) {
+              rec.el.dataset.art = b.art.id;
+              rec.el.title = `${b.art.title} · ${b.art.path}`;
+            } else {
+              delete rec.el.dataset.art;
+              rec.el.title = `${b.count} OUTPUTS · ${b.art?.title ?? ''} · OPEN THE GALLERY`;
+            }
+            // La tarjeta mide lo que su CSS, no lo que midió la ficha que usó este nodo.
+            rec.el.style.width = '';
+            rec.el.style.height = '';
+          }
+          rec.el.style.transform = `translate3d(${Math.round(b.sx)}px, ${Math.round(b.sy)}px, 0)`;
+          if (key === hoverKey && b.art) {
+            cap.textContent = `${b.art.title} · ${ago(b.art.at)}`;
+            cap.style.transform = `translate3d(${Math.round(b.sx)}px, ${Math.round(b.sy + 25)}px, 0)`;
             cap.hidden = false;
           }
         }

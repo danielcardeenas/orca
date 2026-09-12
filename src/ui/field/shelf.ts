@@ -126,6 +126,67 @@ export function shelfVisible(tilePx: number): boolean {
 }
 
 /**
+ * La escalera de los outputs, de lejos a cerca. La estantería empieza en el
+ * peldaño 3 (190 px), y hasta ahí el operador tenía que acercarse mucho para
+ * saber siquiera que un agente había producido algo. Ahora hay tres
+ * peldaños, como los rótulos:
+ *
+ * - por debajo de `BADGE_PX` (44 px, donde tampoco hay rótulo) la marca la
+ *   lleva el shader de la baldosa (`swarm.ts`, bit 8 de la forma): un
+ *   cuadrito enmarcado en la esquina inferior derecha, «aquí hay resultados»,
+ *   a cualquier zoom en que se vea la baldosa;
+ * - entre 44 y 190 px la baldosa cuelga una **tarjeta** en vez de la fila:
+ *   la miniatura del output más nuevo y la cuenta, a tamaño fijo de píxeles
+ *   como los rótulos, colgada del borde inferior por su hilo (`tether.ts`).
+ *   De lejos no hace falta ver cada resultado: hace falta ver que los hay,
+ *   cuántos, y que son de éste;
+ * - a partir de 190 px, la fila de fichas de siempre.
+ */
+export const BADGE_PX = TIER_PX[0];
+
+/** ¿Se dibuja la tarjeta con la baldosa a este ancho en píxeles? */
+export function badgeVisible(tilePx: number): boolean {
+  return tilePx >= BADGE_PX && !shelfVisible(tilePx);
+}
+
+/** La tarjeta: el output más nuevo, la cuenta, y dónde cuelga en el mundo. */
+export interface BadgeSpec {
+  /** El artefacto más nuevo, que es el que enseña. */
+  id: string;
+  /** Cuántos hay en total. */
+  count: number;
+  /** El ancla, en unidades de mundo: una caja del lado de una ficha, pegada al borde izquierdo de la baldosa. */
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Dónde cuelga la tarjeta: en la franja que la rejilla ya reservó para la
+ * estantería, pegada al borde izquierdo de la baldosa, con el mismo aire
+ * (`SHELF_PAD`) que la fila. El ancla mide lo que una ficha; la tarjeta se
+ * dibuja a píxeles fijos desde la esquina superior izquierda de esa caja,
+ * así que de lejos sobresale de la franja hacia el canalón — que es aire —
+ * y no hacia la baldosa de abajo. Sin estantería posible, nada.
+ */
+export function shelfBadge(ids: string[], tile: ShelfTile): BadgeSpec | null {
+  if (!ids.length || shelfHeight(ids.length, tile) === 0) return null;
+  const s = tile.scale;
+  const w = CHIP_W * s;
+  return {
+    id: ids[0]!,
+    count: ids.length,
+    x: tile.x - (TILE_W * s) / 2 + w / 2,
+    y: tile.y - (TILE_H * s) / 2 - SHELF_PAD * s - w / 2,
+    z: tile.z + SHELF_Z,
+    w,
+    h: w,
+  };
+}
+
+/**
  * Las fichas, de izquierda a derecha y las más nuevas primero.
  *
  * `ids` llega ya ordenado por quien lo llama —el mundo ordena por `at`— y esta

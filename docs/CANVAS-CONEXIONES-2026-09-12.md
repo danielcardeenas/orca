@@ -246,6 +246,33 @@ hueco entre la primera y la segunda ficha y corriendo por debajo de la fila
 sintética sólo dejó un primer plano de diagnóstico con una baldosa en
 tránsito por delante.
 
+## 7. Que se vea de lejos que hay resultados (mismo día, pedido del operador)
+
+*«No se ven fácilmente. Requieren mucho zoom. […] Debe de ser fácil de ver
+desde lejos que hay assets ahí de resultado.»* Tenía razón: la estantería
+empieza en el peldaño 3 (190 px de baldosa) y por debajo no había nada que
+dijera que un agente había producido algo. Ahora hay una **escalera**, como
+la de los rótulos (`shelf.ts`, `BADGE_PX`, `badgeVisible`, `shelfBadge`):
+
+| baldosa | qué se ve |
+|---|---|
+| < 44 px (sin rótulo) | **la marca del shader**: un cuadrito enmarcado con un punto —una foto en su marco— en la esquina inferior derecha, del tamaño del sigilo, en tinta. Bit 8 de la forma (`swarm.ts`). Se ve a cualquier zoom en que se vea la baldosa, y se retira de 190 a 260 px, donde ya está la fila. |
+| 44–190 px | **la tarjeta** (`.chip-badge`, `shelves.ts`): la miniatura del output más nuevo y `×N`, a píxeles fijos como los rótulos, colgada de la esquina inferior izquierda de la baldosa por su hilo. Con un solo output es ese output (clic lo abre, hover enciende su hilo); con varios es la puerta a la galería del agente, como el contador. |
+| ≥ 190 px | la fila de fichas de siempre. |
+
+La tarjeta cuelga fuera del cuadro de la baldosa, en la franja que la
+rejilla ya reservaba, y enlazada por el mismo tirante que las fichas: de
+lejos sobresale de la franja hacia el canalón —aire—, nunca hacia la
+baldosa de abajo. Un techo: con `MAX_CHIPS` nodos ya dibujados no se añaden
+tarjetas.
+
+**Verificación.**
+
+```
+npm test -- shelf                     la escalera sin huecos ni solapes, y la geometría de la tarjeta
+ORCA_VISUAL_ISOLATED=1 npx tsx test/shelf.shots.ts   shelf-06-badge.png (la tarjeta con ×N en el primer fotograma sin fichas) y shelf-07-mark.png (más lejos, sin tarjeta, con la flota dibujada)
+```
+
 ## Filtros que cubren este documento
 
 ```

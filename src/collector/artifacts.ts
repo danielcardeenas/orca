@@ -15,6 +15,13 @@
  *     con `{path, title}` — vía `orca-show`. Es para lo que la detección no
  *     puede adivinar: cuál de los treinta png que generó es EL que hay que ver,
  *     y cómo se llama.
+ *  3. **Por efecto.** Un archivo que aparece en el árbol del proyecto sin que
+ *     ninguna tool lo haya escrito: lo que sale de `ffmpeg`, de un
+ *     `playwright`, de un script de generación, de un build. Nada de eso pasa
+ *     por Write, así que (1) no lo ve, y es justo la forma que tiene un
+ *     pipeline de producir su resultado. Se observa el ARCHIVO, nunca el
+ *     comando: leer `convert a.png b.png` para adivinar qué produjo sería
+ *     volver a adivinar a partir de una cadena, y ahí `a.png` es una entrada.
  *
  * La postura de seguridad es la misma que la del resto del collector: el hub
  * nombra un ID, nunca una ruta. `read()` sirve exclusivamente rutas que este
@@ -47,6 +54,33 @@ export const MAX_ARTIFACTS = 200;
 
 /** Un `.json` de publicación más grande que esto no es una declaración. */
 const MAX_DECL_BYTES = 64 * 1024;
+
+/**
+ * Dónde no se mira nunca.
+ *
+ * Ni dependencias, ni trabajo intermedio, ni nada oculto — un `.git` durante un
+ * commit produce miles de eventos, y ninguno es algo que mirar. El filtro es
+ * por segmento de ruta y por cadena, antes de tocar el disco.
+ *
+ * `out/` NO está: es donde un pipeline de render deja su resultado tanto como
+ * donde un bundler deja el suyo, y perder el caso que motivó todo esto para
+ * ahorrarse unos html de build es un mal cambio.
+ */
+const SKIP_DIRS = new Set([
+  'node_modules', 'dist', 'build', 'target', 'coverage', 'vendor',
+  '__pycache__', 'venv',
+]);
+
+/**
+ * Cuántos archivos nuevos se aceptan por tick.
+ *
+ * Un `git checkout` de rama renueva el mtime de todo el repo de golpe, y un
+ * render por lotes escribe cientos de png en segundos. Ni una cosa ni la otra
+ * son cientos de resultados. El tope deja pasar los más recientes y anota el
+ * resto en el log: perder de vista un fotograma intermedio no cuesta nada,
+ * ahogar el índice sí.
+ */
+const MAX_BURST = 24;
 
 /** Tools cuyo `file_path` es, literalmente, un archivo que acaba de aparecer. */
 export const ARTIFACT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
@@ -123,6 +157,10 @@ export class ArtifactIndex {
   private items = new Map<string, Artifact>();
   private tracked = new Map<string, Tracked>();
   private watchers = new Map<string, fs.FSWatcher>();
+  /** Watch recursivo del árbol de cada proyecto. Ver `attachTreeWatch()`. */
+  private trees = new Map<string, fs.FSWatcher>();
+  /** ruta absoluta → proyecto, de lo que el árbol vio y el tick aún no miró. */
+  private seen = new Map<string, string>();
   /** archivo de declaración → mtime ya procesado. Ver `takeDecl()`. */
   private decls = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
@@ -146,8 +184,12 @@ export class ArtifactIndex {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    for (const w of this.watchers.values()) { try { w.close(); } catch { /* ya cerrado */ } }
+    for (const w of [...this.watchers.values(), ...this.trees.values()]) {
+      try { w.close(); } catch { /* ya cerrado */ }
+    }
     this.watchers.clear();
+    this.trees.clear();
+    this.seen.clear();
   }
 
   track(projectId: string, projectPath: string): void {
@@ -161,8 +203,10 @@ export class ArtifactIndex {
 
   untrack(projectId: string): void {
     this.tracked.delete(projectId);
-    const w = this.watchers.get(projectId);
-    if (w) { try { w.close(); } catch { /* ya cerrado */ } this.watchers.delete(projectId); }
+    for (const map of [this.watchers, this.trees]) {
+      const w = map.get(projectId);
+      if (w) { try { w.close(); } catch { /* ya cerrado */ } map.delete(projectId); }
+    }
   }
 
   /** Lo que hay ahora mismo. El snapshot de reconexión lo reenvía entero. */
@@ -359,6 +403,7 @@ export class ArtifactIndex {
     try {
       for (const t of this.tracked.values()) {
         this.attachWatch(t);
+        this.attachTreeWatch(t);
         const names = await readdirQuiet(t.dir);
         if (names === null) continue;
         for (const name of names) {
@@ -366,6 +411,7 @@ export class ArtifactIndex {
           await this.takeDecl(t, path.join(t.dir, name));
         }
       }
+      await this.takeSeen();
       // Un artefacto cuyo archivo ya no existe es un hueco en la consola. No
       // hace falta comprobarlo cada segundo: es un cambio raro y caro.
       if (this.scans % 8 === 0) await this.sweepMissing();
@@ -386,6 +432,88 @@ export class ArtifactIndex {
       this.watchers.set(t.projectId, w);
     } catch {
       // Sin watch queda el poll de 1s, que es latencia irrelevante aquí.
+    }
+  }
+
+  /* ── por efecto: el árbol del proyecto ──────────────────────────── */
+
+  /**
+   * Mira el proyecto entero, para ver aparecer lo que ninguna tool escribió.
+   *
+   * Un `fs.watch` recursivo es el sistema operativo haciendo el trabajo: ni
+   * recorremos el árbol ni tocamos disco hasta que algo cambia de verdad, que
+   * es lo que hace viable mirar un repo grande una vez por segundo. Donde el
+   * recursivo no existe —Linux, según versión— esto no se monta y la captura
+   * se queda en las otras dos entradas, que es una degradación, no un fallo.
+   */
+  private attachTreeWatch(t: Tracked): void {
+    if (this.trees.has(t.projectId)) return;
+    if (!fs.existsSync(t.projectPath)) return;
+    try {
+      const w = fs.watch(t.projectPath, { recursive: true }, (_ev, name) => {
+        if (typeof name === 'string') this.sawInTree(t, name);
+      });
+      w.on('error', () => {
+        try { w.close(); } catch { /* ya cerrado */ }
+        this.trees.delete(t.projectId);
+      });
+      this.trees.set(t.projectId, w);
+    } catch {
+      log('debug', SCOPE, `sin watch recursivo en ${t.projectPath}: sólo tools y declaraciones`);
+    }
+  }
+
+  /**
+   * Un cambio en el árbol. Barato a propósito: esto corre en el hilo del
+   * evento y en una ráfaga se llama miles de veces, así que aquí sólo hay
+   * comparaciones de cadenas. Statear, atribuir y registrar es trabajo del
+   * tick, sobre la cola que esto deja.
+   */
+  private sawInTree(t: Tracked, rel: string): void {
+    if (!kindOf(rel)) return;
+    const parts = rel.split(path.sep);
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i]!;
+      // El nombre del archivo puede empezar por punto sin ser un directorio
+      // oculto; los directorios del camino, no.
+      if (i < parts.length - 1 && (seg.startsWith('.') || SKIP_DIRS.has(seg))) return;
+    }
+    this.seen.set(path.join(t.projectPath, rel), t.projectId);
+  }
+
+  /**
+   * Drena lo que vio el árbol.
+   *
+   * La atribución es la parte floja y hay que decirlo: se le cuelga al agente
+   * vivo del proyecto con la actividad más reciente, porque un archivo que
+   * aparece no lleva firma. Con cinco agentes en el mismo repo se equivocará a
+   * veces. El daño está acotado por diseño: esto entra como `observed`, y lo
+   * observado no se ancla solo en el campo — vive en la galería, donde una
+   * atribución torcida cuesta una línea mal puesta y no una imagen junto al
+   * agente equivocado.
+   */
+  private async takeSeen(): Promise<void> {
+    if (this.seen.size === 0) return;
+    const batch = [...this.seen.entries()];
+    this.seen.clear();
+    if (batch.length > MAX_BURST) {
+      log('info', SCOPE, `${batch.length} archivos de golpe en el árbol: me quedo con ${MAX_BURST}`);
+    }
+
+    const fresh: { file: string; projectId: string; at: number }[] = [];
+    for (const [file, projectId] of batch) {
+      const stat = await fsp.stat(file).catch(() => null);
+      if (!stat || !stat.isFile()) continue;
+      fresh.push({ file, projectId, at: Math.round(stat.mtimeMs) });
+    }
+    fresh.sort((a, b) => b.at - a.at);
+
+    for (const f of fresh.slice(0, MAX_BURST)) {
+      const agentId = this.deps.resolveAgent(f.projectId, null);
+      // Sin nadie a quien colgárselo no hay registro: un artefacto sin dueño
+      // no tiene dónde vivir en la consola, y adivinar un dueño es peor.
+      if (!agentId) continue;
+      this.observe({ path: f.file, projectId: f.projectId, agentId, at: f.at });
     }
   }
 

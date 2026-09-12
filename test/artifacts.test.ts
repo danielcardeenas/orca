@@ -490,6 +490,91 @@ export async function testDeclaredBeatsObserved(): Promise<TestResult> {
   }
 }
 
+/* ── 7 · lo que sale de un proceso, no de una tool ────────────────── */
+
+/**
+ * El caso del operador: un pipeline de generación.
+ *
+ * `ffmpeg`, `playwright`, un script de render — nada de eso pasa por Write, y
+ * hasta ahora no existía para ORCA. Se comprueba con un archivo escrito por
+ * fuera del índice, que es exactamente lo que hace un proceso hijo, y se
+ * comprueba también lo que NO puede entrar: dependencias, trabajo intermedio,
+ * lo oculto y las extensiones que no son para mirar.
+ */
+export async function testTreeCatchesWhatBashMade(): Promise<TestResult> {
+  const name = 'un archivo que aparece en el árbol entra sin que ninguna tool lo escriba';
+  const dir = tempDir('orca-art-tree-');
+  const idx = index();
+  try {
+    mkdirSync(join(dir, 'out'), { recursive: true });
+    mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+    mkdirSync(join(dir, '.cache'), { recursive: true });
+
+    idx.track('p1', dir);
+    idx.start(50);
+    // Que el watch esté montado antes de escribir: si no, esto mide el poll.
+    await sleep(200);
+
+    // El render que nos importa, como lo dejaría un proceso hijo.
+    writeFileSync(join(dir, 'out', 'frame-final.png'), makePng(64, 3));
+    // Y todo lo que no debe entrar.
+    writeFileSync(join(dir, 'node_modules', 'pkg', 'logo.png'), makePng(64, 4));
+    writeFileSync(join(dir, '.cache', 'thumb.png'), makePng(64, 5));
+    writeFileSync(join(dir, 'out', 'pipeline.ts'), 'export const x = 1;\n');
+
+    await until(() => idx.list().length > 0, 4_000, 'el png del árbol');
+    await sleep(300);
+
+    const all = idx.list();
+    assert(all.length === 1, `entraron ${all.length}: ${all.map((a) => a.path).join(' ')}`);
+    const a = all[0]!;
+    assert(a.path === join(dir, 'out', 'frame-final.png'), `entró el que no era: ${a.path}`);
+    assert(a.source === 'observed', `lo que aparece solo es observed, fue ${a.source}`);
+    assert(a.agentId === 'a1', `sin dueño resuelto no habría registro: ${a.agentId}`);
+    assert(a.width === 64, 'no se leyó la cabecera del png');
+
+    return ok(name, 'el png del build entra como observed; node_modules, lo oculto y el .ts no');
+  } catch (err) {
+    return fail(name, String(err));
+  } finally {
+    idx.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Sin dueño no hay registro.
+ *
+ * Un archivo que aparece no lleva firma, así que el índice le pregunta al
+ * collector quién estaba trabajando ahí. Cuando la respuesta es «nadie» —el
+ * proyecto no tiene ningún agente vivo— inventar uno pondría el trabajo de
+ * alguien colgando de otro. Se descarta y ya está.
+ */
+export async function testTreeNeedsAnOwner(): Promise<TestResult> {
+  const name = 'un archivo del árbol sin agente a quien atribuirlo no se registra';
+  const dir = tempDir('orca-art-orphan-');
+  let asked = 0;
+  const idx = new ArtifactIndex({
+    machineId: MACHINE,
+    resolveAgent: () => { asked++; return null; },
+  });
+  try {
+    idx.track('p1', dir);
+    idx.start(50);
+    await sleep(200);
+    writeFileSync(join(dir, 'render.png'), makePng(64, 7));
+    await until(() => asked > 0, 4_000, 'que el árbol pregunte de quién es');
+    await sleep(200);
+    assert(idx.list().length === 0, `se registró sin dueño: ${idx.list().length}`);
+    return ok(name, 'nadie vivo en el proyecto: el archivo se queda en su disco');
+  } catch (err) {
+    return fail(name, String(err));
+  } finally {
+    idx.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /* ── suite ────────────────────────────────────────────────────────── */
 
 export default {
@@ -501,6 +586,8 @@ export default {
     testWorldStoresAndServesUrl,
     testExplicitPublication,
     testDeclaredBeatsObserved,
+    testTreeCatchesWhatBashMade,
+    testTreeNeedsAnOwner,
     testHubServesArtifact,
   ],
 };

@@ -24,7 +24,10 @@
  * hovering the row, which is no way to reach anything: a hover cannot be
  * tabbed to, cannot be tapped, and vanishes while you read it. Each row now
  * carries a disclosure (`▸`) that opens the whole title, the whole brief, its
- * crew, and the two ways into the mission — the conversation and the results.
+ * crew, the three ways into the mission — the results, the conversation and the
+ * crew — and ARCHIVE, que la retira de la consola preguntando lo mismo que
+ * pregunta la ventana (`missionArchiveAsk`): archivar desde el panel no puede
+ * costar menos que archivar desde dentro.
  * It is a real `<button>` with `aria-expanded`, so Tab reaches it and Enter
  * and Space open it. The title itself is a button too: clicking it opens the
  * mission's conversation while it runs, and its results once it has finished,
@@ -66,6 +69,7 @@
 
 import type { Console } from '../console.ts';
 import { store } from '../store.ts';
+import { hub } from '../net/client.ts';
 import { getPref, setPref } from '../prefs.ts';
 import { ago, esc } from '../util.ts';
 import { REDUCE } from '../motion.ts';
@@ -74,7 +78,7 @@ import {
   algnFold, algnFoldClear, algnRowBack, algnRowIn, algnRowPulse, algnUnfold, algnZipDelay, algnZipTo,
   paintBadge,
 } from '../gfx/algn.ts';
-import { PHASE_WORD, isOpen, missionRows, type MissionPhase, type MissionRow } from './mission-status.ts';
+import { PHASE_WORD, isOpen, missionArchiveAsk, missionRows, type MissionPhase, type MissionRow } from './mission-status.ts';
 import { visibleMissions } from '../../shared/missions.ts';
 import { gesture } from '../gestures.ts';
 
@@ -240,6 +244,8 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
         <button class="missions__act" type="button" data-act="results">MISSION</button>
         <button class="missions__act" type="button" data-act="talk">CONVERSATION</button>
         <button class="missions__act" type="button" data-act="crew">CREW</button>
+        <button class="missions__act missions__act--archive" type="button" data-archive
+          title="Take it out of the console. Its agents and its conversation are kept.">ARCHIVE</button>
       </div>`;
   }
 
@@ -364,6 +370,27 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
     c.openMission(id, { tab: what });
   }
 
+  /**
+   * Retirar la misión desde su propia fila, sin abrir la ventana.
+   *
+   * Es el mismo gesto que el ARCHIVE de la ventana y hace la misma pregunta
+   * (`missionArchiveAsk`): archivar una misión viva no puede costar lo mismo
+   * desde el panel que desde dentro, o el panel sería el atajo para hacerlo sin
+   * pensar. Y no hace falta recargar nada: el hub devuelve la misión archivada,
+   * el store la guarda, `visibleMissions` deja de darla y la fila se va en el
+   * render que sigue.
+   */
+  async function archive(id: string) {
+    const m = store.world.missions?.[id];
+    if (!m) return;
+    const ask = missionArchiveAsk(m);
+    if (ask && !confirm(ask)) return;
+    try {
+      store.upsertMission(await hub.archiveMission(m.id));
+      c.note(`Mission archived: ${m.title}`, 'info');
+    } catch (err) { c.note(`Could not archive mission: ${String(err)}`, 'warn'); }
+  }
+
   list.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     const go = t.closest<HTMLElement>('[data-go]');
@@ -375,6 +402,9 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
     const m = rows.get(id);
     const r = shownRows.get(id);
     if (!m || !r) return;
+
+    const arch = t.closest<HTMLElement>('[data-archive]');
+    if (arch) { e.stopPropagation(); arch.blur(); void archive(id); return; }
 
     const act = t.closest<HTMLElement>('[data-act]');
     if (act) { e.stopPropagation(); act.blur(); enter(id, act.dataset.act as 'talk' | 'crew' | 'results'); return; }

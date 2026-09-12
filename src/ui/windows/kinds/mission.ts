@@ -82,7 +82,7 @@ import type { DebriefAgent, MissionDebrief } from '../../../shared/debrief.ts';
 import { capcomOf } from '../../../shared/capcom.ts';
 import { crewWord, missionCrew, squadMembers, type CrewMember, type CrewSquad, type MissionCrew } from '../mission-crew.ts';
 import { sigilBits, sigilHTML } from '../../gfx/sigil.ts';
-import { missionHeadline, missionLead, PHASE_WORD, missionPhase, liveCrew, type MissionLead } from '../../hud/mission-status.ts';
+import { missionArchiveAsk, missionHeadline, missionLead, PHASE_WORD, missionPhase, liveCrew, type MissionLead } from '../../hud/mission-status.ts';
 import { store, type OutgoingMessage } from '../../store.ts';
 import { authedUrl, hub, uploadFile } from '../../net/client.ts';
 import { bindAttach } from '../attach.ts';
@@ -786,7 +786,8 @@ export function mountMission(ctx: WinCtx, c: Console) {
   async function archive() {
     const m = mission();
     if (!m) return;
-    if (m.status === 'active' && !confirm(`"${m.title}" sigue activa. Archivarla la retira de la consola; sus agentes y su conversación se conservan.\n\n¿Archivar?`)) return;
+    const ask = missionArchiveAsk(m);
+    if (ask && !confirm(ask)) return;
     try {
       store.upsertMission(await hub.archiveMission(m.id));
       c.note(`Mission archived: ${m.title}`, 'info');

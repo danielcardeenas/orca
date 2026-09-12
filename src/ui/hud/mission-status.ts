@@ -116,6 +116,20 @@ export function missionTitle(mission: CapcomMission, max = 40): string {
   return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
+/**
+ * Lo que se pregunta antes de archivar una misión viva, palabra por palabra.
+ *
+ * Vive aquí porque hay dos sitios desde los que se archiva —la ventana de la
+ * misión y la fila abierta del panel— y una pregunta con dos redacciones son
+ * dos promesas distintas sobre lo que pasa al aceptar. Una misión terminada no
+ * pregunta nada: `null` es «archívala y ya».
+ */
+export function missionArchiveAsk(mission: CapcomMission): string | null {
+  if (mission.status !== 'active') return null;
+  return `"${mission.title}" sigue activa. Archivarla la retira de la consola;`
+    + ` sus agentes y su conversación se conservan.\n\n¿Archivar?`;
+}
+
 const OPEN: ReadonlySet<MissionPhase> = new Set(['waiting', 'progress', 'stalled', 'queued']);
 export const isOpen = (phase: MissionPhase): boolean => OPEN.has(phase);
 

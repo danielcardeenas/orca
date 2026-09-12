@@ -9,7 +9,7 @@
 
 import { MISSION_STALL_GRACE_MS, missionStall, type CapcomMission, type MissionMessage, type MissionStatus } from '../src/shared/missions.ts';
 import type { Agent, AgentState } from '../src/shared/types.ts';
-import { isOpen, liveCrew, railSplit, missionPhase, missionRows, missionTitle } from '../src/ui/hud/mission-status.ts';
+import { isOpen, liveCrew, railSplit, missionArchiveAsk, missionPhase, missionRows, missionTitle } from '../src/ui/hud/mission-status.ts';
 import { eq, ok, test, type TestModule } from './harness.ts';
 
 const T0 = 1_800_000_000_000;
@@ -174,6 +174,23 @@ const mod: TestModule = {
       ], agentOf);
       const r = railSplit(rows, null);
       return eq('strip', r.strip.map((x) => x.id), ['a', 'b', 'c']);
+    }),
+
+    /*
+     * Se archiva desde dos sitios —la ventana de la misión y la fila abierta
+     * del panel— y los dos leen esta frase. Si cada uno redactara la suya,
+     * archivar desde el panel prometería otra cosa que archivar desde dentro,
+     * y el operador sólo habría leído una de las dos.
+     */
+    test('missionArchiveAsk: una viva pregunta, y con su nombre; una terminada no pregunta nada', () => {
+      const live = missionArchiveAsk(task('t', { title: 'Sacar el dinero de la consola' }));
+      const done = missionArchiveAsk(task('t', { title: 'T', status: 'completed' }));
+      const failed = missionArchiveAsk(task('t', { title: 'T', status: 'failed' }));
+      return ok('ask',
+        live !== null && live.includes('Sacar el dinero de la consola')
+        && live.includes('sigue activa') && live.includes('se conservan')
+        && done === null && failed === null,
+        `${JSON.stringify(live)} / ${done} / ${failed}`);
     }),
 
     test('railSplit: lo terminado se pliega, salvo la conversación abierta', () => {

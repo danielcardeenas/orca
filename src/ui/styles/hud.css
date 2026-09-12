@@ -720,6 +720,13 @@ body.tray-mode .tray .tile { width: 72px; }
   padding: 3px 6px; line-height: 1; border-radius: 2px;
 }
 .missions__act:hover { background: var(--lime); color: #111; border-color: var(--lime); }
+/* ARCHIVE no es una cuarta puerta: es lo contrario, retirar la misión de la
+   consola. No crece con las tres que llevan dentro y va apagado hasta que se
+   le apunta, que es como se lee «esto no es lo que vienes a hacer aquí». */
+.missions__act--archive {
+  flex: 0 0 auto; color: var(--ink-dim); border-color: var(--line);
+}
+.missions__act--archive:hover { background: var(--ink-dim); color: #111; border-color: var(--ink-dim); }
 
 /* Phases. Waiting is amber, the console's colour for "a human"; a finished
    mission dims; a failed one is the breach red the launch rows already wear.
@@ -739,6 +746,9 @@ body.tray-mode .tray .tile { width: 72px; }
 .missions__row.is-waiting .missions__cs, .missions__row.is-waiting .missions__act { border-color: rgba(245,165,36,0.5); }
 .missions__row.is-waiting .missions__act { color: var(--amber); }
 .missions__row.is-waiting .algn-zip rect { fill: var(--amber); }
+/* El ámbar es de las puertas, no de retirar: ver `.missions__act--archive`. */
+.missions__row.is-stalled .missions__act--archive,
+.missions__row.is-waiting .missions__act--archive { color: var(--ink-dim); border-color: var(--line); }
 .missions__row.is-done { opacity: 0.55; }
 .missions__row.is-done:hover, .missions__row.is-done.is-open { opacity: 0.9; }
 .missions__row.is-completed .px, .missions__row.is-completed .missions__title { color: var(--ink-mid); }

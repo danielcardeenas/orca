@@ -1197,6 +1197,7 @@ export class FakeMachine {
       projectId: a.projectId,
       machineId: this.spec.id,
       kind: f.kind,
+      source: 'declared',
       path: f.file,
       title: f.title,
       url: null,

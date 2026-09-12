@@ -311,7 +311,13 @@ export interface AgentMetrics {
 export interface SessionRollup {
   total: number;
   byState: Record<AgentState, number>;
-  costUSD: number;
+  /**
+   * Uso acumulado, en tokens de techo (`ceilingTokens`). Sustituyó a `costUSD`
+   * el 2026-09-12: la flota va con plan plano y los dólares no medían ningún
+   * cobro. `AgentMetrics.costUSD` sigue existiendo porque lo escribe el CLI;
+   * lo que ya no existe es una suma de dólares que alguien lea.
+   */
+  tokens: number;
   tokensPerSec: number;
   /** Number of agents needing a human right now. The deck sorts on this. */
   blocked: number;
@@ -576,6 +582,8 @@ export interface Placement {
 
 export type ArtifactKind = 'image' | 'video' | 'html' | 'text' | 'file';
 
+export type ArtifactSource = 'declared' | 'observed';
+
 /**
  * Something an agent produced that is worth looking at.
  *
@@ -606,6 +614,18 @@ export interface Artifact {
    * decides what "open" means and whether now is the moment.
    */
   open: boolean;
+  /**
+   * Who decided this is worth looking at.
+   *
+   * `declared` — the agent published it on purpose (`orca-show`). It has a
+   * title it wrote, and it is the one of the forty PNGs that matters.
+   * `observed` — it merely appeared while the agent worked. Useful, but
+   * nobody chose it, and the title is a file name.
+   *
+   * The console leans on this: only what an agent declared earns a place on
+   * the canvas by itself. What was merely observed waits in the gallery.
+   */
+  source: ArtifactSource;
   /** Set when the operator has pulled it out of its agent into the field. */
   placement: { x: number; y: number; z: number } | null;
 }
@@ -670,7 +690,7 @@ export function emptyRollup(): SessionRollup {
   return {
     total: 0,
     byState: { booting: 0, thinking: 0, working: 0, blocked: 0, idle: 0, done: 0, dead: 0 },
-    costUSD: 0,
+    tokens: 0,
     tokensPerSec: 0,
     blocked: 0,
   };

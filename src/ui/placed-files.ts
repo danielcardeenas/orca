@@ -109,7 +109,9 @@ export function createPlacedFiles(storage: StorageLike | null): PlacedFiles {
       return files.map((f): Artifact => ({
         id: f.id, agentId: '', projectId: '', machineId: '', kind: f.kind, path: f.path,
         title: baseName(f.path), url: `/api/file?path=${encodeURIComponent(f.path)}`,
-        bytes: 0, width: null, height: null, at: f.at, open: false, placement: { ...f.placement },
+        bytes: 0, width: null, height: null, at: f.at, open: false,
+        // Lo soltó el operador con la mano: elegido, como una declaración.
+        source: 'declared', placement: { ...f.placement },
       }));
     },
   };

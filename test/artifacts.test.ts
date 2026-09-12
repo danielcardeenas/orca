@@ -138,6 +138,7 @@ export async function testDetectionFromTranscript(): Promise<TestResult> {
 
     const text = all.find((a) => a.path.endsWith('notes.md'));
     assert(text?.kind === 'text', `el .md debería ser text, fue ${text?.kind}`);
+    assert(image!.source === 'observed', `lo detectado es observed, fue ${image!.source}`);
 
     // Reescribir el mismo archivo actualiza el mismo registro, no crea otro.
     writeFileSync(png, makePng(64, 9));
@@ -407,6 +408,7 @@ export async function testExplicitPublication(): Promise<TestResult> {
     assert(a.title === 'El render final', `title ${a.title}`);
     assert(a.path === png, `path ${a.path}`);
     assert(a.agentId === 'a1', `agentId ${a.agentId}`);
+    assert(a.source === 'declared', `lo publicado es declared, fue ${a.source}`);
     // La declaración NO se borra: es estado, y un collector reiniciado tiene que
     // volver a encontrarla.
     assert(existsSync(join(decls, 'show_abc.json')), 'la declaración se borró');
@@ -416,6 +418,70 @@ export async function testExplicitPublication(): Promise<TestResult> {
     assert(seen.length === before, `se re-emitió ${seen.length - before} veces sin cambiar nada`);
 
     return ok(name, `1 declaración válida entra con su título, /etc/hosts no, y no repite`);
+  } catch (err) {
+    return fail(name, String(err));
+  } finally {
+    idx.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/* ── 6 · declarado gana a observado ───────────────────────────────── */
+
+/**
+ * `source` es lo que le dice al canvas qué puede anclar solo.
+ *
+ * La regla tiene una dirección: declarar es una decisión de un agente y no se
+ * pierde. Lo contrario —que un `Write` posterior degradara a «algo que
+ * apareció» la gráfica que el agente publicó con su título— haría que el
+ * artefacto se cayera del canvas justo cuando el agente lo actualiza, que es
+ * cuando más ganas hay de mirarlo.
+ */
+export async function testDeclaredBeatsObserved(): Promise<TestResult> {
+  const name = 'declarado sube desde observado y no vuelve a bajar';
+  const dir = tempDir('orca-art-src-');
+  const idx = index();
+  try {
+    const png = join(dir, 'out', 'render.png');
+    mkdirSync(join(dir, 'out'), { recursive: true });
+    writeFileSync(png, makePng(64, 6));
+
+    // 1. Primero aparece solo: un Write en el transcript.
+    idx.observe({ path: png, projectId: 'p1', agentId: 'a1', at: Date.now(), cwd: dir });
+    const id = artifactId(MACHINE, png);
+    assert(idx.get(id)?.source === 'observed', 'la detección debería dar observed');
+    assert(idx.get(id)?.title === 'render.png', 'el título observado es el nombre del archivo');
+
+    // 2. El agente lo publica: gana un título suyo y sube a declared.
+    idx.observe({
+      path: png, projectId: 'p1', agentId: 'a1', at: Date.now() + 1,
+      declaredIn: dir, title: 'El render final',
+    });
+    assert(idx.get(id)?.source === 'declared', 'publicar no subió el source');
+    assert(idx.get(id)?.title === 'El render final', 'publicar no puso el título del agente');
+
+    // 3. Lo reescribe. Sigue siendo el que él eligió.
+    writeFileSync(png, makePng(64, 9));
+    idx.observe({ path: png, projectId: 'p1', agentId: 'a1', at: Date.now() + 2, cwd: dir });
+    const after = idx.get(id)!;
+    assert(after.source === 'declared', `reescribirlo lo degradó a ${after.source}`);
+    assert(after.title === 'El render final', `reescribirlo perdió el título: ${after.title}`);
+
+    // 4. Y el hub no se fía de lo que le llegue: sólo 'declared' literal pasa.
+    const world = new World({});
+    world.upsertMachine({
+      id: MACHINE, hostname: 'mac', platform: 'darwin', version: '0.1.0',
+      online: true, lastSeen: Date.now(), connectedAt: Date.now(),
+      load: { sessions: 0, activeSessions: 0, cpuPct: null, memPct: null },
+    });
+    const kept = world.upsertArtifact(MACHINE, { ...after });
+    assert(kept.source === 'declared', 'el hub perdió el source declarado');
+    const junk = world.upsertArtifact(MACHINE, {
+      ...after, id: 'art_junk00000000001', source: 'whatever-the-agent-said',
+    });
+    assert(junk.source === 'observed', `un source inventado debería caer a observed, fue ${junk.source}`);
+
+    return ok(name, 'observed → declared con título propio; reescribir no degrada; el hub valida');
   } catch (err) {
     return fail(name, String(err));
   } finally {
@@ -434,6 +500,7 @@ export default {
     testArtifactCap,
     testWorldStoresAndServesUrl,
     testExplicitPublication,
+    testDeclaredBeatsObserved,
     testHubServesArtifact,
   ],
 };

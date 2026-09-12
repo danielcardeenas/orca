@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import type { Artifact, ArtifactKind } from '../shared/types.ts';
+import type { Artifact, ArtifactKind, ArtifactSource } from '../shared/types.ts';
 import { MAX_ARTIFACT_BYTES, artifactMime } from '../shared/protocol.ts';
 import { errText, isInside, launchable, log, oneLine, safeJson, sha1, str } from './util.ts';
 
@@ -233,13 +233,21 @@ export class ArtifactIndex {
        * mandó abrir no es retirar la petición.
        */
       open: input.open === true || (input.open == null && prev?.open === true),
+      /*
+       * Declarar es una decisión, y no se pierde. Un agente que publica una
+       * gráfica y luego la reescribe con Write no acaba de degradarla a «algo
+       * que apareció»: sigue siendo la que él eligió, con el título que le
+       * puso. Al revés sí ocurre: lo observado sube a declarado en cuanto el
+       * agente lo publica.
+       */
+      source: input.declaredIn ? 'declared' : (prev?.source ?? 'observed'),
       placement: prev?.placement ?? null,
     };
 
     // Un tick que vuelve a ver la misma escritura no debería generar tráfico.
     if (prev && prev.bytes === next.bytes && prev.at === next.at
       && prev.title === next.title && prev.agentId === next.agentId
-      && prev.open === next.open) return null;
+      && prev.open === next.open && prev.source === next.source) return null;
 
     this.items.set(id, next);
     this.evict();

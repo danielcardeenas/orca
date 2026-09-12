@@ -315,7 +315,7 @@ function workspaceKind(v: unknown): ExcludedWorkspace | undefined {
 function metrics(raw: unknown): AgentMetrics {
   const o = obj(raw) ?? {};
   return {
-    costUSD: n(o['costUSD']),
+    tokens: n(o['tokens']),
     inputTokens: n(o['inputTokens']),
     outputTokens: n(o['outputTokens']),
     cacheReadTokens: n(o['cacheReadTokens']),
@@ -769,6 +769,10 @@ export function sanitizeArtifact(raw: unknown, machineId: string): Artifact | nu
     // `open` es una petición del agente, no un permiso: sobrevive el booleano
     // y nada más. Qué significa abrir algo lo decide la consola.
     open: b(o['open']),
+    // Lo que no venga declarado explícitamente se trata como observado: el
+    // canvas sólo ancla solo lo que un agente eligió enseñar, así que la
+    // duda cae siempre del lado de no ocupar sitio.
+    source: o['source'] === 'declared' ? 'declared' : 'observed',
     placement: place
       ? { x: n(place['x']), y: n(place['y']), z: n(place['z']) }
       : null,
@@ -786,22 +790,22 @@ interface Bucket {
   ids: Set<string>;
   roll: SessionRollup;
   /**
-   * Cuánto de `roll.costUSD` es dinero que no se gastó: el de los agentes que
-   * viven en una máquina del arnés.
+   * Cuánto de `roll.tokens` es uso que no hubo: el de los agentes que viven en
+   * una máquina del arnés.
    *
    * Va aparte y no restado porque las dos cifras tienen lector. El rollup del
    * proyecto lo lee la consola, y el recinto del arnés tiene que poder dibujar
-   * su propio gasto —es parte de lo que se está desarrollando ahí—. El total
-   * de la flota lo lee el operador y lo lee CAPCOM, y ésos son dólares: ahí
+   * su propio consumo —es parte de lo que se está desarrollando ahí—. El total
+   * de la flota lo lee el operador y lo lee CAPCOM, y ése es trabajo real: ahí
    * esto se resta. Ver shared/synthetic.ts.
    */
-  synthCostUSD: number;
+  synthTokens: number;
   dirty: boolean;
 }
 
 function rollupEq(a: SessionRollup, x: SessionRollup): boolean {
   if (a.total !== x.total || a.blocked !== x.blocked) return false;
-  if (Math.abs(a.costUSD - x.costUSD) > 1e-9) return false;
+  if (a.tokens !== x.tokens) return false;
   if (Math.abs(a.tokensPerSec - x.tokensPerSec) > 1e-9) return false;
   for (const st of AGENT_STATES) if (a.byState[st] !== x.byState[st]) return false;
   return true;
@@ -867,7 +871,7 @@ export class World {
   private bucket(key: string): Bucket {
     let bkt = this.buckets.get(key);
     if (!bkt) {
-      bkt = { ids: new Set(), roll: emptyRollup(), synthCostUSD: 0, dirty: true };
+      bkt = { ids: new Set(), roll: emptyRollup(), synthTokens: 0, dirty: true };
       this.buckets.set(key, bkt);
     }
     return bkt;
@@ -921,17 +925,17 @@ export class World {
         if (!a || a.hidden === true) continue;
         roll.total += 1;
         roll.byState[a.state] += 1;
-        roll.costUSD += a.metrics.costUSD;
+        roll.tokens += ceilingTokens(a.metrics);
         roll.tokensPerSec += a.metrics.tokensPerSec;
         if (a.state === 'blocked') roll.blocked += 1;
         // Se decide por la máquina del agente, no por la del proyecto: es lo
         // que la marca cubre y lo único que sigue en pie cuando un fixture se
         // llama igual que un proyecto de verdad.
-        if (isSynthetic(this.state.machines[a.machineId])) synth += a.metrics.costUSD;
+        if (isSynthetic(this.state.machines[a.machineId])) synth += ceilingTokens(a.metrics);
       }
-      if (rollupEq(bkt.roll, roll) && Math.abs(bkt.synthCostUSD - synth) <= 1e-9) continue;
+      if (rollupEq(bkt.roll, roll) && bkt.synthTokens === synth) continue;
       bkt.roll = roll;
-      bkt.synthCostUSD = synth;
+      bkt.synthTokens = synth;
       fleetDirty = true;
       const project = key ? this.state.projects[key] : undefined;
       if (project) {
@@ -945,14 +949,15 @@ export class World {
     for (const bkt of this.buckets.values()) {
       fleet.total += bkt.roll.total;
       /*
-       * El total de la flota es dinero, y el del arnés no lo es.
+       * El total de la flota es trabajo hecho, y el del arnés no lo es.
        *
        * En el incidente del 2026-09-07 los siete proyectos inventados metieron
        * más de mil dólares en este contador — el que el HUD enseña y el que
-       * `/api/health` publica. Los agentes sintéticos siguen contándose (la
-       * consola los dibuja, para eso están); su gasto no.
+       * `/api/health` publica. Ahora el contador va en tokens y el argumento es
+       * el mismo: los agentes sintéticos siguen contándose (la consola los
+       * dibuja, para eso están); su consumo no.
        */
-      fleet.costUSD += bkt.roll.costUSD - bkt.synthCostUSD;
+      fleet.tokens += bkt.roll.tokens - bkt.synthTokens;
       fleet.tokensPerSec += bkt.roll.tokensPerSec;
       fleet.blocked += bkt.roll.blocked;
       for (const st of AGENT_STATES) fleet.byState[st] += bkt.roll.byState[st];
@@ -2406,7 +2411,7 @@ export class World {
       agents: { total: this.state.fleet.total, byState: this.state.fleet.byState },
       archived: this.archived.size,
       blocked: this.state.fleet.blocked,
-      costUSD: Number(this.state.fleet.costUSD.toFixed(4)),
+      tokens: this.state.fleet.tokens,
       tokensPerSec: Number(this.state.fleet.tokensPerSec.toFixed(1)),
       /*
        * Quién manda aquí, si manda alguien. Es lo primero que necesita saber

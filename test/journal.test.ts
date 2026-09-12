@@ -316,7 +316,7 @@ const tests = [
     } finally { await b.close(); }
   }),
 
-  test('stats: cost and duration per project, done rate, who answered, and the briefs that escalated', async () => {
+  test('stats: use and duration per project, done rate, who answered, and the briefs that escalated', async () => {
     const b = box();
     try {
       arrive(b, agent({ id: 'w1', mission: 'Ship payments. Done when green.' }));
@@ -325,9 +325,11 @@ const tests = [
       b.lifecycle.feed({ at: 15_000, kind: 'escalation:new', machineId: 'm1', agentId: 'w2', projectId: 'p_ax', text: 'Refund to card or wallet?', data: { id: 'esc_1', urgency: 'normal', options: [] } }, b.agents.get('w2'));
       b.lifecycle.feed({ at: 16_000, kind: 'escalation:answered', machineId: 'm1', agentId: 'w2', projectId: 'p_ax', text: 'Refund to card or wallet?', data: { answer: 'card', by: 'human' } }, b.agents.get('w2'));
       b.lifecycle.feed({ at: 17_000, kind: 'escalation:new', machineId: 'm1', agentId: 'w3', projectId: 'p_or', text: 'Which registry?', data: { id: 'esc_2', urgency: 'low', options: [] } }, b.agents.get('w3'));
-      b.clock.now = 21_000; move(b, 'w1', 'done', { metrics: { ...agent({ id: 'x' }).metrics, costUSD: 2 } });
-      b.clock.now = 41_000; move(b, 'w2', 'dead', { metrics: { ...agent({ id: 'x' }).metrics, costUSD: 4 } });
-      b.clock.now = 11_000; move(b, 'w3', 'done', { metrics: { ...agent({ id: 'x' }).metrics, costUSD: 1 } });
+      // Tokens de techo: entrada + salida + escritura de caché. El costUSD va
+      // con ellos porque el transcript lo trae, y ya no lo suma nadie.
+      b.clock.now = 21_000; move(b, 'w1', 'done', { metrics: { ...agent({ id: 'x' }).metrics, costUSD: 2, inputTokens: 1_000, outputTokens: 1_000, cacheWriteTokens: 0 } });
+      b.clock.now = 41_000; move(b, 'w2', 'dead', { metrics: { ...agent({ id: 'x' }).metrics, costUSD: 4, inputTokens: 2_000, outputTokens: 1_000, cacheWriteTokens: 1_000 } });
+      b.clock.now = 11_000; move(b, 'w3', 'done', { metrics: { ...agent({ id: 'x' }).metrics, costUSD: 1, inputTokens: 500, outputTokens: 500, cacheWriteTokens: 0 } });
       b.journal.landed({ agentId: 'w1', branch: 'orca/w1', target: 'main', commit: 'abc123', ok: true });
       b.journal.landed({ agentId: 'w2', branch: 'orca/w2', target: 'main', ok: false, detail: 'conflict in charges.ts' });
       await b.journal.flush();
@@ -337,10 +339,10 @@ const tests = [
       return ok('stats add up',
         s.launches === 3 && s.byLauncher.human === 3
         && s.ends.done === 2 && s.ends.dead === 1 && s.doneRate === 0.6667
-        && s.cost.totalUSD === 7 && s.cost.avgUSD === 2.3333
+        && s.usage.tokens === 7_000 && s.usage.avgTokens === 2333 && s.usage.measured === 3
         && s.duration.avgMs === Math.round((20_000 + 40_000 + 10_000) / 3)
-        && ax?.launches === 2 && ax.done === 1 && ax.dead === 1 && ax.doneRate === 0.5 && ax.totalCostUSD === 6 && ax.avgCostUSD === 3 && ax.avgDurationMs === 30_000 && ax.escalations === 1
-        && or?.launches === 1 && or.avgCostUSD === 1 && or.escalations === 1
+        && ax?.launches === 2 && ax.done === 1 && ax.dead === 1 && ax.doneRate === 0.5 && ax.totalTokens === 6_000 && ax.avgTokens === 3_000 && ax.avgDurationMs === 30_000 && ax.escalations === 1
+        && or?.launches === 1 && or.avgTokens === 1_000 && or.escalations === 1
         && s.escalations.asked === 2 && s.escalations.answeredByHuman === 1 && s.escalations.answeredByCapcom === 0 && s.escalations.unanswered === 1 && s.escalations.avgWaitMs === 1_000
         && s.escalatedBriefs.length === 2
         && s.escalatedBriefs.some((e) => e.agentId === 'w2' && e.brief === 'Ship refunds. Done when green.' && e.answeredBy === 'human' && e.state === 'dead')
@@ -397,7 +399,7 @@ const tests = [
       for (let i = 0; i < BRIEFING_MAX_LINES + 3; i += 1) {
         arrive(b, agent({ id: `w${i}`, callsign: `W${i}` }));
         b.clock.now += 1_000;
-        move(b, `w${i}`, 'done', { lastSay: `finished ${i}`, metrics: { ...agent({ id: 'x' }).metrics, costUSD: 0.5 } });
+        move(b, `w${i}`, 'done', { lastSay: `finished ${i}`, metrics: { ...agent({ id: 'x' }).metrics, costUSD: 0.5, inputTokens: 12_000, outputTokens: 3_000 } });
       }
       await b.journal.flush();
       const first = briefingLines(b.ctx, b.clock.now);
@@ -409,7 +411,7 @@ const tests = [
       await b.journal.flush();
       const third = briefingLines(b.ctx, b.clock.now);
       return ok('briefing section',
-        first.length === BRIEFING_MAX_LINES + 1 && first[0]!.startsWith('… 3 more') && first.at(-1)!.includes('finished 10') && first[1]!.includes('$0.50')
+        first.length === BRIEFING_MAX_LINES + 1 && first[0]!.startsWith('… 3 more') && first.at(-1)!.includes('finished 10') && first[1]!.includes('15k tokens')
         && second.length === 0
         && third.length === 2 && third[0]!.startsWith('LT [AX] dead') && third[1]!.includes('FAILED to land') && third[1]!.includes('tests red')
         && existsSync(join(b.dir, 'journal', 'state.json')),

@@ -107,8 +107,8 @@ function emptyStats(): JournalStats {
     since: null, until: null, entries: 0, launches: 3,
     byLauncher: { human: 1, capcom: 2, agent: 0 },
     ends: { done: 2, dead: 1 }, doneRate: 2 / 3,
-    cost: { totalUSD: 1.5, avgUSD: 0.5 }, duration: { avgMs: 600_000 },
-    byProject: [{ project: 'AX', projectId: 'p1', launches: 3, done: 2, dead: 1, doneRate: 2 / 3, totalCostUSD: 1.5, avgCostUSD: 0.5, avgDurationMs: 600_000, escalations: 1 }],
+    usage: { tokens: 1_500_000, avgTokens: 500_000, measured: 3 }, duration: { avgMs: 600_000 },
+    byProject: [{ project: 'AX', projectId: 'p1', launches: 3, done: 2, dead: 1, doneRate: 2 / 3, totalTokens: 1_500_000, avgTokens: 500_000, avgDurationMs: 600_000, escalations: 1 }],
     escalations: { asked: 4, answeredByCapcom: 2, answeredByHuman: 1, unanswered: 1, avgWaitMs: 840_000 },
     escalatedBriefs: [], rotations: 1, landings: { ok: 2, failed: 0 },
   };

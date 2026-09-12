@@ -1032,10 +1032,10 @@ async function purgeHarness(ctx: CeoContext): Promise<ToolOutcome> {
   return {
     result: JSON.stringify({
       stopped: stopped.map((p) => ({ pid: p.pid, script: p.script, how: p.how, command: p.command })),
-      removed: { ...removed, costUSD: Number(removed.costUSD.toFixed(2)) },
+      removed: { machines: removed.machines, agents: removed.agents, projects: removed.projects, escalations: removed.escalations },
       note: clean
         ? 'nothing to do: no harness process is pointing at this hub and no synthetic machine is in the world'
-        : 'only machines that declared themselves synthetic were touched; no real agent, project or spend was',
+        : 'only machines that declared themselves synthetic were touched; no real agent or project was',
       ...(survivors.length
         ? { warning: `${survivors.length} process(es) survived SIGKILL; they may not be ours to signal` }
         : {}),
@@ -1043,7 +1043,7 @@ async function purgeHarness(ctx: CeoContext): Promise<ToolOutcome> {
     summary: clean
       ? 'no harness found on this hub'
       : `stopped ${stopped.length} harness process(es), removed ${removed.machines} synthetic machine(s), `
-        + `${removed.agents} agent(s), ${removed.projects} project(s), $${removed.costUSD.toFixed(2)} of fictitious spend`,
+        + `${removed.agents} agent(s), ${removed.projects} project(s)`,
   };
 }
 
@@ -1084,12 +1084,12 @@ function listFleet(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome
       agents: p.rollup.total,
       by_state: p.rollup.byState,
       blocked: p.rollup.blocked,
-      spend_usd: Number(p.rollup.costUSD.toFixed(2)),
+      tokens: Math.round(projectTokens(ctx, p.id)),
       budget: projectBudget(ctx, p.id),
       // Sólo cuando lo es, y con la advertencia pegada: quien lo lea tiene que
-      // saber en la misma línea que ni el proyecto ni el dinero existen.
+      // saber en la misma línea que el proyecto no existe.
       ...(fixtures.has(p.machineId)
-        ? { synthetic: true, spend_note: 'test fixture: not a repository and not real spend' }
+        ? { synthetic: true, note: 'test fixture: not a repository and not real work' }
         : {}),
     }));
 
@@ -1996,7 +1996,7 @@ function inspectSquad(ctx: CeoContext, input: Record<string, unknown>): ToolOutc
       id: a.id, callsign: a.callsign, state: a.state, lead: a.lead,
       tool: a.tool, tool_detail: a.toolDetail, mission: a.mission,
       blocked_on: a.block?.summary ?? null,
-      spend_usd: Number(a.metrics.costUSD.toFixed(2)),
+      tokens: ceilingTokens(a.metrics),
       uptime_sec: Math.round(a.uptimeMs / 1000),
       budget: ctx.budgets ? budgetView(ctx.budgets.agentStatus(a)) : null,
     };
@@ -2018,7 +2018,7 @@ function inspectSquad(ctx: CeoContext, input: Record<string, unknown>): ToolOutc
 
   const alive = agents.filter((a) => !TERMINAL_STATES.has(a.state)).length;
   const blocked = agents.filter((a) => a.state === 'blocked').length;
-  const spend = agents.reduce((s, a) => s + a.metrics.costUSD, 0);
+  const used = agents.reduce((s, a) => s + ceilingTokens(a.metrics), 0);
 
   return {
     result: JSON.stringify({
@@ -2026,7 +2026,7 @@ function inspectSquad(ctx: CeoContext, input: Record<string, unknown>): ToolOutc
       address: `squad:${sq.name}`,
       lead: sq.leaderId ? describe(sq.leaderId) : null,
       members,
-      totals: { members: members.length, alive, blocked, spend_usd: Number(spend.toFixed(2)) },
+      totals: { members: members.length, alive, blocked, tokens: Math.round(used) },
       budget: ctx.budgets ? scopeView(ctx.budgets.scopeStatus({ kind: 'squad', ref: sq.name })) : null,
       waiting,
     }, null, 1),
@@ -2357,6 +2357,19 @@ function scopeView(s: ScopeBudget | null): Record<string, unknown> | null {
     live_subagents_charged: s.descendants,
     pct: Math.round(s.pct * 100), level: s.level, agents: s.agent_ids.length,
   };
+}
+
+/**
+ * El uso de un proyecto, en la unidad de los techos. Sustituye al rollup en
+ * dólares que `list_fleet` servía por proyecto: aquélla era una suma de
+ * estimaciones de un plan plano, y ésta sale del transcript de cada agente.
+ */
+function projectTokens(ctx: CeoContext, projectId: string): number {
+  let tokens = 0;
+  // Un subagente `Task` cuenta: su consumo es del proyecto igual que el de su
+  // ancestro, y aquí no hay techo a quien cargárselo por separado.
+  for (const a of ctx.agents()) if (a.projectId === projectId) tokens += ceilingTokens(a.metrics);
+  return tokens;
 }
 
 /**
@@ -3254,7 +3267,7 @@ function briefing(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome 
     .sort((a, b) => b.rollup.total - a.rollup.total)
     .map((p) => {
       const by = Object.entries(p.rollup.byState).filter(([, n]) => n > 0).map(([st, n]) => `${n} ${st}`).join(', ');
-      return `${p.code} ${p.name}${p.gitBranch ? ` @${p.gitBranch}` : ''}${p.gitDirty ? ' (dirty)' : ''} · ${by}${p.rollup.costUSD ? ` · $${p.rollup.costUSD.toFixed(2)}` : ''}`;
+      return `${p.code} ${p.name}${p.gitBranch ? ` @${p.gitBranch}` : ''}${p.gitDirty ? ' (dirty)' : ''} · ${by}`;
     });
 
   /* The latest rules: what the operator has said that still applies. */

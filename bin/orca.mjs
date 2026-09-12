@@ -288,7 +288,24 @@ function print(out) {
 }
 
 const pad = (s, n) => String(s ?? '').padEnd(n).slice(0, n);
-const money = (n) => `$${Number(n ?? 0).toFixed(2)}`;
+/**
+ * Uso, que es lo que ORCA mide desde el 2026-09-12. El dinero se fue de todas
+ * las superficies: la flota va con plan plano y un dólar no medía ningún cobro.
+ */
+const tokens = (n) => {
+  const v = Number(n ?? 0);
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${Math.round(v / 1_000)}k`;
+  return String(Math.round(v));
+};
+
+/** Los tokens de una entrada `end` del journal: la regla de `ceilingTokens`. */
+const entryTokens = (e) => {
+  const t = e?.tokens;
+  if (!t) return null;
+  const base = (t.input ?? 0) + (t.output ?? 0);
+  return typeof t.cacheWrite === 'number' ? base + t.cacheWrite : base + (t.cacheRead ?? 0);
+};
 
 function printFleet(r) {
   const projects = r.projects ?? [];
@@ -299,7 +316,7 @@ function printFleet(r) {
     const by = p.by_state ?? {};
     const states = ['booting', 'thinking', 'working', 'blocked', 'idle', 'done', 'dead']
       .filter((s) => by[s]).map((s) => `${by[s]} ${s}`).join(' · ');
-    console.log(`${pad(p.code, 4)} ${pad(p.name, 22)} ${pad(p.branch ?? '', 14)} ${pad(`${p.agents} agents`, 10)} ${pad(money(p.spend_usd), 8)} ${states}`);
+    console.log(`${pad(p.code, 4)} ${pad(p.name, 22)} ${pad(p.branch ?? '', 14)} ${pad(`${p.agents} agents`, 10)} ${pad(tokens(p.tokens), 8)} ${states}`);
   }
   if (blocked.length) {
     console.log('\nwaiting on a human:');
@@ -316,7 +333,7 @@ function printFleet(r) {
 }
 
 function printSquad(r) {
-  console.log(`${r.name}  ·  ${r.totals.alive}/${r.totals.members} alive · ${r.totals.blocked} blocked · ${money(r.totals.spend_usd)}`);
+  console.log(`${r.name}  ·  ${r.totals.alive}/${r.totals.members} alive · ${r.totals.blocked} blocked · ${tokens(r.totals.tokens)} tokens`);
   for (const m of r.members) {
     console.log(`  ${pad(m.callsign, 5)} ${pad(m.lead ? 'LEAD' : '', 5)} ${pad(m.state, 9)} ${pad(m.tool ?? '', 10)} ${m.blocked_on ? `! ${m.blocked_on}` : (m.mission ?? '')}`);
   }
@@ -397,7 +414,7 @@ function printJournal(r) {
         tail = `by ${e.by ?? '?'}${e.squad ? ` · ${e.squad}${e.lead ? ' (lead)' : ''}` : ''}${e.taskId ? ` · ${e.taskId}` : ''} · ${e.runtime ?? '?'}${e.model ? `/${e.model}` : ''}: ${oneLine(e.brief, 100)}`;
         break;
       case 'end':
-        tail = `${e.state}${e.late ? ' (late)' : ''} · ${money(e.costUSD)} · ${span(e.durationMs)}`
+        tail = `${e.state}${e.late ? ' (late)' : ''} · ${entryTokens(e) === null ? '— tokens' : `${tokens(entryTokens(e))} tokens`} · ${span(e.durationMs)}`
           + (e.lines && (e.lines.added || e.lines.removed) ? ` · +${e.lines.added}/-${e.lines.removed}` : '')
           + (e.taskId ? ` · ${e.taskId}` : '') + (e.lastSay ? `: ${oneLine(e.lastSay, 100)}` : '');
         break;
@@ -425,13 +442,13 @@ function printJournalStats(s) {
   const pct = (x) => (x === null || x === undefined ? '—' : `${Math.round(x * 100)}%`);
   console.log(`launches ${s.launches} (human ${s.byLauncher?.human ?? 0}, capcom ${s.byLauncher?.capcom ?? 0}, agent ${s.byLauncher?.agent ?? 0})`
     + ` · done ${s.ends?.done ?? 0} / dead ${s.ends?.dead ?? 0} (${pct(s.doneRate)} done)`
-    + ` · ${money(s.cost?.totalUSD)} total, ${s.cost?.avgUSD != null ? money(s.cost.avgUSD) : '—'} avg, ${s.duration?.avgMs != null ? span(s.duration.avgMs) : '—'} avg`
+    + ` · ${tokens(s.usage?.tokens)} tokens over ${s.usage?.measured ?? 0} measured, ${s.usage?.avgTokens != null ? tokens(s.usage.avgTokens) : '—'} avg, ${s.duration?.avgMs != null ? span(s.duration.avgMs) : '—'} avg`
     + ` · escalations ${s.escalations?.asked ?? 0} (capcom ${s.escalations?.answeredByCapcom ?? 0}, human ${s.escalations?.answeredByHuman ?? 0}, open ${s.escalations?.unanswered ?? 0})`
     + ` · rotations ${s.rotations ?? 0} · landings ${s.landings?.ok ?? 0} ok / ${s.landings?.failed ?? 0} failed`);
   if (s.byProject?.length) {
-    console.log(`\n${pad('project', 8)} ${pad('launch', 6)} ${pad('done', 5)} ${pad('dead', 5)} ${pad('rate', 5)} ${pad('total', 9)} ${pad('avg $', 8)} ${pad('avg time', 9)} esc`);
+    console.log(`\n${pad('project', 8)} ${pad('launch', 6)} ${pad('done', 5)} ${pad('dead', 5)} ${pad('rate', 5)} ${pad('tokens', 9)} ${pad('avg tok', 8)} ${pad('avg time', 9)} esc`);
     for (const p of s.byProject) {
-      console.log(`${pad(p.project ?? p.projectId ?? '?', 8)} ${pad(p.launches, 6)} ${pad(p.done, 5)} ${pad(p.dead, 5)} ${pad(pct(p.doneRate), 5)} ${pad(money(p.totalCostUSD), 9)} ${pad(p.avgCostUSD != null ? money(p.avgCostUSD) : '—', 8)} ${pad(p.avgDurationMs != null ? span(p.avgDurationMs) : '—', 9)} ${p.escalations}`);
+      console.log(`${pad(p.project ?? p.projectId ?? '?', 8)} ${pad(p.launches, 6)} ${pad(p.done, 5)} ${pad(p.dead, 5)} ${pad(pct(p.doneRate), 5)} ${pad(tokens(p.totalTokens), 9)} ${pad(p.avgTokens != null ? tokens(p.avgTokens) : '—', 8)} ${pad(p.avgDurationMs != null ? span(p.avgDurationMs) : '—', 9)} ${p.escalations}`);
     }
   }
   if (s.escalatedBriefs?.length) {

@@ -372,7 +372,7 @@ const tests = [
         && finishedHead.includes('(2)') && has('K3 [AX] done 20m ago · task_pay') && has('K5 [AX] dead 10m ago · no mission: "segfault"')
         && !has('K4 [AX]') && !has('K6 [AX]')
         && has('audit-01 (2 members: 1 done, 1 dead)') && !has('pay-01 (')
-        && has('AX axolots @main · 1 working, 1 blocked · $1.50') && !has('CP capcom') && !has('ZZ empty')
+        && has('AX axolots @main · 1 working, 1 blocked') && !has('$') && !has('CP capcom') && !has('ZZ empty')
         && has('[AX] always the test key (re: Which key on staging?)')
         && text.length < 2500,
         `${text.length} chars · ${out.summary}`,

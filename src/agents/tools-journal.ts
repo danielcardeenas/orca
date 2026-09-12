@@ -20,6 +20,7 @@ import {
   JOURNAL_KINDS, MAX_LIMIT, DEFAULT_LIMIT, parseWhen,
   type JournalEntry, type JournalKind, type JournalQuery,
 } from '../hub/journal.ts';
+import { fmtTokens } from '../hub/budgets.ts';
 
 const WHEN = 'A window edge: "24h", "3d", "90m", an ISO date, or epoch ms. Null for no bound.';
 
@@ -27,7 +28,7 @@ export const TOOLS: ToolSpec[] = [
   {
     name: 'journal',
     description:
-      'The fleet journal: every launch (who launched it, the full brief, runtime, model), every end (final state, cost, duration, tokens, lines changed, last message), every escalation and who answered it (CAPCOM or human), every CAPCOM rotation and every landing — persisted across sessions and hub restarts. This is how a new CAPCOM learns what earlier ones did: read it before re-launching something that already ran, and before writing a brief like one that ended in an escalation. Returns compact entries, newest first unless asked otherwise; `full` returns the whole brief and message. For averages and rates call journal_stats.',
+      'The fleet journal: every launch (who launched it, the full brief, runtime, model), every end (final state, tokens used, duration, lines changed, last message), every escalation and who answered it (CAPCOM or human), every CAPCOM rotation and every landing — persisted across sessions and hub restarts. This is how a new CAPCOM learns what earlier ones did: read it before re-launching something that already ran, and before writing a brief like one that ended in an escalation. Returns compact entries, newest first unless asked otherwise; `full` returns the whole brief and message. For averages and rates call journal_stats.',
     input_schema: {
       type: 'object',
       properties: {
@@ -137,7 +138,7 @@ export function run(ctx: CeoContext, name: string, input: Record<string, unknown
       result: JSON.stringify(s, null, 1),
       summary: `journal stats${scope ? ` (${scope})` : ''}: ${s.launches} launch(es), ${s.ends.done} done / ${s.ends.dead} dead`
         + (s.doneRate !== null ? ` (${Math.round(s.doneRate * 100)}% done)` : '')
-        + `, $${s.cost.totalUSD.toFixed(2)} total, ${s.escalations.asked} escalation(s), ${s.escalatedBriefs.length} brief(s) that escalated`,
+        + `, ${fmtTokens(s.usage.tokens)} tokens over ${s.usage.measured} measured end(s), ${s.escalations.asked} escalation(s), ${s.escalatedBriefs.length} brief(s) that escalated`,
     };
   }
 

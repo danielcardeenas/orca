@@ -60,6 +60,7 @@ import type { CapcomMission } from '../shared/missions.ts';
 import { GESTURE_FAMILY_LABELS, GESTURE_PREFIX, foldGesture, gesturesByFamily, windowKindsNeverOpened } from '../shared/gestures.ts';
 import type { AutonomyDeps } from './autonomy.ts';
 import type { JournalApi, JournalStats } from './journal.ts';
+import { fmtTokens } from './budgets.ts';
 import type { CapcomTimer } from './capcom.ts';
 
 export const IMPROVE_DIR = 'improve';
@@ -825,12 +826,12 @@ export function buildDigest(input: {
   lines.push(`fleet now: ${fleet.agents} agents, ${fleet.blocked} blocked, ${fleet.missionsOpen} open missions (${fleet.missionsOwed} owed an answer)`);
   lines.push(`launches: ${stats.launches} (human ${stats.byLauncher.human}, capcom ${stats.byLauncher.capcom}, agent ${stats.byLauncher.agent})`);
   lines.push(`endings: ${stats.ends.done} done, ${stats.ends.dead} dead${stats.doneRate === null ? '' : ` (${Math.round(stats.doneRate * 100)}% done)`}`);
-  lines.push(`cost: ${money(stats.cost.totalUSD)} total, ${stats.cost.avgUSD === null ? '—' : money(stats.cost.avgUSD)} per agent, avg run ${mins(stats.duration.avgMs)}`);
+  lines.push(`use: ${fmtTokens(stats.usage.tokens)} tokens total, ${stats.usage.avgTokens === null ? '—' : fmtTokens(stats.usage.avgTokens)} per agent over ${stats.usage.measured} measured end(s), avg run ${mins(stats.duration.avgMs)}`);
   lines.push(`escalations: ${stats.escalations.asked} asked · capcom answered ${stats.escalations.answeredByCapcom} · human answered ${stats.escalations.answeredByHuman} · ${stats.escalations.unanswered} unanswered · avg wait ${mins(stats.escalations.avgWaitMs)}`);
   lines.push(`capcom rotations: ${stats.rotations} · landings ${stats.landings.ok} ok / ${stats.landings.failed} failed`);
 
   const projects = stats.byProject.slice(0, 5)
-    .map((p) => `${p.project ?? p.projectId ?? '?'} ${p.launches}L ${p.dead}✝ ${money(p.totalCostUSD)}`);
+    .map((p) => `${p.project ?? p.projectId ?? '?'} ${p.launches}L ${p.dead}✝ ${fmtTokens(p.totalTokens)}`);
   if (projects.length) lines.push(`by project: ${projects.join(' · ')}`);
 
   /*

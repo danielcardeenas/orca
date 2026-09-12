@@ -10,8 +10,9 @@
  *
  *   launch     un agente entró al mundo: quién lo lanzó (humano / CAPCOM /
  *              agente), proyecto, squad, tarea, brief completo, runtime, modelo
- *   end        pasó a done o dead: coste, duración, tokens, líneas, último
- *              mensaje recortado
+ *   end        pasó a done o dead: uso (tokens), duración, líneas, último
+ *              mensaje recortado. `costUSD` se sigue anotando y ya no lo lee
+ *              nadie: ver `JournalEntry.costUSD`
  *   escalation un agente preguntó (ask_human o pregunta al mando)
  *   answer     quién contestó esa escalación (CAPCOM o humano) y qué dijo
  *   rotation   CAPCOM se recicló: de qué sesión a cuál, y con qué cifras
@@ -56,6 +57,8 @@ import { join } from 'node:path';
 import type { Agent } from '../shared/types.ts';
 import { TERMINAL_STATES } from '../shared/types.ts';
 import { isSynthetic } from '../shared/synthetic.ts';
+import { ceilingTokens } from '../shared/tokens.ts';
+import { fmtTokens } from './budgets.ts';
 import type { AutonomyDeps } from './autonomy.ts';
 import type { EscalationAnswered, EscalationRaised } from './lifecycle.ts';
 import { normalize } from './memory.ts';
@@ -102,9 +105,20 @@ export interface JournalEntry {
 
   /* end */
   state?: FinalState;
+  /**
+   * Lo que el CLI dijo que costó, en dólares. **Histórico.** Se sigue
+   * escribiendo porque el transcript lo trae y borrarlo del modelo no haría
+   * más cierto lo ya escrito, pero desde el 2026-09-12 NADA lo suma ni lo
+   * presenta: esta flota va con plan plano y la cifra no corresponde a ningún
+   * cobro. Lo que se mide es `tokens`. Ver docs/INVENTARIO-DINERO-2026-09-12.md.
+   */
   costUSD?: number;
   durationMs?: number;
-  tokens?: { input: number; output: number; cacheRead: number; thinking: number };
+  /**
+   * `cacheWrite` falta en toda entrada anterior al 2026-09-12: el journal no lo
+   * guardaba. `entryTokens` cae entonces al mismo fallback que `ceilingTokens`.
+   */
+  tokens?: { input: number; output: number; cacheRead: number; thinking: number; cacheWrite?: number };
   lines?: { added: number; removed: number };
   toolCalls?: number;
   turns?: number | null;
@@ -185,6 +199,23 @@ function migrate(e: JournalEntry): JournalEntry {
   return { ...rest, missionId: legacy } as JournalEntry;
 }
 
+/**
+ * Los tokens de una entrada `end`, con la MISMA regla que los techos
+ * (`ceilingTokens`): entrada + salida + escritura de caché. Una entrada
+ * anterior al 2026-09-12 no guardó la escritura, y entonces cae al fallback de
+ * la propia regla — entrada + salida + lectura de caché —, que mide de más y
+ * nunca de menos. Null cuando la entrada no anotó tokens en absoluto: un cero
+ * ahí diría "no consumió", que es distinto de "no se midió".
+ */
+export function entryTokens(e: JournalEntry): number | null {
+  const t = e.tokens;
+  if (!t) return null;
+  return ceilingTokens({
+    inputTokens: t.input, outputTokens: t.output, cacheReadTokens: t.cacheRead,
+    ...(typeof t.cacheWrite === 'number' ? { cacheWriteTokens: t.cacheWrite } : {}),
+  });
+}
+
 function clip(s: string | null | undefined, n: number): string | null {
   if (typeof s !== 'string') return null;
   const t = s.replace(/\s+/g, ' ').trim();
@@ -233,8 +264,9 @@ export interface ProjectStats {
   dead: number;
   /** done / (done + dead), null sin fines. */
   doneRate: number | null;
-  totalCostUSD: number;
-  avgCostUSD: number | null;
+  /** Tokens de techo (`ceilingTokens`) sumados sobre los fines del proyecto. */
+  totalTokens: number;
+  avgTokens: number | null;
   avgDurationMs: number | null;
   escalations: number;
 }
@@ -260,7 +292,12 @@ export interface JournalStats {
   byLauncher: Record<LaunchedBy, number>;
   ends: { done: number; dead: number };
   doneRate: number | null;
-  cost: { totalUSD: number; avgUSD: number | null };
+  /**
+   * Uso, que es lo que sustituyó al dinero el 2026-09-12. `measured` dice
+   * sobre cuántos fines se midió: un `0` con `measured: 0` es un journal que
+   * no anotó tokens, no una flota que no consumió.
+   */
+  usage: { tokens: number; avgTokens: number | null; measured: number };
   duration: { avgMs: number | null };
   byProject: ProjectStats[];
   escalations: { asked: number; answeredByCapcom: number; answeredByHuman: number; unanswered: number; avgWaitMs: number | null };
@@ -486,14 +523,14 @@ export class Journal {
     const entries = this.query({ ...q, limit: MAX_LIMIT * 1000, order: 'asc' });
     const byLauncher: Record<LaunchedBy, number> = { human: 0, capcom: 0, agent: 0 };
     const ends = { done: 0, dead: 0 };
-    const cost: number[] = [];
+    const used: number[] = [];
     const dur: number[] = [];
-    const proj = new Map<string, ProjectStats & { costs: number[]; durs: number[] }>();
+    const proj = new Map<string, ProjectStats & { used: number[]; durs: number[] }>();
     const projOf = (e: JournalEntry) => {
       const key = e.projectId ?? e.project ?? '?';
       let p = proj.get(key);
       if (!p) {
-        p = { project: e.project ?? null, projectId: e.projectId ?? null, launches: 0, done: 0, dead: 0, doneRate: null, totalCostUSD: 0, avgCostUSD: null, avgDurationMs: null, escalations: 0, costs: [], durs: [] };
+        p = { project: e.project ?? null, projectId: e.projectId ?? null, launches: 0, done: 0, dead: 0, doneRate: null, totalTokens: 0, avgTokens: null, avgDurationMs: null, escalations: 0, used: [], durs: [] };
         proj.set(key, p);
       }
       return p;
@@ -517,7 +554,8 @@ export class Journal {
           if (e.state === 'done') ends.done += 1; else if (e.state === 'dead') ends.dead += 1;
           const p = projOf(e);
           if (e.state === 'done') p.done += 1; else if (e.state === 'dead') p.dead += 1;
-          if (typeof e.costUSD === 'number') { cost.push(e.costUSD); p.costs.push(e.costUSD); p.totalCostUSD += e.costUSD; }
+          const tok = entryTokens(e);
+          if (tok !== null) { used.push(tok); p.used.push(tok); p.totalTokens += tok; }
           if (typeof e.durationMs === 'number') { dur.push(e.durationMs); p.durs.push(e.durationMs); }
           if (e.agentId && e.state) finals.set(e.agentId, e.state);
           break;
@@ -539,11 +577,11 @@ export class Journal {
     const avg = (xs: number[]): number | null => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
     const round = (n: number | null, d = 4): number | null => (n === null ? null : Number(n.toFixed(d)));
     const byProject = [...proj.values()]
-      .map(({ costs, durs, ...p }) => ({
+      .map(({ used: u, durs, ...p }) => ({
         ...p,
         doneRate: p.done + p.dead ? round(p.done / (p.done + p.dead)) : null,
-        totalCostUSD: round(p.totalCostUSD) ?? 0,
-        avgCostUSD: round(avg(costs)),
+        totalTokens: Math.round(p.totalTokens),
+        avgTokens: round(avg(u), 0),
         avgDurationMs: round(avg(durs), 0),
       }))
       .sort((a, b) => b.launches - a.launches);
@@ -570,7 +608,7 @@ export class Journal {
       if (escalatedBriefs.length >= 20) break;
     }
 
-    const total = cost.reduce((a, b) => a + b, 0);
+    const total = used.reduce((a, b) => a + b, 0);
     return {
       since: q.since ?? null, until: q.until ?? null,
       entries: entries.length,
@@ -578,7 +616,7 @@ export class Journal {
       byLauncher,
       ends,
       doneRate: ends.done + ends.dead ? round(ends.done / (ends.done + ends.dead)) : null,
-      cost: { totalUSD: round(total) ?? 0, avgUSD: round(avg(cost)) },
+      usage: { tokens: Math.round(total), avgTokens: round(avg(used), 0), measured: used.length },
       duration: { avgMs: round(avg(dur), 0) },
       byProject,
       escalations: {
@@ -678,7 +716,8 @@ export function ago(ms: number): string {
 /** Una entrada `end`, en una línea para CAPCOM o para un terminal. */
 export function endLine(e: JournalEntry, now: number): string {
   const parts: string[] = [];
-  if (typeof e.costUSD === 'number' && e.costUSD > 0) parts.push(`$${e.costUSD.toFixed(2)}`);
+  const tok = entryTokens(e);
+  if (tok !== null && tok > 0) parts.push(`${fmtTokens(tok)} tokens`);
   if (typeof e.durationMs === 'number') parts.push(ago(e.durationMs));
   if (e.lines && (e.lines.added || e.lines.removed)) parts.push(`+${e.lines.added}/-${e.lines.removed}`);
   if (e.missionId) parts.push(e.missionId);
@@ -771,7 +810,13 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       kind: 'end', at, ...base(a), state,
       costUSD: Number((m?.costUSD ?? 0).toFixed(4)),
       durationMs: Math.max(0, (a.updatedAt || at) - (a.startedAt || at)),
-      tokens: { input: m?.inputTokens ?? 0, output: m?.outputTokens ?? 0, cacheRead: m?.cacheReadTokens ?? 0, thinking: m?.thinkingTokens ?? 0 },
+      tokens: {
+        input: m?.inputTokens ?? 0, output: m?.outputTokens ?? 0,
+        cacheRead: m?.cacheReadTokens ?? 0, thinking: m?.thinkingTokens ?? 0,
+        // Sin esto no se puede aplicar `ceilingTokens` a una entrada del
+        // journal: en Claude la escritura de caché es casi toda la entrada.
+        ...(typeof m?.cacheWriteTokens === 'number' ? { cacheWrite: m.cacheWriteTokens } : {}),
+      },
       lines: { added: m?.linesAdded ?? 0, removed: m?.linesRemoved ?? 0 },
       toolCalls: m?.toolCalls ?? 0, turns: m?.turns ?? 0,
       lastSay: a.lastSay, runtime: a.runtime, model: a.model,

@@ -7,7 +7,7 @@
  * its id, and the last word that arrived in markdown.
  */
 
-import { bareId, nameOf, plain, promptish } from '../src/ui/util.ts';
+import { bareId, besidesTitle, nameOf, plain, promptish } from '../src/ui/util.ts';
 import { eq, ok, test, type TestModule } from './harness.ts';
 
 const BRIEF = 'Eres el agente A en una prueba corta de saludo entre dos agentes. Escribe en saludo/saludo.log';
@@ -63,6 +63,27 @@ export default {
         'hola puedes oirme',
         'Test',
       ]);
+    }),
+
+    /*
+     * Los dos detalles que se abren en el HUD —la fila de una misión y la
+     * ficha de una propuesta— enseñan el título entero y debajo lo que se
+     * escribió aparte. Cuando no hay nada aparte, no hay segunda línea: una
+     * misión que tomó su nombre de la primera línea del operador, o una
+     * propuesta cuyo resumen cabía en el titular, repetirían la frase.
+     */
+    test('besidesTitle() da la segunda línea sólo cuando de verdad dice otra cosa', () => {
+      const title = 'Sacar el dinero de la consola';
+      return eq('besides', [
+        besidesTitle(title, 'Sacar el dinero de la consola'),
+        // Ni los espacios de más, ni las mayúsculas, ni el punto final
+        // distinguen dos frases: repetirla por eso sigue siendo repetirla.
+        besidesTitle(title, '  Sacar  el dinero\n de la consola.  '),
+        besidesTitle(title, 'SACAR EL DINERO DE LA CONSOLA'),
+        besidesTitle(title, ''),
+        besidesTitle(title, '   '),
+        besidesTitle(title, '  Quitar el gasto de todas las superficies.  '),
+      ], ['', '', '', '', '', 'Quitar el gasto de todas las superficies.']);
     }),
   ],
 } satisfies TestModule;

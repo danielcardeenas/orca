@@ -61,7 +61,7 @@ import type { Console } from '../console.ts';
 import { store } from '../store.ts';
 import { hub } from '../net/client.ts';
 import { getPref, setPref } from '../prefs.ts';
-import { ago, esc } from '../util.ts';
+import { ago, besidesTitle, esc } from '../util.ts';
 import { REDUCE } from '../motion.ts';
 import { getSound } from './sound.ts';
 import { pick, type PickHandle } from '../controls.ts';
@@ -137,9 +137,16 @@ function talkHtml(p: ImproveProposal): string {
 
 function detailHtml(p: ImproveProposal, status: ImproveStatus): string {
   const parts: string[] = [];
-  // El resumen abre el detalle: la fila enseña el titular y aquí está la frase
-  // entera, sin recortar. En la fila no cabía sin partirla en dos líneas.
-  if (p.summary) parts.push(`<p class="imp__sum">${esc(p.summary)}</p>`);
+  // El título ENTERO abre el detalle. La fila lo corta con puntos suspensivos y
+  // hasta hoy lo entero sólo vivía en el `title=`, o sea en un tooltip: algo
+  // que no se puede tabular, no se puede tocar en un teléfono y se va mientras
+  // lo lees. Un titular que no se puede leer no es un titular.
+  parts.push(`<p class="imp__full">${esc(p.title)}</p>`);
+  // Y debajo el resumen, salvo cuando es el título otra vez —una propuesta cuya
+  // frase cabía en el titular— por lo mismo que en el panel de misiones: ver
+  // `besidesTitle`.
+  const summary = besidesTitle(p.title, p.summary ?? '');
+  if (summary) parts.push(`<p class="imp__sum">${esc(summary)}</p>`);
   if (p.evidence.length) {
     parts.push(`<span class="imp__k">EVIDENCE · MEASURED</span><ul class="imp__ev">`
       + p.evidence.map((e) => `<li>${esc(e)}</li>`).join('') + `</ul>`);

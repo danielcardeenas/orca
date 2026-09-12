@@ -306,6 +306,16 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .imp__title:hover { color: var(--auto); }
+/* El título entero, dentro del detalle. La fila lo corta y el tooltip no es un
+   sitio donde se pueda leer nada: aquí envuelve en las líneas que haga falta.
+   Lleva el vestido del titular —display, versalitas, hueso— para que se
+   reconozca como la misma frase que la fila enseñaba a medias. */
+.imp__full {
+  margin: 0 0 4px;
+  font-family: var(--font-display, 'Tiny5', monospace);
+  font-size: 11px; letter-spacing: 0.1em; line-height: 1.45; text-transform: uppercase;
+  color: var(--ink-bright); overflow-wrap: anywhere;
+}
 /* El resumen entero, dentro del detalle: en la fila no cabía sin envolverla. */
 .imp__sum {
   margin: 0 0 2px; font-family: var(--font-mono, ui-monospace, monospace);

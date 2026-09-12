@@ -95,6 +95,24 @@ export function promptish(title: string): boolean {
   return /^(eres|sos|eres el|you are|you're|act as|actúa como|tu (misión|tarea|trabajo) es|your (mission|task|job) is)\b/i.test(t);
 }
 
+/**
+ * La segunda línea de un detalle: lo que se escribió aparte del título, o
+ * nada cuando resulta ser el título otra vez.
+ *
+ * Un detalle que se abre para leer el título entero y debajo repite la misma
+ * frase no ha dicho nada dos veces: ha dicho una vez y ha gastado el sitio de
+ * la otra. Pasa de verdad —una misión toma su nombre de la primera línea del
+ * operador, y una propuesta cuyo resumen cabía en el titular lo repite— así
+ * que la comparación ignora lo que no distingue dos frases: espacios de más,
+ * mayúsculas y el punto final.
+ */
+export function besidesTitle(title: string, text: string): string {
+  const body = text.trim();
+  if (!body) return '';
+  const norm = (s: string) => s.replace(/\s+/g, ' ').replace(/[.·]+$/, '').trim().toLocaleLowerCase();
+  return norm(body) === norm(title) ? '' : body;
+}
+
 /** A session id standing in for a title: eight hex or decimal digits and nothing else. */
 export function bareId(title: string): boolean {
   return /^[0-9a-f]{6,12}$/i.test(title.trim());

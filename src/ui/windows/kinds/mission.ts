@@ -723,6 +723,7 @@ export function mountMission(ctx: WinCtx, c: Console) {
       sig = s;
       const refs = refIndex(store.world.agents);
       headEl.innerHTML = `
+        <h2 class="mission-win__full mono">${esc(missionHeadline(m))}</h2>
         <span class="px px--tiny mission-win__phase is-${phase}">${PHASE_WORD[phase]}</span>
         <span class="px px--tiny">OPENED ${clock(m.createdAt)} · LAST MOVED ${ago(m.updatedAt)} AGO</span>
         ${lead ? `<button class="px px--tiny mission-win__lead ${lead.live ? 'is-live' : ''}" type="button" data-open="${esc(lead.agent.id)}" title="${lead.live ? 'the lead of this mission · open it' : 'led it; its session ended · read it'}">LED BY ${esc(lead.agent.callsign)}</button>` : ''}

@@ -1620,6 +1620,22 @@ kbd.key.is-echo { color: var(--lime); }
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   padding: 6px 12px; border-bottom: 1px solid var(--line-soft);
 }
+/*
+ * El título entero, dentro del cuerpo y no en la barra de la ventana.
+ *
+ * `.win__title` lo corta con puntos suspensivos, y no puede dejar de hacerlo:
+ * esa barra es la de TODAS las ventanas —una línea de alto fija, con el
+ * distintivo, la clase y los tres botones— y dejarla envolver cambiaría el
+ * cromado de cada ventana de la consola y movería el borde superior del cuerpo
+ * mientras se arrastra o se redimensiona. La cabecera de la misión, en cambio,
+ * ya envuelve (`flex-wrap: wrap`), así que la frase entera va aquí: se lee
+ * completa, en las líneas que haga falta, sin tocar el marco.
+ */
+.mission-win__full {
+  flex: 1 0 100%; margin: 0;
+  font-family: var(--font-mono, 'Geist Mono', monospace); font-weight: 400;
+  font-size: 12px; line-height: 1.4; color: var(--ink-bright); overflow-wrap: anywhere;
+}
 .mission-win__head .px { color: var(--ink-dim); letter-spacing: 0.12em; }
 .mission-win__phase { color: var(--ink-mid); }
 .mission-win__phase.is-completed { color: var(--lime); }

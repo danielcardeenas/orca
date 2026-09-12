@@ -71,7 +71,7 @@ import type { Console } from '../console.ts';
 import { store } from '../store.ts';
 import { hub } from '../net/client.ts';
 import { getPref, setPref } from '../prefs.ts';
-import { ago, esc } from '../util.ts';
+import { ago, besidesTitle, esc } from '../util.ts';
 import { REDUCE } from '../motion.ts';
 import {
   ALGN_BEAT, ALGN_HOLD, ALGN_SEAT, ZIP_SVG, type AlgnGesture,
@@ -228,13 +228,18 @@ export function mountMissions(host: HTMLElement, c: Console): MissionsHandle {
   }
 
   function detailHtml(r: MissionRow): string {
-    const brief = r.brief.trim();
-    // El encargo, salvo cuando el título ES el encargo —una misión que tomó su
-    // nombre de la primera línea del operador— porque entonces enseñarlo dos
-    // veces es ruido, no información.
-    const body = !brief
+    // El título ENTERO, que es lo que la fila no puede enseñar: la línea de
+    // arriba lleva un recorte a cuarenta (`missionTitle`) y encima la corta el
+    // CSS, así que sin esto el nombre largo de una misión no se lee en ninguna
+    // parte de la consola.
+    //
+    // Debajo, el encargo — salvo cuando el título ES el encargo, que es lo que
+    // pasa con una misión que tomó su nombre de la primera línea del operador:
+    // ver `besidesTitle`.
+    const brief = besidesTitle(r.headline, r.brief);
+    const body = !r.brief.trim()
       ? `<p class="px px--tiny missions__none">NOTHING WRITTEN IN THIS MISSION YET</p>`
-      : brief === r.headline ? ''
+      : !brief ? ''
       : `<div class="missions__brief mono scroll">${esc(brief)}</div>`;
     return `
       <p class="missions__full mono">${esc(r.headline)}</p>

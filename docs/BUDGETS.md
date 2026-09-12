@@ -9,37 +9,45 @@ actuar sobre él.
 
 ---
 
-## 1 · La unidad: tokens, no dólares
+## 1 · La unidad: uso, no dinero
 
-**Decisión: la unidad por defecto son TOKENS — entrada + salida + escritura de
-caché; la lectura de caché no cuenta** (desde el 2026-09-11; antes contaba, ver
-abajo). El dinero sigue en el modelo de datos, apagado. La regla vive en una
-sola función, `ceilingTokens` (`src/shared/tokens.ts`), que usan todos los
-techos.
+**Decisión: un techo se pone en TOKENS —entrada + salida + escritura de caché;
+la lectura de caché no cuenta— o en MINUTOS VISTOS TRABAJANDO. No hay techo en
+dólares** (desde el 2026-09-12; antes había uno, apagado). La regla de los
+tokens vive en una sola función, `ceilingTokens` (`src/shared/tokens.ts`), que
+usan todos los techos.
 
 ### Por qué
 
-Quien opera ORCA lo hace con suscripciones de Claude Code y de Codex. Los
-dólares que un CLI escribe en su transcript no salen de su bolsillo: lo que se
-agota es cuota. Un aviso en dinero le pedía reaccionar a un número que no paga,
-y encima lo pedía mal — ver §2.
+Esta flota se paga con **plan plano**, Claude incluido, y no se usan llamadas a
+la API. Los dólares que un CLI escribe en su transcript no corresponden a
+ningún cobro: son una estimación de algo que nadie paga. Un aviso en dinero
+pedía reaccionar a un número que no significaba nada, y encima lo pedía mal —
+ver §2.
+
+Hasta el 2026-09-11 el eje en dólares siguió en el modelo de datos, apagado
+detrás de `ORCA_BUDGET_MONEY`, por si un día hacía falta para un proyecto que
+consumiera API de pago. El 2026-09-12 se quitó del todo: un eje que nunca se
+evalúa es una segunda contabilidad esperando a discrepar de la primera, y
+mantenerlo obligaba a que `set_budget`, los avisos, `inspect_agent` y la
+consola siguieran hablando de dinero para decir que no contaba. Si algún día
+hace falta, el commit que lo quitó dice exactamente qué había.
 
 ### Por qué esos tokens y no otros
 
 - **No sólo los de salida.** Un agente que lanza veinte subagentes escribe poco
   y lee muchísimo. Un techo en tokens de salida habría hecho parecer barato al
-  agente que consumió el equivalente a $74: es exactamente la forma del
-  incidente que hay que frenar.
+  agente del incidente: es exactamente la forma de lo que hay que frenar.
 - **No los de lectura de caché** (revertido el 2026-09-11). La primera versión
   los contaba con este argumento: son la mayor parte del volumen de un agente
   con contexto grande, y reenviar un contexto enorme en cada turno es como una
   sesión larga quema cuota. En la práctica medían otra cosa: un CLI con un
   prompt de sistema grande relee todo su prefijo cacheado en cada llamada, y
-  eso suma cientos de miles de tokens que cuestan la décima parte y no son
-  trabajo nuevo. El revisor de AUTOMEJORA cruzaba su techo de 400k en el
-  primer minuto sin haber archivado nada (AJ: 227.946 leídos de caché contra
-  12 de entrada y 2.657 de salida). Un contexto que crece se sigue notando:
-  lo que entra nuevo al contexto es escritura de caché, y ésa sí cuenta.
+  eso suma cientos de miles de tokens que no son trabajo nuevo. El revisor de
+  AUTOMEJORA cruzaba su techo de 400k en el primer minuto sin haber archivado
+  nada (AJ: 227.946 leídos de caché contra 12 de entrada y 2.657 de salida). Un
+  contexto que crece se sigue notando: lo que entra nuevo al contexto es
+  escritura de caché, y ésa sí cuenta.
 - **Sí los de escritura de caché.** En Claude son casi toda la entrada:
   `input_tokens` sale en unidades porque el resto entra por
   `cache_creation_input_tokens`. Sin ellos el techo de un agente de Claude no
@@ -51,19 +59,27 @@ y encima lo pedía mal — ver §2.
 
 ### Y son medidos, no estimados
 
-Salen del transcript. No hay tarifa, no hay conjetura y por tanto no hay forma
-de que la cifra se quede corta, que era el segundo defecto.
+Las dos unidades lo son. Los tokens salen del transcript; los minutos, de haber
+visto al agente trabajando. No hay tarifa, no hay conjetura y por tanto no hay
+forma de que la cifra se quede corta, que era el segundo defecto — por eso
+también se fue el `≥` que llevaban las cifras estimadas.
 
-### Cómo se enciende y se apaga el dinero
+### Los techos de los muertos se van solos
 
-| | |
-|---|---|
-| Apagado (por defecto) | `budget_usd` se guarda en el libro y **no se evalúa**. Ningún aviso menciona dólares. |
-| Encendido | `ORCA_BUDGET_MONEY=1` en el entorno del hub. El eje en dólares vuelve a contar, junto al de tokens. |
+Un techo sobrevivía al agente que frenaba. El 2026-09-12 había **23 en el
+libro y ninguno alcanzaba a un agente vivo**: catorce de agentes archivados,
+nueve de agentes de los que ya no quedaba ni eso.
 
-No se borró nada: un techo en dólares puesto hoy sigue ahí y empieza a contar
-el día que un proyecto consuma API de pago. `set_budget` lo dice al ponerlo:
-`budget on K9: 2.5M tokens / $12 (stored, money mode off)`.
+`pruneOrphans` los recoge en cada barrido: un techo cuyo sujeto —agente,
+escuadrón o misión— no está en la flota se marca, y se borra si **sigue** sin
+estar diez minutos después. Hacen falta dos observaciones separadas en el
+tiempo, y ninguna cuenta con la flota vacía: un hub recién relevado la ve vacía
+hasta que el collector habla, y podar ahí desarmaría a la flota entera de una
+pasada. Si el sujeto reaparece —una sesión desarchivada, un escuadrón que
+vuelve a tener miembros— la marca se borra y el techo se queda.
+
+Lo que borra se dice en el log del hub, no a CAPCOM: es un hecho, no un aviso,
+y CAPCOM no puede hacer nada con él.
 
 ### El tiempo
 
@@ -76,22 +92,22 @@ Un agente en idle acumula cero. Ése era el aviso por reloj.
 
 ---
 
-## 2 · El estimador que mentía
+## 2 · El estimador que mentía, y por qué ya no está
 
 El hub reportaba ~$10 donde el journal registró $105,54, y $3,67 donde el real
-fue ~$23: entre 6 y 20 veces por debajo. Tres causas, las tres arregladas:
+fue ~$23: entre 6 y 20 veces por debajo. Tres causas:
 
 1. **No incluía a la descendencia.** El consumo de los subagentes `Task` de un
-   worker no se cargaba a nadie hasta el cierre. Ver §3.
+   worker no se cargaba a nadie hasta el cierre. Ver §3, que sigue vigente.
 2. **Ignoraba la lectura de caché.** La estimación sumaba entrada y salida y
-   dejaba fuera el grueso del volumen. Ahora la pondera a 0,1, que es la
-   proporción a la que la cobran los proveedores.
+   dejaba fuera el grueso del volumen.
 3. **Se presentaba como un total.** Un `~$10` invita a leerlo como la cifra.
-   Ahora una cifra estimada lleva `≥` delante: `≥$10.00 of $12.00`. Es un
-   **suelo**: la verdad es eso o más.
 
-Y sobre todo: con tokens como unidad por defecto, la cifra que gobierna el
-aviso ya no es una estimación de nada.
+Las tres se arreglaron, y aun arregladas la cifra seguía siendo una estimación
+de un plan plano: un número exacto de algo que nadie cobra. El 2026-09-12 se
+quitó el estimador entero, con su `ORCA_BUDGET_USD_PER_MTOK` y su ponderación
+de la caché a 0,1. La cifra que gobierna un aviso ya no es una estimación de
+nada.
 
 ---
 
@@ -335,9 +351,6 @@ primeras completas.
               exists. Raise the caps with ORCA_MAX_DESCENDANTS / ORCA_MAX_AGENT_DEPTH.
 ```
 
-Con `ORCA_BUDGET_MONEY=1` se añade el eje en dólares, con `≥` cuando la cifra es
-un suelo: `≥$74.21 of $12.00 (618%)`.
-
 Y lo que **ya no** verá: ni una línea sobre un agente en idle, terminado,
 parado o en una máquina no conectada.
 
@@ -347,13 +360,10 @@ parado o en una máquina no conectada.
 
 | Variable | Por defecto | Qué hace |
 |---|---|---|
-| `ORCA_BUDGET_MONEY` | apagado | `1` evalúa el eje en dólares. |
 | `ORCA_DEFAULT_BUDGET_TOKENS` | ninguno | Techo en tokens para todo worker sin techo propio. |
-| `ORCA_DEFAULT_BUDGET_USD` | ninguno | Igual, en dólares. Sólo con el dinero encendido. |
 | `ORCA_DEFAULT_BUDGET_MIN` | ninguno | Igual, en minutos **activos**. |
 | `ORCA_BUDGET_ACTION` | `stop` | Qué hace el 100 % sin progreso. `warn` sólo reporta. |
 | `ORCA_BUDGET_PROGRESS_MIN` | `3` | Minutos de silencio antes de contar como parado. |
-| `ORCA_BUDGET_USD_PER_MTOK` | `6` | $/millón para el suelo estimado mientras el CLI no escribe coste. |
 | `ORCA_MAX_DESCENDANTS` | `8` | Subagentes `Task` vivos bajo un agente. |
 | `ORCA_MAX_AGENT_DEPTH` | `2` | Generaciones de subagentes `Task`. |
 | `ORCA_SWARM_ACTION` | `warn` | `stop` para además la sesión del ancestro. |
@@ -372,7 +382,8 @@ la ausencia de freno fue lo más caro del incidente.
 
 ```
 npm test -- budgets        21 pruebas: unidad, umbrales, tiempo activo, idle, retiro,
-                           descendencia, freno, dinero, suelo estimado, agrupado, hub
+                           descendencia, freno, el dinero que ya no está, la poda
+                           de techos huérfanos, agrupado, hub
 npm test -- briefing       que el brief de CAPCOM nombre retire_agent y la unidad nueva
 npm test -- worker-recovery que un handoff no reinicia el consumo del agente
 npm test -- hub            el mundo, la reconciliación y el desalojo

@@ -104,7 +104,7 @@ function capcom(state: Agent['state'] = 'idle'): Agent {
 
 function emptyStats(): JournalStats {
   return {
-    since: null, until: null, entries: 0, launches: 3,
+    since: null, until: null, entries: 0, excluded: 0, launches: 3,
     byLauncher: { human: 1, capcom: 2, agent: 0 },
     ends: { done: 2, dead: 1 }, doneRate: 2 / 3,
     usage: { tokens: 1_500_000, avgTokens: 500_000, measured: 3 }, duration: { avgMs: 600_000 },
@@ -1433,6 +1433,40 @@ const tests = [
       words.join(' ') === 'sent sent completed archived archived'
       && order === 'open sent completed dismissed archived',
       `${words.join(' ')} / ${order}`);
+  }),
+
+  /* ── la puerta de lanzamiento no puede cerrarle a AUTOMEJORA ───── */
+
+  test('both launches AUTOMEJORA makes pass the FORGE gate on ORCA\'s own repo', async () => {
+    const { ProjectPolicy, forgeGate } = await import('../src/hub/project-policy.ts');
+    /*
+     * El repo de ORCA está marcado `forgeOnly` (hub/project-policy.ts), y los
+     * dos únicos lanzamientos automáticos que caen sobre él salen de aquí. Si
+     * la puerta les cerrara, la revisión dejaría de correr y nadie lo vería
+     * hasta el siguiente informe que no llega: el revisor pasa por ser de sólo
+     * lectura (`review`), y el implementador por su squad `forge-…`.
+     */
+    const policy = new ProjectPolicy(null) as unknown as { forgeOnly(p: unknown): boolean };
+    policy.forgeOnly = () => true;
+    const r = rig();
+    const api = improveApi(r);
+    try {
+      feed(api);
+      r.clock.advance(IMPROVE_TICK_MS * 3);
+      await settle();
+      const reviewer = spawnOf(r);
+      r.sent.length = 0;
+      await api.implement({ brief: 'Do it. Done when green.', squad: 'forge-abc123', mission: 'M' });
+      const implementer = spawnOf(r);
+      const project = { id: 'p_orca', path: ORCA_ROOT, code: 'OR' };
+      return ok('AUTOMEJORA is not locked out by its own policy',
+        !!reviewer && !!implementer
+        && forgeGate(reviewer, project, policy as never) === null
+        && forgeGate(implementer, project, policy as never) === null
+        // Y por las razones que se creen, no por casualidad.
+        && reviewer.review === true && implementer.squad?.startsWith('forge-') === true,
+        JSON.stringify({ reviewer: reviewer?.review, implementer: implementer?.squad }));
+    } finally { api.stop(); r.done(); }
   }),
 ];
 

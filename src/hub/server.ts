@@ -12,6 +12,7 @@ import { uploadRecoveryImage } from './recovery-images.ts';
 import { uploadFile } from './uploads.ts';
 import { transcribeHandler, vocabulary, whisperConfig } from './transcribe.ts';
 import { FILE_ROOTS_FILE, FileRoots } from './file-roots.ts';
+import { ProjectPolicy, forgeGate, projectPolicyFile } from './project-policy.ts';
 import { leadPrompt, missionLeadOf, missionPrompt, type CapcomMission } from '../shared/missions.ts';
 import { dispatchForge } from './forge.ts';
 import { normalizeGestures } from '../shared/gestures.ts';
@@ -213,6 +214,15 @@ export interface HubOptions {
    * no toca el disco del operador. `null`: sólo en memoria.
    */
   fileRootsFile?: string | null;
+  /**
+   * Dónde vive la marca por proyecto de la puerta de lanzamiento
+   * (`project-policy.ts`). Sin decir nada: el json real, salvo en el arnés,
+   * que no hereda la política del operador. `null`: sin marcas.
+   *
+   * Un fichero que no existe NO se crea: sin él la puerta está abierta para
+   * todos los proyectos, y arrancar el hub no la enciende para ninguno.
+   */
+  projectPolicyFile?: string | null;
   /** El libro de presupuestos. Una prueba inyecta el suyo, con reloj propio. */
   budgets?: BudgetBook;
   /**
@@ -662,6 +672,11 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   const fleets = options.fleets ?? new FleetStore();
   // Carpetas que el operador autorizó desde el visor (file-roots.ts).
   const approvedRoots = new FileRoots(options.fileRootsFile !== undefined ? options.fileRootsFile : harness ? null : FILE_ROOTS_FILE);
+  // Qué proyectos sólo admiten escritura desde un squad FORGE, si es que hay
+  // alguno: sin fichero no hay marcas, y esto no lo escribe (project-policy.ts).
+  const projectPolicy = new ProjectPolicy(
+    options.projectPolicyFile !== undefined ? options.projectPolicyFile : harness ? null : projectPolicyFile(),
+  );
 
   // whisper.cpp, looked up on every request: a model dropped into
   // ORCA_HOME/models while the hub runs is found without a restart. The
@@ -1340,6 +1355,21 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     }
     const target = targetOf(cmd);
     if (target.error) { ackTo(consoleId, cmdId, false, target.error); return; }
+    /*
+     * La puerta de lanzamiento, en el único sitio por el que pasan todos: la
+     * consola, CAPCOM por MCP y los callers en proceso entran por aquí. Los
+     * hijos que un agente pide con `orca-spawn` no pasan por el hub sino por
+     * su collector, y ésos ya llevan el squad del padre (planChild), así que
+     * el que entró por la puerta se la pasa a los suyos.
+     */
+    if (cmd.k === 'spawn') {
+      const refusal = forgeGate(cmd, world.state.projects[cmd.projectId], projectPolicy);
+      if (refusal) {
+        store.logEvent({ at: Date.now(), kind: 'cmd', text: `spawn rechazado en ${cmd.projectId}: ${refusal}` });
+        ackTo(consoleId, cmdId, false, refusal);
+        return;
+      }
+    }
     // El diario atribuye el lanzamiento que viene: una consola es el humano;
     // sin consola detrás es el mando (MCP) o un caller en proceso.
     if (cmd.k === 'spawn') {

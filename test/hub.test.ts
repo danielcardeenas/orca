@@ -18,7 +18,8 @@ import { WebSocket } from 'ws';
 
 import type { Agent, CeoMessage, Escalation, FeedItem } from '../src/shared/types.ts';
 import type { ServerFrame } from '../src/shared/protocol.ts';
-import { PATHS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
+import { CLOSE_REPLACED, PATHS, PROTOCOL_VERSION, newId } from '../src/shared/protocol.ts';
+import type { CollectorInstance } from '../src/shared/protocol.ts';
 import { BEAT_TIMEOUT_MS } from '../src/shared/protocol.ts';
 
 import { World, looksLikeSecret } from '../src/hub/world.ts';
@@ -687,6 +688,60 @@ export async function testBadTokenIsRejected(): Promise<TestResult> {
   } catch (err) { return fail(name, String(err)); }
 }
 
+/** Un collector crudo: sólo el hello, para poder presentar dos con el mismo id. */
+class RawCollector {
+  ws: WebSocket;
+  closedWith: number | null = null;
+  closedWhy = '';
+  constructor(port: number, machineId: string, instance: CollectorInstance) {
+    this.ws = new WebSocket(`ws://127.0.0.1:${port}${PATHS.collector}`);
+    this.ws.on('close', (code, reason) => { this.closedWith = code; this.closedWhy = reason.toString(); });
+    this.ws.on('error', () => { /* el cierre ya lo cuenta */ });
+    this.ws.once('open', () => {
+      this.ws.send(JSON.stringify({
+        t: 'hello', v: PROTOCOL_VERSION, token: TOKEN, instance,
+        machine: { id: machineId, hostname: 'mac-real', platform: 'darwin', version: '1', online: true, lastSeen: 0, connectedAt: 0, load: { sessions: 0, activeSessions: 0, cpuPct: null, memPct: null } },
+      }));
+    });
+  }
+  close(): void { try { this.ws.close(); } catch { /* ya */ } }
+}
+
+export async function testSameMachineIdReplacesAndSaysWho(): Promise<TestResult> {
+  const name = 'integración: dos collectors con el mismo id → el echado recibe 4009 con el culpable, y el hub avisa a la segunda';
+  try {
+    return await withHub(async (hub) => {
+      const id = 'a303610-misma-maquina';
+      const one: CollectorInstance = { pid: 1001, cwd: '/Users/x/orca', startedAt: 1 };
+      const two: CollectorInstance = { pid: 2002, cwd: '/Users/x/orca/.claude/worktrees/w', startedAt: 2 };
+      const a = new RawCollector(hub.port, id, one);
+      await until(() => hub.world.state.machines[id]?.online === true, 6_000, 'primero dentro');
+      const feedBefore = hub.world.state.feed.length;
+
+      // El segundo echa al primero: 4009, y el motivo dice quién.
+      const b = new RawCollector(hub.port, id, two);
+      await until(() => a.closedWith !== null, 6_000, 'el primero cerrado');
+      assert(a.closedWith === CLOSE_REPLACED, `esperaba ${CLOSE_REPLACED}, fue ${a.closedWith}`);
+      assert(/pid 2002/.test(a.closedWhy) && /worktrees\/w/.test(a.closedWhy), `motivo: ${a.closedWhy}`);
+      assert(hub.world.state.machines[id]?.online === true, 'la máquina no se marca offline por el reemplazo');
+      // Un reemplazo solo es un reinicio: sin alerta en el feed.
+      assert(hub.world.state.feed.slice(feedBefore).every((f) => f.level !== 'alert'), 'el primero no avisa');
+
+      // El primero vuelve y echa al segundo: ping-pong, y esta vez el hub lo dice.
+      const a2 = new RawCollector(hub.port, id, one);
+      await until(() => b.closedWith !== null, 6_000, 'el segundo cerrado');
+      assert(b.closedWith === CLOSE_REPLACED && /pid 1001/.test(b.closedWhy), `segundo: ${b.closedWith} ${b.closedWhy}`);
+      await until(() => hub.world.state.feed.slice(feedBefore).some((f) => f.level === 'alert' && /echando el uno al otro/.test(f.text)), 4_000, 'alerta de ping-pong en el feed');
+      const alert = hub.world.state.feed.slice(feedBefore).find((f) => f.level === 'alert')!;
+      assert(/pid 1001/.test(alert.text) && /pid 2002/.test(alert.text), `la alerta nombra a los dos: ${alert.text}`);
+      assert(hub.world.state.machines[id]?.online === true, 'sigue online con el que ganó');
+      a2.close();
+      await until(() => hub.world.state.machines[id]?.online === false, 6_000, 'sin nadie, offline');
+      return ok(name, alert.text);
+    });
+  } catch (err) { return fail(name, String(err)); }
+}
+
 export async function testGarbageIsIsolated(): Promise<TestResult> {
   const name = 'integración: una consola con basura no tumba a las demás';
   try {
@@ -787,6 +842,7 @@ export default {
     testEscalationAnswerIsRemembered,
     testCollectorDropMarksMachineOffline,
     testBadTokenIsRejected,
+    testSameMachineIdReplacesAndSaysWho,
     testGarbageIsIsolated,
     testHttpEndpoints,
   ],

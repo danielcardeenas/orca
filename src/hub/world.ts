@@ -42,6 +42,7 @@ import {
 import { mergeTalk } from '../shared/talk.ts';
 import { isSynthetic } from '../shared/synthetic.ts';
 import type { CollectorFrame, PatchOp } from '../shared/protocol.ts';
+import { instanceLabel, replacementText } from './replacements.ts';
 import { BEAT_TIMEOUT_MS } from '../shared/protocol.ts';
 import { ghostReason } from './liveness.ts';
 
@@ -1129,6 +1130,30 @@ export class World {
       at: this.now(), level: 'alert', source: 'ORCA',
       text: `máquina ${m.hostname} offline (${reason})`,
     }]);
+    this.flushOut();
+  }
+
+  /**
+   * Otro collector ocupó la plaza de esta máquina. Siempre queda en el log de
+   * eventos, aparte de `machine:reconnect`: el 10-09 hubo 4.912 y ninguna se
+   * distinguía de una reconexión. A partir del segundo en la ventana, además,
+   * se avisa en el feed: dos seguidos no son un reinicio, son un síntoma.
+   */
+  noteMachineReplaced(machineId: string, v: import('./replacements.ts').ReplacementVerdict): void {
+    const m = this.state.machines[machineId];
+    const hostname = m?.hostname ?? machineId;
+    this.event({
+      at: this.now(), kind: 'machine:replaced', machineId,
+      text: `${instanceLabel(v.to)} sustituye a ${instanceLabel(v.from)}`,
+      data: { from: v.from, to: v.to, count: v.count, windowMs: v.windowMs, pingPong: v.pingPong },
+    });
+    if (v.repeated) {
+      this.pushFeed(machineId, [{
+        id: `f_repl_${machineId}_${this.now()}`,
+        at: this.now(), level: 'alert', source: 'ORCA',
+        text: replacementText(hostname, v),
+      }]);
+    }
     this.flushOut();
   }
 

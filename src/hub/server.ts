@@ -50,10 +50,10 @@ import type {
 import { TERMINAL_STATES } from '../shared/types.ts';
 import { HARNESS_ENV, HARNESS_REFUSED, harnessRefusedWhy, isHarnessHub, sameWorld } from '../shared/synthetic.ts';
 import type {
-  ClientFrame, CollectorFrame, Command, CommandFrame, PatchOp, ServerFrame, TermFrame,
+  ClientFrame, CollectorFrame, CollectorInstance, Command, CommandFrame, PatchOp, ServerFrame, TermFrame,
 } from '../shared/protocol.ts';
 import {
-  MAX_ARTIFACT_BYTES, PATHS, PORTS, PROTOCOL_VERSION, artifactMime, newId,
+  CLOSE_REPLACED, MAX_ARTIFACT_BYTES, PATHS, PORTS, PROTOCOL_VERSION, artifactMime, newId,
   TERM_ID_RE, TERM_MAX_CHUNK, TERM_MAX_COLS, TERM_MAX_ROWS,
 } from '../shared/protocol.ts';
 
@@ -64,6 +64,7 @@ import type { PatchFrame } from './bus.ts';
 import { CLOSE_BAD_HELLO, CLOSE_BAD_VERSION, CLOSE_NOT_HARNESS, CLOSE_UNAUTHORIZED, ORCA_DIR, createAuth } from './auth.ts';
 import type { Auth } from './auth.ts';
 import { harnessHomeRefusal } from './harness.ts';
+import { ReplacementWatch, instanceLabel, replacementText } from './replacements.ts';
 import { HubStore } from './persist.ts';
 import { FleetStore } from './fleets.ts';
 import { nextSquadName, SQUAD_SEQ_FILE } from './squad-seq.ts';
@@ -157,6 +158,8 @@ interface Conn {
 
 interface CollectorConn extends Conn {
   machineId: string | null;
+  /** El proceso detrás del `hello`; null si era un collector que aún no lo manda. */
+  instance: CollectorInstance | null;
 }
 
 interface ConsoleConn extends Conn {
@@ -393,6 +396,26 @@ function firstForwarded(raw: string): string {
  * deja de ser local. Falla cerrado, que es lo que hay que hacer cuando la
  * alternativa es abrir la flota entera sin un solo error en el log.
  */
+/**
+ * La instancia que declara un `hello`, o null si no la trae o viene mal.
+ * Es texto que va a logs y a un motivo de cierre: se acota, no se confía.
+ */
+function sanitizeInstance(raw: unknown): CollectorInstance | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r['pid'] !== 'number' || !Number.isFinite(r['pid'])) return null;
+  if (typeof r['startedAt'] !== 'number' || !Number.isFinite(r['startedAt'])) return null;
+  const cwd = typeof r['cwd'] === 'string' ? r['cwd'].slice(0, 200) : '';
+  return { pid: r['pid'], cwd, startedAt: r['startedAt'] };
+}
+
+/** Un motivo de cierre no puede pasar de 123 bytes UTF-8, o `ws` lanza. */
+function closeReason(text: string): string {
+  let out = text;
+  while (Buffer.byteLength(out, 'utf8') > 123) out = out.slice(0, -1);
+  return out;
+}
+
 function remoteOf(req: IncomingMessage): string {
   let forwarded = '';
   for (const h of PROXY_HEADERS) {
@@ -690,6 +713,8 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   if (!harness && existsSync(join(ORCA_DIR, 'push.json'))) getPush();
 
   const collectors = new Map<string, CollectorConn>();   // machineId → conn
+  /** Quién echó a quién por máquina; a partir del segundo en diez minutos, aviso. */
+  const replacements = new ReplacementWatch();
   const orphanCollectors = new Set<CollectorConn>();     // aún sin hello
   const consoles = new Set<ConsoleConn>();
   const pending = new Map<string, Pending>();
@@ -1677,7 +1702,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
   function acceptCollector(ws: WebSocket, req: IncomingMessage): void {
     const conn: CollectorConn = {
       id: newId('col'), ws, remote: remoteOf(req), alive: true,
-      authed: false, helloTimer: null, machineId: null,
+      authed: false, helloTimer: null, machineId: null, instance: null,
     };
     orphanCollectors.add(conn);
     const queryToken = tokenFromRequest(req);
@@ -1736,14 +1761,23 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
             ws.close(CLOSE_NOT_HARNESS, HARNESS_REFUSED);
             return;
           }
-          // Reconexión: la conexión vieja de esa máquina se descarta.
+          const instance = sanitizeInstance(frame.instance);
+          // Reconexión: la conexión vieja de esa máquina se descarta. Se cuenta
+          // y se le dice al echado quién lo echó: sin eso, dos collectors con
+          // el mismo id turnándose cada segundo parecen reconexiones normales.
           const previous = collectors.get(machineId);
           if (previous && previous !== conn) {
             previous.machineId = null;      // que su cierre no marque offline
-            try { previous.ws.close(4009, 'reemplazado'); } catch { /* ya estaba muerto */ }
+            const verdict = replacements.note(machineId, previous.instance, instance, Date.now());
+            const hostname = frame.machine.hostname;
+            if (verdict.repeated) warn(replacementText(hostname, verdict));
+            else log(`collector sustituido: ${machineId} (${hostname}), ${instanceLabel(instance)} echa a ${instanceLabel(previous.instance)}`);
+            try { previous.ws.close(CLOSE_REPLACED, closeReason(`reemplazado por ${instanceLabel(instance)}`)); } catch { /* ya estaba muerto */ }
+            world.noteMachineReplaced(machineId, verdict);
           }
           conn.authed = true;
           conn.machineId = machineId;
+          conn.instance = instance;
           if (conn.helloTimer) { clearTimeout(conn.helloTimer); conn.helloTimer = null; }
           orphanCollectors.delete(conn);
           collectors.set(machineId, conn);

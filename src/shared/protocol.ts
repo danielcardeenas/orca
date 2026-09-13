@@ -22,8 +22,13 @@ export const PROTOCOL_VERSION = 1;
 export type CollectorFrame =
   | { t: 'capcom:transfer'; machineId: string; fromId: string; hold: boolean; contextMode?: 'continuity' | 'clean'; cutoffAt?: number; toId?: string }
   | { t: 'capcom:handoff'; machineId: string; event: import('./handoff.ts').CapcomHandoff }
-  /** First frame on every connection. The hub rejects a version mismatch. */
-  | { t: 'hello'; v: number; machine: Machine; token: string }
+  /**
+   * First frame on every connection. The hub rejects a version mismatch.
+   * `instance` names the process, not the machine: two collectors on one
+   * machine share `machine.id` and only differ here. It is what the hub
+   * quotes when it has to tell one of them who took its place.
+   */
+  | { t: 'hello'; v: number; machine: Machine; token: string; instance?: CollectorInstance }
   /** Full picture of one machine. Sent on connect and after any resync. */
   | { t: 'snapshot'; machineId: string; projects: Project[]; agents: Agent[]; keys: KeyDescriptor[] }
   /** Incremental agent change. `patch` is a shallow merge over the agent. */
@@ -625,6 +630,25 @@ export const CLOSE_BAD_HELLO = 4003;
  * declara arnés la admite.
  */
 export const CLOSE_NOT_HARNESS = 4004;
+/**
+ * Otro collector se presentó con el mismo `machine.id` y se quedó con la
+ * plaza. No es una caída de red: quien lo recibe no puede volver a entrar sin
+ * echar al otro, y dos procesos con la misma identidad no ganan los dos. El
+ * `reason` que lo acompaña dice quién ocupó la plaza (pid y cwd), que es lo
+ * único que permite saber después qué segundo collector corría.
+ */
+export const CLOSE_REPLACED = 4009;
+
+/**
+ * Quién es el proceso detrás de un `hello`. Va aparte de `Machine` porque no
+ * describe a la máquina: dos collectors en la misma máquina la describen igual
+ * y sólo se distinguen por esto.
+ */
+export interface CollectorInstance {
+  pid: number;
+  cwd: string;
+  startedAt: number;
+}
 
 /** Ports. Kept here so collector, hub and UI cannot drift apart. */
 export const PORTS = {

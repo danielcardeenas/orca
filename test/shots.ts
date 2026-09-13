@@ -80,7 +80,15 @@ function runShot(file: string): Promise<Verdict> {
     const t0 = Date.now();
     const p = spawn('npx', argv, {
       cwd: ROOT,
-      env: { ...process.env, ORCA_VISUAL_ISOLATED: '1' },
+      /*
+       * `ORCA_FLEET_STILL`: la flota sintética del arnés, con la población
+       * congelada mientras dure el shot —nadie nace, nadie muere, todo lo
+       * demás sigue vivo—. Va aquí y no en `visual.ts` porque las escenas del
+       * comp sí quieren una flota andando; esto es sólo la puerta. Y se puede
+       * apagar desde fuera (`ORCA_FLEET_STILL=0 npm run shots`) para medir
+       * qué compra. Ver `FakeFleetOptions.still`.
+       */
+      env: { ORCA_FLEET_STILL: '1', ...process.env, ORCA_VISUAL_ISOLATED: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';

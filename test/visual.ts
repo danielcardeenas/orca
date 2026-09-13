@@ -1143,7 +1143,13 @@ export async function ensureServers(
     // column count is a function of its population, so every one of those
     // moved tiles under a shot that was measuring pixels. At 1 the same churn
     // happens twenty times less often.
-    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=1', '--anyway']);
+    //
+    // `--still` when the shot runner asks for it (`ORCA_FLEET_STILL`): the
+    // fourth source of movement — births and deaths — has no
+    // `prefers-reduced-motion` to obey, and this is its switch. Never for the
+    // comp frames: those want a fleet that is going somewhere.
+    const still = process.env['ORCA_FLEET_STILL'] === '1' ? ['--still'] : [];
+    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=1', '--anyway', ...still]);
     fleetStarted = true;
   }
 

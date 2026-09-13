@@ -12,7 +12,8 @@
  * la instantánea del agente en ese momento (o null si ya no está).
  */
 
-import type { Agent } from '../shared/types.ts';
+import type { Agent, WithdrawCause } from '../shared/types.ts';
+import { WITHDRAW_CAUSES } from '../shared/types.ts';
 import type { WorldEvent } from './world.ts';
 
 export interface AgentStateChange {
@@ -38,6 +39,13 @@ export interface LifecycleEvents {
   'escalation:new': (e: EscalationRaised) => void;
   /** Alguien la contestó: `by` es 'human' o 'ceo' (CAPCOM). */
   'escalation:answered': (e: EscalationAnswered) => void;
+  /**
+   * Dejó de existir sin respuesta: el agente siguió, el diálogo cambió, el
+   * agente se fue, la sustituyó otra, caducó o alguien la descartó. `cause`
+   * dice cuál (ver `WithdrawCause` en shared/types.ts). No es una pregunta sin
+   * contestar: es una que nadie tenía que contestar ya.
+   */
+  'escalation:withdrawn': (e: EscalationWithdrawn) => void;
 }
 
 /**
@@ -66,6 +74,17 @@ export interface EscalationAnswered {
   answer: string;
   by: 'human' | 'ceo';
   rememberAs: string | null;
+  at: number;
+}
+
+export interface EscalationWithdrawn {
+  id: string | null;
+  agentId: string | null;
+  projectId: string | null;
+  machineId: string | null;
+  cause: WithdrawCause;
+  /** La prosa del que la retiró, tal cual; para leerla, no para clasificarla. */
+  reason: string;
   at: number;
 }
 
@@ -135,6 +154,19 @@ export class AgentLifecycle {
           answer: typeof d.answer === 'string' ? d.answer : '',
           by: d.by === 'human' ? 'human' : 'ceo',
           rememberAs: typeof d.rememberAs === 'string' ? d.rememberAs : null,
+          at: ev.at,
+        });
+        return;
+      }
+      case 'escalation:withdraw': {
+        const d = (ev.data ?? {}) as { id?: unknown; cause?: unknown; reason?: unknown };
+        // Un evento viejo (anterior a la causa) llega sin `data`: se anota
+        // como retirada por el agente, que era lo único que existía entonces.
+        const cause = (WITHDRAW_CAUSES as readonly unknown[]).includes(d.cause) ? d.cause as WithdrawCause : 'agent';
+        this.emit('escalation:withdrawn', {
+          id: typeof d.id === 'string' ? d.id : null,
+          agentId: ev.agentId ?? null, projectId: ev.projectId ?? null, machineId: ev.machineId ?? null,
+          cause, reason: typeof d.reason === 'string' ? d.reason : ev.text ?? '',
           at: ev.at,
         });
         return;

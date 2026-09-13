@@ -28,7 +28,7 @@ export const TOOLS: ToolSpec[] = [
   {
     name: 'journal',
     description:
-      'The fleet journal: every launch (who launched it, the full brief, runtime, model), every end (final state, tokens used, duration, lines changed, last message), every escalation and who answered it (CAPCOM or human), every CAPCOM rotation and every landing — persisted across sessions and hub restarts. This is how a new CAPCOM learns what earlier ones did: read it before re-launching something that already ran, and before writing a brief like one that ended in an escalation. Returns compact entries, newest first unless asked otherwise; `full` returns the whole brief and message. For averages and rates call journal_stats.',
+      'The fleet journal: every launch (who launched it, the full brief, runtime, model), every end (final state, tokens used, duration, lines changed, last message), every escalation and who answered it (CAPCOM or human) or why it was withdrawn instead (the agent moved on, a permission dialog changed, the agent left, superseded, expired, dismissed), every CAPCOM rotation and every landing — persisted across sessions and hub restarts. This is how a new CAPCOM learns what earlier ones did: read it before re-launching something that already ran, and before writing a brief like one that ended in an escalation. Returns compact entries, newest first unless asked otherwise; `full` returns the whole brief and message. For averages and rates call journal_stats.',
     input_schema: {
       type: 'object',
       properties: {
@@ -36,7 +36,7 @@ export const TOOLS: ToolSpec[] = [
         squad: { type: ['string', 'null'], description: 'Squad label, e.g. "audit-01". Null for all.' },
         mission_id: { type: ['string', 'null'], description: 'Only entries of agents bound to this ORCA mission. Null for all.' },
         agent: { type: ['string', 'null'], description: 'Agent id or callsign. Null for all.' },
-        kind: { type: ['string', 'null'], enum: [...JOURNAL_KINDS, null], description: 'One kind: launch, end, escalation, answer, rotation, landing. Null for every kind.' },
+        kind: { type: ['string', 'null'], enum: [...JOURNAL_KINDS, null], description: 'One kind: launch, end, escalation, answer, withdraw, rotation, landing. Null for every kind.' },
         since: { type: ['string', 'null'], description: WHEN },
         until: { type: ['string', 'null'], description: WHEN },
         state: { type: ['string', 'null'], enum: ['done', 'dead', null], description: 'Only `end` entries with this final state. Null for any.' },
@@ -54,7 +54,7 @@ export const TOOLS: ToolSpec[] = [
   {
     name: 'journal_stats',
     description:
-      'A summary of the fleet journal: launches by who launched them, done vs dead and the done rate, total and average cost and average duration overall and per project, escalations and who answered them, CAPCOM rotations, landings — and the briefs that ended in an escalation, which are the ones to write better next time. Narrow it with a project or a time window.',
+      'A summary of the fleet journal: launches by who launched them, done vs dead and the done rate, total and average cost and average duration overall and per project, escalations split into answered (by whom), withdrawn (by cause: nobody owed those an answer) and unanswered (asked in the window and still open), CAPCOM rotations, landings — and the briefs that ended in an escalation, which are the ones to write better next time. Narrow it with a project or a time window.',
     input_schema: {
       type: 'object',
       properties: {
@@ -82,6 +82,7 @@ export function compact(e: JournalEntry): JournalEntry {
   if ('lastSay' in out) out.lastSay = cut(out.lastSay);
   if ('question' in out) out.question = cut(out.question);
   if ('answer' in out) out.answer = cut(out.answer);
+  if ('reason' in out) out.reason = cut(out.reason);
   return out;
 }
 
@@ -140,7 +141,9 @@ export function run(ctx: CeoContext, name: string, input: Record<string, unknown
       result: JSON.stringify(s, null, 1),
       summary: `journal stats${scope ? ` (${scope})` : ''}: ${s.launches} launch(es), ${s.ends.done} done / ${s.ends.dead} dead`
         + (s.doneRate !== null ? ` (${Math.round(s.doneRate * 100)}% done)` : '')
-        + `, ${fmtTokens(s.usage.tokens)} tokens over ${s.usage.measured} measured end(s), ${s.escalations.asked} escalation(s), ${s.escalatedBriefs.length} brief(s) that escalated`
+        // Las mismas tres cifras que el digest de AUTOMEJORA, con la misma
+        // regla: retirada no es sin respuesta.
+        + `, ${fmtTokens(s.usage.tokens)} tokens over ${s.usage.measured} measured end(s), ${s.escalations.asked} escalation(s) (${s.escalations.answeredByCapcom + s.escalations.answeredByHuman} answered, ${s.escalations.withdrawn} withdrawn, ${s.escalations.unanswered} unanswered), ${s.escalatedBriefs.length} brief(s) that escalated`
         // Lo apartado se dice con el total, o el total miente por omisión.
         + (s.excluded > 0 ? ` · ${s.excluded} harness entr${s.excluded === 1 ? 'y' : 'ies'} excluded` : ''),
     };

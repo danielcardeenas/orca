@@ -25,7 +25,9 @@ import {
 import { TOOLS, run, queryOf, compact, briefingLines } from '../src/agents/tools-journal.ts';
 import { EXTENSION_TOOLS, duplicateToolNames } from '../src/agents/extensions.ts';
 import { CEO_TOOLS, type CeoContext } from '../src/agents/tools.ts';
-import type { Agent, Machine, Project } from '../src/shared/types.ts';
+import { buildDigest } from '../src/hub/improve.ts';
+import { World, type WorldEvent } from '../src/hub/world.ts';
+import type { Agent, Escalation, Machine, Project, WithdrawCause } from '../src/shared/types.ts';
 import type { CapcomMission } from '../src/shared/missions.ts';
 import { eq, ok, test, type TestModule } from './harness.ts';
 
@@ -248,6 +250,118 @@ const tests = [
         && answers[0]?.escalationId === 'esc_1' && answers[0].answeredBy === 'capcom' && answers[0].answer === 'test' && answers[0].waitedMs === 15_000
         && answers[1]?.escalationId === 'esc_2' && answers[1].answeredBy === 'human' && answers[1].rememberAs === 'never delete branches' && answers[1].waitedMs === 1_000,
         JSON.stringify({ asked, answers }));
+    } finally { await b.close(); }
+  }),
+
+  test('a withdrawn escalation is a withdraw entry with its cause: counted apart, never as unanswered, and every reader says the same', async () => {
+    // El 10-09 la máquina real levantó 76 preguntas, 68 se retiraron (56 por
+    // «Permission dialog changed») y 0 se contestaron: el diario las contaba
+    // TODAS como sin respuesta, y el informe acusaba al mando de desatender
+    // lo que nunca tuvo que atender. Una retirada es otro hecho, y se ve.
+    const b = box();
+    try {
+      arrive(b, agent({ id: 'w1', mission: 'Ship payments. Done when green.' }));
+      arrive(b, agent({ id: 'w2', mission: 'Audit orca. Done when listed.' }));
+      const ask = (at: number, id: string, agentId: string, text: string) =>
+        b.lifecycle.feed({ at, kind: 'escalation:new', machineId: 'm1', agentId, projectId: 'p_ax', text, data: { id, urgency: 'blocking', options: [] } }, b.agents.get(agentId));
+      const drop = (at: number, id: string, agentId: string, cause: WithdrawCause, reason: string) =>
+        b.lifecycle.feed({ at, kind: 'escalation:withdraw', machineId: 'm1', agentId, projectId: 'p_ax', text: reason, data: { id, cause, reason } }, b.agents.get(agentId));
+      ask(20_000, 'esc_1', 'w1', 'Run the migration?');
+      drop(24_000, 'esc_1', 'w1', 'agent', 'el agente lo resolvió por su cuenta');
+      ask(30_000, 'esc_2', 'w1', 'Allow Bash(rm -rf dist)?');
+      drop(34_000, 'esc_2', 'w1', 'permission', 'Permission dialog changed; previous outcome unconfirmed');
+      // Ésta sí queda abierta: es la única que nadie contestó.
+      ask(40_000, 'esc_3', 'w2', 'Which registry?');
+      // Y una retirada como la escribía el hub de antes: sin `data`, sólo la
+      // prosa y el agente. Se casa por agente y cuenta como retirada por él.
+      ask(50_000, 'esc_4', 'w2', 'Bump the major?');
+      b.lifecycle.feed({ at: 51_000, kind: 'escalation:withdraw', machineId: 'm1', agentId: 'w2', text: 'el agente terminó' }, b.agents.get('w2'));
+      await b.journal.flush();
+
+      const w = lines(b.dir).filter((e) => e.kind === 'withdraw');
+      const s = b.journal.stats();
+      const byKind = b.journal.query({ kind: 'withdraw', order: 'asc' });
+      const tool = run(b.ctx, 'journal_stats', { project: null, squad: null, since: null, until: null })!;
+      const digest = buildDigest({
+        stats: s, usage: { since: 0, counts: {}, total: 0 },
+        fleet: { agents: 2, blocked: 1, missionsOpen: 0, missionsOwed: 0 }, windowMs: 86_400_000,
+      }).lines.find((l) => l.startsWith('escalations:')) ?? '';
+      const w1 = s.escalatedBriefs.find((e) => e.agentId === 'w1');
+      const w2 = s.escalatedBriefs.find((e) => e.agentId === 'w2');
+      return ok('withdrawn is its own column',
+        w.length === 3
+        && w[0]?.escalationId === 'esc_1' && w[0].cause === 'agent' && w[0].question === 'Run the migration?' && w[0].reason === 'el agente lo resolvió por su cuenta' && w[0].waitedMs === 4_000
+        && w[1]?.escalationId === 'esc_2' && w[1].cause === 'permission' && w[1].waitedMs === 4_000
+        && w[2]?.escalationId === 'esc_4' && w[2].cause === 'agent' && w[2].reason === 'el agente terminó' && w[2].waitedMs === 1_000
+        && s.escalations.asked === 4 && s.escalations.answeredByCapcom === 0 && s.escalations.answeredByHuman === 0
+        && s.escalations.withdrawn === 3 && s.escalations.withdrawnBy.agent === 2 && s.escalations.withdrawnBy.permission === 1 && s.escalations.withdrawnBy.gone === 0
+        && s.escalations.unanswered === 1 && s.escalations.avgWaitMs === null
+        && byKind.length === 3
+        && w1?.withdrawn === 'permission' && w1.answeredBy === null && w2?.withdrawn === 'agent'
+        && tool.summary.includes('4 escalation(s) (0 answered, 3 withdrawn, 1 unanswered)')
+        && digest.includes('4 asked') && digest.includes('3 withdrawn (no answer was owed: agent 2, permission 1)') && digest.includes('1 unanswered'),
+        JSON.stringify({ w, escalations: s.escalations, briefs: s.escalatedBriefs, tool: tool.summary, digest }));
+    } finally { await b.close(); }
+  }),
+
+  test('every way the world closes a question without an answer reaches the journal with its id and cause', async () => {
+    // El mismo cableado que server.ts: World → lifecycle.feed → diario. Seis
+    // cierres, y hasta hoy tres no emitían ningún evento (caducada, sustituida,
+    // descartada) y los otros no llevaban id, así que el diario no podía casar
+    // ninguno con su pregunta.
+    const b = box();
+    try {
+      const events: WorldEvent[] = [];
+      const world = new World({
+        now: () => b.clock.now,
+        onEvent: (ev) => { events.push(ev); b.lifecycle.feed(ev, ev.agentId ? world.state.agents[ev.agentId] : null); },
+      });
+      const m: Machine = {
+        id: 'm1', hostname: 'm1', platform: 'darwin', version: '0.1.0', online: true,
+        lastSeen: b.clock.now, connectedAt: b.clock.now, load: { sessions: 0, activeSessions: 0, cpuPct: null, memPct: null },
+      };
+      world.upsertMachine(m);
+      for (const id of ['a1', 'a2', 'a3']) world.applyCollector({ t: 'agent:new', machineId: 'm1', agent: agent({ id, projectId: 'p_ax' }) }, 'm1');
+      const esc = (id: string, agentId: string, over: Partial<Escalation> = {}): Escalation => ({
+        id, agentId, projectId: 'p_ax', machineId: 'm1', question: `Q ${id}`, context: null, options: ['yes', 'no'], optionsOnly: false,
+        urgency: 'blocking', status: 'pending', ceoAttempt: null, answer: null, answeredBy: null, rememberAs: null,
+        askedAt: b.clock.now, answeredAt: null, expiresAt: null, ...over,
+      });
+      const raise = (e: Escalation) => world.applyCollector({ t: 'escalation', machineId: 'm1', escalation: e }, 'm1');
+      const perm = { phase: 'requested' as const, fingerprint: 'fp' };
+
+      raise(esc('esc_agent', 'a1'));
+      world.applyCollector({ t: 'escalation:withdraw', machineId: 'm1', id: 'esc_agent', reason: 'el agente lo resolvió por su cuenta' }, 'm1');
+      raise(esc('esc_perm', 'a1', { permission: perm }));
+      world.applyCollector({ t: 'escalation:withdraw', machineId: 'm1', id: 'esc_perm', reason: 'Permission dialog changed; previous outcome unconfirmed' }, 'm1');
+      raise(esc('esc_old', 'a2', { permission: perm }));
+      raise(esc('esc_new', 'a2', { permission: { ...perm, fingerprint: 'fp2' } })); // sustituye a esc_old
+      raise(esc('esc_gone', 'a3'));
+      world.applyCollector({ t: 'agent:gone', machineId: 'm1', id: 'a3' }, 'm1');
+      raise(esc('esc_dismissed', 'a1'));
+      world.dismissEscalation('esc_dismissed');
+      raise(esc('esc_expired', 'a1', { expiresAt: b.clock.now + 1 }));
+      b.clock.now += 1_000;
+      world.sweep(b.clock.now);
+      // Una retirada repetida no se anota dos veces.
+      world.applyCollector({ t: 'escalation:withdraw', machineId: 'm1', id: 'esc_agent', reason: 'otra vez' }, 'm1');
+      await b.journal.flush();
+
+      const withdrawEvents = events.filter((e) => e.kind === 'escalation:withdraw');
+      const w = lines(b.dir).filter((e) => e.kind === 'withdraw');
+      const causeOf = Object.fromEntries(w.map((e) => [e.escalationId, e.cause]));
+      const s = b.journal.stats();
+      const status = (id: string) => world.state.escalations[id]?.status;
+      return ok('six closures, six causes, one still open',
+        withdrawEvents.length === 6 && withdrawEvents.every((e) => typeof (e.data as { id?: unknown }).id === 'string' && typeof e.agentId === 'string')
+        && w.length === 6
+        && causeOf['esc_agent'] === 'agent' && causeOf['esc_perm'] === 'permission' && causeOf['esc_old'] === 'superseded'
+        && causeOf['esc_gone'] === 'gone' && causeOf['esc_dismissed'] === 'dismissed' && causeOf['esc_expired'] === 'expired'
+        && w.every((e) => e.question === `Q ${e.escalationId}` && typeof e.waitedMs === 'number')
+        && status('esc_old') === 'withdrawn' && status('esc_expired') === 'expired' && status('esc_new') === 'pending'
+        && s.escalations.asked === 7 && s.escalations.withdrawn === 6 && s.escalations.unanswered === 1
+        && Object.values(s.escalations.withdrawnBy).every((n) => n === 1),
+        JSON.stringify({ events: withdrawEvents, w, escalations: s.escalations }));
     } finally { await b.close(); }
   }),
 

@@ -25,7 +25,7 @@ import { parseContinuation } from '../shared/continuation.ts';
 import type {
   Agent, AgentMessage, AgentMetrics, AgentRole, AgentState, Artifact, ArtifactKind, CeoMessage,
   Collision, Escalation, FeedItem, KeyDescriptor, Machine, MessageKind, MessageScope,
-  Project, SessionRollup, WorldState,
+  Project, SessionRollup, WithdrawCause, WorldState,
   TalkItem,
 } from '../shared/types.ts';
 import { AGENT_STATES, LIVE_STATES, MAX_REPORT, MAX_TALK, MAX_TALK_TEXT, TERMINAL_STATES, emptyRollup, emptyWorld } from '../shared/types.ts';
@@ -161,6 +161,18 @@ export interface WorldEvent {
   projectId?: string;
   text?: string;
   data?: unknown;
+}
+
+/**
+ * Lo que `escalation:withdraw` lleva en `data`. Con el id el diario casa la
+ * retirada con la pregunta; con la causa (`WithdrawCause`, shared/types.ts)
+ * la cuenta aparte de las que nadie contestó. Hasta el 2026-09-13 el evento
+ * sólo llevaba el motivo en prosa, y toda retirada contaba como sin respuesta.
+ */
+export interface WithdrawData {
+  id: string;
+  cause: WithdrawCause;
+  reason: string;
 }
 
 export interface WorldHooks {
@@ -1129,10 +1141,7 @@ export class World {
     }
     for (const e of Object.values(this.state.escalations)) {
       if (e.status !== 'pending' && e.status !== 'with_ceo') continue;
-      if (e.expiresAt !== null && e.expiresAt < now) {
-        e.status = 'expired';
-        this.emit({ o: 'escalation', id: e.id, v: e });
-      }
+      if (e.expiresAt !== null && e.expiresAt < now) this.closeEscalation(e, 'expired', 'expired', 'caducó por tiempo');
     }
     this.reviveGhosts(now);
     this.evictTerminal(now);
@@ -1290,8 +1299,7 @@ export class World {
       let expired = 0;
       for (const e of droppable) {
         if (expired >= excess) break;
-        e.status = 'expired';
-        this.emit({ o: 'escalation', id: e.id, v: e });
+        this.closeEscalation(e, 'expired', 'expired', 'la cola de preguntas desbordó');
         expired++;
       }
       if (expired > 0) {
@@ -1486,12 +1494,7 @@ export class World {
      */
     for (const e of Object.values(this.state.escalations)) {
       if (e.agentId !== id || e.status === 'answered' || e.status === 'withdrawn') continue;
-      e.status = 'withdrawn';
-      this.emit({ o: 'escalation', id: e.id, v: e });
-      this.event({
-        at: this.now(), kind: 'escalation:withdraw', machineId: e.machineId,
-        text: 'el agente que preguntaba ya no está',
-      });
+      this.closeEscalation(e, 'withdrawn', 'gone', 'el agente que preguntaba ya no está');
     }
     for (const m of Object.values(this.state.messages)) {
       if (m.fromAgentId === id || (m.scope === 'agent' && m.toAgentId === id)) {
@@ -2031,8 +2034,7 @@ export class World {
     if (e.permission && !prev) {
       for (const older of Object.values(this.state.escalations)) {
         if (older.id !== e.id && older.machineId === machineId && older.agentId === e.agentId && older.permission && ['pending', 'with_ceo'].includes(older.status)) {
-          older.status = 'withdrawn';
-          this.emit({ o: 'escalation', id: older.id, v: older });
+          this.closeEscalation(older, 'withdrawn', 'superseded', `la sustituyó otro diálogo de permisos (${e.id})`);
         }
       }
     }
@@ -2052,9 +2054,29 @@ export class World {
     const e = this.state.escalations[id];
     if (!e || e.machineId !== machineId) return;
     if (e.status === 'answered') return;
-    e.status = 'withdrawn';
-    this.emit({ o: 'escalation', id, v: e });
-    this.event({ at: this.now(), kind: 'escalation:withdraw', machineId, text: s(reason, MAX_LINE) });
+    // El collector no dice por qué en un campo, sólo en prosa. Lo que el hub
+    // sí sabe es si lo que retira era un diálogo de permisos, y ésa es la
+    // clase que importa contar aparte.
+    this.closeEscalation(e, 'withdrawn', e.permission ? 'permission' : 'agent', s(reason, MAX_LINE));
+  }
+
+  /**
+   * Todo cierre sin respuesta pasa por aquí: fija el estado, publica el
+   * registro y deja el hecho en el log con el id, el agente y la causa. Sin
+   * el id, el diario no puede casar la retirada con la pregunta y la sigue
+   * contando como pendiente; sin la causa, no puede decir cuántas se
+   * retiraron por qué. Idempotente: una escalación ya cerrada no se anota
+   * dos veces.
+   */
+  private closeEscalation(e: Escalation, status: 'withdrawn' | 'expired', cause: WithdrawCause, reason: string): void {
+    if (e.status === 'answered' || e.status === 'withdrawn' || e.status === 'expired') return;
+    e.status = status;
+    this.emit({ o: 'escalation', id: e.id, v: e });
+    const data: WithdrawData = { id: e.id, cause, reason };
+    this.event({
+      at: this.now(), kind: 'escalation:withdraw', machineId: e.machineId, agentId: e.agentId,
+      projectId: e.projectId, text: reason, data,
+    });
   }
 
   requestPermissionAnswer(id: string): void {
@@ -2148,8 +2170,7 @@ export class World {
   dismissEscalation(id: string): Escalation | null {
     const e = this.state.escalations[id];
     if (!e) return null;
-    e.status = 'withdrawn';
-    this.emit({ o: 'escalation', id, v: e });
+    this.closeEscalation(e, 'withdrawn', 'dismissed', 'descartada desde la consola');
     this.flushOut();
     return e;
   }

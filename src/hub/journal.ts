@@ -15,6 +15,12 @@
  *              nadie: ver `JournalEntry.costUSD`
  *   escalation un agente preguntó (ask_human o pregunta al mando)
  *   answer     quién contestó esa escalación (CAPCOM o humano) y qué dijo
+ *   withdraw   esa escalación dejó de existir sin respuesta, y por qué causa
+ *              (`WithdrawCause`, shared/types.ts): el agente siguió, el diálogo de
+ *              permisos cambió, el agente se fue, la sustituyó otra, caducó,
+ *              alguien la descartó. Sin esta entrada toda retirada contaba
+ *              como «sin respuesta», que es la cifra con la que se juzga si
+ *              el mando atiende a la flota
  *   rotation   CAPCOM se recicló: de qué sesión a cuál, y con qué cifras
  *   landing    un worktree aterrizó en la rama del proyecto (pieza C, si existe)
  *
@@ -36,7 +42,7 @@
  * ── De dónde salen los hechos ──────────────────────────────────────
  *
  * Del ciclo de vida tipado (lifecycle.ts): agent:new, agent:state,
- * escalation:new, escalation:answered. Más un barrido cada
+ * escalation:new, escalation:answered, escalation:withdrawn. Más un barrido cada
  * `ORCA_JOURNAL_SWEEP_MS` (5 s) sobre la flota entera, porque un snapshot de
  * collector (arranque del hub, reconexión) mete agentes en el mundo sin
  * evento alguno, y los da por muertos igual de en silencio: el barrido anota
@@ -54,19 +60,19 @@ import { appendFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { Agent } from '../shared/types.ts';
-import { TERMINAL_STATES } from '../shared/types.ts';
+import type { Agent, WithdrawCause } from '../shared/types.ts';
+import { TERMINAL_STATES, WITHDRAW_CAUSES } from '../shared/types.ts';
 import { isSynthetic } from '../shared/synthetic.ts';
 import { ceilingTokens } from '../shared/tokens.ts';
 import { fmtTokens } from './budgets.ts';
 import type { AutonomyDeps } from './autonomy.ts';
-import type { EscalationAnswered, EscalationRaised } from './lifecycle.ts';
+import type { EscalationAnswered, EscalationRaised, EscalationWithdrawn } from './lifecycle.ts';
 import { normalize } from './memory.ts';
 
 /* ── el registro ──────────────────────────────────────────────────── */
 
-export type JournalKind = 'launch' | 'end' | 'escalation' | 'answer' | 'rotation' | 'landing';
-export const JOURNAL_KINDS: readonly JournalKind[] = ['launch', 'end', 'escalation', 'answer', 'rotation', 'landing'];
+export type JournalKind = 'launch' | 'end' | 'escalation' | 'answer' | 'withdraw' | 'rotation' | 'landing';
+export const JOURNAL_KINDS: readonly JournalKind[] = ['launch', 'end', 'escalation', 'answer', 'withdraw', 'rotation', 'landing'];
 
 export type LaunchedBy = 'human' | 'capcom' | 'agent';
 export type AnsweredBy = 'human' | 'capcom';
@@ -135,8 +141,12 @@ export interface JournalEntry {
   answer?: string | null;
   answeredBy?: AnsweredBy;
   rememberAs?: string | null;
-  /** answer: cuánto esperó la pregunta. */
+  /** answer / withdraw: cuánto estuvo abierta la pregunta. */
   waitedMs?: number | null;
+  /* withdraw */
+  cause?: WithdrawCause;
+  /** withdraw: la prosa de quien la retiró. */
+  reason?: string | null;
 
   /* rotation */
   fromId?: string | null;
@@ -298,8 +308,30 @@ export interface EscalatedBrief {
   brief: string | null;
   question: string | null;
   answeredBy: AnsweredBy | null;
+  /** Si nadie la contestó porque dejó de existir: la causa. Null si sigue abierta o se contestó. */
+  withdrawn: WithdrawCause | null;
   /** Cómo acabó ese agente, si ya acabó. */
   state: FinalState | null;
+}
+
+/**
+ * El recuento de preguntas de una ventana. Tres destinos que suman `asked`
+ * (salvo lo que se cerró fuera de la ventana): contestada, retirada, o
+ * abierta todavía. `unanswered` es SÓLO lo tercero. Las retiradas no se
+ * callan: van aparte y por causa, porque muchas retiradas de una misma clase
+ * son un síntoma (un detector que minta una pregunta por cada cambio de
+ * pantalla, por ejemplo), y sólo se ve si se cuenta.
+ */
+export interface EscalationStats {
+  asked: number;
+  answeredByCapcom: number;
+  answeredByHuman: number;
+  /** Retiradas en la ventana, todas las causas. */
+  withdrawn: number;
+  withdrawnBy: Record<WithdrawCause, number>;
+  /** Preguntadas en la ventana y ni contestadas ni retiradas dentro de ella. */
+  unanswered: number;
+  avgWaitMs: number | null;
 }
 
 export interface JournalStats {
@@ -328,7 +360,7 @@ export interface JournalStats {
   usage: { tokens: number; avgTokens: number | null; measured: number };
   duration: { avgMs: number | null };
   byProject: ProjectStats[];
-  escalations: { asked: number; answeredByCapcom: number; answeredByHuman: number; unanswered: number; avgWaitMs: number | null };
+  escalations: EscalationStats;
   /** Briefs que acabaron en escalación: lo que una sesión nueva debería escribir mejor. */
   escalatedBriefs: EscalatedBrief[];
   rotations: number;
@@ -589,6 +621,9 @@ export class Journal {
     const finals = new Map<string, FinalState>();
     const asked = new Map<string, JournalEntry>();
     const answered = new Map<string, JournalEntry>();
+    const withdrawn = new Map<string, JournalEntry>();
+    const withdrawnBy = Object.fromEntries(WITHDRAW_CAUSES.map((c) => [c, 0])) as Record<WithdrawCause, number>;
+    let withdrawnTotal = 0;
     const waits: number[] = [];
     let rotations = 0;
     const landings = { ok: 0, failed: 0 };
@@ -619,6 +654,14 @@ export class Journal {
           if (e.escalationId) answered.set(e.escalationId, e);
           if (typeof e.waitedMs === 'number') waits.push(e.waitedMs);
           break;
+        case 'withdraw':
+          // Se cuenta aunque la pregunta se hiciera antes de la ventana, igual
+          // que las respuestas; lo que NO hace es contar como espera: nadie
+          // esperó por una pregunta que dejó de hacer falta.
+          withdrawnTotal += 1;
+          if (e.cause && e.cause in withdrawnBy) withdrawnBy[e.cause] += 1;
+          if (e.escalationId) withdrawn.set(e.escalationId, e);
+          break;
         case 'rotation': rotations += 1; break;
         case 'landing': if (e.ok === false) landings.failed += 1; else landings.ok += 1; break;
       }
@@ -648,11 +691,13 @@ export class Journal {
       seenAgents.add(e.agentId);
       const l = launches.get(e.agentId);
       const a = e.escalationId ? answered.get(e.escalationId) : undefined;
+      const w = e.escalationId ? withdrawn.get(e.escalationId) : undefined;
       escalatedBriefs.push({
         agentId: e.agentId, callsign: e.callsign ?? l?.callsign ?? null,
         project: e.project ?? l?.project ?? null, squad: e.squad ?? l?.squad ?? null, missionId: e.missionId ?? l?.missionId ?? null,
         brief: clip(l?.brief ?? null, 240), question: clip(e.question ?? null, 200),
         answeredBy: a?.answeredBy ?? null,
+        withdrawn: a ? null : w?.cause ?? null,
         state: finals.get(e.agentId) ?? null,
       });
       if (escalatedBriefs.length >= 20) break;
@@ -672,7 +717,8 @@ export class Journal {
       byProject,
       escalations: {
         asked: asked.size, answeredByCapcom: byCapcom, answeredByHuman: byHuman,
-        unanswered: [...asked.keys()].filter((k) => !answered.has(k)).length,
+        withdrawn: withdrawnTotal, withdrawnBy,
+        unanswered: [...asked.keys()].filter((k) => !answered.has(k) && !withdrawn.has(k)).length,
         avgWaitMs: round(avg(waits), 0),
       },
       escalatedBriefs,
@@ -949,6 +995,26 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         squad: a?.squad ?? asked?.squad ?? null, missionId: a ? missionOf(a) : asked?.missionId ?? null,
         escalationId: e.id ?? asked?.escalationId ?? null, question: e.question ?? asked?.question ?? null,
         answer: e.answer, answeredBy: e.by === 'human' ? 'human' : 'capcom', rememberAs: e.rememberAs ?? null,
+        waitedMs: asked ? Math.max(0, e.at - asked.at) : null,
+      });
+    }),
+    deps.lifecycle.on('escalation:withdrawn', (e: EscalationWithdrawn) => {
+      // Se casa con la pregunta por id y, sin id, por agente: como la
+      // respuesta. Y se anota aunque no se encuentre la pregunta (un hub que
+      // reinició con ella abierta): el hecho de que dejó de existir sigue
+      // siendo cierto, y `stats` la casará por id con la entrada vieja.
+      const asked = (e.id ? openById.get(e.id) : undefined) ?? (e.agentId ? open.get(e.agentId) : undefined) ?? null;
+      if (asked?.escalationId) openById.delete(asked.escalationId);
+      if (e.agentId && open.get(e.agentId) === asked) open.delete(e.agentId);
+      const a = e.agentId ? deps.agent(e.agentId) : undefined;
+      write({
+        kind: 'withdraw', at: e.at,
+        agentId: e.agentId ?? asked?.agentId ?? null, callsign: a?.callsign ?? asked?.callsign ?? null,
+        machineId: a?.machineId ?? e.machineId ?? asked?.machineId ?? null,
+        projectId: e.projectId ?? asked?.projectId ?? null, project: code(e.projectId ?? asked?.projectId ?? null),
+        squad: a?.squad ?? asked?.squad ?? null, missionId: a ? missionOf(a) : asked?.missionId ?? null,
+        escalationId: e.id ?? asked?.escalationId ?? null, question: asked?.question ?? null,
+        cause: e.cause, reason: clip(e.reason, MAX_QUESTION),
         waitedMs: asked ? Math.max(0, e.at - asked.at) : null,
       });
     }),

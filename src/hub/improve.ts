@@ -824,7 +824,19 @@ export function buildDigest(input: {
   lines.push(`launches: ${stats.launches} distinct agents (human ${stats.byLauncher.human}, capcom ${stats.byLauncher.capcom}, agent ${stats.byLauncher.agent} — those three count launch ENTRIES, so a relaunched agent adds one)`);
   lines.push(`endings: ${stats.ends.done} done, ${stats.ends.dead} dead${stats.doneRate === null ? '' : ` (${Math.round(stats.doneRate * 100)}% done)`}`);
   lines.push(`use: ${fmtTokens(stats.usage.tokens)} tokens total, ${stats.usage.avgTokens === null ? '—' : fmtTokens(stats.usage.avgTokens)} per agent over ${stats.usage.measured} measured end(s), avg run ${mins(stats.duration.avgMs)}`);
-  lines.push(`escalations: ${stats.escalations.asked} asked · capcom answered ${stats.escalations.answeredByCapcom} · human answered ${stats.escalations.answeredByHuman} · ${stats.escalations.unanswered} unanswered · avg wait ${mins(stats.escalations.avgWaitMs)}`);
+  /*
+   * Las retiradas van aparte de las no contestadas, y por causa. Una pregunta
+   * que dejó de existir (el agente siguió, el diálogo cambió, el agente se
+   * fue) no es una pregunta que nadie contestó, y sumarlas era acusar al
+   * mando de desatender lo que nunca tuvo que atender: «132 unanswered» con
+   * «0 owed an answer» en el mismo informe. Pero tampoco se callan: muchas
+   * retiradas de una clase son un síntoma que sólo se ve si se cuenta.
+   */
+  const esc = stats.escalations;
+  const causes = (Object.entries(esc.withdrawnBy) as [string, number][]).filter(([, n]) => n > 0).map(([c, n]) => `${c} ${n}`);
+  lines.push(`escalations: ${esc.asked} asked · capcom answered ${esc.answeredByCapcom} · human answered ${esc.answeredByHuman}`
+    + ` · ${esc.withdrawn} withdrawn (no answer was owed${causes.length ? `: ${causes.join(', ')}` : ''})`
+    + ` · ${esc.unanswered} unanswered (asked in the window, still open) · avg wait ${mins(esc.avgWaitMs)}`);
   lines.push(`capcom rotations: ${stats.rotations} · landings ${stats.landings.ok} ok / ${stats.landings.failed} failed`);
 
   /*

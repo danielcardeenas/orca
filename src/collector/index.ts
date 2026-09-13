@@ -77,6 +77,7 @@ import {
 } from './util.ts';
 import type { LineBatch, TranscriptRef } from './watch.ts';
 import { TranscriptWatcher } from './watch.ts';
+import { ReconnectPolicy, type ReconnectPlan } from './reconnect.ts';
 
 const SCOPE = 'collector';
 
@@ -132,8 +133,8 @@ const LIVE_WATCH_RETRY_MS = 5_000;
  * son un modelo pensando: son un diálogo abierto, o un cuelgue.
  */
 const STALL_MS = Math.max(4_000, Number(process.env['ORCA_STALL_MS'] ?? 20_000) || 20_000);
-const RECONNECT_MIN_MS = 1_000;
-const RECONNECT_MAX_MS = 30_000;
+/** Cuándo arrancó este proceso: con el pid, es lo que lo distingue de otro collector en la misma máquina. */
+const STARTED_AT = Date.now();
 const FEED_MAX = 200;
 
 /* ── identidad de la máquina ──────────────────────────────────────── */
@@ -266,7 +267,8 @@ class Collector {
   private ws: WebSocket | null = null;
   private connected = false;
   private helloSent = false;
-  private backoff = RECONNECT_MIN_MS;
+  /** Cuánto esperar antes de volver a llamar al hub. Ver reconnect.ts: la política es lo que falló el 10-09. */
+  private readonly reconnect = new ReconnectPolicy();
   private stopping = false;
   private timers: NodeJS.Timeout[] = [];
   private cpuPrev: { idle: number; total: number } | null = null;
@@ -1589,7 +1591,7 @@ class Collector {
       ws = new WebSocket(url, { handshakeTimeout: 8000 });
     } catch (err) {
       log('debug', SCOPE, `no pude abrir el socket: ${errText(err)}`);
-      this.scheduleReconnect();
+      this.scheduleReconnect(this.reconnect.failed());
       return;
     }
     this.ws = ws;
@@ -1597,7 +1599,9 @@ class Collector {
 
     ws.on('open', () => {
       this.connected = true;
-      this.backoff = RECONNECT_MIN_MS;
+      // Abrir no resetea la espera: en el bucle de dos collectors con el mismo
+      // id el socket abre siempre y muere al segundo. Se decide al cerrar.
+      this.reconnect.opened(Date.now());
       log('info', SCOPE, `conectado al hub en ${url}`);
       this.sendHello();
       this.sendSnapshot();
@@ -1611,26 +1615,33 @@ class Collector {
       // Con el hub caído esto ocurre cada pocos segundos: no es ruido de warn.
       log('debug', SCOPE, `socket: ${errText(err)}`);
     });
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
       const was = this.connected;
       this.connected = false;
       this.ws = null;
       // Sin hub no hay consola mirando: se sueltan los ptys, los panes siguen.
       this.terms.closeAll('hub link lost');
-      if (was) log('warn', SCOPE, 'hub desconectado, reintentando');
-      this.scheduleReconnect();
+      const plan = this.reconnect.closed(code, Date.now());
+      if (plan.replaced) {
+        // No es una caída: otro proceso con mi identidad ocupó la plaza, y el
+        // hub dice cuál. Volver al segundo es lo que hizo el bucle del 10-09.
+        const who = reason.toString() || 'sin detalle';
+        const again = plan.streak > 1 ? `, ${plan.streak} veces seguidas` : '';
+        log(plan.streak > 1 ? 'error' : 'warn', SCOPE,
+          `otro collector se ha conectado con mi identidad de máquina (${who})${again}; vuelvo a llamar en ${Math.round(plan.waitMs / 1000)}s`);
+      } else if (was) {
+        log('warn', SCOPE, 'hub desconectado, reintentando');
+      }
+      this.scheduleReconnect(plan);
     });
   }
 
-  /** Backoff exponencial 1s→30s con jitter, para no sincronizar toda la flota. */
-  private scheduleReconnect(): void {
+  /** Programa la siguiente llamada. La espera la decide la política, con jitter para no sincronizar la flota. */
+  private scheduleReconnect(plan: ReconnectPlan): void {
     if (this.stopping) return;
-    const jitter = Math.random() * this.backoff * 0.3;
-    const wait = Math.min(RECONNECT_MAX_MS, this.backoff) + jitter;
-    const t = setTimeout(() => this.connect(), wait);
+    const t = setTimeout(() => this.connect(), plan.waitMs);
     t.unref?.();
-    this.backoff = Math.min(RECONNECT_MAX_MS, Math.round(this.backoff * 1.8));
-    log('debug', SCOPE, `reintento en ${Math.round(wait)}ms`);
+    log('debug', SCOPE, `reintento en ${plan.waitMs}ms`);
   }
 
   private send(frame: CollectorFrame): void {
@@ -1649,6 +1660,9 @@ class Collector {
     const frame: CollectorFrame = {
       t: 'hello', v: PROTOCOL_VERSION, machine: this.machine(),
       token: sharedToken(),
+      // Quién soy como proceso: si otro collector me echa, el hub le dice
+      // esto a él, y a mí me dice lo suyo. Es lo que faltó el 10-09.
+      instance: { pid: process.pid, cwd: process.cwd(), startedAt: STARTED_AT },
     };
     try {
       this.ws?.send(JSON.stringify(frame));

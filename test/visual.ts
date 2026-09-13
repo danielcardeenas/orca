@@ -670,6 +670,24 @@ const SQUAD_NAME = 'ledger-close';
 const SHOWCASE_CALLSIGN = 'Z9';
 
 /**
+ * Where this squad says it came from, and why it is NOT the mock's.
+ *
+ * The mark itself is not optional: this thing opens a collector socket and
+ * declares a machine with a `blocking` question on it. Unmarked, the hub has
+ * no way to tell that question from a real one — which is the incident of
+ * 2026-09-07 all over again, the one that left 299 fake agents out of 595 in
+ * this hub's archive. `synthetic` is a declaration by the machine, never a
+ * deduction by the hub (src/shared/synthetic.ts), so it has to be said here.
+ *
+ * But the enclosure it lands in follows `harnessOf`, and sharing the mock's
+ * would file these seven inside the grid that recomposes itself on every
+ * birth — losing the one property this squad exists for: being a subject that
+ * holds still while everything else moves. Its own slug keeps it in its own
+ * island.
+ */
+const SQUAD_HARNESS = 'visual-squad';
+
+/**
  * Six agents under one squad label, one of them blocked on a question only a
  * person can answer, plus a seventh standing alone for the tier-5 tile.
  *
@@ -693,6 +711,9 @@ export async function injectSquad(): Promise<{ close(): void } | null> {
   const machine: Machine = {
     id: SQUAD_MACHINE, hostname: 'visual-squad', platform: 'linux',
     version: '0.1.0-visual', online: true, lastSeen: now, connectedAt: now, load,
+    // See SQUAD_HARNESS: the mark quarantines the fake question, the slug
+    // keeps these seven out of the mock's shifting grid.
+    synthetic: true, harnessOf: SQUAD_HARNESS,
   };
   const project: Project = {
     id: SQUAD_PROJECT, machineId: SQUAD_MACHINE, slug: '-srv-ledger', name: 'ledger',
@@ -1181,8 +1202,12 @@ export async function ensureServers(
 async function hasSyntheticFleet(): Promise<boolean> {
   try {
     const r = await fetch(`http://127.0.0.1:${hubPort()}/api/health`, { signal: AbortSignal.timeout(2000) });
-    const h = await r.json() as { machines?: { list?: { online: boolean; synthetic?: boolean }[] } };
-    return (h.machines?.list ?? []).some((m) => m.online && m.synthetic === true);
+    const h = await r.json() as { machines?: { list?: { id: string; online: boolean; synthetic?: boolean }[] } };
+    // The injected squad is synthetic too, and it is not a fleet: it never
+    // transitions and it publishes nothing. Counting it would leave a reused
+    // hub without the mock — and every frame that needs a working agent
+    // waiting for one that is never coming.
+    return (h.machines?.list ?? []).some((m) => m.online && m.synthetic === true && m.id !== SQUAD_MACHINE);
   } catch { return false; }
 }
 

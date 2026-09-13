@@ -107,6 +107,24 @@ async function main() {
       .then(() => true).catch(() => false);
     if (!appeared) return skip('la escuadra nunca apareció en el campo');
     await sleep(1500);
+
+    /*
+     * La escuadra vive en SU recinto, no en el del mock.
+     *
+     * `injectSquad` se declara sintética —abre un socket de collector y suelta
+     * una pregunta `blocking` de mentira, y sin la marca el hub no puede
+     * distinguirla de una de verdad—, pero con un `harnessOf` propio: el del
+     * mock la metería en la rejilla que se recompone con cada nacimiento, que
+     * es justo lo que esta escuadra existe para evitar. Aquí es una aserción y
+     * no un comentario porque la propiedad se pierde en silencio: el par
+     * seguiría apareciendo, sólo que otra vez encima de arenas movedizas.
+     */
+    const recintos = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.rgn--harness')]
+      .map((el) => el.dataset.project ?? ''));
+    assert.ok(recintos.includes('~harness/visual-squad'),
+      `la escuadra tiene recinto propio (recintos del arnés: ${recintos.join(', ') || 'ninguno'})`);
+    assert.ok(recintos.length > 1,
+      'y el del mock sigue siendo otro: si sólo hay uno, la escuadra cayó dentro de la rejilla que se mueve');
     const own = (s: SpotView | null | undefined) => !!s && s.trayOf === null && s.scale >= 1;
     // Los miembros, por `parentId`: el líder inyectado no lleva `childIds`.
     const readSpots = () => page.evaluate(({ p, tileH }) => {

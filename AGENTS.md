@@ -16,14 +16,22 @@ npm test -- --changed
 ```
 
 `--changed` elige las suites que alcanzan lo que has tocado recorriendo el grafo
-de imports: cambiar `src/collector/provider-handoff.ts` corre 14 suites de 62;
-cambiar `src/ui/field/pipes.ts`, 3. No hay lista que mantener y no se
-desactualiza. La suite completa pasa de diez minutos, y por eso la alternativa
-real a correr las suites afectadas no es correrlas todas: es no correr ninguna.
+de imports y las rutas que las pruebas leen del disco (`new URL('../x',
+import.meta.url)`, un directorio entero, o un `<link href="/src/…css">` en un
+fixture de Playwright): cambiar `src/collector/provider-handoff.ts` corre 14
+suites de 62; cambiar `src/ui/styles/hud.css`, 9. No hay lista que mantener y
+no se desactualiza. La suite completa pasa de diez minutos, y por eso la
+alternativa real a correr las suites afectadas no es correrlas todas: es no
+correr ninguna.
 
 Si aparece `sin suite que los cubra`, es un aviso, no un fallo: has cambiado algo
 que ninguna prueba mira. Escribe la prueba, o di al entregar qué quedó sin
-cubrir. Callarlo convierte «los tests pasan» en una frase sin contenido.
+cubrir. Callarlo convierte «los tests pasan» en una frase sin contenido. Debajo
+dice si lo mira un shot o una escena visual, que esta corrida no ejecuta.
+
+Si no se ejecuta ninguna suite, la corrida sale con código 3, no en verde: «no
+ejecuté nada» y «ejecuté y pasó» son cosas distintas. La única excepción es
+`--changed` con el árbol limpio, que no tiene nada que verificar.
 
 Otras formas:
 

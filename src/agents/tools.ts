@@ -3228,7 +3228,12 @@ function briefing(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome 
       const to = m.toAgentId ? name(m.toAgentId) : m.toSquad ? `squad ${m.toSquad}` : `[${code(m.toProjectId ?? m.fromProjectId)}]`;
       const target = m.toAgentId ? ctx.agent(m.toAgentId) : undefined;
       // Un destinatario muerto o terminado convierte la espera en permanente.
-      const gone = m.toAgentId && (!target || TERMINAL_STATES.has(target.state));
+      // Un escuadrón también: si nadie más que quien preguntó sigue vivo en
+      // él, la pregunta a `squad:` no la va a leer nadie — y un miembro no
+      // tiene otra puerta que ésa (ver `hub/wake.ts`, `squadWaits`).
+      const squadEmpty = !!m.toSquad && !ctx.agents()
+        .some((a) => a.squad === m.toSquad && a.id !== m.fromAgentId && !TERMINAL_STATES.has(a.state));
+      const gone = (m.toAgentId && (!target || TERMINAL_STATES.has(target.state))) || squadEmpty;
       return `${m.fromCallsign} → ${to}, waiting ${ago(now - m.at)}${gone ? ' · RECIPIENT IS GONE, nobody will answer this' : ''}`
         + `: "${clip(m.subject, 140)}" (${m.id})`;
     });

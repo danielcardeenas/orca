@@ -280,7 +280,9 @@ a medias y una fila desplegada sobreviven al giro del teléfono y a la vuelta al
 escritorio. La ventana de una misión ocupa el ancho y deja libre la banda del
 dock, con el composer anclado al fondo y el teclado virtual medido. Está en
 [ENTREGA-MOVIL-2026-09-08.md](ENTREGA-MOVIL-2026-09-08.md) y vive en
-`src/ui/hud/sections.ts`.
+`src/ui/hud/sections.ts`. Girado también es un teléfono: qué lo es lo dice
+`src/ui/phone.ts` —ancho y alto, no sólo ancho— y de lado la ventana se come
+el sitio del mástil ([ENTREGA-MOVIL-APAISADO-2026-09-13.md](ENTREGA-MOVIL-APAISADO-2026-09-13.md)).
 
 ## CREW: quién la está haciendo, y bajo quién
 

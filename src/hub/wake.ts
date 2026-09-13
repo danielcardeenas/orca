@@ -22,6 +22,12 @@
  *                                llegó, no queda nadie en ella, o nadie ha dado
  *                                señal desde el encargo. Con el motivo y qué
  *                                hacer con él.
+ *   [SQUAD <name>]               un MIEMBRO de escuadrón lleva parado en una
+ *                                pregunta a su líder que nadie contesta. Con
+ *                                la pregunta, si el líder sigue vivo, y la
+ *                                llamada exacta que lo desbloquea. Es la
+ *                                salida de emergencia de una jerarquía en la
+ *                                que el miembro no puede hablar con nadie más.
  *
  * ── Por qué existe el tercero ─────────────────────────────────────
  *
@@ -110,6 +116,7 @@ import type { AgentStateChange } from './lifecycle.ts';
 export const AGENT_WAKE_PREFIX = 'AGENT';
 export const HEARTBEAT_PREFIX = 'HEARTBEAT';
 export const MISSION_WAKE_PREFIX = 'MISSION';
+export const SQUAD_WAKE_PREFIX = 'SQUAD';
 
 /**
  * A los cuántos minutos se recuerda una pregunta del operador, y cada cuánto
@@ -164,6 +171,44 @@ export const MISSION_ASK_CHARS = 600;
 /** Cuántas misiones se detallan en un recordatorio antes de resumir el resto. */
 export const MISSION_WAKE_MAX = 6;
 
+/**
+ * A los cuántos minutos se avisa a CAPCOM de un miembro de escuadrón que
+ * espera respuesta de su líder, y cada cuánto después.
+ *
+ * Un miembro no tiene `orca-ask`: su única puerta hacia arriba es su líder, y
+ * es deliberado (`collector/shims.ts`). Pero una jerarquía sin salida de
+ * emergencia es una jerarquía que, cuando el líder no contesta, deja al
+ * miembro parado sin que nadie lo sepa. El 2026-09-13 el canal hacia los
+ * líderes estuvo roto horas y un miembro con el trabajo ya en disco declaró
+ * que no encontraba a CAPCOM y que no tenía con qué escalar. Lo salvó que a
+ * alguien se le ocurriera ir a leer su fichero.
+ *
+ * **Quince minutos el primero.** Un líder contesta a sus miembros dentro de
+ * un turno; un turno largo —una suite de diez minutos— cabe en quince. Por
+ * debajo, el aviso llegaría mientras el líder está escribiendo la respuesta,
+ * y un aviso que casi siempre sobra enseña a ignorarlo. Después 45 y cada
+ * dos horas: la escalera de las misiones, por la misma razón que allí.
+ */
+export const SQUAD_WAIT_STEPS_MIN: readonly number[] = [15, 45, 120];
+
+/**
+ * Sin líder vivo nadie va a contestar nunca, y esperar quince minutos para
+ * decirlo es esperar por nada. El primer aviso sale al minuto; los siguientes
+ * siguen la escalera normal.
+ */
+export const SQUAD_WAIT_ORPHAN_MIN = 1;
+
+/**
+ * A partir de aquí el OPERADOR ve en su feed que un miembro lleva esperando a
+ * su líder. Una hora: un miembro no le interrumpe —la jerarquía existe para
+ * eso— pero una flota con un agente parado una hora es algo que él tiene que
+ * ver, igual que una misión que no avanza.
+ */
+export const SQUAD_WAIT_ALERT_MIN = 60;
+
+/** Cuántos miembros esperando se detallan en un aviso antes de resumir el resto. */
+export const SQUAD_WAIT_MAX = 6;
+
 /** Cuánto del último mensaje del agente viaja en el despertador. */
 export const WAKE_LAST_SAY_CHARS = 400;
 /** Cuántos fines se retienen sin CAPCOM antes de olvidar los más viejos. */
@@ -208,6 +253,17 @@ export interface WakeConfig {
    * lleva parada. `ORCA_MISSION_STALL_ALERT_MIN`; 0 apaga.
    */
   missionStallAlertMin: number;
+  /**
+   * Minutos de espera a los que se avisa a CAPCOM de un miembro de escuadrón
+   * cuya pregunta a su líder sigue sin respuesta, en orden. El último se
+   * repite. `ORCA_SQUAD_WAIT_STEPS`; vacía o `0` apaga el aviso.
+   */
+  squadWaitSteps: readonly number[];
+  /**
+   * Minutos tras los cuales el operador ve en el feed que un miembro lleva
+   * esperando a su líder. `ORCA_SQUAD_WAIT_ALERT_MIN`; 0 apaga.
+   */
+  squadWaitAlertMin: number;
 }
 
 export const WAKE_DEFAULTS: Readonly<WakeConfig> = {
@@ -221,6 +277,8 @@ export const WAKE_DEFAULTS: Readonly<WakeConfig> = {
   missionStallSteps: MISSION_STALL_STEPS_MIN,
   missionStallMin: MISSION_STALL_GRACE_MS / 60_000,
   missionStallAlertMin: MISSION_STALL_ALERT_MIN,
+  squadWaitSteps: SQUAD_WAIT_STEPS_MIN,
+  squadWaitAlertMin: SQUAD_WAIT_ALERT_MIN,
 };
 
 /** Lee la configuración del entorno. Lo que no parsea conserva el default. */
@@ -246,6 +304,8 @@ export function wakeConfig(env: Record<string, string | undefined> = process.env
     missionStallSteps: stepsOf(env['ORCA_MISSION_STALL_STEPS'], WAKE_DEFAULTS.missionStallSteps),
     missionStallMin: num('ORCA_MISSION_STALL_MIN', WAKE_DEFAULTS.missionStallMin) || WAKE_DEFAULTS.missionStallMin,
     missionStallAlertMin: num('ORCA_MISSION_STALL_ALERT_MIN', WAKE_DEFAULTS.missionStallAlertMin),
+    squadWaitSteps: stepsOf(env['ORCA_SQUAD_WAIT_STEPS'], WAKE_DEFAULTS.squadWaitSteps),
+    squadWaitAlertMin: num('ORCA_SQUAD_WAIT_ALERT_MIN', WAKE_DEFAULTS.squadWaitAlertMin),
   };
 }
 
@@ -426,6 +486,70 @@ export function missionAlertLine(e: MissionWakeEntry): string {
     + ' report_mission, which leaves the mission open.';
 }
 
+/* ── el miembro que espera a su líder ─────────────────────────────── */
+
+/** Un miembro de escuadrón parado en una pregunta a su líder, tal y como va a viajar. */
+export interface SquadWaitEntry {
+  /** El `ask` sin contestar: es lo que `answer_peer` toma. */
+  messageId: string;
+  squad: string;
+  member: string;
+  /** El líder al que se dirige, o null si el escuadrón no tiene ninguno. */
+  lead: string | null;
+  /** `done`/`dead` cuando el líder ya no está; null si sigue vivo o no hay. */
+  leadGone: string | null;
+  subject: string;
+  waitingMs: number;
+}
+
+/**
+ * «M1 has been waiting 23m for its lead L1 to answer», y si nadie puede, por
+ * qué: para la cabecera y para el feed, que dicen lo mismo a dos lectores.
+ */
+function squadWaitClause(e: SquadWaitEntry): string {
+  const who = e.lead ? `its lead ${e.lead}` : 'a lead its squad does not have';
+  const nobody = e.leadGone ? `; ${e.lead} is gone (${e.leadGone}): nobody will` : !e.lead ? ': nobody will' : '';
+  return `${e.member} has been waiting ${waited(e.waitingMs)} for ${who} to answer${nobody}`;
+}
+
+/**
+ * `[SQUAD audit-01] M1 has been waiting 23m for its lead L1 to answer`
+ * `  asked: ¿Fusiono sobre main o sobre la rama?`
+ * `  do: answer it yourself with answer_peer(message_id="msg_x", …) if you can …`
+ *
+ * El miembro está BLOQUEADO mientras tanto: no puede seguir sin la respuesta
+ * y no tiene otra puerta. Por eso el aviso lleva la llamada exacta, como los
+ * de misión: contestar tiene que ser copiar una línea. Cuando el líder ya no
+ * está se dice en la cabecera, porque cambia la acción: ya no hay a quién
+ * empujar, y la pregunta la contesta CAPCOM o nadie.
+ */
+export function squadWaitLine(e: SquadWaitEntry): string {
+  const head = `[${SQUAD_WAKE_PREFIX} ${e.squad}] ${squadWaitClause(e)}`;
+  const answer = `answer_peer(message_id="${e.messageId}", answer="<the answer>", basis="<where it came from>")`;
+  const action = e.leadGone || !e.lead
+    ? `answer it yourself with ${answer}, or hand ${e.member}'s work to someone else. It is blocked until one of those happens.`
+    : `answer it yourself with ${answer} if you can; otherwise send_to_agent ${e.lead} to make it read its mail. ${e.member} is blocked until one of you answers.`;
+  return `${head}\n  asked: ${oneLine(e.subject, MISSION_ASK_CHARS)}\n  do: ${action}`;
+}
+
+/** Varios miembros, un mensaje. */
+export function squadWaitMessage(entries: SquadWaitEntry[]): string {
+  const shown = entries.slice(0, SQUAD_WAIT_MAX);
+  const body = shown.map(squadWaitLine).join('\n');
+  if (entries.length === 1) return body;
+  const oldest = entries.reduce((w, e) => (e.waitingMs > w.waitingMs ? e : w), entries[0]!);
+  const rest = entries.length - shown.length;
+  return `[${SQUAD_WAKE_PREFIX}] ${entries.length} squad members are waiting on their leads, the longest ${waited(oldest.waitingMs)}.\n${body}`
+    + (rest > 0 ? `\n…and ${rest} more; call briefing for the rest.` : '')
+    + '\nHandle each: a member has no other door than its lead, and none of them can ask you or the operator.';
+}
+
+/** Lo que el OPERADOR ve en el feed cuando un miembro lleva demasiado esperando a su líder. */
+export function squadWaitAlertLine(e: SquadWaitEntry): string {
+  return `squad ${e.squad}: ${squadWaitClause(e)}`
+    + ` — "${oneLine(e.subject, 120)}". CAPCOM has been told; the member cannot reach you itself.`;
+}
+
 export function heartbeatMessage(quietMin: number): string {
   return `[${HEARTBEAT_PREFIX}] ${quietMin} min without a turn. Call briefing. Act only if something is owed`
     + ' — a blocked agent, a mission waiting on you, a finished worker nobody reported.'
@@ -466,10 +590,17 @@ export interface WakeWatermark {
    * repetiría el primer aviso de todas las misiones paradas.
    */
   stalls: Record<string, { key: string; sent: number; alerted: boolean }>;
+  /**
+   * Avisos de miembro esperando a su líder ya dados, por `ask`. La clave es
+   * el id del mensaje: una pregunta es una espera, y contestarla —o que el
+   * miembro se vaya— la cierra sin que nadie la cancele. Persistido por lo
+   * mismo que los demás: que un reinicio del hub no repita el primer aviso.
+   */
+  squadWaits: Record<string, { sent: number; alerted: boolean }>;
 }
 
 export function emptyWatermark(): WakeWatermark {
-  return { seen: {}, lastDeliveredAt: 0, capcoms: [], missions: {}, stalls: {} };
+  return { seen: {}, lastDeliveredAt: 0, capcoms: [], missions: {}, stalls: {}, squadWaits: {} };
 }
 
 export function loadWatermark(dir: string): WakeWatermark {
@@ -492,12 +623,19 @@ export function loadWatermark(dir: string): WakeWatermark {
         stalls[id] = { key: v.key, sent: v.sent, alerted: v.alerted === true };
       }
     }
+    const squadWaits: WakeWatermark['squadWaits'] = {};
+    for (const [id, v] of Object.entries(raw.squadWaits ?? {})) {
+      if (v && typeof v === 'object' && typeof v.sent === 'number') {
+        squadWaits[id] = { sent: v.sent, alerted: v.alerted === true };
+      }
+    }
     return {
       seen,
       lastDeliveredAt: typeof raw.lastDeliveredAt === 'number' ? raw.lastDeliveredAt : 0,
       capcoms: Array.isArray(raw.capcoms) ? raw.capcoms.filter((c): c is string => typeof c === 'string') : [],
       missions,
       stalls,
+      squadWaits,
     };
   } catch {
     return emptyWatermark();
@@ -548,6 +686,14 @@ export interface WakeApi {
    * expuesta para tests. Devuelve cuántas se avisaron.
    */
   missionStalls(): number;
+  /**
+   * Un tick de los avisos de miembro esperando a su líder: manda un
+   * `[SQUAD …]` por cada `ask` de un miembro a su líder (o a su escuadrón)
+   * que lleva sin respuesta más de lo tolerable, enseguida si el líder ya no
+   * está, y avisa al operador de los que llevan demasiado. Se llama sola en
+   * cada tick; expuesta para tests. Devuelve cuántos miembros se avisaron.
+   */
+  squadWaits(): number;
   /** Cuándo CAPCOM tuvo su último turno, según lo que este módulo vio. */
   lastTurnAt(): number;
   /**
@@ -713,10 +859,15 @@ export function createWake(deps: AutonomyDeps): WakeApi {
    * No se manda si el miembro ya avisó él: el aviso es el respaldo, no una
    * copia. Y el líder no se avisa a sí mismo.
    */
+  /** El líder de este miembro, vivo o no, o null: sin squad, siendo él el líder, o sin nadie que lo lidere. */
+  function leadOf(a: Agent): Agent | null {
+    if (!a.squad || a.lead) return null;
+    return deps.agents().find((o) => o.squad === a.squad && o.lead && o.id !== a.id && o.role !== 'capcom') ?? null;
+  }
+
   /** El líder vivo de este miembro, o null: sin squad, siendo él el líder, o con el líder ya ido. */
   function liveLeadOf(a: Agent): Agent | null {
-    if (!a.squad || a.lead) return null;
-    const lead = deps.agents().find((o) => o.squad === a.squad && o.lead && o.id !== a.id && o.role !== 'capcom');
+    const lead = leadOf(a);
     return lead && lead.state !== 'done' && lead.state !== 'dead' ? lead : null;
   }
 
@@ -1064,6 +1215,98 @@ export function createWake(deps: AutonomyDeps): WakeApi {
     return due.length;
   }
 
+  /* ── el miembro que espera a su líder ─────────────────────────── */
+
+  /**
+   * Una pasada por las preguntas entre agentes buscando miembros de
+   * escuadrón parados en una a su líder.
+   *
+   * Es la salida de emergencia de la jerarquía. `onState` calla a propósito
+   * cuando un miembro se bloquea bajo un líder vivo —seis miembros no son
+   * seis turnos de CAPCOM— y eso está bien mientras el líder conteste. Cuando
+   * no contesta, nada más lo dice: el miembro no tiene `orca-ask`, el
+   * `briefing` sólo lo lista si CAPCOM lo pide, y el aviso al líder de
+   * `tellLead` viaja por el mismo canal que puede estar fallando. Esto mira
+   * desde fuera de ese canal, con lo que el hub sabe con certeza: la pregunta
+   * existe, no tiene respuesta, y quién debía darla sigue —o no— vivo.
+   *
+   * Sólo `ask`, y sólo de un miembro a su líder o a su escuadrón: un
+   * `handoff` no espera respuesta, y un líder que pregunta tiene a CAPCOM.
+   * Igual que los avisos de misión, la condición se recalcula entera de la
+   * flota en cada tick y se apaga sola: contestar (`answer_peer`, el líder,
+   * cualquiera del escuadrón) o que el miembro se vaya la hace desaparecer.
+   * Lo único que se persiste es cuántas veces se avisó ya de ESTA pregunta.
+   */
+  function squadWaits(): number {
+    if (stopped || !deps.messages) return 0;
+    const steps = config.squadWaitSteps;
+    const now = deps.now();
+    const due: SquadWaitEntry[] = [];
+    const open = new Set<string>();
+    let changed = false;
+
+    for (const m of deps.messages()) {
+      if (m.kind !== 'ask' || m.answer !== null) continue;
+      const member = deps.agent(m.fromAgentId);
+      // Sin miembro vivo no hay nadie esperando: un `ask` de un agente que ya
+      // terminó es historia, no un bloqueo.
+      if (!member || !member.squad || member.lead || member.role === 'capcom') continue;
+      if (member.state === 'done' || member.state === 'dead') continue;
+      const lead = leadOf(member);
+      const toLead = (lead !== null && m.toAgentId === lead.id) || (m.scope === 'squad' && m.toSquad === member.squad);
+      if (!toLead) continue;
+
+      open.add(m.id);
+      const leadGone = lead && (lead.state === 'done' || lead.state === 'dead') ? lead.state : null;
+      const entry: SquadWaitEntry = {
+        messageId: m.id, squad: member.squad, member: member.callsign,
+        lead: lead?.callsign ?? null, leadGone, subject: m.subject,
+        waitingMs: Math.max(0, now - m.at),
+      };
+      const prev = wm.squadWaits[m.id];
+      const mark = prev ?? { sent: 0, alerted: false };
+      if (!prev) changed = true;
+
+      // El operador se entera aparte, y aunque no haya CAPCOM a quien
+      // decírselo: si no lo hay, con más razón.
+      if (config.squadWaitAlertMin > 0 && !mark.alerted && entry.waitingMs >= config.squadWaitAlertMin * 60_000) {
+        mark.alerted = true;
+        changed = true;
+        const line = squadWaitAlertLine(entry);
+        if (deps.alert) deps.alert(line); else deps.note(line);
+      }
+
+      // Sin líder que pueda contestar, el primer aviso no espera la escalera.
+      const orphan = lead === null || leadGone !== null;
+      const dueMs = orphan && mark.sent === 0 ? SQUAD_WAIT_ORPHAN_MIN * 60_000 : dueAtMs(steps, mark.sent);
+      if (steps.length > 0 && entry.waitingMs >= dueMs) due.push(entry);
+      wm.squadWaits[m.id] = mark;
+    }
+
+    // Contestadas, retiradas o de miembros que ya no están: la cuenta se cierra.
+    for (const id of Object.keys(wm.squadWaits)) {
+      if (!open.has(id)) { delete wm.squadWaits[id]; changed = true; }
+    }
+
+    if (due.length === 0) { if (changed) persist(); return 0; }
+    // Sin CAPCOM no se pierde nada: la pregunta sigue abierta y el próximo
+    // tick con mando la vuelve a encontrar. No se apunta como avisado.
+    if (!deps.capcom()) { if (changed) persist(); return 0; }
+
+    due.sort((a, b) => b.waitingMs - a.waitingMs);
+    const outcome = deps.sayToCapcom(squadWaitMessage(due));
+    if (outcome === false) { if (changed) persist(); return 0; }
+    lastTurn = deps.now();
+    for (const e of due) {
+      const mark = wm.squadWaits[e.messageId];
+      if (mark) mark.sent += 1;
+    }
+    persist();
+    deps.note(`CAPCOM avisado: ${due.length} miembro(s) esperando a su líder `
+      + `(${due.map((e) => `${e.member} ${waited(e.waitingMs)}${e.leadGone ? ', líder ido' : ''}`).join(', ')})`);
+    return due.length;
+  }
+
   /* ── montaje ──────────────────────────────────────────────────── */
 
   adoptExisting();
@@ -1077,6 +1320,7 @@ export function createWake(deps: AutonomyDeps): WakeApi {
     // pesa más que un latido, y si hay uno el latido ya no hace falta.
     try { missionReplies(); } catch (err) { deps.log(`wake: recordatorio de misión falló: ${String(err)}`); }
     try { missionStalls(); } catch (err) { deps.log(`wake: aviso de misión parada falló: ${String(err)}`); }
+    try { squadWaits(); } catch (err) { deps.log(`wake: aviso de miembro esperando falló: ${String(err)}`); }
     try { heartbeat(); } catch (err) { deps.log(`wake: tick falló: ${String(err)}`); }
   }, HEARTBEAT_TICK_MS);
 
@@ -1087,6 +1331,7 @@ export function createWake(deps: AutonomyDeps): WakeApi {
     heartbeat,
     missionReplies,
     missionStalls,
+    squadWaits,
     lastTurnAt: () => lastTurn,
     watermark: () => structuredClone(wm),
     stop() {

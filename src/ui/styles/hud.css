@@ -370,6 +370,9 @@ body.tray-mode .tray .tile { width: 72px; }
  * que no encontraba «a tile standing still in landscape», y lo sufría
  * cualquiera con el teléfono en horizontal. La misma condición que ya usa la
  * hoja en apaisado (`max-width: 1180px` y `max-height: 560px`, más abajo).
+ * La condición vive en `src/ui/phone.ts`, que es lo que consulta el `wm`, y
+ * `window.css` la repite para las ventanas; `test/phone-media.test.ts` afirma
+ * que las tres siguen diciendo lo mismo.
  */
 @media (max-width: 720px), ((max-width: 1180px) and (max-height: 560px)) {
   .mast { left: 14px; right: 14px; flex-wrap: wrap; gap: 8px; }

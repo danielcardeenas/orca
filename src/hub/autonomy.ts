@@ -18,7 +18,7 @@
  * son el `BudgetBook` de hub/budgets.ts, evaluado en el sweep del hub.
  */
 
-import type { Agent, Machine, Project } from '../shared/types.ts';
+import type { Agent, AgentMessage, Machine, Project } from '../shared/types.ts';
 import type { CapcomMission } from '../shared/missions.ts';
 import type { Command } from '../shared/protocol.ts';
 import type { CapcomTimer } from './capcom.ts';
@@ -89,6 +89,12 @@ export interface AutonomyDeps {
    * duplicar un aviso que el propio miembro ya dio.
    */
   saidTo?(fromAgentId: string, since: number): { toAgentId: string | null; toSquad: string | null }[];
+  /**
+   * Los mensajes entre agentes que el hub conserva, contestados o no. Es lo
+   * que mira el aviso de miembro esperando a su líder (ver `wake.ts`,
+   * `squadWaits`). Opcional: un arnés sin mensajes no tiene esperas que ver.
+   */
+  messages?(): AgentMessage[];
   lifecycle: AgentLifecycle;
   /**
    * El tablero de AUTOMEJORA cambió y hay que empujarlo a las consolas.

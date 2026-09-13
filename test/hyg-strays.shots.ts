@@ -55,6 +55,18 @@ function report(): HygieneReport {
         evidence: ["runs ORCA's src/hub/server.ts", 'ORCA launched it from npm run dev (pid 900), which is gone, and its lease has not been renewed for 31m'],
       },
       {
+        // Sesión detenida, proceso vivo: el resto que faltaba el 2026-09-13. Ver shared/reap.ts.
+        id: 'stray_session_208fd608', kind: 'session', verdict: 'orphan', action: 'terminate',
+        label: 'K9 · done · 612M retained', agentId: '208fd608', pid: 36_570, startedAt: now - 3 * 3_600_000,
+        rssBytes: 612 * 1024 * 1024,
+        evidence: [
+          'ORCA launched K9 (verified by the spawn record)',
+          'pid 36570 runs claude, observed as the pid of its own ORCA pane',
+          'its pane orca-208fd608 is gone and the CLI no longer lists the session',
+          'pid 36570 still has the start time and command line ORCA recorded',
+        ],
+      },
+      {
         id: 'stray_agent_a9', kind: 'agent', verdict: 'orphan', action: 'retire',
         label: 'Z2 · working', agentId: 'sess_a9', pid: 51_200,
         evidence: [
@@ -120,7 +132,7 @@ async function main() {
       where: e.querySelector('.hyg__stray-where')?.textContent ?? '',
       act: e.querySelector('.hyg__stray-act')?.textContent ?? null,
     })));
-    assert.equal(rows.length, 6, 'every stray is shown, including the ones it will not touch');
+    assert.equal(rows.length, 7, 'every stray is shown, including the ones it will not touch');
     const by = (id: string) => rows.find((r) => r.id === id)!;
 
     assert.equal(by('stray_vite_4321').mark, '!', 'an orphan is marked');
@@ -131,7 +143,13 @@ async function main() {
     assert.equal(by('stray_vite_19478').mark, '·');
     assert.equal(by('stray_vite_19478').act, null, 'another project is never offered either');
     assert.match(by('stray_vite_19478').where, /dijosi/, 'and the panel says whose it is');
-    assert.match((await page.locator('.hyg__stray-all').textContent()) ?? '', /CLEAN 3/, 'the bulk action counts only the orphans');
+    assert.match((await page.locator('.hyg__stray-all').textContent()) ?? '', /CLEAN 4/, 'the bulk action counts only the orphans');
+
+    // La cifra que habría hecho innecesaria la investigación: cuánto retienen las sesiones detenidas.
+    assert.equal(by('stray_session_208fd608').mark, '!');
+    assert.equal(by('stray_session_208fd608').act, 'STOP IT', 'a stopped session with a live process is offered like any orphan');
+    assert.match(by('stray_session_208fd608').name, /612M retained/, 'and its cost is on the label');
+    assert.match((await page.locator('[data-retained]').innerText()), /1 STOPPED SESSION RETAIN 612M/, 'the header sums what stopped sessions retain');
 
     // El caso que cerró el agujero: sin padre y sin lease, se enseña y no se toca.
     assert.equal(by('stray_vite_5150').mark, '?');
@@ -139,7 +157,7 @@ async function main() {
 
     // El orden: primero lo que se decide.
     assert.deepEqual(rows.map((r) => r.cls.includes('is-orphan') ? 'o' : r.cls.includes('is-ambiguous') ? 'a' : 'p'),
-      ['o', 'o', 'o', 'a', 'a', 'p'], 'orphans first: the list is read from the top');
+      ['o', 'o', 'o', 'o', 'a', 'a', 'p'], 'orphans first: the list is read from the top');
 
     await mkdir(SHOTS, { recursive: true });
     const box = (await page.locator('.win.is-hygiene').boundingBox())!;

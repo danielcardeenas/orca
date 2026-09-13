@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Agent, Escalation, Project } from '../src/shared/types.ts';
+import type { Agent, AgentMessage, Escalation, Project } from '../src/shared/types.ts';
 import { MissionStore } from '../src/hub/missions.ts';
 import { MISSION_ID, visibleMissions } from '../src/shared/missions.ts';
 import { CEO_TOOLS, runTool, type CeoContext } from '../src/agents/tools.ts';
@@ -68,6 +68,7 @@ function escalation(over: Partial<Escalation> = {}): Escalation {
 function ctx(o: {
   agents?: Agent[]; projects?: Project[]; escalations?: Escalation[]; missions?: MissionStore;
   rules?: { question: string; answer: string; projectId: string | null; at: number }[];
+  messages?: AgentMessage[];
 }): CeoContext {
   const agents = o.agents ?? [];
   const projects = o.projects ?? [];
@@ -83,7 +84,7 @@ function ctx(o: {
     rules: (limit) => (o.rules ?? []).slice(0, limit),
     dispatch: refuse, nextSquadName: refuse, fleets: () => [],
     recall: () => [], remember: refuse, raiseToHuman: refuse, resolveEscalation: refuse,
-    messages: () => [], message: () => undefined, collisions: () => [],
+    messages: () => o.messages ?? [], message: () => undefined, collisions: () => [],
     relay: refuse, answerPeer: refuse, acknowledgeCollision: refuse, archiveAgents: refuse,
   };
 }
@@ -378,6 +379,37 @@ const tests = [
         `${text.length} chars · ${out.summary}`,
       );
     });
+  }),
+
+  test('a peer question to a squad with nobody left alive is flagged as one nobody will answer', async () => {
+    // Un miembro no tiene otra puerta que su escuadrón: si en él no queda
+    // nadie vivo, esa pregunta es permanente, y hasta hoy sólo se decía de las
+    // dirigidas a un agente concreto.
+    const at = NOW - 20 * 60_000;
+    const base = {
+      kind: 'ask' as const, scope: 'squad' as const, fromProjectId: 'p1', toAgentId: null, toProjectId: null,
+      body: null, files: [], at, readBy: [], expiresAt: null, answer: null, answeredAt: null, answeredBy: null,
+    };
+    const messages: AgentMessage[] = [
+      { ...base, id: 'msg_orphan', fromAgentId: 'm1', fromCallsign: 'M1', toSquad: 'audit-01', subject: 'merge onto main?' },
+      { ...base, id: 'msg_live', fromAgentId: 'm2', fromCallsign: 'M2', toSquad: 'pay-01', subject: 'which branch?' },
+    ];
+    const agents = [
+      agent({ id: 'm1', callsign: 'M1', squad: 'audit-01' }),
+      agent({ id: 'l1', callsign: 'L1', state: 'dead', squad: 'audit-01', lead: true }),
+      agent({ id: 'm2', callsign: 'M2', squad: 'pay-01' }),
+      agent({ id: 'l2', callsign: 'L2', squad: 'pay-01', lead: true }),
+    ];
+    const out = await runTool(ctx({ agents, projects: [project()], messages }), 'briefing', { hours: 1 });
+    const lines = out.result.split('\n');
+    const orphan = lines.find((l) => l.includes('(msg_orphan)')) ?? '';
+    const live = lines.find((l) => l.includes('(msg_live)')) ?? '';
+    return ok(
+      'squad with nobody alive → RECIPIENT IS GONE; a squad with a live lead is not',
+      orphan.includes('M1 → squad audit-01, waiting 20m · RECIPIENT IS GONE, nobody will answer this: "merge onto main?"')
+      && live.includes('M2 → squad pay-01, waiting 20m: "which branch?"') && !live.includes('GONE'),
+      `${orphan.trim()} | ${live.trim()}`,
+    );
   }),
 
   test('briefing caps every section and says how many more there are', async () => {

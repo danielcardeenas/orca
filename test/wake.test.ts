@@ -11,14 +11,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Agent } from '../src/shared/types.ts';
+import type { Agent, AgentMessage } from '../src/shared/types.ts';
 import type { CapcomMission } from '../src/shared/missions.ts';
 import { newId } from '../src/shared/protocol.ts';
 import type { AutonomyDeps } from '../src/hub/autonomy.ts';
 import type { CapcomTimer } from '../src/hub/capcom.ts';
 import { AgentLifecycle } from '../src/hub/lifecycle.ts';
 import {
-  AGENT_WAKE_PREFIX, HEARTBEAT_PREFIX, HEARTBEAT_TICK_MS, MISSION_WAKE_PREFIX, WAKE_DEFAULTS,
+  AGENT_WAKE_PREFIX, HEARTBEAT_PREFIX, HEARTBEAT_TICK_MS, MISSION_WAKE_PREFIX, SQUAD_WAIT_ALERT_MIN,
+  SQUAD_WAIT_ORPHAN_MIN, SQUAD_WAIT_STEPS_MIN, SQUAD_WAKE_PREFIX, WAKE_DEFAULTS,
   WAKE_LAST_SAY_CHARS, WAKE_STATE_FILE, agentWakeLine, createWake, wakeConfig,
 } from '../src/hub/wake.ts';
 import { capcomBrief } from '../src/collector/briefs.ts';
@@ -156,6 +157,31 @@ function mission(id: string, title: string, messages: CapcomMission['messages'])
 
 const COALESCE = WAKE_DEFAULTS.coalesceMs;
 const SETTLE = WAKE_DEFAULTS.idleSettleMs;
+const MIN = 60_000;
+
+/** Un mensaje entre agentes tal como lo guarda el hub, para el quinto despertador. */
+function ask(over: Partial<AgentMessage> & { id: string; fromAgentId: string; at: number }): AgentMessage {
+  return {
+    kind: 'ask', scope: over.toSquad ? 'squad' : 'agent',
+    fromCallsign: over.fromAgentId.toUpperCase(), fromProjectId: 'p1',
+    toAgentId: null, toProjectId: null, toSquad: null,
+    subject: 'merge onto main or onto the branch?', body: null, files: [],
+    readBy: [], expiresAt: null, answer: null, answeredAt: null, answeredBy: null,
+    ...over,
+  };
+}
+
+/** Un escuadrón de dos —líder y miembro— con un `ask` del miembro ya en el mundo. */
+function squadRig(env: Record<string, string | undefined> = {}): Rig & { mail: AgentMessage[] } {
+  const r = rig(env) as Rig & { mail: AgentMessage[] };
+  r.mail = [];
+  r.deps.messages = () => r.mail;
+  r.arrive(agent({ id: 'lead', callsign: 'L1', squad: 'audit-01', lead: true }));
+  r.arrive(agent({ id: 'mem', callsign: 'M1', squad: 'audit-01', parentId: 'lead', depth: 2 }));
+  return r;
+}
+
+const squadSaid = (r: Rig): string[] => r.said.filter((t) => t.startsWith(`[${SQUAD_WAKE_PREFIX}`));
 
 /* ── tests ────────────────────────────────────────────────────────── */
 
@@ -869,6 +895,162 @@ const tests = [
     } finally { wake.stop(); off.done(); }
   }),
 
+  /* ── el miembro que espera a su líder ───────────────────────────── */
+
+  test('a member blocked on an ask to its lead: silence for 15 min, then one [SQUAD] with the exact call, again at 45, and nothing once answered', () => {
+    const r = squadRig();
+    const wake = createWake(r.deps);
+    try {
+      r.mail.push(ask({ id: 'msg_1', fromAgentId: 'mem', toAgentId: 'lead', at: r.clock.now() }));
+      r.clock.advance(14 * MIN);
+      const early = squadSaid(r).length;
+      r.clock.advance(2 * MIN);
+      const first = squadSaid(r);
+      r.clock.advance(20 * MIN);
+      const between = squadSaid(r).length;
+      r.clock.advance(10 * MIN);
+      const second = squadSaid(r).length;
+      r.mail[0]!.answer = 'main'; r.mail[0]!.answeredAt = r.clock.now(); r.mail[0]!.answeredBy = 'lead';
+      r.clock.advance(3 * 60 * MIN);
+      const after = squadSaid(r).length;
+      const line = first[0] ?? '';
+      return ok(
+        '15 → 45 ladder, the answer_peer call verbatim, silent once answered',
+        early === 0 && first.length === 1 && between === 1 && second === 2 && after === 2
+        && line.startsWith(`[${SQUAD_WAKE_PREFIX} audit-01] M1 has been waiting 15m for its lead L1 to answer\n`)
+        && line.includes('asked: merge onto main or onto the branch?')
+        && line.includes('answer_peer(message_id="msg_1"') && line.includes('send_to_agent L1')
+        && r.notes.some((n) => n.includes('esperando a su líder') && n.includes('M1 15m'))
+        && wake.watermark().squadWaits['msg_1'] === undefined,
+        `${early}/${first.length}/${between}/${second}/${after} · ${line.split('\n')[0]}`,
+      );
+    } finally { wake.stop(); r.done(); }
+  }),
+
+  test('a member asking a lead that is already dead reaches CAPCOM within a minute: nobody else will ever answer', () => {
+    const r = squadRig();
+    const wake = createWake(r.deps);
+    try {
+      r.move('lead', 'dead');
+      r.clock.advance(COALESCE);
+      const agentWakes = r.said.length;
+      r.mail.push(ask({ id: 'msg_2', fromAgentId: 'mem', toSquad: 'audit-01', at: r.clock.now() }));
+      // El minuto se cumple entre dos ticks: cae en el siguiente.
+      r.clock.advance(SQUAD_WAIT_ORPHAN_MIN * MIN + HEARTBEAT_TICK_MS);
+      const first = squadSaid(r);
+      r.clock.advance(40 * MIN);
+      const held = squadSaid(r).length;
+      r.clock.advance(5 * MIN);
+      const second = squadSaid(r).length;
+      const line = first[0] ?? '';
+      return ok(
+        '[AGENT L1 dead] first, then [SQUAD] at a minute saying the lead is gone, then the normal ladder',
+        agentWakes === 1 && first.length === 1 && held === 1 && second === 2
+        && line.startsWith(`[${SQUAD_WAKE_PREFIX} audit-01] M1 has been waiting 1m for its lead L1 to answer; L1 is gone (dead): nobody will\n`)
+        && line.includes("hand M1's work to someone else") && !line.includes('send_to_agent')
+        && r.notes.some((n) => n.includes('M1 1m, líder ido')),
+        `${agentWakes}/${first.length}/${held}/${second} · ${line.split('\n')[0]}`,
+      );
+    } finally { wake.stop(); r.done(); }
+  }),
+
+  test("only a member's ask to its lead or its squad counts: handoffs, a lead's own asks, questions to peers and agents without a squad never wake", () => {
+    const r = squadRig();
+    r.arrive(agent({ id: 'mem2', callsign: 'M2', squad: 'audit-01', parentId: 'lead', depth: 2 }));
+    r.arrive(agent({ id: 'solo', callsign: 'S1' }));
+    const wake = createWake(r.deps);
+    try {
+      const at = r.clock.now();
+      r.mail.push(
+        ask({ id: 'h', kind: 'handoff', fromAgentId: 'mem', toAgentId: 'lead', at }),
+        ask({ id: 'l', fromAgentId: 'lead', toSquad: 'audit-01', at }),
+        ask({ id: 'p', fromAgentId: 'mem', toAgentId: 'mem2', at }),
+        ask({ id: 's', fromAgentId: 'solo', toAgentId: 'lead', at }),
+      );
+      r.clock.advance(3 * 60 * MIN);
+      return ok(
+        'none of them is a member waiting on its lead',
+        squadSaid(r).length === 0 && Object.keys(wake.watermark().squadWaits).length === 0,
+        `${squadSaid(r).length} said`,
+      );
+    } finally { wake.stop(); r.done(); }
+  }),
+
+  test('past an hour the operator sees it once in their feed; a member that leaves closes its wait; several waits travel as one message', () => {
+    const r = squadRig();
+    r.arrive(agent({ id: 'mem2', callsign: 'M2', squad: 'audit-01', parentId: 'lead', depth: 2 }));
+    const wake = createWake(r.deps);
+    try {
+      const at = r.clock.now();
+      r.mail.push(
+        ask({ id: 'a', fromAgentId: 'mem', toAgentId: 'lead', at }),
+        ask({ id: 'b', fromAgentId: 'mem2', toSquad: 'audit-01', at, subject: 'which branch do I merge?' }),
+      );
+      r.clock.advance(16 * MIN);
+      const first = squadSaid(r);
+      r.move('mem2', 'done');
+      r.clock.advance((SQUAD_WAIT_ALERT_MIN - 16 + 1) * MIN);
+      const alerts = r.alerts.filter((t) => t.startsWith('squad audit-01'));
+      r.clock.advance(3 * 60 * MIN);
+      const alertsLater = r.alerts.filter((t) => t.startsWith('squad audit-01')).length;
+      const later = squadSaid(r).slice(1);
+      const one = first[0] ?? '';
+      return ok(
+        'two waits → one [SQUAD] message; one operator alert at an hour; M2 gone → only M1 keeps being reported',
+        first.length === 1 && one.startsWith(`[${SQUAD_WAKE_PREFIX}] 2 squad members are waiting on their leads, the longest 15m.\n`)
+        && one.includes('M1 has been waiting 15m') && one.includes('M2 has been waiting 15m') && one.includes('asked: which branch do I merge?')
+        && alerts.length === 1 && alerts[0]!.startsWith('squad audit-01: M1 has been waiting 1h for its lead L1 to answer — "merge onto main')
+        && alertsLater === 1
+        && later.length > 0 && later.every((t) => t.includes('M1 has been waiting') && !t.includes('M2')),
+        `${first.length} first · ${alerts.length}/${alertsLater} alerts · ${later.length} later`,
+      );
+    } finally { wake.stop(); r.done(); }
+  }),
+
+  test('a hub restart does not repeat the warning, and without CAPCOM nothing is counted as sent', () => {
+    const r = squadRig();
+    r.setCapcom(null);
+    const wake = createWake(r.deps);
+    try {
+      r.mail.push(ask({ id: 'msg_5', fromAgentId: 'mem', toAgentId: 'lead', at: r.clock.now() }));
+      r.clock.advance(30 * MIN);
+      const withoutCapcom = squadSaid(r).length;
+      const notSent = wake.watermark().squadWaits['msg_5']?.sent === 0;
+      r.setCapcom(capcomAgent({ id: 'cap2' }));
+      r.clock.advance(HEARTBEAT_TICK_MS);
+      const once = squadSaid(r).length;
+      wake.stop();
+      const again = createWake(r.deps);
+      try {
+        r.clock.advance(10 * MIN);
+        const after = squadSaid(r).length;
+        const persisted = (JSON.parse(readFileSync(join(r.dir, WAKE_STATE_FILE), 'utf8')) as { squadWaits?: Record<string, { sent: number }> })
+          .squadWaits?.['msg_5']?.sent === 1;
+        return ok(
+          'held without CAPCOM, sent once when one appears, remembered across a restart',
+          withoutCapcom === 0 && notSent && once === 1 && after === 1 && persisted,
+          `${withoutCapcom}/${once}/${after} · notSent=${notSent} persisted=${persisted}`,
+        );
+      } finally { again.stop(); }
+    } finally { r.done(); }
+  }),
+
+  test('ORCA_SQUAD_WAIT_STEPS=0 switches the warning off; a custom ladder is honoured', () => {
+    const off = squadRig({ ORCA_SQUAD_WAIT_STEPS: '0' });
+    const wake = createWake(off.deps);
+    try {
+      off.mail.push(ask({ id: 'x', fromAgentId: 'mem', toAgentId: 'lead', at: off.clock.now() }));
+      off.clock.advance(6 * 60 * MIN);
+      const custom = wakeConfig({ ORCA_SQUAD_WAIT_STEPS: '9,2', ORCA_SQUAD_WAIT_ALERT_MIN: '0' });
+      return ok(
+        'off is off; steps parse and sort; defaults are the exported ladder',
+        squadSaid(off).length === 0 && custom.squadWaitSteps.join(',') === '2,9' && custom.squadWaitAlertMin === 0
+        && WAKE_DEFAULTS.squadWaitSteps === SQUAD_WAIT_STEPS_MIN && WAKE_DEFAULTS.squadWaitAlertMin === SQUAD_WAIT_ALERT_MIN,
+        `${squadSaid(off).length} said · ${custom.squadWaitSteps.join(',')}`,
+      );
+    } finally { wake.stop(); off.done(); }
+  }),
+
   test('the brief teaches the prefixes: report_mission on [AGENT], briefing and silence on [HEARTBEAT], and what a stall is not', () => {
     const brief = capcomBrief();
     const has = (s: string) => brief.includes(s);
@@ -880,7 +1062,10 @@ const tests = [
       // motivos, que `sent` no es `received`, y que ORCA no reenvía sola.
       && has('`[MISSION <mission_id> stalled]`')
       && has('`send-failed`') && has('`no-agent`') && has('`no-start`') && has('`no-progress`')
-      && has('**`sent` is not `received`.**') && has('ORCA never re-sends for you'),
+      && has('**`sent` is not `received`.**') && has('ORCA never re-sends for you')
+      // La salida de emergencia de la jerarquía: el prefijo, que el miembro no
+      // tiene otra puerta, y las dos acciones (contestar o empujar al líder).
+      && has('`[SQUAD <name>]`') && has('`answer_peer`') && has('no other door'),
     );
   }),
 ];

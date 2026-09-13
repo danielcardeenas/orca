@@ -132,6 +132,7 @@ import {
 } from './fx.ts';
 import { WIN_KINDS } from '../../shared/gestures.ts';
 import { gesture } from '../gestures.ts';
+import { isPhone } from '../phone.ts';
 
 /**
  * La lista vive en `shared/gestures.ts` porque el hub, que no tiene ventanas,
@@ -255,7 +256,7 @@ export interface WmEvents {
   onContext?(win: Win, x: number, y: number): void;
 }
 
-const MOBILE = () => matchMedia('(max-width: 720px)').matches;
+// A phone, standing or on its side: one answer for the wm and the sheets, see `phone.ts`.
 const KEY = 'orca.windows.v2';
 /** A standard agent tile is one world unit wide; a 640px window occupies two. */
 const AGENT_WINDOW_PPU = 320;
@@ -366,7 +367,7 @@ export class WindowManager {
     // wherever the glass happened to hold it. Nobody chose that seat, so it
     // gets out of the way of the seats somebody did choose.
     this.captureCanvas(win, true);
-    ((this.ev.plane && !MOBILE() && win.mode === 'canvas') ? this.canvasLayer : this.layer).appendChild(el);
+    ((this.ev.plane && !isPhone() && win.mode === 'canvas') ? this.canvasLayer : this.layer).appendChild(el);
     this.wins.set(id, win);
     this.byKey.set(spec.key, win);
     this.reproject();
@@ -536,7 +537,7 @@ export class WindowManager {
     // are what `CANVAS` returns to, and `reproject` needs them to tell a
     // screen-fixed window from one that follows its tile.
     const p = this.ev.plane?.();
-    if (!p || MOBILE()) return;
+    if (!p || isPhone()) return;
     if (!win.canvas && win.spec.anchor) {
       const r = this.ev.tileRect(win.spec.anchor);
       const origin = this.ev.agentOrigin?.(win.spec.anchor) ?? (r
@@ -591,7 +592,7 @@ export class WindowManager {
    */
   private seatOffView(win: Win): boolean {
     const p = this.ev.plane?.();
-    if (!p || !win.canvas || MOBILE()) return false;
+    if (!p || !win.canvas || isPhone()) return false;
     const at = this.ev.project?.(win.canvas.x, win.canvas.y)
       ?? { x: p.origin.x + win.canvas.x * p.ppu, y: p.origin.y - win.canvas.y * p.ppu };
     const s = p.ppu / win.canvas.ppu;
@@ -600,11 +601,11 @@ export class WindowManager {
 
   /** On the canvas and below reading scale: too small to read, only to move. */
   private far(win: Win): boolean {
-    return !!this.ev.plane && !MOBILE() && win.mode === 'canvas' && win.scale < READING_SCALE;
+    return !!this.ev.plane && !isPhone() && win.mode === 'canvas' && win.scale < READING_SCALE;
   }
 
   private needsLocate(win: Win): boolean {
-    return !!this.ev.plane && !MOBILE() && win.mode === 'canvas' && !!win.canvas &&
+    return !!this.ev.plane && !isPhone() && win.mode === 'canvas' && !!win.canvas &&
       (this.far(win) || win.x < 8 || win.y < 112 ||
        win.x + win.w * win.scale > window.innerWidth - 8 ||
        win.y + win.h * win.scale > window.innerHeight - DOCK_H);
@@ -621,7 +622,7 @@ export class WindowManager {
    * says it (`hud/tray.ts`) and why the minimap draws it (`hud/minimap.ts`).
    */
   offView(win: Win): boolean {
-    if (!this.ev.plane || MOBILE() || win.minimized || win.mode !== 'canvas') return false;
+    if (!this.ev.plane || isPhone() || win.minimized || win.mode !== 'canvas') return false;
     return outsideViewport({ x: win.x, y: win.y, w: win.w * win.scale, h: win.h * win.scale });
   }
 
@@ -671,7 +672,7 @@ export class WindowManager {
   bringForward(win: Win) {
     if (!this.wins.has(win.id)) return;
     if (win.minimized) this.restore(win, false);
-    if (!this.ev.plane || MOBILE()) { this.focus(win); return; }
+    if (!this.ev.plane || isPhone()) { this.focus(win); return; }
     if (win.mode === 'canvas') {
       win.mode = 'front'; win.scale = 1;
       win.x = (window.innerWidth - win.w) / 2;
@@ -702,7 +703,7 @@ export class WindowManager {
     if (win.el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
     if (hadFocus) this.ev.onFocus(null);
     this.reproject(); this.apply(win);
-    if (!MOBILE() && from.width && from.height) {
+    if (!isPhone() && from.width && from.height) {
       sendToCanvas(win.el, { x: from.left, y: from.top, w: from.width, h: from.height });
     }
     this.persist(); this.emitStack();
@@ -742,7 +743,7 @@ export class WindowManager {
     // `display: none` — waits for the flight, or the flight has nothing left
     // to move. A window that was folded when the session ended never unfolds
     // in the first place, so it has nothing to fly from.
-    if (this.reviving || MOBILE()) win.el.classList.add('is-min');
+    if (this.reviving || isPhone()) win.el.classList.add('is-min');
     else {
       const to = this.trayRect(win);
       void foldTo(win.el, to).then(() => { if (win.minimized) win.el.classList.add('is-min'); });
@@ -763,7 +764,7 @@ export class WindowManager {
     win.minimized = false;
     win.el.classList.remove('is-min');
     if (locate) this.activate(win); else this.focus(win);
-    if (!MOBILE() && win.mode !== 'canvas') unfoldFrom(win.el, from);
+    if (!isPhone() && win.mode !== 'canvas') unfoldFrom(win.el, from);
     this.persist();
   }
   trayList(): Win[] { return [...this.wins.values()].filter((w) => w.minimized); }
@@ -1014,7 +1015,7 @@ export class WindowManager {
         // Only from the canvas: a window already on the glass has nowhere to
         // be brought to, and swallowing the key there would be a key that
         // does nothing. `PIN` is its own button.
-        if (win.mode !== 'canvas' || !this.ev.plane || MOBILE()) return false;
+        if (win.mode !== 'canvas' || !this.ev.plane || isPhone()) return false;
         e.preventDefault(); this.bringForward(win); return true;
       case 'v':
         if (win.spec.anchor) { e.preventDefault(); this.ev.onReveal?.(win.spec.anchor); return true; }
@@ -1083,14 +1084,14 @@ export class WindowManager {
     let crossed = false;
     for (const win of this.wins.values()) {
       if (win.minimized) continue;
-      if (this.ev.plane && !win.canvas && !MOBILE()) this.captureCanvas(win);
+      if (this.ev.plane && !win.canvas && !isPhone()) this.captureCanvas(win);
       if (this.ev.plane && win.canvas) {
-        if (win.mode === 'canvas' && !MOBILE()) {
+        if (win.mode === 'canvas' && !isPhone()) {
           const p = this.ev.plane();
           const at = this.ev.project?.(win.canvas.x, win.canvas.y) ?? { x: p.origin.x + win.canvas.x * p.ppu, y: p.origin.y - win.canvas.y * p.ppu };
           win.x = at.x; win.y = at.y;
           win.scale = p.ppu / win.canvas.ppu;
-        } else { win.scale = 1; if (!MOBILE()) this.clampToView(win); }
+        } else { win.scale = 1; if (!isPhone()) this.clampToView(win); }
         this.apply(win);
         const away = this.offView(win);
         if (away !== (win.away ?? false)) { win.away = away; crossed = true; }
@@ -1109,7 +1110,7 @@ export class WindowManager {
         }
         continue;
       }
-      if (MOBILE()) continue;
+      if (isPhone()) continue;
       if (!win.spec.anchor) continue;
       const r = this.ev.tileRect(win.spec.anchor);
       if (!r) { this.showOff(win, null); continue; }
@@ -1277,8 +1278,8 @@ export class WindowManager {
   private apply(win: Win) {
     // The one place a position is written, so the dock band is honoured by
     // every path: docked, dragged, anchored, clamped to an edge.
-    if (!MOBILE() && !(this.ev.plane && win.mode === 'canvas')) win.y = Math.max(44, Math.min(window.innerHeight - win.h - DOCK_H, win.y));
-    const spatial = !!this.ev.plane && !MOBILE();
+    if (!isPhone() && !(this.ev.plane && win.mode === 'canvas')) win.y = Math.max(44, Math.min(window.innerHeight - win.h - DOCK_H, win.y));
+    const spatial = !!this.ev.plane && !isPhone();
     const parent = spatial && win.mode === 'canvas' ? this.canvasLayer : this.layer;
     if (win.el.isConnected && win.el.parentElement !== parent) {
       // Atomic moves preserve iframe documents, terminal state and selection.
@@ -1392,7 +1393,7 @@ export class WindowManager {
     if (pin) {
       pin.classList.toggle('is-on', !!win.spec.anchor);
       pin.addEventListener('click', () => {
-        if (this.ev.plane && !MOBILE()) { this.pinToScreen(win); return; }
+        if (this.ev.plane && !isPhone()) { this.pinToScreen(win); return; }
         // Toggle between following the tile and staying on the glass.
         // The button cuts to lime; the pipe is what eases. Unpinning drains it
         // before the anchor goes, so the last frame of the pipe is the tile.
@@ -1428,7 +1429,7 @@ export class WindowManager {
       const t = e.target as HTMLElement;
       if (t.closest('button, .win__grip, .win__off')) return;
       if (!t.closest('.win__head') && !this.far(win)) return;
-      if (MOBILE()) return;
+      if (isPhone()) return;
       dragging = true;
       el.setPointerCapture(e.pointerId);
       sx = e.clientX; sy = e.clientY; ox = win.x; oy = win.y;

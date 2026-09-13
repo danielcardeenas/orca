@@ -887,6 +887,8 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
     saidTo: (fromAgentId, since) => Object.values(world.state.messages)
       .filter((m) => m.fromAgentId === fromAgentId && m.at >= since)
       .map((m) => ({ toAgentId: m.toAgentId, toSquad: m.toSquad })),
+    // Lo que mira el aviso de miembro esperando a su líder. Ver `wake.squadWaits`.
+    messages: () => Object.values(world.state.messages),
     lifecycle,
     ...(publisher ? { publisher } : {}),
     // El tablero de AUTOMEJORA entero, empujado cuando cambia. Son unos pocos

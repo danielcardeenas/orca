@@ -1118,7 +1118,16 @@ export async function ensureServers(
     // CAPCOM inside, and this harness has already decided what it is allowed to
     // share (see `sharing`). It no longer opens a real hub — that door is the
     // hub's now — so by here the target is a test hub either way.
-    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=3', '--anyway']);
+    //
+    // `--speed=1` and not the 3 that stood here for months: the mock applies
+    // the multiplier twice — once shortening the tick interval, once
+    // lengthening the step (`every()` and `tick()` in fake-collector.ts) — so
+    // a 3 ran the state machine at 9×. Measured, that was a birth every 0.84 s
+    // and a death every 1.45 s; the whole synthetic fleet is one island whose
+    // column count is a function of its population, so every one of those
+    // moved tiles under a shot that was measuring pixels. At 1 the same churn
+    // happens twenty times less often.
+    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=1', '--anyway']);
     fleetStarted = true;
   }
 

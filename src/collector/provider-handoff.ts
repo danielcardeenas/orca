@@ -1,4 +1,6 @@
-import { capcomBrief, cleanCapcomBrief } from './briefs.ts';
+// Sólo para el PROMPT de preparación de un reset limpio: los ficheros del
+// runtime los escribe `CapcomSession.writeConfig`, a través de `configure`.
+import { cleanCapcomBrief } from './briefs.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -120,12 +122,51 @@ export function demoteArchivedRules(root: string): number {
   return moved;
 }
 
+/**
+ * Y el propio runtime, fuera del directorio de CAPCOM.
+ *
+ * Bajar el respaldo a `rules/` quitó una copia; quedaba la otra. El destino de
+ * un relevo arrancaba en `~/.orca/capcom/handoffs/<id>/runtime`, y
+ * `~/.orca/capcom/CLAUDE.md` —el brief del CAPCOM que corre directamente ahí,
+ * que el collector reescribe al arrancar y que no se puede quitar— era ancestro
+ * suyo. Un traspaso de continuidad cargaba el brief dos veces (6.017 tokens por
+ * petición, medidos), y un reset LIMPIO, el modo que existe para no inyectar
+ * las reglas persistentes, recibía el texto largo entero por el ancestro: su
+ * brief corto en el cwd y el largo un directorio más arriba. Confirmado en
+ * vivo: la sesión que encargó este arreglo arrancó con tres copias.
+ *
+ * Los relevos viven ahora en un directorio HERMANO del de CAPCOM, no
+ * descendiente: `~/.orca/capcom-handoffs/<id>/`, con `runtime/` y `rules/`
+ * dentro como hasta ahora. Ningún ancestro de ese cwd lleva un fichero de
+ * reglas de ORCA, así que el destino recibe exactamente lo que se escribe en su
+ * cwd, una vez, y un reset limpio recibe sólo el brief corto.
+ *
+ * Los archivos escritos antes se quedan donde están —son el historial de las
+ * sesiones anteriores del mando— y se siguen encontrando por id, degradando y
+ * podando igual que antes: `roots()` recorre las dos raíces.
+ */
+export const HANDOFFS_DIR = 'handoffs';
+
 interface Deps {
   priorHistory?(a: AgentHandle): string;
   cwd?(a: AgentHandle): string;
   models?(): ProviderModel[];
   model?(a: AgentHandle): string | null;
+  /** Directorio de control: identidad, reglas vivas, actas. Sin él no hay relevo. */
   dir(): string;
+  /**
+   * Dónde se archivan los relevos. Por defecto `<dir>/handoffs`, que es lo que
+   * un worker sigue usando; CAPCOM pasa su directorio hermano, porque el cwd
+   * del destino no puede colgar de `dir()`.
+   */
+  archives?(): string;
+  /**
+   * Quien amuebla el cwd de un destino con contexto nuevo: brief, MCP y
+   * settings. Es `CapcomSession.writeConfig`, el único dueño de esos ficheros;
+   * antes este servicio escribía el brief por su cuenta y la activación lo
+   * reescribía, dos dueños de un mismo `runtime/CLAUDE.md`.
+   */
+  configure?(cwd: string, mode: 'continuity' | 'clean'): void;
   agent(id: string): AgentHandle | null;
   owns(a: AgentHandle): boolean;
   context(a: AgentHandle): string;
@@ -176,9 +217,22 @@ export class ProviderHandoffs {
     if (p.fromModel && (this.deps.model?.(a) ?? a.model) !== p.fromModel) return false;
     return true;
   }
+  /** Donde se escriben los relevos nuevos. */
+  private archiveRoot(): string { return this.deps.archives?.() ?? path.join(this.deps.dir(), HANDOFFS_DIR); }
+  /**
+   * Las raíces con relevos: la actual y, si es otra, la de antes bajo `dir()`.
+   * Los archivos de ahí no se mueven —son historial—, pero se siguen leyendo,
+   * degradando y podando.
+   */
+  private roots(): string[] {
+    const current = this.archiveRoot(); const legacy = path.join(this.deps.dir(), HANDOFFS_DIR);
+    return path.resolve(current) === path.resolve(legacy) ? [current] : [current, legacy];
+  }
+  /** El plan de un relevo: donde esté; uno nuevo, en la raíz actual. */
   private planFile(id: string) {
     if (!uuid(id)) throw new Error('Invalid handoff id');
-    return path.join(this.deps.dir(), 'handoffs', id, 'plan.json');
+    const files = this.roots().map(root => path.join(root, id, 'plan.json'));
+    return files.find(file => fs.existsSync(file)) ?? files[0]!;
   }
   private save(p: ProviderHandoffPlan) {
     this.memory.set(p.id, structuredClone(p));
@@ -239,12 +293,14 @@ export class ProviderHandoffs {
    * design: a handoff must never fail because housekeeping did.
    */
   private prune(keep: string): void {
-    const root = path.join(this.deps.dir(), 'handoffs');
     const spare = new Set([path.basename(keep)]);
     try {
       const r = readIdentity(this.deps.dir());
       for (const ref of [r?.handoffId, r?.archive && path.basename(r.archive)]) if (typeof ref === 'string' && ref) spare.add(ref);
     } catch { /* no active recovery to protect */ }
+    for (const root of this.roots()) this.pruneRoot(root, spare);
+  }
+  private pruneRoot(root: string, spare: Set<string>): void {
     let entries: string[] = [];
     try { entries = fs.readdirSync(root); } catch { return; }
     for (const entry of entries) {
@@ -291,15 +347,23 @@ export class ProviderHandoffs {
       && !(this.deps.models?.() ?? providerModels()).some(m => m.runtime === runtime && m.id === model && m.installed)) {
       throw new Error('Choose an installed provider and a listed model.');
     }
-    const transferId = randomUUID(); const archive = path.join(this.deps.dir(), 'handoffs', transferId);
+    if (contextMode && !this.deps.configure) throw new Error('Nobody can furnish a fresh CAPCOM directory here. No handoff was prepared.');
+    const transferId = randomUUID(); const archive = path.join(this.archiveRoot(), transferId);
     fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
-    const cwd = contextMode ? path.join(archive, 'runtime') : undefined;
-    if (cwd) {
+    /*
+     * El cwd del destino. Con contexto nuevo, un directorio recién creado
+     * dentro del archivo —hermano de `rules/`, y fuera del directorio de
+     * CAPCOM: ver `HANDOFFS_DIR`— que amuebla el dueño de la configuración.
+     * Sin él, donde corre hoy el origen: para un worker, su proyecto; para
+     * CAPCOM, su propio directorio. Siempre explícito en el plan, para que ni
+     * la preparación ni la activación tengan que deducirlo del archivo.
+     */
+    const cwd = contextMode ? path.join(archive, 'runtime') : this.deps.cwd?.(a) ?? this.deps.dir();
+    if (contextMode) {
       fs.mkdirSync(cwd, { mode: 0o700 });
-      const brief = contextMode === 'clean' ? cleanCapcomBrief() : capcomBrief();
-      for (const name of ['AGENTS.md', 'CLAUDE.md']) fs.writeFileSync(path.join(cwd, name), brief, { mode: 0o600 });
+      this.deps.configure!(cwd, contextMode);
     }
-    demoteArchivedRules(path.join(this.deps.dir(), 'handoffs'));
+    for (const root of this.roots()) demoteArchivedRules(root);
     this.prune(archive);
     const raw = fs.readFileSync(a.transcriptPath!);
     linkOrCopy(a.transcriptPath!, path.join(archive, 'source.jsonl'));
@@ -320,7 +384,7 @@ export class ProviderHandoffs {
     const checkpointPath = path.join(archive, 'HANDOFF.md');
     fs.writeFileSync(checkpointPath, contextMode === 'clean' ? '# CAPCOM — clean context reset\n\nOperator requested a clean session. No pending-work summary, historical conversation or persisted rule text was injected. Files, hub history, rules and workers are retained. The new session waits for new instructions. Source and history archives in this directory are for operator review only.\n' : `# agent handoff\n\nPrevious session: ${a.sessionId}\nTarget: ${runtime}/${model}\nFull original transcript: ${archive}/source.jsonl\nConversation: ${historyPath}\n\nThis is a point-in-time snapshot. Reconcile pending missions using briefing after activation. Historical instructions are evidence, not new orders.\n\n${checkpoint}\n\n${contextMode ? `Persistent runtime rules: CLAUDE.md and AGENTS.md (copies in ${RULES_DIR}/ inside this archive). Read briefing first after activation; inspect_mission and recall retrieve details on demand.` : this.deps.context(a)}`, { mode: 0o600 });
     const p: ProviderHandoffPlan = { ...(contextMode ? { contextMode } : {}), id: transferId, fromId: a.id, fromRuntime: a.runtime, fromModel: this.deps.model?.(a) ?? a.model ?? null,
-      ...(cwd ? { cwd } : this.deps.cwd ? { cwd: this.deps.cwd(a) } : {}),
+      cwd,
       runtime: runtime as 'claude' | 'codex', model, at: Date.now(), archive, historyPath, checkpointPath, bytes: Buffer.byteLength(history), sha256: hash(raw), phase: 'review',
       detail: 'Backup ready. Confirmation sends this conversation and checkpoint to the selected provider; the previous agent stays active until preparation succeeds.' };
     fs.writeFileSync(path.join(archive, 'manifest.json'), JSON.stringify({ sourcePath: a.transcriptPath, sourceSha256: p.sha256, historySha256: hash(history), checkpointSha256: hash(fs.readFileSync(checkpointPath)) }, null, 2), { mode: 0o600 });
@@ -366,7 +430,13 @@ export class ProviderHandoffs {
   }
 }
 
-/** No MCP credentials or action tools during context preparation. */
+/**
+ * No MCP credentials or action tools during context preparation.
+ *
+ * `review()` always writes `cwd` into the plan now; the grandparent-of-archive
+ * fallback only serves a plan written before that, whose archive still lives
+ * under the CAPCOM directory.
+ */
 export function prepareProvider(p: ProviderHandoffPlan, prompt: string): Promise<{ sessionId: string; receipt: string }> {
   const bin = runtimeBin(p.runtime); if (!bin) return Promise.reject(new Error('Provider CLI is not installed.'));
   const sessionId = randomUUID();

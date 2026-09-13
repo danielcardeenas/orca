@@ -84,6 +84,8 @@ function fixture(): Fixture {
   file(join(orca, 'history.jsonl'), 25 * 1024 * 1024, 400);
   file(join(orca, 'recovery-images', 'old', 'img.bin'), 40 * 1024 * 1024, 400);
   file(join(orca, 'capcom', 'handoffs', 'h.json'), 10 * 1024 * 1024, 400);
+  // Los relevos nuevos, en el directorio hermano de capcom.
+  file(join(orca, 'capcom-handoffs', 'r', 'source.jsonl'), 10 * 1024 * 1024, 400);
   file(join(orca, 'worker-recovery', 'handoffs', 'w.json'), 10 * 1024 * 1024, 400);
   // Logs and artifacts.
   file(join(orca, 'hub', 'events', '2026-01-01.jsonl'), 3 * 1024 * 1024, 60);
@@ -155,9 +157,9 @@ export default {
       const r = await sampler().sample();
       const transcripts = categoryBytes(r, 'transcripts');
       const recovery = categoryBytes(r, 'recovery');
-      // 12M + 6M + 4096 + 900 of transcripts, 85M of recovery.
+      // 12M + 6M + 4096 + 900 of transcripts, 95M of recovery.
       const wantT = 18 * 1024 * 1024 + 4096 + 900;
-      const wantR = 85 * 1024 * 1024;
+      const wantR = 95 * 1024 * 1024;
       const total = orcaTotal(r).value ?? 0;
       return ok('every byte landed in a category',
         transcripts === wantT && recovery === wantR && total > wantT + wantR
@@ -233,6 +235,11 @@ export default {
         ['~/.orca/recovery-images', true],
         ['~/.orca/recovery-images/2026-01', true],
         ['~/.orca/recovery-images-old', false],
+        // Los relevos de CAPCOM, en su directorio hermano y en el de antes.
+        ['~/.orca/capcom-handoffs', true],
+        ['~/.orca/capcom-handoffs/162ee578/runtime', true],
+        ['~/.orca/capcom/handoffs/162ee578', true],
+        ['~/.orca/capcom', false],
         ['~/.orca/artifacts', false],
         ['~/.claude/projects/-srv-cold', false],
       ];

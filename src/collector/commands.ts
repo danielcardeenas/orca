@@ -32,7 +32,7 @@ import {
   type InterruptOutcome,
 } from '../shared/interrupt.ts';
 import type { AgentMessage } from '../shared/types.ts';
-import { excludedWorkspace, refusalFor } from '../shared/workspaces.ts';
+import { capcomHandoffsHome, capcomHome, excludedWorkspace, refusalFor } from '../shared/workspaces.ts';
 import { squadBrief, withBrief } from './briefs.ts';
 import type { ArtifactIndex } from './artifacts.ts';
 import type { EscalationWatcher } from './escalate.ts';
@@ -135,7 +135,13 @@ export interface CommandDeps {
    * ponerlo no pueda hacerlo por descuido.
    */
   trustFile?: string | false;
-  transfer?: { context(): string; hold(id: string, on: boolean, plan?: import('../shared/provider-handoff.ts').ProviderHandoffPlan): void; activate(plan: import('../shared/provider-handoff.ts').ProviderHandoffPlan, sessionId: string): Promise<void> };
+  transfer?: {
+    context(): string;
+    hold(id: string, on: boolean, plan?: import('../shared/provider-handoff.ts').ProviderHandoffPlan): void;
+    activate(plan: import('../shared/provider-handoff.ts').ProviderHandoffPlan, sessionId: string): Promise<void>;
+    /** Amuebla el cwd de un destino con contexto nuevo: `CapcomSession.writeConfig`, el único dueño de esos ficheros. */
+    configure(cwd: string, mode: 'continuity' | 'clean'): void;
+  };
   projects: ProjectRegistry;
   keys: KeyVault;
   /** Donde viven los agentes hospedados. Sin tmux, todo cae a `--bg`. */
@@ -209,6 +215,12 @@ export interface CapcomChannel {
    * lanzó ahí, así que no hay nada que adivinar a partir de un slug.
    */
   dir(): string | null;
+  /**
+   * Dónde se archivan sus relevos y dónde corre uno relevado: al lado de
+   * `dir()`, nunca debajo, para que el brief de ahí no sea ancestro del cwd
+   * del destino. Ver `capcomHandoffsDir` en capcom.ts.
+   */
+  handoffsDir(): string | null;
   /** Las opciones que toda invocación suya necesita: MCP, permisos, nombre. */
   launchArgs(): string[];
   /** El resume creó una sesión nueva: el rol se muda a ella. */
@@ -255,9 +267,11 @@ export class CommandRunner {
     this.handoffs = new ProviderHandoffs({ agent: deps.agent, owns: a => !!this.capcomFor(a),
       model: a => this.models.state(a)?.active ?? a.model ?? null,
       dir: () => { const dir = deps.capcom?.dir(); if (!dir) throw new Error('CAPCOM is unavailable'); return dir; },
+      archives: () => { const dir = deps.capcom?.handoffsDir(); if (!dir) throw new Error('CAPCOM is unavailable'); return dir; },
       busy: id => this.inputBusy.has(id) || this.models.locked(id) || ['queued', 'applying'].includes(this.models.state(deps.agent(id)!)?.phase ?? ''),
       context: () => deps.transfer?.context() ?? '', hold: (id, on, plan) => deps.transfer?.hold(id, on, plan),
       activate: async (plan, sessionId) => { if (!deps.transfer) throw new Error('Provider handoff activation unavailable'); await deps.transfer.activate(plan, sessionId); },
+      ...(deps.transfer ? { configure: (cwd, mode) => deps.transfer!.configure(cwd, mode) } : {}),
     });
     this.workers = new WorkerHandoffs(deps, this.models, id => this.inputBusy.has(id));
     this.reset = new CapcomResets({
@@ -426,10 +440,14 @@ export class CommandRunner {
     const allowed = launchable(cwd);
     if (!allowed.ok) return { ok: false, detail: allowed.why };
     if (!isDir(cwd)) return { ok: false, detail: `la ruta del proyecto no existe: ${cwd}` };
-    const controlRoot = path.resolve(process.env['ORCA_CAPCOM_DIR'] ?? path.join(orcaDir(), 'capcom'));
-    const realControlRoot = fs.existsSync(controlRoot) ? fs.realpathSync(controlRoot) : controlRoot;
-    if (isInside(realControlRoot, fs.realpathSync(cwd))) {
-      return { ok: false, detail: 'CAPCOM is a control workspace: workers launched here read its CLAUDE.md and wake up believing they are the commander. Choose a work project outside the CAPCOM directory; do not retry by spawning more workers here.' };
+    // El directorio de CAPCOM y el de sus relevos, que es hermano y no hijo
+    // (capcom.ts, `capcomHandoffsDir`): un relevado corre ahí con el brief en su cwd.
+    const controlRoot = path.resolve(capcomHome());
+    for (const root of [controlRoot, path.resolve(capcomHandoffsHome())]) {
+      const real = fs.existsSync(root) ? fs.realpathSync(root) : root;
+      if (isInside(real, fs.realpathSync(cwd))) {
+        return { ok: false, detail: 'CAPCOM is a control workspace: workers launched here read its CLAUDE.md and wake up believing they are the commander. Choose a work project outside the CAPCOM directory; do not retry by spawning more workers here.' };
+      }
     }
     if (typeof cmd.prompt !== 'string' || cmd.prompt.trim().length === 0) {
       return { ok: false, detail: 'prompt vacío' };

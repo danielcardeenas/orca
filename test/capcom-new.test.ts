@@ -20,7 +20,9 @@ import { test, ok } from './harness.ts';
 const OLD = '11111111-2222-4333-8444-555555555555';
 const NEW = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 function rig(runtime = 'codex') {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-fresh-isolated-'));
+  // Como en producción: el directorio de CAPCOM y, a su lado, el de sus relevos.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-fresh-isolated-'));
+  const dir = path.join(root, 'capcom'); fs.mkdirSync(dir, { mode: 0o700 });
   const source = path.join(dir, 'source.jsonl');
   const line = runtime === 'codex' ? { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ text: 'HISTORICAL_CONVERSATION_SENTINEL' }] } }
     : { type: 'user', message: { content: 'HISTORICAL_CONVERSATION_SENTINEL' } };
@@ -29,7 +31,11 @@ function rig(runtime = 'codex') {
   const a = { id: OLD, sessionId: OLD, runtime, model: runtime === 'codex' ? 'gpt-6-astra' : 'opus', pane: `orca-${OLD}`, alive: true, state: 'idle', transcriptPath: source } as AgentHandle;
   let effective = a.model ?? null;
   const prompts: string[] = []; const holds: boolean[] = []; const activated: string[] = [];
-  const deps = { dir: () => dir, agent: (id: string) => id === OLD ? a : null, owns: () => true, busy: () => false,
+  // Quien amuebla el cwd de un destino: el mismo dueño que en la activación.
+  const owner = new CapcomSession({ dir, bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:1', token: '', trust: false,
+    alive: () => false, note() {}, lineage: { noteSpawn() {}, bind() {}, demote() {} } });
+  const deps = { dir: () => dir, archives: () => owner.handoffsDir, configure: (cwd: string, mode: 'continuity' | 'clean') => owner.writeConfig(cwd, mode),
+    agent: (id: string) => id === OLD ? a : null, owns: () => true, busy: () => false,
     model: () => effective, models: (): ProviderModel[] => [], context: () => 'OLD_FLEET_CONTEXT_SENTINEL',
     hold: (_id: string, on: boolean) => { holds.push(on); },
     prepare: async (p: ProviderHandoffPlan, prompt: string) => { prompts.push(prompt); return { sessionId: NEW, receipt: `ORCA_HANDOFF_READY_${p.id}` }; },
@@ -37,7 +43,7 @@ function rig(runtime = 'codex') {
   };
   const service = new ProviderHandoffs(deps);
   const settle = async () => { for (let i = 0; i < 100 && service.locked(OLD); i++) await Promise.resolve(); assert.equal(service.locked(OLD), false); };
-  return { dir, source, a, deps, service, settle, prompts, holds, activated, model: (m: string) => { effective = m; }, dispose: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  return { dir, source, a, deps, service, settle, prompts, holds, activated, model: (m: string) => { effective = m; }, dispose: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 export default { suite: 'Fresh CAPCOM', tests: [
   ...['codex', 'claude'].flatMap(runtime => (['clean', 'continuity'] as const).map(mode => test(`${runtime} ${mode} keeps effective model, exact archive, and excludes historical conversation`, async () => {

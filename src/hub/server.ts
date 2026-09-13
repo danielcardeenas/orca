@@ -2595,6 +2595,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
       join(ORCA_DIR, 'uploads'),
       ...approvedRoots.list(),
       join(ORCA_DIR, 'capcom', 'handoffs'),
+      join(ORCA_DIR, 'capcom-handoffs'),
       join(ORCA_DIR, 'worker-recovery', 'handoffs'),
       ...Object.values(world.state.projects).map((p) => p.path),
       ...scratchpadRoots(),

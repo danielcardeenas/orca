@@ -373,6 +373,7 @@ export const PROTECTED: string[] = [
   '~/.orca/history.jsonl',
   '~/.orca/recovery-images',
   '~/.orca/capcom/handoffs',
+  '~/.orca/capcom-handoffs',
   '~/.orca/worker-recovery',
   '~/.orca/token',
   '~/.orca/machine-id',

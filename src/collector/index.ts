@@ -354,6 +354,7 @@ class Collector {
           this.tick();
           this.sendSnapshot();
         },
+        configure: (cwd, mode) => { if (!this.capcom) throw new Error('CAPCOM unavailable'); this.capcom.writeConfig(cwd, mode); },
       },
       permissions: {
         get: (id) => {
@@ -370,6 +371,7 @@ class Collector {
       capcom: {
         owns: (shortId) => this.capcom?.owns(shortId) ?? false,
         dir: () => this.capcom?.dir ?? null,
+        handoffsDir: () => this.capcom?.handoffsDir ?? null,
         launchArgs: () => this.capcom?.launchArgs() ?? [],
         adoptCleared: (toId, mode, cutoffAt, model) => {
           this.capcom?.adoptCleared(toId, mode, cutoffAt, model);

@@ -17,7 +17,7 @@ import { PATHS, PROTOCOL_VERSION, type ServerFrame } from '../src/shared/protoco
 import { createAuth } from '../src/hub/auth.ts';
 import { findPaths, fileKind } from '../src/ui/windows/paths.ts';
 import { startHub } from '../src/hub/server.ts';
-import { acceptableRoot, envRoots, scratchpadRoots, fileMime, parseRange, resolveServedPath } from '../src/hub/files.ts';
+import { acceptableRoot, envRoots, scratchpadRoots, fileMime, parseRange, resolveServedPath, REFUSAL } from '../src/hub/files.ts';
 import { ok, eq, test, freePort, type TestModule } from './harness.ts';
 
 const BASE = realpathSync(tmpdir());
@@ -25,6 +25,10 @@ const FIXTURE = mkdtempSync(join(BASE, 'orca-files-test-'));
 const ROOT = join(FIXTURE, 'project');
 const OUTSIDE = join(FIXTURE, 'outside');
 const ALIAS = join(FIXTURE, 'alias');
+/** El árbol aislado de un agente, donde el CLI lo pone: `<proyecto>/.claude/worktrees/<nombre>`. */
+const WORKTREE = join(ROOT, '.claude', 'worktrees', 'k9');
+/** Una home de mentira con la misma forma dentro, para el caso que NO se abre. */
+const HOMEFAKE = join(FIXTURE, 'home');
 const TEST_TOKEN = 'orca-files-fixture-token';
 let ready = false;
 const CANARY = 'ESTO-NO-DEBE-SALIR-POR-/api/file';
@@ -48,6 +52,18 @@ function fixture(): void {
   symlinkSync(join(ROOT, '.env'), join(ROOT, 'innocent.txt'));
   writeFileSync(join(ROOT, 'voice.wav'), Buffer.alloc(100, 1));
   execFileSync('mkfifo', [join(ROOT, 'pipe')]);
+  // Un worktree con las dos clases de contenido dentro. Los prohibidos existen
+  // en disco a propósito: si el veto se rompiera darían 200 y no 404, que es la
+  // diferencia entre una prueba que detecta el agujero y una que lo tapa.
+  mkdirSync(join(WORKTREE, 'src'), { recursive: true });
+  mkdirSync(join(WORKTREE, '.claude'), { recursive: true });
+  writeFileSync(join(WORKTREE, 'src', 'dentro.ts'), 'export const donde = "el worktree";\n');
+  writeFileSync(join(WORKTREE, '.claude', 'settings.json'), '{ "anidado": true }\n');
+  writeFileSync(join(WORKTREE, '.env'), 'NON-SENSITIVE-FIXTURE');
+  writeFileSync(join(WORKTREE, 'deploy.key'), 'NON-SENSITIVE-FIXTURE');
+  writeFileSync(join(ROOT, '.claude', 'settings.json'), '{ "del proyecto": true }\n');
+  mkdirSync(join(HOMEFAKE, '.claude', 'worktrees', 'k9', 'src'), { recursive: true });
+  writeFileSync(join(HOMEFAKE, '.claude', 'worktrees', 'k9', 'src', 'dentro.ts'), 'export const donde = "la home";\n');
 }
 
 async function withHub<T>(fn: (base: string) => Promise<T>): Promise<T> {
@@ -178,6 +194,52 @@ const tests = [
       const r = resolveServedPath(join(ROOT, p), [ROOT]); return !r.ok && r.status === 403;
     }));
   }),
+
+  /*
+   * El permiso de `.claude/worktrees` es POSICIONAL, y esto es lo que lo
+   * distingue de una comprobación de subcadena.
+   *
+   * Una subcadena (`path.includes('.claude/worktrees')`) dejaría pasar la
+   * segunda fila —la configuración de un agente anidado dentro del worktree—
+   * y la sexta convertiría en servible la home del hub, donde viven los
+   * transcripts de todas las sesiones. Ninguna de las dos se reconstruye
+   * leyendo el código: el shot del navegador las cubre, pero cuesta veinte
+   * segundos y levanta un hub, así que el día que alguien toque `privatePath`
+   * sin leer el comentario, esto es lo que se pone rojo.
+   *
+   * Las dos últimas filas son el mismo fichero: sólo cambia quién es la home.
+   * Ahí está toda la regla — la excepción mira dónde cuelga ese `.claude`, no
+   * sólo cómo se llama.
+   */
+  test('el worktree se sirve, y lo privado de dentro —y el de la home— no', () => {
+    fixture();
+    const enHome = join(HOMEFAKE, '.claude', 'worktrees', 'k9', 'src', 'dentro.ts');
+    // El motivo y no sólo el código: un 403 «fuera de las raíces» aquí sería
+    // un fallo del fixture disfrazado de prueba verde.
+    const estado = (path: string, roots: string[], home?: string) => {
+      const r = resolveServedPath(path, roots, home ? { home } : {});
+      return r.ok ? 'ok' : r.reason === REFUSAL.private ? 'política' : `${r.status} ${r.reason}`;
+    };
+    return eq('posicional', [
+      estado(join(WORKTREE, 'src', 'dentro.ts'), [ROOT]),
+      estado(join(WORKTREE, '.claude', 'settings.json'), [ROOT]),
+      estado(join(WORKTREE, '.env'), [ROOT]),
+      estado(join(WORKTREE, 'deploy.key'), [ROOT]),
+      estado(join(ROOT, '.claude', 'settings.json'), [ROOT]),
+      estado(enHome, [FIXTURE], HOMEFAKE),
+      estado(enHome, [FIXTURE], OUTSIDE),
+    ], ['ok', 'política', 'política', 'política', 'política', 'política', 'ok']);
+  }),
+
+  /*
+   * La otra puerta: `files:allow` decide con `acceptableRoot`, que decide con
+   * lo mismo. Que un worktree pueda fijarse como raíz es la consecuencia
+   * buscada; que el de la home no, es lo que impide que autorizar una carpeta
+   * abra `~/.claude`.
+   */
+  test('un worktree puede ser raíz autorizada; el de la home, no', () =>
+    eq('allow', [acceptableRoot(WORKTREE), acceptableRoot(join(HOMEFAKE, '.claude', 'worktrees', 'k9'), HOMEFAKE), acceptableRoot(join(ROOT, '.claude'))],
+      [true, false, false])),
 
   test('FIFO y raíces de otro usuario se rechazan sin leer', () => {
     const pipe = resolveServedPath(join(ROOT, 'pipe'), [ROOT]);

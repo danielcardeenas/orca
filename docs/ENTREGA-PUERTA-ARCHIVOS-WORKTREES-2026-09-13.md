@@ -133,11 +133,47 @@ fichero quedó idéntico a como estaba (`diff` contra copia previa).
   miembro del squad. Queda en el typecheck. Lo digo en vez de darlo por bueno,
   que es la laguna que `ENTREGA-RUTAS-PERMITIDAS-2026-09-09.md` dejó abierta
   con el botón ALLOW — ésa sí queda cerrada aquí.
-- **`test/files.test.ts` no lo toqué**: el resto de `test/` es de otro
-  miembro. Una unitaria del permiso posicional ahí sería más barata que el
-  shot; pregunté a mi líder y no llegó respuesta, así que la prueba fue al
-  único fichero de `test/` que es mío. Pasa por el hub vivo, que es más
-  fuerte, pero cuesta 20 s en vez de milisegundos.
+## 5. Añadido después del merge: la unitaria en `test/files.test.ts`
+
+En la primera entrega no toqué ese fichero —el resto de `test/` era de otro
+miembro del squad— y la propiedad quedó sostenida sólo por el shot: más
+fuerte, pero veinte segundos y un hub, o sea el que nadie corre a mano el día
+que alguien toca `privatePath` sin leer el comentario. CAPCOM lo reclamó y
+está escrita. Dos pruebas, milisegundos:
+
+`el worktree se sirve, y lo privado de dentro —y el de la home— no` afirma el
+**motivo** y no sólo el código, para que un 403 «fuera de las raíces» no pueda
+disfrazarse de prueba verde:
+
+| ruta | esperado |
+|---|---|
+| `<wt>/src/dentro.ts` | se sirve |
+| `<wt>/.claude/settings.json` | política |
+| `<wt>/.env` | política |
+| `<wt>/deploy.key` | política |
+| `<proyecto>/.claude/settings.json` | política |
+| `<home>/.claude/worktrees/k9/src/dentro.ts`, con esa home | política |
+| el mismo fichero, con otra home | se sirve |
+
+Las dos últimas filas son el mismo fichero y sólo cambia quién es la home: ahí
+está la regla entera. Los ficheros prohibidos existen en disco a propósito —si
+el veto se rompiera darían 200 y no 404, que es la diferencia entre detectar
+el agujero y taparlo.
+
+`un worktree puede ser raíz autorizada; el de la home, no` cubre la otra
+puerta, `files:allow`, por `acceptableRoot`: `true`, `false`, `false`.
+
+Las que de verdad distinguen esta implementación de una por subcadena son la
+segunda fila y la sexta: una subcadena dejaría servible la configuración de un
+agente anidado y convertiría la home del hub en raíz autorizable.
+
+Corrido para esto: `npm run typecheck` limpio, `npm test -- --changed` 37/37
+(3 ficheros → 1 suite, `files`), `npm test -- files file-roots hub` 93/93. No
+volví a correr los shots: este cambio no toca `src/`. Sigue sin hacerse la
+comprobación por mutación —mutar `privatePath` a subcadena y ver la suite en
+rojo—: el clasificador del sandbox bloquea correr pruebas con la regla
+debilitada, así que la detección está sostenida por cómo están construidas
+esas dos filas, no por un rojo observado.
 
 Filtros que cubren esta entrega: `files`, `file-roots`, `hub`; shots
 `file-browser`, `file-viewer`.

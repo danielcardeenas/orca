@@ -38,10 +38,10 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 
 import { waitFor } from './lib/wait-for.mjs';
+import { projectRoot } from './lib/project-root.mjs';
 import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
@@ -83,13 +83,6 @@ function parse(args) {
     else usage(1);
   }
   return out;
-}
-
-function projectRoot(explicit) {
-  if (explicit) return resolve(explicit);
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch { return process.cwd(); }
 }
 
 function readStdin() {

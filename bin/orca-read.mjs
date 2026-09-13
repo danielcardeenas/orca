@@ -25,10 +25,10 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 
 import { waitFor } from './lib/wait-for.mjs';
+import { projectRoot } from './lib/project-root.mjs';
 
 const argv = process.argv.slice(2);
 
@@ -86,17 +86,6 @@ function usage() {
 }
 
 /* ── Where to read ────────────────────────────────────────────────── */
-
-function projectRoot(explicit) {
-  if (explicit) return resolve(explicit);
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || process.cwd();
-  } catch {
-    return process.cwd();
-  }
-}
 
 function orcaPresent() {
   const home = process.env.ORCA_HOME ?? join(process.env.HOME ?? '', '.orca');

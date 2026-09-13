@@ -20,10 +20,10 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 
 import { waitFor } from './lib/wait-for.mjs';
+import { projectRoot } from './lib/project-root.mjs';
 import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
@@ -84,18 +84,8 @@ function usage() {
 
 /* ── Where to write ───────────────────────────────────────────────── */
 
-function projectRoot(explicit) {
-  if (explicit) return resolve(explicit);
-  try {
-    // The escalation lands in the repo the agent is actually working in, which
-    // is what the collector maps to a project.
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || process.cwd();
-  } catch {
-    return process.cwd();
-  }
-}
+// The escalation lands in the repo the agent is working in — folded back to the
+// project the collector actually watches. See lib/project-root.mjs.
 
 /**
  * ORCA is "running here" if a collector has ever touched this machine. The

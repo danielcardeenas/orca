@@ -28,7 +28,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { projectRoot } from './lib/project-root.mjs';
 import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
@@ -84,17 +84,6 @@ function usage() {
 }
 
 /* ── Where to write ───────────────────────────────────────────────── */
-
-function projectRoot(explicit) {
-  if (explicit) return resolve(explicit);
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || process.cwd();
-  } catch {
-    return process.cwd();
-  }
-}
 
 function orcaPresent() {
   const home = process.env.ORCA_HOME ?? join(process.env.HOME ?? '', '.orca');

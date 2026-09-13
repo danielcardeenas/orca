@@ -26,7 +26,7 @@
 
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, relative, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { projectRoot } from './lib/project-root.mjs';
 import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
@@ -100,17 +100,6 @@ function usage() {
 }
 
 /* ── Where to write ───────────────────────────────────────────────── */
-
-function projectRoot(explicit) {
-  if (explicit) return resolve(explicit);
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || process.cwd();
-  } catch {
-    return process.cwd();
-  }
-}
 
 /** Same marker orca-tell uses: no ~/.orca means nobody is reading this. */
 function orcaPresent() {

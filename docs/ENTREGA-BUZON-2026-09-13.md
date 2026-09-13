@@ -151,23 +151,73 @@ el que la respuesta todavía sirve.
 
 ---
 
-## 5. Lo que NO se ha hecho, y quién lo tiene
+## 5. El fallo 2, cerrado (`2373856`)
 
-El **fallo 2** (segmentar el buzón), el **fallo 3** (`writeAtomic`) y el lado
-del collector de la capa 1 (`delivered` / `undeliverable` / `read`) están
-repartidos a **AG**, en zona exclusiva suya: `src/collector/messages.ts` y
-`bin/orca-read.mjs`. No los ha tocado nadie más.
+El **fallo 2**, el **fallo 3** y el lado collector de la capa 1 los cerró **AG**
+en su zona exclusiva, y están en la rama:
 
-Sin el fallo 2 arreglado, el correo sigue siendo del primero que lo lee.
+- La entrega es **por destinatario**: `<msgId>.<agente>.json` y su `.read` al
+  lado. El destinatario va en el nombre y **no lo re-deriva el CLI**, porque el
+  hub ya resolvió el escuadrón al enrutar — que los dos lados contesten por
+  separado la misma pregunta es la forma exacta del fallo del worktree.
+- Lo ya entregado sin destinatario (~200 ficheros) **sigue siendo de todos**:
+  esconder correo que existe habría sido un fallo peor que el que se arregla.
+- `writeAtomic` con temporal de pid y azar, como `trust.ts`.
+- El recibo, lado collector: `delivered` con sus destinatarios, `undeliverable`
+  con el motivo, `read` cuando aparece la marca — que ahora es por agente, así
+  que `readBy` dice por fin **quién** leyó.
+
+## 6. El cableado de los CLI, verificado en vivo por J8
+
+`docs/verificacion-cli-j8.md`. Cubre el único hueco que quedaba declarado.
+
+| CLI | en vivo | resultado |
+|---|---|---|
+| `orca-tell`, `orca-read`, `orca-show` | sí | plegaron al principal; el collector los consumió |
+| `orca-ask` | sí | correcto |
+| `orca-spawn` | **no, por decisión** | cableado correcto por lectura; verificarlo lanza un agente real, y con la máquina a 3,6 G de swap eso se escala, no se ejecuta |
+| `orca-improve` | no | cableado correcto por lectura; mueve la cola de automejora |
+
+**J8 corrige un dato de la primera versión de esta entrega, y tiene razón:** el
+shim no es una copia, es un envoltorio de una línea que hace `exec node
+<checkout principal>/bin/orca-<x>.mjs`. Así que el arreglo quedó activo para
+toda la flota **en cuanto se fusionó a `main`**, sin reinstalar nada. Donde sí
+importa la distinción es al medir antes del merge: invocando el nombre pelado
+se mide el código del principal, no el del worktree.
+
+### Un acoplamiento que conviene mirar
+
+J8 estuvo **bloqueado esperando a CAPCOM porque `orca-ask` no está en su PATH**.
+Comprobado: el perfil de shims `squad` monta `orca-read orca-recover orca-show
+orca-spawn orca-tell` — **sin `orca-ask`**, que sólo está en `full`.
+
+Es coherente con el diseño: un miembro escala a su líder con
+`orca-tell --kind ask`, y es el líder quien usa `orca-ask`. Pero eso significa
+que **la única vía de escape de un miembro pasa por el canal que hoy estaba
+roto**. Cuando la ruta principal falla, no hay alternativa: el miembro se queda
+esperando, que es exactamente lo que pasó. No lo llamo fallo porque el diseño
+tiene su motivo, pero el acoplamiento es real y hoy costó tiempo.
+
+## 7. Lo que esto desatascó
+
+El arreglo de la raíz está en producción de código desde `69de31a`, y tuvo
+efecto inmediato fuera de este squad: en el lote de siete, **cuatro agentes
+habían quedado sordos por este mismo fallo**. Uno trabajó hora y media sin que
+su líder viera nada y **se le dio por parado**; había entregado cinco arreglos.
+
+Es el argumento de por qué esto no admitía un parche. El síntoma no era «faltan
+mensajes»: era «este agente no hace nada», y la conclusión racional ante ese
+síntoma es apagarlo. Un canal que falla en silencio no pierde mensajes, pierde
+el trabajo de la gente y además hace que parezca culpa suya.
 
 ---
 
-## 6. Verificación
+## 8. Verificación
 
 ```
 npm run typecheck                      limpio
-npm test -- --changed                  33 suites, 528/528
-npm test -- buzon                      10/10
+npm test -- --changed                  33 suites, 528/528   (la raíz y las dos capas)
+npm test -- buzon messages traffic     68/68                (con el fallo 2 dentro)
 ```
 
 **De extremo a extremo, contra el sistema real**, que es lo que de verdad
@@ -184,28 +234,46 @@ El huérfano del código viejo se ha dejado intacto en
 `.claude/worktrees/forge-buzon-01/.orca/out/` como el «antes» junto al
 «después».
 
+### El recibo, de punta a punta y en vivo
+
+```
+$ node bin/orca-tell.mjs --check tell_mtz7ztqqki2msy     (recién mandado)
+filed 0s ago, waiting for the collector (normal for a few seconds)
+$ …tras el siguiente envío, pasada la gracia
+picked up by the collector 35s ago; delivery is out of this machine's hands
+```
+
+`filed → picked` **solo, sin ayuda del collector**: la ausencia del fichero en
+`.orca/out` ya prueba que se lo llevaron. Seis recibos consecutivos, ni un falso
+«no recogido».
+
 ### Lo que queda sin cubrir, dicho por su nombre
 
+- **`delivered` y `read` no son observables en vivo todavía.** Están probados
+  (`buzon`, `messages`), pero el collector de producción corre el `src/` del
+  checkout principal, y ahí el lado collector del recibo aún no está: `grep`
+  da 0 menciones en el principal frente a 18 en la rama. **Se verán en cuanto
+  CAPCOM fusione**, no antes. El `picked` de arriba sí es real hoy porque lo
+  resuelve el emisor.
 - **`npm test -- --changed` avisa `sin suite que los cubra` para los seis
   `bin/orca-*.mjs`.** Son ejecutables y nadie los importa, así que el grafo no
-  los alcanza. Su lógica **sí** está cubierta a través de `bin/lib/` (las dos
-  pruebas de plegado y las cuatro del recibo importan los módulos directamente);
-  lo que no tiene prueba automática es **el cableado de cada CLI**: que cada uno
-  de los seis llame de verdad al módulo. De `orca-tell` hay prueba en vivo; de
-  los otros cinco, no. Está encargado a un miembro y **no estaba cerrado al
-  entregar esto**.
+  los alcanza. Su lógica está cubierta vía `bin/lib/`, y `bin/orca-read.mjs`
+  lo cubren además cuatro pruebas de `buzon.test.ts` que lo **ejecutan** de
+  verdad. El cableado de los seis lo verificó J8 en vivo (§6), con dos
+  excepciones razonadas: `orca-spawn` y `orca-improve`, comprobados por lectura.
 - **No se han corrido los shots.** No se ha tocado UI.
 - **No se ha corrido la suite entera** (pasa de diez minutos, y la máquina está
   con 3,6 G de swap y cuatro agentes de otro squad trabajando).
 
 ---
 
-## 7. Filtros que cubren este documento
+## 9. Filtros que cubren este documento
 
 ```
 npm test -- buzon                      la raíz, el recibo y la pregunta colgada
+npm test -- messages                   la entrega por destinatario y writeAtomic
 npm test -- briefing                   el informe de situación de CAPCOM
 npm test -- worktrees workspaces       el plegado del lado del collector
 npm test -- traffic squads             el canal agente ↔ agente
-npm test -- --changed                  las 33 suites que alcanza este cambio
+npm test -- --changed                  las suites que alcanza este cambio
 ```

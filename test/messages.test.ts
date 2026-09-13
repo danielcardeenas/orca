@@ -16,8 +16,9 @@ import path from 'node:path';
 
 import { CollisionIndex, absPathOf, isNoise } from '../src/collector/collisions.ts';
 import type { CollisionAgent } from '../src/collector/collisions.ts';
-import { MessageWatcher, clamp, expiryOf, isOutPayload } from '../src/collector/messages.ts';
+import { MessageWatcher, clamp, expiryOf, inboxStem, isOutPayload } from '../src/collector/messages.ts';
 import type { MessageDeps } from '../src/collector/messages.ts';
+import { readReceipt, receiptsDir, writeReceipt } from '../bin/lib/receipt.mjs';
 import type { AgentMessage } from '../src/shared/types.ts';
 import type { LineBatch, TranscriptRef } from '../src/collector/watch.ts';
 import { eq, ok, test, type TestModule } from './harness.ts';
@@ -373,11 +374,13 @@ const tests = [
     }, sent);
     if (!m) return ok('la respuesta reaparece como no leída', false, 'no se emitió');
     await w.deliverTo(p, m, 'a2');
-    const mark = path.join(p, '.orca', 'in', `${m.id}.read`);
+    // El eco de la respuesta va al buzón DEL QUE PREGUNTÓ (a1), no al del que
+    // la contesta: es su respuesta, y el nombre del archivo lo dice.
+    const mark = path.join(p, '.orca', 'in', `${inboxStem(m.id, 'a1')}.read`);
     fs.writeFileSync(mark, '1');           // el destinatario lo leyó
     await w.reply(m.id, 'no, lo lee facturación', 'a2');
     const echo = JSON.parse(
-      fs.readFileSync(path.join(p, '.orca', 'in', `${m.id}.json`), 'utf8'),
+      fs.readFileSync(path.join(p, '.orca', 'in', `${inboxStem(m.id, 'a1')}.json`), 'utf8'),
     ) as Record<string, unknown>;
     return ok('la respuesta reaparece como no leída aunque el ask ya se leyera',
       !fs.existsSync(mark) && echo['kind'] === 'notice'
@@ -430,7 +433,9 @@ const tests = [
     if (!m) return ok('deliverTo escribe el buzón', false, 'no se emitió');
 
     const good = await w.deliverTo(p, m, 'a2');
-    const file = path.join(p, '.orca', 'in', `${m.id}.json`);
+    // El archivo lleva el destinatario en el nombre: un proyecto tiene UN
+    // buzón y hasta hoy el nombre no decía para quién era cada cosa.
+    const file = path.join(p, '.orca', 'in', `${inboxStem(m.id, 'a2')}.json`);
     const written = fs.existsSync(file)
       ? JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown> : null;
     const bad = await w.deliverTo('/etc', m, 'a2');
@@ -438,8 +443,168 @@ const tests = [
 
     return ok('deliverTo escribe el buzón y rechaza rutas de sistema',
       good.ok && written?.['subject'] === 'entrégame' && written['replyTo'] === m.id
+      && written['to'] === 'a2'
       && !bad.ok && !worse.ok,
-      `good=${good.ok} etc=${bad.detail} root=${worse.detail}`);
+      `good=${good.ok} archivo=${path.basename(file)} etc=${bad.detail} root=${worse.detail}`);
+  }),
+
+  test('dos destinatarios, dos archivos: nadie se lleva el correo del otro', async () => {
+    /*
+     * El fallo del 2026-09-13, en una prueba. Un `.orca/in/` por proyecto, un
+     * archivo por mensaje y una marca `.read` global: el primero que leía se
+     * llevaba el correo de todos y los demás veían "nothing new". Le pasó a un
+     * líder de squad tres veces en una mañana, la última con un mensaje suyo.
+     *
+     * Lo que se afirma aquí es lo que hace imposible repetirlo: una entrega por
+     * destinatario, cada una con su nombre y su marca de leído.
+     */
+    const p = tmpProject();
+    const fleet: Fleet = {
+      agents: {
+        a1: { callsign: 'Z1', projectId: 'p1' },
+        a2: { callsign: 'T1', projectId: 'p1' },
+        a3: { callsign: 'K9', projectId: 'p1' },
+      },
+      projects: { p1: { name: 'proj', path: p } },
+    };
+    const { w, sent } = makeWatcher(fleet, 'p1', p);
+    const m = await sendFrom(w, p, 'squad1', {
+      kind: 'handoff', to: 'fleet', subject: 'para los dos', agentId: 'a1',
+    }, sent);
+    if (!m) return ok('dos destinatarios, dos archivos', false, 'no se emitió');
+
+    await w.deliverTo(p, m, 'a2');
+    await w.deliverTo(p, m, 'a3');
+
+    const inbox = fs.readdirSync(path.join(p, '.orca', 'in')).filter((n) => n.endsWith('.json'));
+    // T1 lee: pone SU marca, y la de K9 no existe.
+    const markT1 = path.join(p, '.orca', 'in', `${inboxStem(m.id, 'a2')}.read`);
+    const markK9 = path.join(p, '.orca', 'in', `${inboxStem(m.id, 'a3')}.read`);
+    fs.writeFileSync(markT1, '1');
+
+    return ok('dos destinatarios, dos archivos: nadie se lleva el correo del otro',
+      inbox.length === 2
+      && inbox.includes(`${inboxStem(m.id, 'a2')}.json`)
+      && inbox.includes(`${inboxStem(m.id, 'a3')}.json`)
+      && fs.existsSync(markT1) && !fs.existsSync(markK9),
+      `${inbox.length} archivos · marca de K9 tras leer T1: ${fs.existsSync(markK9)}`);
+  }),
+
+  test('un mensaje viejo sin destinatario sigue siendo de todos', () => {
+    /*
+     * Había ~200 archivos ya depositados con el nombre antiguo cuando esto se
+     * escribió, y a un mensaje ya entregado no se le puede inventar un
+     * destinatario. Hacerlos invisibles habría cambiado un fallo por otro peor:
+     * correo que existe y nadie ve.
+     */
+    return ok('un mensaje viejo sin destinatario sigue siendo de todos',
+      inboxStem('msg_abc', null) === 'msg_abc'
+      && inboxStem('msg_abc', 'a2') === 'msg_abc.a2',
+      `${inboxStem('msg_abc', null)} · ${inboxStem('msg_abc', 'a2')}`);
+  }),
+
+  test('dos entregas a la vez del mismo mensaje no se pisan el temporal', async () => {
+    /*
+     * 288 avisos de «no pude escribir el buzón de entrada» en siete días, y ni
+     * un mensaje perdido: `writeAtomic` derivaba el nombre del temporal sólo
+     * del destino, así que dos entregas concurrentes compartían `.tmp`, el
+     * primero en renombrar se lo llevaba y el resto fallaba con ENOENT. Esa
+     * pista falsa desvió dos investigaciones de una pérdida que estaba en otro
+     * sitio.
+     *
+     * Con el buzón por destinatario ya no coinciden ni en el destino, así que
+     * esto afirma las dos mitades a la vez.
+     */
+    const p = tmpProject();
+    const fleet: Fleet = {
+      agents: {
+        a1: { callsign: 'Z1', projectId: 'p1' },
+        a2: { callsign: 'T1', projectId: 'p1' },
+        a3: { callsign: 'K9', projectId: 'p1' },
+      },
+      projects: { p1: { name: 'proj', path: p } },
+    };
+    const { w, sent } = makeWatcher(fleet, 'p1', p);
+    const m = await sendFrom(w, p, 'race1', {
+      kind: 'notice', to: 'fleet', subject: 'a la vez', agentId: 'a1',
+    }, sent);
+    if (!m) return ok('dos entregas a la vez', false, 'no se emitió');
+
+    const out = await Promise.all([
+      w.deliverTo(p, m, 'a2'), w.deliverTo(p, m, 'a3'),
+      w.deliverTo(p, m, 'a2'), w.deliverTo(p, m, 'a3'),
+    ]);
+    const failed = out.filter((r) => !r.ok);
+    return ok('dos entregas a la vez del mismo mensaje no se pisan el temporal',
+      failed.length === 0,
+      `${out.length} entregas · ${failed.length} fallos${failed[0] ? ` (${failed[0].detail})` : ''}`);
+  }),
+
+  test('el recibo del emisor pasa a delivered, y acumula destinatarios', async () => {
+    /*
+     * La otra mitad del recibo. `orca-tell` lo deja en `filed` y promueve solo
+     * el primer salto a `picked` —la ausencia del archivo en el buzón de salida
+     * ya lo prueba—, pero sólo el collector sabe el final. Sin esto, un emisor
+     * no podía distinguir «nadie lo recogió» de «llegó y nadie ha contestado»,
+     * que fue exactamente la confusión del 2026-09-13.
+     */
+    const p = tmpProject();
+    const fleet: Fleet = {
+      agents: {
+        a1: { callsign: 'Z1', projectId: 'p1' },
+        a2: { callsign: 'T1', projectId: 'p1' },
+        a3: { callsign: 'K9', projectId: 'p1' },
+      },
+      projects: { p1: { name: 'proj', path: p } },
+    };
+    const { w, sent } = makeWatcher(fleet, 'p1', p);
+    const dir = receiptsDir(p);
+    writeReceipt(dir, 'r1', {
+      msgId: 'r1', state: 'filed', to: 'fleet', kind: 'notice',
+      recipients: [], detail: null, at: Date.now(), updatedAt: Date.now(),
+    });
+    const m = await sendFrom(w, p, 'r1', {
+      kind: 'notice', to: 'fleet', subject: 'con recibo', agentId: 'a1',
+    }, sent);
+    if (!m) return ok('el recibo del emisor pasa a delivered', false, 'no se emitió');
+
+    await w.deliverTo(p, m, 'a2');
+    await w.deliverTo(p, m, 'a3');
+    const after = readReceipt(dir, 'r1');
+    // Un destinatario que falla NO degrada un mensaje que sí llegó a otros.
+    await w.deliverTo('/etc', m, 'a2');
+    const kept = readReceipt(dir, 'r1');
+
+    return ok('el recibo del emisor pasa a delivered, y acumula destinatarios',
+      after?.state === 'delivered'
+      && after.recipients.join(',') === 'T1,K9'
+      && kept?.state === 'delivered',
+      `${after?.state} → ${after?.recipients.join(',')} · tras el fallo: ${kept?.state}`);
+  }),
+
+  test('sin recibo filiado aquí no se inventa ninguno', async () => {
+    /*
+     * Un mensaje cuyo emisor vive en otra máquina lo entrega este collector,
+     * pero su recibo está en el disco del otro. Aquí no se escribe nada y el
+     * emisor lee `picked`, que es la verdad. Un recibo que miente es peor que
+     * uno incompleto: sobre él se construyen las decisiones equivocadas.
+     */
+    const p = tmpProject();
+    const fleet: Fleet = {
+      agents: { a1: { callsign: 'Z1', projectId: 'p1' }, a2: { callsign: 'T1', projectId: 'p1' } },
+      projects: { p1: { name: 'proj', path: p } },
+    };
+    const { w, sent } = makeWatcher(fleet, 'p1', p);
+    const m = await sendFrom(w, p, 'sinrecibo', {
+      kind: 'notice', to: 'fleet', subject: 'sin recibo', agentId: 'a1',
+    }, sent);
+    if (!m) return ok('sin recibo filiado aquí no se inventa ninguno', false, 'no se emitió');
+    await w.deliverTo(p, m, 'a2');
+    const dir = receiptsDir(p);
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+    return ok('sin recibo filiado aquí no se inventa ninguno',
+      files.length === 0 && readReceipt(dir, 'sinrecibo') === null,
+      `${files.length} recibos`);
   }),
 
   test('expiryOf: los notice caducan, los ask no', () => {

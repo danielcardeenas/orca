@@ -26,6 +26,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import type { Agent, AgentMessage, Project } from '../src/shared/types.ts';
 import { runTool, type CeoContext } from '../src/agents/tools.ts';
@@ -113,6 +114,34 @@ function receipt(over: Partial<Receipt> = {}): Receipt {
 function withDir<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), 'orca-buzon-'));
   try { return fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** El `orca-read` de ESTE árbol. El del PATH es el del checkout principal. */
+const ORCA_READ = fileURLToPath(new URL('../bin/orca-read.mjs', import.meta.url));
+
+/**
+ * Corre ese `orca-read` sobre un buzón de mentira, como uno de los agentes.
+ *
+ * El entorno se limpia de `CLAUDE_SESSION_ID` y `ORCA_PANE` a propósito: si
+ * los hereda, `whoami` devuelve la sesión que está corriendo la prueba y el
+ * `--agent` no decidiría nada.
+ */
+function read(dir: string, agentId: string | null, extra: string[] = []): string {
+  const args = [ORCA_READ, '--project', dir, '--json', ...extra];
+  if (agentId) args.push('--agent', agentId);
+  return execFileSync(process.execPath, args, {
+    encoding: 'utf8',
+    env: { ...process.env, ORCA_HOME: dir, CLAUDE_SESSION_ID: '', ORCA_PANE: '' },
+  });
+}
+
+/** Deja un mensaje en el buzón tal y como lo deposita el collector. */
+function deliver(dir: string, stem: string, subject: string): void {
+  mkdirSync(join(dir, '.orca', 'in'), { recursive: true });
+  writeFileSync(
+    join(dir, '.orca', 'in', `${stem}.json`),
+    JSON.stringify({ id: stem.split('.')[0], kind: 'notice', subject, at: NOW }),
+  );
 }
 
 const tests = [
@@ -310,6 +339,84 @@ const tests = [
       out.result.split('\n').filter((l) => l.includes('msg_orphan')).join(' | '),
     );
   }),
+
+  /* ── 4. el buzón compartido ─────────────────────────────────────── */
+
+  test('an agent reads only its own mail out of the shared inbox', () => withDir((dir) => {
+    /*
+     * El fallo del 2026-09-13 por el otro extremo. Un `.orca/in/` por proyecto
+     * y diecisiete agentes leyéndolo: el primero que corría `orca-read` se
+     * llevaba el correo de todos y dejaba marcado como leído lo que no era
+     * suyo. Le costó tres mensajes a un líder de squad en una mañana.
+     */
+    deliver(dir, 'msg_mine.aaa-1', 'para mí');
+    deliver(dir, 'msg_hers.bbb-2', 'para otra');
+    deliver(dir, 'msg_old', 'de antes, sin destinatario');
+
+    const seen = JSON.parse(read(dir, 'aaa-1', ['--peek'])) as { subject: string }[];
+    const subjects = seen.map((m) => m.subject).sort().join(' | ');
+    return ok(
+      'only the file addressed to me, plus the un-addressed legacy one',
+      seen.length === 2 && !subjects.includes('para otra')
+      && subjects.includes('para mí') && subjects.includes('de antes'),
+      subjects,
+    );
+  })),
+
+  test('reading marks it read for me alone, and the other agent still has hers', () => withDir((dir) => {
+    deliver(dir, 'msg_x.aaa-1', 'para mí');
+    deliver(dir, 'msg_x.bbb-2', 'para otra');
+
+    read(dir, 'aaa-1');                       // sin --peek: marca
+    const again = JSON.parse(read(dir, 'aaa-1', ['--peek'])) as unknown[];
+    const hers = JSON.parse(read(dir, 'bbb-2', ['--peek'])) as { subject: string }[];
+
+    // Antes, la marca era `<msgId>.read`, una sola para todos los
+    // destinatarios: leer en nombre ajeno era el comportamiento normal.
+    return ok(
+      'the read mark is per recipient, so nobody is marked read in my name',
+      again.length === 0 && hers.length === 1 && hers[0]?.subject === 'para otra',
+      `mías sin leer=${again.length} suyas=${hers.length}`,
+    );
+  })),
+
+  test('a stranger still sees the mail that was never addressed to anyone', () => withDir((dir) => {
+    /*
+     * La garantía de compatibilidad, y es la que de verdad importa: había ~200
+     * mensajes ya depositados con el nombre antiguo, sin destinatario, y a un
+     * mensaje entregado no se le puede inventar uno. Que desaparecieran para
+     * todo el mundo sería cambiar un fallo por otro peor.
+     *
+     * Se prueba con un lector que no es destinatario de nada: ve lo viejo —que
+     * es de todos— y nada de lo ajeno.
+     */
+    deliver(dir, 'msg_a.aaa-1', 'de uno');
+    deliver(dir, 'msg_b.bbb-2', 'de otra');
+    deliver(dir, 'msg_legacy', 'de antes de todo esto');
+    const seen = JSON.parse(read(dir, 'ccc-3', ['--peek'])) as { subject: string }[];
+    return ok(
+      'un-addressed mail stays visible; addressed mail stays private',
+      seen.length === 1 && seen[0]?.subject === 'de antes de todo esto',
+      seen.map((m) => m.subject).join(' | ') || '(nada)',
+    );
+  })),
+
+  test('--everyone still opens the whole shared inbox', () => withDir((dir) => {
+    /*
+     * La salida de emergencia. Si el filtro se equivoca —una identidad mal
+     * resuelta, un mensaje dirigido a un id que ya no existe—, tiene que haber
+     * una forma de ver el buzón entero sin editar código. Lo contrario de un
+     * canal que se cae en silencio es uno que se puede inspeccionar.
+     */
+    deliver(dir, 'msg_a.aaa-1', 'de uno');
+    deliver(dir, 'msg_b.bbb-2', 'de otra');
+    const seen = JSON.parse(read(dir, 'aaa-1', ['--peek', '--everyone'])) as unknown[];
+    return ok(
+      'the escape hatch shows what the filter is hiding',
+      seen.length === 2,
+      `${seen.length} mensajes`,
+    );
+  })),
 
   test('the section is there even when there is nothing owed', async () => {
     const c = ctx({ agents: [agent()], projects: [project()], messages: [] });

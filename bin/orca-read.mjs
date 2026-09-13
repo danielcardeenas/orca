@@ -3,9 +3,19 @@
  * orca-read — read what other agents have sent you.
  *
  * The receiving half of orca-tell. The collector drops messages into
- * `<project>/.orca/in/`; this prints the unread ones and marks them read by
- * dropping a `<id>.read` marker next to each, which is what ORCA watches to
+ * `<project>/.orca/in/<msgId>.<recipient>.json`; this prints the unread ones
+ * addressed to whoever is running it, and marks them read by dropping a
+ * `<msgId>.<recipient>.read` marker next to each, which is what ORCA watches to
  * fill `readBy` in the console.
+ *
+ * The inbox directory is shared by every agent in the project — one `.orca/in/`
+ * per project, not per agent — so both halves of that name matter. Until
+ * 2026-09-13 neither existed: the file was named after the message alone, said
+ * nothing about who it was for, and the read mark was global. The first agent
+ * to run this walked off with everyone else's mail and left them a `.read`
+ * marker in their name; the real recipients saw "nothing new". It cost a squad
+ * lead three messages in one morning, the last one addressed to himself, and it
+ * is why the recipient is now part of the filename.
  *
  *   orca-read                 what has been sent to me, unread only
  *   orca-read --all           including what I have already read
@@ -29,13 +39,17 @@ import { join } from 'node:path';
 
 import { waitFor } from './lib/wait-for.mjs';
 import { projectRoot } from './lib/project-root.mjs';
+import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
 
 /* ── Arguments ────────────────────────────────────────────────────── */
 
 function parse(args) {
-  const out = { wait: false, timeout: 60, all: false, json: false, peek: false, project: null, kind: null, limit: 50 };
+  const out = {
+    wait: false, timeout: 60, all: false, json: false, peek: false, project: null,
+    kind: null, limit: 50, agentId: sessionId(), everyone: false,
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const next = () => args[++i];
@@ -48,6 +62,8 @@ function parse(args) {
       case '--kind': case '-k': out.kind = next() ?? null; break;
       case '--limit': case '-n': out.limit = Math.max(1, Number(next() ?? 50) || 50); break;
       case '--project': case '-p': out.project = next() ?? null; break;
+      case '--agent': out.agentId = next() ?? null; break;
+      case '--everyone': out.everyone = true; break;
       case '--help': case '-h': usage(); process.exit(0); break;
       default:
         console.error(`unknown argument: ${a}`);
@@ -73,6 +89,8 @@ function usage() {
   -k, --kind <kind>       only notice | ask | handoff | warning
   -n, --limit <n>         at most this many (default: 50, newest first)
   -p, --project <path>    project root (default: git root, else cwd)
+      --agent <id>        your session id, if this cannot work it out itself
+      --everyone          every message in the shared inbox, not only yours
       --json              machine-readable output
 
   Exit: 0 printed (empty is fine) · 1 bad usage · 2 ORCA not running
@@ -82,7 +100,16 @@ function usage() {
 
       orca-tell --reply <id> "your answer"
 
-  and whoever asked stops being blocked.`);
+  and whoever asked stops being blocked.
+
+  A project has ONE inbox directory shared by every agent in it, so each
+  message file is named after its recipient and you are shown only yours.
+  Before that, on 2026-09-13, the first agent to read carried off everybody
+  else's mail and the real recipients saw "nothing new" — it happened to one
+  squad lead three times in a morning, the last time to a message he had sent
+  himself. Older files carry no recipient and are shown to everyone, because
+  hiding mail that already exists would be a worse bug than the one being
+  fixed.`);
 }
 
 /* ── Where to read ────────────────────────────────────────────────── */
@@ -103,6 +130,33 @@ if (!orcaPresent()) {
   process.exit(2);
 }
 
+/**
+ * Is this file addressed to me?
+ *
+ * The collector names each delivery `<msgId>.<recipient>.json`, so the answer
+ * is in the filename and needs no guessing. Two deliberate escape hatches, both
+ * of which err towards showing too much rather than hiding mail:
+ *
+ *  - **A file with no recipient** (`<msgId>.json`) is shown to everyone. That
+ *    is every message delivered before 2026-09-13 — around 200 of them on this
+ *    machine at the time — and they cannot be re-addressed after the fact.
+ *  - **An agent that does not know who it is** sees everything, exactly as
+ *    before. `sessionId()` returning null means "I don't know", and a reader
+ *    who doesn't know its own name must not conclude that no mail is its own:
+ *    that would turn a shared inbox into an empty one.
+ *
+ * Note the recipient is decided where the routing happens — the hub resolved
+ * the squad and called the collector once per agent. Re-deriving membership
+ * here would be two sides answering the same question separately, which is the
+ * exact shape of the worktree bug this same morning.
+ */
+function mine(stem) {
+  if (opts.everyone || !opts.agentId) return true;
+  const dot = stem.indexOf('.');
+  if (dot < 0) return true;                       // no recipient: everyone's
+  return stem.slice(dot + 1) === opts.agentId;
+}
+
 function readItems() {
   const now = Date.now();
   const items = [];
@@ -112,7 +166,8 @@ function readItems() {
       if (!name.endsWith('.json')) continue;
       if (name.startsWith('.')) continue;             // a .tmp mid-rename
       if (name.endsWith('.answer.json')) continue;    // an answer to something I asked
-      const id = name.slice(0, -'.json'.length);
+      const stem = name.slice(0, -'.json'.length);
+      if (!mine(stem)) continue;
       const file = join(inDir, name);
       let msg;
       try {
@@ -125,14 +180,19 @@ function readItems() {
       // into an archive.
       if (typeof msg.expiresAt === 'number' && msg.expiresAt < now) {
         rmSync(file, { force: true });
-        rmSync(join(inDir, `${id}.read`), { force: true });
+        rmSync(join(inDir, `${stem}.read`), { force: true });
         continue;
       }
-      const readMark = join(inDir, `${id}.read`);
+      // The read mark follows the file, so it is per recipient too: marking a
+      // message read no longer does it in everybody else's name.
+      const readMark = join(inDir, `${stem}.read`);
       const read = existsSync(readMark);
       if (read && !opts.all) continue;
       if (opts.kind && msg.kind !== opts.kind) continue;
-      items.push({ id, file, readMark, read, msg });
+      // The id an agent quotes back in `--reply` is the MESSAGE's, never the
+      // filename's: the filename now carries a recipient the hub knows nothing
+      // about.
+      items.push({ id: msg.id ?? stem, file, readMark, read, msg });
     }
   }
 

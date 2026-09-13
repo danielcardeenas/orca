@@ -1,3 +1,4 @@
+import { tokenComponents } from '../src/hub/journal.ts';
 /**
  * AUTOMEJORA: la sección en la que ORCA se mira a sí misma.
  *
@@ -107,8 +108,8 @@ function emptyStats(): JournalStats {
     since: null, until: null, entries: 0, excluded: 0, launches: 3,
     byLauncher: { human: 1, capcom: 2, agent: 0 },
     ends: { done: 2, dead: 1 }, doneRate: 2 / 3,
-    usage: { tokens: 1_500_000, avgTokens: 500_000, measured: 3 }, duration: { avgMs: 600_000 },
-    byProject: [{ project: 'AX', projectId: 'p1', launches: 3, done: 2, dead: 1, doneRate: 2 / 3, totalTokens: 1_500_000, avgTokens: 500_000, avgDurationMs: 600_000, escalations: 1 }],
+    usageBasis: 'legacy-mixed-ceiling-session-max', tokenComponents: tokenComponents([]), usage: { tokens: 1_500_000, avgTokens: 500_000, measured: 3 }, duration: { avgMs: 600_000 },
+    byProject: [{ project: 'AX', projectId: 'p1', launches: 3, done: 2, dead: 1, doneRate: 2 / 3, totalTokens: 1_500_000, tokenComponents: tokenComponents([]), avgTokens: 500_000, avgDurationMs: 600_000, escalations: 1 }],
     escalations: {
       asked: 4, answeredByCapcom: 2, answeredByHuman: 1,
       withdrawn: 1, withdrawnBy: { agent: 0, permission: 1, gone: 0, superseded: 0, expired: 0, dismissed: 0 },

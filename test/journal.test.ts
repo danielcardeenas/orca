@@ -121,11 +121,22 @@ function lines(dir: string): JournalEntry[] {
 /* ── las pruebas ──────────────────────────────────────────────────── */
 
 const tests = [
+  test('components separate cheap cache reads and expose unknown historical writes', async () => {
+    const b = box();
+    try {
+      b.journal.record({ kind: 'end', machineId: 'm1', callsign: null, projectId: null, project: null, squad: null, missionId: null, agentId: 'old', tokens: { input: 10, output: 5, cacheRead: 99985, thinking: 2 } });
+      b.journal.record({ kind: 'end', machineId: 'm1', callsign: null, projectId: null, project: null, squad: null, missionId: null, agentId: 'new', tokens: { input: 20, output: 10, cacheRead: 800, cacheWrite: 40, thinking: 4 } });
+      b.journal.record({ kind: 'end', machineId: 'm1', callsign: null, projectId: null, project: null, squad: null, missionId: null, agentId: 'new', tokens: { input: 15, output: 8, cacheRead: 700, cacheWrite: 30, thinking: 3 } });
+      await b.journal.flush();
+      const c = JSON.parse(run(b.ctx, 'journal_stats', {})!.result).tokenComponents;
+      return ok('known components and explicit unknowns', c.input === 30 && c.output === 15 && c.cacheRead === 100785 && c.cacheWriteKnown === 40 && c.cacheWrite === null && c.newTokens === null && c.sessionsWithMissingCacheWrite === 1 && c.measured === 2);
+    } finally { await b.close(); }
+  }),
   test('cumulative ends count once per machine/session, using the maximum even when counters decrease', async () => {
     const b = box();
     try {
       for (const [machineId, agentId, input] of [['m1', 'a', 100], ['m1', 'a', 150], ['m1', 'a', 120], ['m2', 'a', 40]] as const) {
-        b.journal.record({ kind: 'end', machineId, agentId, projectId: 'p_ax', tokens: { input, output: 0, cacheRead: 0, thinking: 0 }, state: 'done' });
+        b.journal.record({ kind: 'end', machineId, agentId, callsign: null, squad: null, missionId: null, project: null, projectId: 'p_ax', tokens: { input, output: 0, cacheRead: 0, thinking: 0 }, state: 'done' });
       }
       await b.journal.flush();
       const s = b.journal.stats();

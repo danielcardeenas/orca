@@ -238,6 +238,49 @@ export function entryTokens(e: JournalEntry): number | null {
   });
 }
 
+export interface TokenComponents {
+  basis: 'sum-of-session-component-maxima';
+  measured: number;
+  unmeasured: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  /** Known writes are a lower bound when any snapshot omitted cacheWrite. */
+  cacheWriteKnown: number;
+  cacheWrite: number | null;
+  newTokens: number | null;
+  sessionsWithMissingCacheWrite: number;
+}
+
+/** Independent cumulative maxima; thinking is part of output, never added. */
+export function tokenComponents(entries: JournalEntry[]): TokenComponents {
+  const sessions = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; missing: boolean; measured: boolean }>();
+  for (const e of entries) {
+    if (e.kind !== 'end') continue;
+    const key = e.agentId ? JSON.stringify([e.machineId ?? null, e.agentId]) : e.id;
+    const v = sessions.get(key) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, missing: false, measured: false };
+    sessions.set(key, v);
+    if (!e.tokens) continue;
+    v.measured = true;
+    for (const k of ['input', 'output', 'cacheRead'] as const) v[k] = Math.max(v[k], e.tokens[k]);
+    if (typeof e.tokens.cacheWrite === 'number') v.cacheWrite = Math.max(v.cacheWrite, e.tokens.cacheWrite);
+    else v.missing = true;
+  }
+  const out: TokenComponents = { basis: 'sum-of-session-component-maxima', measured: 0, unmeasured: 0, input: 0, output: 0, cacheRead: 0, cacheWriteKnown: 0, cacheWrite: null, newTokens: null, sessionsWithMissingCacheWrite: 0 };
+  for (const v of sessions.values()) {
+    if (!v.measured) { out.unmeasured++; continue; }
+    out.measured++;
+    out.input += v.input; out.output += v.output; out.cacheRead += v.cacheRead;
+    out.cacheWriteKnown += v.cacheWrite;
+    if (v.missing) out.sessionsWithMissingCacheWrite++;
+  }
+  if (!out.sessionsWithMissingCacheWrite && !out.unmeasured && out.measured) {
+    out.cacheWrite = out.cacheWriteKnown;
+    out.newTokens = out.input + out.output + out.cacheWrite;
+  }
+  return out;
+}
+
 function clip(s: string | null | undefined, n: number): string | null {
   if (typeof s !== 'string') return null;
   const t = s.replace(/\s+/g, ' ').trim();
@@ -292,8 +335,9 @@ export interface ProjectStats {
   dead: number;
   /** done / (done + dead), null sin fines. */
   doneRate: number | null;
-  /** Tokens de techo (`ceilingTokens`) sumados sobre los fines del proyecto. */
+  /** Legacy mixed ceiling metric, deduplicated by session; not new tokens. */
   totalTokens: number;
+  tokenComponents: TokenComponents;
   avgTokens: number | null;
   avgDurationMs: number | null;
   escalations: number;
@@ -358,6 +402,9 @@ export interface JournalStats {
    * no anotó tokens, no una flota que no consumió.
    */
   usage: { tokens: number; avgTokens: number | null; measured: number };
+  /** The old total is retained for compatibility, explicitly not homogeneous. */
+  usageBasis: 'legacy-mixed-ceiling-session-max';
+  tokenComponents: TokenComponents;
   duration: { avgMs: number | null };
   byProject: ProjectStats[];
   escalations: EscalationStats;
@@ -613,7 +660,7 @@ export class Journal {
       const key = e.projectId ?? e.project ?? '?';
       let p = proj.get(key);
       if (!p) {
-        p = { project: e.project ?? null, projectId: e.projectId ?? null, launches: 0, done: 0, dead: 0, doneRate: null, totalTokens: 0, avgTokens: null, avgDurationMs: null, escalations: 0, used: [], durs: [] };
+        p = { project: e.project ?? null, projectId: e.projectId ?? null, launches: 0, done: 0, dead: 0, doneRate: null, totalTokens: 0, tokenComponents: tokenComponents([]), avgTokens: null, avgDurationMs: null, escalations: 0, used: [], durs: [] };
         proj.set(key, p);
       }
       return p;
@@ -687,6 +734,7 @@ export class Journal {
     const byProject = [...proj.values()]
       .map(({ used: u, durs, ...p }) => ({
         ...p,
+        tokenComponents: tokenComponents(entries.filter((e) => (e.projectId ?? e.project ?? '?') === (p.projectId ?? p.project ?? '?'))),
         doneRate: p.done + p.dead ? round(p.done / (p.done + p.dead)) : null,
         totalTokens: Math.round(p.totalTokens),
         avgTokens: round(avg(u), 0),
@@ -728,6 +776,8 @@ export class Journal {
       ends,
       doneRate: ends.done + ends.dead ? round(ends.done / (ends.done + ends.dead)) : null,
       usage: { tokens: Math.round(total), avgTokens: round(avg(used), 0), measured: used.length },
+      usageBasis: 'legacy-mixed-ceiling-session-max',
+      tokenComponents: tokenComponents(entries),
       duration: { avgMs: round(avg(dur), 0) },
       byProject,
       escalations: {

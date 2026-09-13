@@ -444,7 +444,7 @@ function printJournalStats(s) {
   const pct = (x) => (x === null || x === undefined ? '—' : `${Math.round(x * 100)}%`);
   console.log(`launches ${s.launches} (human ${s.byLauncher?.human ?? 0}, capcom ${s.byLauncher?.capcom ?? 0}, agent ${s.byLauncher?.agent ?? 0})`
     + ` · done ${s.ends?.done ?? 0} / dead ${s.ends?.dead ?? 0} (${pct(s.doneRate)} done)`
-    + ` · ${tokens(s.usage?.tokens)} tokens over ${s.usage?.measured ?? 0} measured, ${s.usage?.avgTokens != null ? tokens(s.usage.avgTokens) : '—'} avg, ${s.duration?.avgMs != null ? span(s.duration.avgMs) : '—'} avg`
+    + ` · ${tokens(s.usage?.tokens)} legacy mixed tokens over ${s.usage?.measured ?? 0} measured, ${s.usage?.avgTokens != null ? tokens(s.usage.avgTokens) : '—'} avg, ${s.duration?.avgMs != null ? span(s.duration.avgMs) : '—'} avg`
     // Las mismas cuatro cifras que el digest de AUTOMEJORA y journal_stats:
     // retirada no es sin respuesta, y `open` es lo que sigue sin contestar.
     + ` · escalations ${s.escalations?.asked ?? 0} (capcom ${s.escalations?.answeredByCapcom ?? 0}, human ${s.escalations?.answeredByHuman ?? 0}, withdrawn ${s.escalations?.withdrawn ?? 0}, open ${s.escalations?.unanswered ?? 0})`

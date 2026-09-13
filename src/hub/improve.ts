@@ -823,7 +823,7 @@ export function buildDigest(input: {
   lines.push(`fleet now: ${fleet.agents} agents, ${fleet.blocked} blocked, ${fleet.missionsOpen} open missions (${fleet.missionsOwed} owed an answer)`);
   lines.push(`launches: ${stats.launches} distinct agents (human ${stats.byLauncher.human}, capcom ${stats.byLauncher.capcom}, agent ${stats.byLauncher.agent} — those three count launch ENTRIES, so a relaunched agent adds one)`);
   lines.push(`endings: ${stats.ends.done} done, ${stats.ends.dead} dead${stats.doneRate === null ? '' : ` (${Math.round(stats.doneRate * 100)}% done)`}`);
-  lines.push(`use: ${fmtTokens(stats.usage.tokens)} tokens total, ${stats.usage.avgTokens === null ? '—' : fmtTokens(stats.usage.avgTokens)} per agent over ${stats.usage.measured} measured end(s), avg run ${mins(stats.duration.avgMs)}`);
+  lines.push(`use: ${fmtTokens(stats.usage.tokens)} legacy mixed tokens (not new tokens), ${stats.usage.avgTokens === null ? '—' : fmtTokens(stats.usage.avgTokens)} per agent over ${stats.usage.measured} measured session(s), avg run ${mins(stats.duration.avgMs)}`);
   /*
    * Las retiradas van aparte de las no contestadas, y por causa. Una pregunta
    * que dejó de existir (el agente siguió, el diálogo cambió, el agente se

@@ -1,3 +1,4 @@
+import { tokenComponents } from '../src/hub/journal.ts';
 /**
  * GESTOS DE LA CONSOLA: qué toca el operador, contado sin contenido.
  *
@@ -35,7 +36,7 @@ function stats(): JournalStats {
     since: null, until: null, entries: 0, excluded: 0, launches: 500,
     byLauncher: { human: 290, capcom: 0, agent: 210 },
     ends: { done: 2, dead: 1 }, doneRate: 2 / 3,
-    usage: { tokens: 1_500_000, avgTokens: 500_000, measured: 3 }, duration: { avgMs: 600_000 },
+    usageBasis: 'legacy-mixed-ceiling-session-max', tokenComponents: tokenComponents([]), usage: { tokens: 1_500_000, avgTokens: 500_000, measured: 3 }, duration: { avgMs: 600_000 },
     byProject: [],
     escalations: {
       asked: 4, answeredByCapcom: 2, answeredByHuman: 1,

@@ -54,7 +54,7 @@ export const TOOLS: ToolSpec[] = [
   {
     name: 'journal_stats',
     description:
-      'A summary of the fleet journal: launches by who launched them, done vs dead and the done rate, total and average cost and average duration overall and per project, escalations split into answered (by whom), withdrawn (by cause: nobody owed those an answer) and unanswered (asked in the window and still open), CAPCOM rotations, landings — and the briefs that ended in an escalation, which are the ones to write better next time. Narrow it with a project or a time window.',
+      'A summary of the fleet journal: launches by who launched them, done vs dead and the done rate, separate input, output, cache-read and cache-write token maxima per session, unknown historical writes explicitly null, legacy mixed ceiling totals for compatibility, and average duration overall and per project, escalations split into answered (by whom), withdrawn (by cause: nobody owed those an answer) and unanswered (asked in the window and still open), CAPCOM rotations, landings — and the briefs that ended in an escalation, which are the ones to write better next time. Narrow it with a project or a time window.',
     input_schema: {
       type: 'object',
       properties: {
@@ -143,7 +143,7 @@ export function run(ctx: CeoContext, name: string, input: Record<string, unknown
         + (s.doneRate !== null ? ` (${Math.round(s.doneRate * 100)}% done)` : '')
         // Las mismas tres cifras que el digest de AUTOMEJORA, con la misma
         // regla: retirada no es sin respuesta.
-        + `, ${fmtTokens(s.usage.tokens)} tokens over ${s.usage.measured} measured end(s), ${s.escalations.asked} escalation(s) (${s.escalations.answeredByCapcom + s.escalations.answeredByHuman} answered, ${s.escalations.withdrawn} withdrawn, ${s.escalations.unanswered} unanswered), ${s.escalatedBriefs.length} brief(s) that escalated`
+        + `, ${fmtTokens(s.usage.tokens)} legacy mixed tokens over ${s.usage.measured} measured session(s); ${fmtTokens(s.tokenComponents.cacheRead)} cache-read tokens, new tokens: ${s.tokenComponents.newTokens === null ? 'unknown (missing measurements)' : fmtTokens(s.tokenComponents.newTokens)}, ${s.escalations.asked} escalation(s) (${s.escalations.answeredByCapcom + s.escalations.answeredByHuman} answered, ${s.escalations.withdrawn} withdrawn, ${s.escalations.unanswered} unanswered), ${s.escalatedBriefs.length} brief(s) that escalated`
         // Lo apartado se dice con el total, o el total miente por omisión.
         + (s.excluded > 0 ? ` · ${s.excluded} harness entr${s.excluded === 1 ? 'y' : 'ies'} excluded` : ''),
     };

@@ -95,6 +95,11 @@ export interface Reach {
  * raíz del repo.
  */
 export async function reach(entry: string, dir: string, root: string, m = memo()): Promise<Reach> {
+  // `run.ts` pasa el directorio con barra final (`new URL('.', …).pathname`);
+  // con ella, `startsWith(dir + '/')` no reconocía ninguna suite como suya y
+  // las tres señales se apagaban en silencio. Lo cazó la corrida real, no la
+  // unitaria, que construía el directorio sin barra.
+  dir = resolve(dir); root = resolve(root);
   const files = new Set([entry]);
   const dirs = new Set<string>();
   // Un directorio que contenga a las propias suites —`test/`, o la raíz del

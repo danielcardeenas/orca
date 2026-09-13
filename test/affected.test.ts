@@ -79,6 +79,10 @@ export default { suite: 'Affected suites', tests: [
       // window.css sólo la lee el directorio: el <link> es de hud.css.
       const win = await affected(r.dir, ['src/ui/styles/window.css'], r.root);
       assert.deepEqual(win.suites, ['sheets.test.ts']);
+      // run.ts pasa el directorio con barra final; con ella la selección
+      // volvía a cero en silencio y la corrida real lo cazó.
+      const slash = await affected(r.dir + '/', ['src/ui/styles/hud.css'], r.root + '/');
+      assert.deepEqual(slash.suites, ['link.test.ts', 'sheets.test.ts']);
       return ok('tocar una hoja ya no selecciona cero suites', true);
     } finally { r.dispose(); }
   }),

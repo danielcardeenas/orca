@@ -804,7 +804,23 @@ export async function newPage(browser: Browser, w: number, h: number): Promise<P
     viewport: { width: w, height: h },
     // Tiny5 is a pixel face; at 1x the screenshot resamples it into mush.
     deviceScaleFactor: 2,
-    reducedMotion: 'no-preference',
+    /*
+     * `reduce`, and it buys three of the four sources of movement at once:
+     * the camera stops easing its flights (field/camera.ts), every tween
+     * collapses to zero (motion.ts `dur()`), and the shaders stop breathing
+     * the tiles and running the traces down the pipes (field/swarm.ts,
+     * field/command.ts, field/pipes.ts). None of these shots asserts anything
+     * about an animation — they wait for counts and for a tile to hold still
+     * — and one of them, `tether`, compares two photographs of a 6×13 px
+     * patch: with a tile breathing next to it that patch changes on its own,
+     * so the test could pass without the thing it claims to measure ever
+     * lighting up. The fourth source, births and deaths, is the mock's, and
+     * `ORCA_FLEET_STILL` is what holds it (see `ensureServers`).
+     *
+     * Only the shots come through here; the comp frames of `npm run visual`
+     * build their own contexts.
+     */
+    reducedMotion: 'reduce',
   });
   const page = await ctx.newPage();
   // Fixtures include unknown/external origins; photograph the whole synthetic fleet.

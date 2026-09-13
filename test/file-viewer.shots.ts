@@ -55,6 +55,43 @@ function state(page: Page): Promise<WinState[]> {
 
 const closeAll = (page: Page) => page.evaluate(() => { document.querySelectorAll<HTMLElement>('.win [data-w-close]').forEach((b) => b.click()); });
 
+/**
+ * Un punto desnudo de la cabecera de la ventana del agente en el canvas: uno
+ * que `elementFromPoint` devuelva como suyo y que no sea un botón. O qué lo
+ * tapa, si no hay ninguno.
+ *
+ * Se barre la cabecera entera, no sólo su línea media: una ventana de archivo
+ * abierta delante puede cruzarla por el medio y dejar libres el borde de
+ * arriba o el de abajo. Y se pregunta al DOM en vez de calcular el punto a
+ * partir de la caja: la capa del canvas va por DEBAJO del HUD y de las
+ * ventanas en front (`window.css`, `.wm--canvas`), así que un punto de la
+ * caja de la ventana no es necesariamente un punto que reciba la rueda. Aquí
+ * se apuntaba a `x + w − 60·escala, y + 12·escala` sin mirar qué había
+ * encima, y en un tercio de las corridas había la ventana de archivo del paso
+ * 1: sesenta ruedas sobre una ventana en front, que no hace zoom, y la escala
+ * no se movía ni una milésima — «scale 0.352937, desde 0.353».
+ */
+async function bareHeaderPoint(page: Page): Promise<{ x: number; y: number } | { covered: string }> {
+  return page.evaluate(() => {
+    const w = document.querySelector<HTMLElement>('.win.is-agent');
+    const head = w?.querySelector<HTMLElement>('.win__head');
+    if (!w || !head) return { covered: 'no hay ventana de agente' };
+    const r = head.getBoundingClientRect();
+    let covered = 'fuera del viewport';
+    for (const fy of [0.5, 0.25, 0.75, 0.12, 0.88]) {
+      const y = r.y + r.height * fy;
+      for (let x = r.x + 6; x < r.right; x += 8) {
+        const e = document.elementFromPoint(x, y) as HTMLElement | null;
+        if (!e) continue;
+        if (e.closest('.win') === w && !e.closest('button')) return { x, y };
+        const win = e.closest<HTMLElement>('.win');
+        covered = win ? `la ventana ${win.dataset['kind']} (${[...win.classList].filter((c) => c.startsWith('is-')).join(' ')})` : `${e.tagName.toLowerCase()}.${[...e.classList].join('.')}`;
+      }
+    }
+    return { covered };
+  });
+}
+
 async function main() {
   await ensureServers();
   const png = await readFile(join(ROOT, 'public', 'screenshots', 'narrow.png'));
@@ -80,6 +117,17 @@ async function main() {
     let s = await state(page);
     assert.equal(s.find((w) => w.kind === 'file')?.top, 'file', 'the file window is on top of the window it came from (front)');
     assert.equal(s.find((w) => w.kind === 'file')?.focus, true, 'and it is the active one');
+    /*
+     * Ya medida, se cierra. Quedaba abierta, en front, y el paso 2 devuelve la
+     * ventana del agente al canvas JUNTO A SU BALDOSA (`captureCanvas`,
+     * wm.ts), esté donde esté: según dónde haya puesto la flota a ese agente,
+     * la ventana de archivo de este paso caía encima de la cabecera a la que
+     * el paso 2 apunta con la rueda, y el zoom no llegaba nunca. Lo que el
+     * paso 2 prueba —que un archivo abierto desde el canvas aterriza delante—
+     * no necesita este primero.
+     */
+    await page.evaluate(() => { document.querySelector<HTMLElement>('.win.is-file [data-w-close]')?.click(); });
+    await sleep(400);
 
     /* 2 · the origin on the canvas: the new file still lands in front */
     await page.evaluate(() => { document.querySelector<HTMLElement>('.win.is-agent [data-w-front]')?.click(); });
@@ -107,7 +155,11 @@ async function main() {
        * en el plano a 0.28 y la aserción culpaba al zoom de no llegar.
        */
       if (a.canvas && a.scale >= 0.6) break;
-      await page.mouse.move(a.x + a.w - 60 * a.scale, a.y + 12 * a.scale);
+      // Donde la rueda llegue de verdad a la ventana, no donde su caja diga
+      // que está: ver `bareHeaderPoint`. Y en cada vuelta, porque crece.
+      const at = await bareHeaderPoint(page);
+      assert.ok('x' in at, `la cabecera de la ventana del canvas recibe la rueda: la tapa ${'covered' in at ? at.covered : '?'}`);
+      await page.mouse.move(at.x, at.y);
       await page.keyboard.down('Meta'); await page.mouse.wheel(0, -60); await page.keyboard.up('Meta');
       await sleep(120);
     }
@@ -123,26 +175,10 @@ async function main() {
     await page.screenshot({ path: join(SHOTS, 'file-viewer-01-stack.png') });
 
     /* 3 · click the canvas window's title: in front of everything, active */
-    /*
-     * Se barre la cabecera entera, no sólo su línea media: la ventana de
-     * archivo que acaba de abrirse delante puede cruzarla por el medio y
-     * dejar libres el borde de arriba o el de abajo. Antes bastaba con eso
-     * para que la prueba dijera que no hay dónde agarrar la ventana, cuando
-     * lo que pasaba es que sólo miraba una línea de las veinte que tiene.
-     */
-    const pt = await page.evaluate(() => {
-      const w = document.querySelector<HTMLElement>('.win.is-agent')!; const head = w.querySelector<HTMLElement>('.win__head')!;
-      const r = head.getBoundingClientRect();
-      for (const fy of [0.5, 0.25, 0.75, 0.12, 0.88]) {
-        const y = r.y + r.height * fy;
-        for (let x = r.x + 6; x < r.right; x += 8) {
-          const e = document.elementFromPoint(x, y) as HTMLElement | null;
-          if (e && e.closest('.win') === w && !e.closest('button')) return { x, y };
-        }
-      }
-      return null;
-    });
-    assert.ok(pt, 'some bare stretch of the canvas window\'s header is reachable');
+    // La ventana de archivo que acaba de abrirse delante puede cruzar la
+    // cabecera por el medio: `bareHeaderPoint` busca el trozo que deja libre.
+    const pt = await bareHeaderPoint(page);
+    assert.ok('x' in pt, `some bare stretch of the canvas window's header is reachable (la tapa ${'covered' in pt ? pt.covered : '?'})`);
     await page.mouse.click(pt.x, pt.y);
     await sleep(600);
     const raised = (await state(page)).find((w) => w.kind === 'agent')!;

@@ -101,7 +101,7 @@ function hostedSession(dir: string, o: { alive?: (id: string) => boolean; now?: 
   const demoted: string[] = [];
   const roles: string[] = [];
   const noted: string[] = [];
-  const rotated: { fromId: string; turns: number; compactions: number }[] = [];
+  const rotated: { fromId: string; turns?: number; compactions?: number; reason?: string }[] = [];
   const order: string[] = [];
   const session = new CapcomSession({
     bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:4479', token: 'tok', dir,
@@ -119,7 +119,7 @@ function hostedSession(dir: string, o: { alive?: (id: string) => boolean; now?: 
       spawn: async (p) => { panes.push({ name: p.name, argv: p.argv }); order.push('spawn'); return { ok: true, stdout: '', detail: '' }; },
       kill: async (name) => { killed.push(name); order.push('kill'); return { ok: true, stdout: '', detail: '' }; },
     },
-    rotated: (info) => { rotated.push({ fromId: info.fromId, turns: info.turns, compactions: info.compactions }); order.push('notify'); },
+    rotated: (info) => { rotated.push(info); order.push('notify'); },
   });
   return { session, panes, killed, demoted, roles, noted, rotated, order };
 }
@@ -302,7 +302,7 @@ const tests = [
     try {
       const s = hostedSession(dir);
       const first = await s.session.ensure();
-      const out = await s.session.rotate({ turns: 120, compactions: 2, contextTokens: 150_000 });
+      const out = await s.session.rotate({ reason: '75% of the context window ≥ 75%', turns: 120, compactions: 2, contextTokens: 150_000 });
       const before = first.shortId ?? '';
       const after = out.shortId ?? '';
       const newPane = s.panes[1];
@@ -310,6 +310,7 @@ const tests = [
         'rotating a hosted CAPCOM hands over cleanly',
         out.ok && after !== '' && after !== before
         && s.order.join(' ') === 'spawn notify kill demote spawn'
+        && s.rotated[0]?.reason === '75% of the context window ≥ 75%'
         && s.rotated[0]?.fromId === before && s.rotated[0].turns === 120 && s.rotated[0].compactions === 2
         && s.killed[0] === `orca-${before}` && s.demoted[0] === before
         && newPane?.name === `orca-${after}` && newPane.argv[newPane.argv.length - 1] === CAPCOM_ROTATED_PROMPT

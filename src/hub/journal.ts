@@ -806,6 +806,7 @@ export class Journal {
 /* ── el lado del hub ──────────────────────────────────────────────── */
 
 export interface RotationInput {
+  reason?: string;
   fromId: string;
   machineId?: string | null;
   turns?: number;
@@ -999,6 +1000,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       write({
         kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
         projectId: a.projectId, project: code(a.projectId), squad: null, missionId: null,
+        reason: input.reason ?? 'unknown: collector omitted trigger',
         fromId: input.fromId, toId: a.id, turns: input.turns ?? null,
         compactions: input.compactions ?? null, contextTokens: input.contextTokens ?? null,
       });
@@ -1008,6 +1010,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       write({
         kind: 'rotation', at, agentId: a.id, callsign: a.callsign, machineId: a.machineId,
         projectId: a.projectId, project: code(a.projectId), squad: null, missionId: null,
+        reason: 'unknown: inferred session replacement',
         fromId: capcomId, toId: a.id, note: 'inferred: a new CAPCOM appeared while another was known',
       });
       wrote = true;
@@ -1049,9 +1052,9 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       if (e.agentId) open.set(e.agentId, entry);
     }),
     deps.lifecycle.on('escalation:answered', (e: EscalationAnswered) => {
-      const asked = (e.id ? openById.get(e.id) : undefined) ?? (e.agentId ? open.get(e.agentId) : undefined) ?? null;
+      const asked = (e.id ? openById.get(e.id) : e.agentId ? open.get(e.agentId) : undefined) ?? null;
       if (asked?.escalationId) openById.delete(asked.escalationId);
-      if (e.agentId) open.delete(e.agentId);
+      if (e.agentId && open.get(e.agentId) === asked) open.delete(e.agentId);
       const a = e.agentId ? deps.agent(e.agentId) : undefined;
       write({
         kind: 'answer', at: e.at,
@@ -1068,7 +1071,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
       // respuesta. Y se anota aunque no se encuentre la pregunta (un hub que
       // reinició con ella abierta): el hecho de que dejó de existir sigue
       // siendo cierto, y `stats` la casará por id con la entrada vieja.
-      const asked = (e.id ? openById.get(e.id) : undefined) ?? (e.agentId ? open.get(e.agentId) : undefined) ?? null;
+      const asked = (e.id ? openById.get(e.id) : e.agentId ? open.get(e.agentId) : undefined) ?? null;
       if (asked?.escalationId) openById.delete(asked.escalationId);
       if (e.agentId && open.get(e.agentId) === asked) open.delete(e.agentId);
       const a = e.agentId ? deps.agent(e.agentId) : undefined;
@@ -1132,6 +1135,7 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         write({
           kind: 'rotation', at: deps.now(), agentId: held.fromId, callsign: null, machineId: held.machineId ?? null,
           projectId: null, project: null, squad: null, missionId: null,
+          reason: held.reason ?? 'unknown: collector omitted trigger',
           fromId: held.fromId, toId: null, turns: held.turns ?? null,
           compactions: held.compactions ?? null, contextTokens: held.contextTokens ?? null,
           note: 'the new CAPCOM never showed up',

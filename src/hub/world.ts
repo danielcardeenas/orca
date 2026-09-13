@@ -631,6 +631,7 @@ export function sanitizeEscalation(raw: unknown, machineId: string): Escalation 
   const by = o['answeredBy'];
   return {
     id: o['id'],
+    ...(o['from'] === 'ceo' ? { from: 'ceo' as const } : {}),
     agentId: validId(o['agentId']) ? o['agentId'] : '',
     projectId: validId(o['projectId']) ? o['projectId'] : '',
     machineId: validId(o['machineId']) ? o['machineId'] : machineId,
@@ -2053,6 +2054,7 @@ export class World {
     if (!e) throw new Error('escalation inválida');
     e.machineId = machineId;
     const prev = this.state.escalations[e.id];
+    if (prev?.from === 'ceo') e.from = 'ceo';
     // Una escalación ya respondida no vuelve a 'pending' por un frame tardío.
     if (prev && (prev.status === 'answered' || (prev.permission && ['withdrawn', 'expired'].includes(prev.status))) && e.status !== prev.status) return;
     if (prev?.permission?.phase === 'pending' && e.permission?.phase === 'requested') e.permission.phase = 'pending';
@@ -2135,7 +2137,7 @@ export class World {
     }
     this.event({
       at: this.now(), kind: 'escalation:answered', machineId: e.machineId, agentId: e.agentId,
-      projectId: e.projectId, text: e.question, data: { answer: e.answer, by, rememberAs: e.rememberAs },
+      projectId: e.projectId, text: e.question, data: { id: e.id, answer: e.answer, by, rememberAs: e.rememberAs },
     });
     this.flushOut();
     return e;
@@ -2147,14 +2149,14 @@ export class World {
    * nada al humano por su cuenta.
    */
   upsertEscalationLocal(e: Escalation): Escalation {
+    e.from = 'ceo';
     this.state.escalations[e.id] = e;
     this.emit({ o: 'escalation', id: e.id, v: e });
     this.event({
       at: this.now(), kind: 'escalation:new', machineId: e.machineId, agentId: e.agentId,
       projectId: e.projectId, text: e.question,
-      // Sin `id` en data: ésta la levantó el CEO, y volver a notificárselo
-      // provocaría que se triara a sí mismo en bucle.
-      data: { urgency: e.urgency, options: e.options, from: 'ceo' },
+      // Identity is for accounting; from prevents CAPCOM triaging itself.
+      data: { id: e.id, urgency: e.urgency, options: e.options, from: 'ceo' },
     });
     this.flushOut();
     return e;

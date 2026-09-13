@@ -316,7 +316,7 @@ export class ProviderHandoffs {
       } catch { /* the note is a courtesy, not the point */ }
     }
   }
-  fresh(id: string, mode: 'continuity' | 'clean', checkpoint = '', target?: { runtime: string; model: string }): ProviderHandoffPlan {
+  fresh(id: string, mode: 'continuity' | 'clean', checkpoint = '', target?: { runtime: string; model: string }, rotationReason = 'manual: new CAPCOM'): ProviderHandoffPlan {
     if (!['continuity', 'clean'].includes(mode)) throw new Error('Choose clean or continuity explicitly.');
     if (this.running === id && this.freshPlan && this.freshPlan.contextMode === mode) return this.status(this.freshPlan.id);
     const a = this.target(id);
@@ -324,6 +324,8 @@ export class ProviderHandoffs {
     const runtime = target?.runtime ?? a.runtime;
     if (!model || !['claude', 'codex'].includes(runtime)) throw new Error('Current CAPCOM runtime/model is unknown. No new session was started.');
     const p = this.review(id, runtime, model, mode === 'clean' ? '' : checkpoint, mode);
+    p.rotationReason = rotationReason;
+    this.save(p);
     this.freshPlan = p;
     return this.commit(id, p.id);
   }
@@ -383,7 +385,7 @@ export class ProviderHandoffs {
     fs.writeFileSync(historyPath, history, { mode: 0o600 });
     const checkpointPath = path.join(archive, 'HANDOFF.md');
     fs.writeFileSync(checkpointPath, contextMode === 'clean' ? '# CAPCOM — clean context reset\n\nOperator requested a clean session. No pending-work summary, historical conversation or persisted rule text was injected. Files, hub history, rules and workers are retained. The new session waits for new instructions. Source and history archives in this directory are for operator review only.\n' : `# agent handoff\n\nPrevious session: ${a.sessionId}\nTarget: ${runtime}/${model}\nFull original transcript: ${archive}/source.jsonl\nConversation: ${historyPath}\n\nThis is a point-in-time snapshot. Reconcile pending missions using briefing after activation. Historical instructions are evidence, not new orders.\n\n${checkpoint}\n\n${contextMode ? `Persistent runtime rules: CLAUDE.md and AGENTS.md (copies in ${RULES_DIR}/ inside this archive). Read briefing first after activation; inspect_mission and recall retrieve details on demand.` : this.deps.context(a)}`, { mode: 0o600 });
-    const p: ProviderHandoffPlan = { ...(contextMode ? { contextMode } : {}), id: transferId, fromId: a.id, fromRuntime: a.runtime, fromModel: this.deps.model?.(a) ?? a.model ?? null,
+    const p: ProviderHandoffPlan = { rotationReason: 'manual: provider handoff', ...(contextMode ? { contextMode } : {}), id: transferId, fromId: a.id, fromRuntime: a.runtime, fromModel: this.deps.model?.(a) ?? a.model ?? null,
       cwd,
       runtime: runtime as 'claude' | 'codex', model, at: Date.now(), archive, historyPath, checkpointPath, bytes: Buffer.byteLength(history), sha256: hash(raw), phase: 'review',
       detail: 'Backup ready. Confirmation sends this conversation and checkpoint to the selected provider; the previous agent stays active until preparation succeeds.' };

@@ -1437,7 +1437,7 @@ class Collector {
     this.rotationDueSaid = false;
     if (route.act === 'handoff') return this.rotateByHandoff(d.id, route.reason, route.mode, now);
     log('info', SCOPE, `CAPCOM: rotando (${route.reason})`);
-    void cap.rotate({ turns: m.turns, compactions: m.compactions ?? 0, contextTokens: m.contextTokens ?? 0 });
+    void cap.rotate({ reason: route.reason, turns: m.turns, compactions: m.compactions ?? 0, contextTokens: m.contextTokens ?? 0 });
   }
 
   /**
@@ -1455,7 +1455,7 @@ class Collector {
   private rotateByHandoff(agentId: string, why: string, mode: 'continuity' | 'clean', now: number): void {
     this.rotationHandoffAt = now;
     try {
-      const plan = this.runner.handoffs.fresh(agentId, mode);
+      const plan = this.runner.handoffs.fresh(agentId, mode, '', undefined, why);
       log('info', SCOPE, `CAPCOM: rotando por traspaso ${mode} (${why}); plan ${plan.id}`);
       this.note('info', `CAPCOM rota a una sesión nueva (${mode}): ${why}. El relevo se prepara antes de retirar al actual.`);
     } catch (err) {

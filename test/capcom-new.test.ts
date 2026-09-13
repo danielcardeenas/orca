@@ -97,6 +97,15 @@ export default { suite: 'Fresh CAPCOM', tests: [
       return ok(`${failure}: no new authority, source retained`, true);
     } finally { r.dispose(); }
   })),
+  test('automatic rotation reason persists in the prepared handoff plan', async () => {
+    const r = rig(); try {
+      const p = r.service.fresh(OLD, 'clean', '', undefined, '75% of the context window ≥ 75%');
+      await r.settle();
+      assert.equal(r.service.status(p.id).rotationReason, '75% of the context window ≥ 75%');
+      assert.equal(JSON.parse(fs.readFileSync(path.join(p.archive, 'plan.json'), 'utf8')).rotationReason, p.rotationReason);
+      return ok('trigger retained through preparation', true);
+    } finally { r.dispose(); }
+  }),
   test('busy or unknown model fails before preparing a runtime', () => {
     const r = rig(); try {
       r.a.state = 'working'; assert.throws(() => r.service.fresh(OLD, 'clean'), /Finish/);
@@ -107,8 +116,9 @@ export default { suite: 'Fresh CAPCOM', tests: [
   }),
   test('Codex activation verifies ready pane before cutover and clean watchdog resumes without briefing', async () => {
     const r = rig(); try {
-      const calls: string[] = []; const argv: string[][] = [];
+      const calls: string[] = []; const argv: string[][] = []; const reasons: (string | undefined)[] = [];
       const cap = new CapcomSession({ dir: r.dir, bin: '/fake/claude', codexBin: '/fake/codex', hubUrl: 'ws://127.0.0.1:1', token: '', trust: false,
+        rotated: info => { reasons.push(info.reason); },
         alive: () => false, note() {}, lineage: { noteSpawn() {}, bind() {}, demote() {} },
         tmux: { available: () => true,
           spawn: async p => { calls.push('spawn'); argv.push(p.argv); assert.equal(p.cwd, plan.cwd); return { ok: true, stdout: '', detail: '' }; },
@@ -117,7 +127,9 @@ export default { suite: 'Fresh CAPCOM', tests: [
         },
       });
       cap.adopt(OLD); const plan = r.service.review(OLD, 'codex', 'gpt-6-astra', '', 'clean');
+      plan.rotationReason = '4 compactions ≥ 4';
       await cap.activateHandoff(plan, NEW);
+      assert.deepEqual(reasons, ['4 compactions ≥ 4']);
       assert.equal(cap.current(), NEW); assert.equal(calls.at(-1), `kill:orca-${OLD}`);
       assert.deepEqual(argv[0]!.slice(0, 3), ['/fake/codex', 'resume', NEW]);
       assert.ok(argv[0]!.includes('gpt-6-astra'));

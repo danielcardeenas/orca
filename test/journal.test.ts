@@ -387,11 +387,37 @@ const tests = [
     } finally { await b.close(); }
   }),
 
+  test('world answers and withdrawals pair by id after journal restart without in-memory questions', async () => {
+    const b = box();
+    let restarted: JournalApi | undefined;
+    try {
+      const world = new World({ now: () => b.clock.now, onEvent: ev => b.lifecycle.feed(ev, null) });
+      for (const id of ['answer-me', 'withdraw-me']) {
+        world.upsertEscalationLocal({
+          id, agentId: 'same-agent', machineId: 'm1', projectId: 'p_ax', question: id, context: null,
+          options: [], optionsOnly: false, urgency: 'blocking', status: 'pending', ceoAttempt: null,
+          answer: null, answeredBy: null, rememberAs: null, askedAt: b.clock.now, answeredAt: null, expiresAt: null,
+        });
+      }
+      await b.journal.flush();
+      b.journal.stop?.();
+      restarted = createJournal(b.deps);
+      world.answerEscalation('answer-me', 'yes', 'human', null);
+      world.dismissEscalation('withdraw-me');
+      await restarted.flush();
+      const entries = restarted.query();
+      const stats = restarted.stats();
+      return ok('both explicit ids survive restart', entries.some(e => e.kind === 'answer' && e.escalationId === 'answer-me')
+        && entries.some(e => e.kind === 'withdraw' && e.escalationId === 'withdraw-me')
+        && stats.escalations.answeredByHuman === 1 && stats.escalations.unanswered === 0);
+    } finally { restarted?.stop?.(); await b.close(); }
+  }),
+
   test('a CAPCOM rotation is one entry: the hub hint carries the numbers, the new session closes it', async () => {
     const b = box();
     try {
       arrive(b, agent({ id: 'cap1', role: 'capcom', projectId: 'p_or' }));
-      b.journal.rotated({ fromId: 'cap1', machineId: 'm1', turns: 300, compactions: 2, contextTokens: 150_000 });
+      b.journal.rotated({ reason: '4 compactions ≥ 4', fromId: 'cap1', machineId: 'm1', turns: 300, compactions: 2, contextTokens: 150_000 });
       b.clock.now = 30_000;
       arrive(b, agent({ id: 'cap2', role: 'capcom', projectId: 'p_or' }));
       // Sin gancho: un tercer CAPCOM aparece mientras se conocía el segundo.
@@ -400,7 +426,7 @@ const tests = [
       await b.journal.flush();
       const rot = lines(b.dir).filter((e) => e.kind === 'rotation');
       return ok('two rotations',
-        rot.length === 2
+        rot.length === 2 && rot[0]?.reason === '4 compactions ≥ 4' && rot[1]?.reason === 'unknown: inferred session replacement'
         && rot[0]?.fromId === 'cap1' && rot[0].toId === 'cap2' && rot[0].turns === 300 && rot[0].compactions === 2 && rot[0].contextTokens === 150_000
         && rot[1]?.fromId === 'cap2' && rot[1].toId === 'cap3' && rot[1].note?.startsWith('inferred') === true
         && b.timers[0]?.cancelled === true

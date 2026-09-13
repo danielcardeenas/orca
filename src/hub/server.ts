@@ -788,7 +788,7 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           try { history.mark(world.state); } catch (err) { warn('history.mark falló:', err); }
         }
       }
-      const escId = ev.kind === 'escalation:new'
+      const escId = ev.kind === 'escalation:new' && (ev.data as { from?: string } | undefined)?.from !== 'ceo'
         ? (ev.data as { id?: string } | undefined)?.id
         : undefined;
       if (ev.kind === 'message:new') {
@@ -1845,9 +1845,9 @@ export async function startHub(options: HubOptions = {}): Promise<Hub> {
           world.pushFeed(machineId, [{ id: newId('f_cap'), at: Date.now(), level: 'info', source: 'CAPCOM', text }]);
           try {
             autonomy.journal.rotated({
-              fromId: frame.fromId, machineId,
-              turns: Number(frame.turns) || 0, compactions: Number(frame.compactions) || 0,
-              contextTokens: Number(frame.contextTokens) || 0,
+              fromId: frame.fromId, machineId, reason: typeof frame.reason === 'string' ? frame.reason : 'unknown: collector omitted trigger',
+              turns: frame.turns, compactions: frame.compactions,
+              contextTokens: frame.contextTokens,
             });
           } catch (err) { warn('journal.rotated falló:', err); }
           return;

@@ -1,3 +1,4 @@
+import { World, sanitizeEscalation } from '../src/hub/world.ts';
 /**
  * CAPCOM: the command layer, from the wire down.
  *
@@ -501,6 +502,42 @@ const tests = [
   }),
 
   /* ── the 90-second deadline ─────────────────────────────────────── */
+
+  test('CAPCOM-origin questions retain identity but never return through event delivery, direct offer or sweep after restart', () => {
+    const said: string[] = [];
+    const events: string[] = [];
+    let router: CapcomRouter;
+    let persisted: Escalation | undefined;
+    const world = new World({ onEvent: ev => {
+      if (ev.kind !== 'escalation:new') return;
+      const data = ev.data as { id: string };
+      events.push(data.id);
+      // Even a caller that ignores event.from must be safe at the router.
+      router.offer(data.id);
+    } });
+    const deps = {
+      capcom: () => agent({ id: 'replacement-capcom', role: 'capcom' }),
+      say: (_id: string, text: string) => { said.push(text); },
+      escalation: (id: string) => persisted?.id === id ? persisted : world.state.escalations[id],
+      markWithCeo: () => { throw Error('CAPCOM must not triage its own questions'); },
+      giveUp: () => { throw Error('no timer should exist'); }, setTimer: fakeClock().setTimer,
+    };
+    router = new CapcomRouter(deps);
+    // Different author, no ceoAttempt: neither of the old guards can help.
+    const raised = world.upsertEscalationLocal(escalation({ agentId: 'previous-capcom', ceoAttempt: null }));
+    const direct = router.offer(raised.id);
+    const swept = router.sweep(Object.values(world.state.escalations));
+    // Serialize and sanitize exactly the record, with no event or in-memory hints.
+    persisted = sanitizeEscalation(JSON.parse(JSON.stringify(raised)), raised.machineId)!;
+    router.stop();
+    router = new CapcomRouter(deps);
+    const afterRestart = router.offer(persisted.id);
+    const sweepAfterRestart = router.sweep([persisted]);
+    router.stop();
+    return ok('identity retained; all entrances reject durable CAPCOM origin',
+      events[0] === raised.id && persisted.id === raised.id && persisted.from === 'ceo'
+      && !direct && !afterRestart && swept === 0 && sweepAfterRestart === 0 && said.length === 0);
+  }),
 
   test('an escalation is handed to CAPCOM and marked as being triaged', () => {
     const clock = fakeClock();

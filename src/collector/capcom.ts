@@ -353,12 +353,13 @@ export interface CapcomLaunch {
 
 /** Why CAPCOM is being recycled, in the numbers the feed line shows. */
 export interface RotationSignals {
+  reason?: string;
   turns: number;
   compactions: number;
   contextTokens: number;
 }
 
-export interface RotationNotice extends RotationSignals {
+export interface RotationNotice extends Partial<RotationSignals> {
   /** The agent id the hub knows the retiring session by. */
   fromId: string;
 }
@@ -498,6 +499,8 @@ export class CapcomSession {
       // only after the old pane is stopped, then announce it to the hub.
       writeIdentity(this.dir, next);
       cutover = true;
+      this.deps.rotated?.({ fromId: this.deps.agentIdOf?.(old) ?? old,
+        reason: plan.rotationReason ?? 'unknown: handoff plan omitted trigger' });
       this.adopt(sessionId); this.deps.lineage.bind(sessionId, sessionId);
       this.deps.note('info', `CAPCOM handoff activated: ${plan.fromRuntime} → ${plan.runtime}/${plan.model}. Backup: ${plan.archive}`);
     } finally { if (!cutover) await tmux.kill(name); }
@@ -628,6 +631,7 @@ export class CapcomSession {
         const runner = this.deps.launch ?? runDetached;
         const stopped = await runner(this.deps.bin, ['stop', remembered], this.dir);
         if (!stopped.ok) log('warn', SCOPE, `no pude parar el CAPCOM --bg ${remembered}: ${stopped.detail}`);
+        this.deps.rotated?.({ fromId: this.deps.agentIdOf?.(remembered) ?? remembered, reason: 'recovery: background session moved to hosted pane' });
         this.deps.lineage.demote(remembered);
         this.shortId = null;
         this.saveState(null);
@@ -661,6 +665,7 @@ export class CapcomSession {
     try {
       const recovery = this.recovery();
       if (!this.gaveUp && recovery && recovery.sessionId !== this.shortId && this.now() >= this.nextTry) {
+        if (this.shortId) this.deps.rotated?.({ fromId: this.deps.agentIdOf?.(this.shortId) ?? this.shortId, reason: 'recovery: verified session installed' });
         this.nextTry = this.now() + CAPCOM_RESTART_MS;
         void this.ensure().catch((err) => this.deps.note('alert', errText(err)));
         return;
@@ -674,6 +679,7 @@ export class CapcomSession {
     // Too young to be declared dead: the CLI has not listed it yet.
     if (this.shortId && this.now() - this.adoptedAt < CAPCOM_GRACE_MS) return;
     if (this.shortId) {
+      this.deps.rotated?.({ fromId: this.deps.agentIdOf?.(this.shortId) ?? this.shortId, reason: 'recovery: CAPCOM disappeared' });
       this.deps.note('warn', `CAPCOM (${this.shortId}) se cayó`);
       this.shortId = null;
       this.saveState(null);
@@ -925,6 +931,9 @@ export class CapcomSession {
    * el linaje igual que lo haría un traspaso.
    */
   adoptCleared(toId: string, mode: 'clean' | 'continuity', cutoffAt: number, model?: string): void {
+    if (this.shortId && this.shortId !== toId) this.deps.rotated?.({
+      fromId: this.deps.agentIdOf?.(this.shortId) ?? this.shortId, reason: `manual: new CAPCOM (${mode})`,
+    });
     this.adopt(toId, { contextMode: mode, cutoffAt, reason: 'manual', ...(model ? { model } : {}) });
   }
 

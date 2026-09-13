@@ -46,7 +46,7 @@ export type CollectorFrame =
    * session is coming up. Sent BEFORE the old one is stopped, so the hub holds
    * its mail instead of pasting it into a dying pane or declaring no command.
    */
-  | { t: 'capcom:rotated'; machineId: string; fromId: string; turns: number; compactions: number; contextTokens: number }
+  | { t: 'capcom:rotated'; machineId: string; fromId: string; reason?: string; turns?: number; compactions?: number; contextTokens?: number }
   /** Blocks of one session's conversation, in order. CAPCOM only. */
   | { t: 'talk'; machineId: string; agentId: string; items: TalkItem[] }
   /** The text CAPCOM is typing right now, off its pane. `null` when it stopped. */

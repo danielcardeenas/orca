@@ -3,6 +3,8 @@ export interface ProviderHandoffPlan {
   /** Fresh context keeps archive on disk and transfers only a bounded checkpoint. */
   contextMode?: 'continuity' | 'clean';
   cwd?: string;
+  /** Trigger captured at request time, retained through preparation/restart. */
+  rotationReason?: string;
   id: string; fromId: string; fromRuntime: string; fromModel: string | null;
   runtime: 'claude' | 'codex'; model: string; at: number;
   archive: string; historyPath: string; checkpointPath: string;

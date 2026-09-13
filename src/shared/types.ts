@@ -373,6 +373,8 @@ export type WithdrawCause = 'agent' | 'permission' | 'gone' | 'superseded' | 'ex
 export const WITHDRAW_CAUSES: readonly WithdrawCause[] = ['agent', 'permission', 'gone', 'superseded', 'expired', 'dismissed'];
 
 export interface Escalation {
+  /** Durable routing origin: CAPCOM questions belong to the human, across rotations. */
+  from?: 'ceo';
   /** Terminal approval: sending a key is not resolution. */
   permission?: { phase: 'requested' | 'pending' | 'confirmed'; fingerprint: string };
   id: string;

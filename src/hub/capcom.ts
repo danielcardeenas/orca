@@ -260,7 +260,7 @@ export class CapcomRouter {
     const cap = this.live();
     if (!cap) return false;
     const esc = this.deps.escalation(escalationId);
-    if (!esc || esc.status !== 'pending' || (esc.permission && esc.permission.phase !== 'requested')) return false;
+    if (!esc || esc.from === 'ceo' || esc.status !== 'pending' || (esc.permission && esc.permission.phase !== 'requested')) return false;
     if (this.cleanCutoff !== null && esc.askedAt <= this.cleanCutoff) return false;
     // Its own question would loop straight back into it.
     if (esc.agentId === cap.id) return false;

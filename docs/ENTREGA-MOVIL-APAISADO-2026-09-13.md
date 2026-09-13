@@ -154,4 +154,25 @@ npm run shots -- hud-mobile file-viewer tether    tres rondas: ver §8
 
 ## 8. Shots, tres rondas
 
-(pendiente de completar al terminar la corrida)
+`npm run shots -- hud-mobile file-viewer tether`, en serie, en el worktree:
+
+| Ronda | file-viewer | hud-mobile | tether |
+| --- | --- | --- | --- |
+| 1 (11:41) | OK 17s | OK 90s | OK 30s |
+| 2 (11:44) | OK 17s | OK 111s | OK 31s |
+| 3 (11:46) | OK 18s | OK 90s | **FAIL** 31s |
+
+`hud-mobile` pasó las tres con la afirmación nueva de 844×390 dentro: ventana
+desde x=0 a ancho entero, sin asa, cuerpo ≥180px, cabecera que no arrastra.
+
+El rojo de la ronda 3 es `tether.shots.ts:283`, «tirar del asa ensancha la
+superficie: 541 → 541 px»: el intermitente que
+[SHOTS-ROJOS-FORGE-2026-09-13.md](SHOTS-ROJOS-FORGE-2026-09-13.md) ya registra
+a 3/12. Corre a 1440×900, donde `PHONE_MQ` es falso e `isPhone()` devuelve lo
+mismo que devolvía `MOBILE()`. No se ha cambiado código por él.
+
+Salvedad, dicha: las rondas corrieron con el árbol en movimiento —otros dos
+miembros commiteaban y editaban `src/hub` y `src/collector` en el mismo
+worktree; HEAD pasó de `7a61eed` a `9bbc73f` entre la ronda 1 y la 3—, así
+que valen como indicio y no como tasa. Las tres rondas que cuentan las corre
+el líder con el árbol quieto.

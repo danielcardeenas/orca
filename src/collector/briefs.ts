@@ -484,6 +484,17 @@ export function capcomBrief(): string {
       + ' agent blocked on a question or a permission, for a published result the operator has'
       + ' not read yet, or for an archived mission — those are other states, with other answers.',
     '',
+    '**A squad member waiting on its lead** arrives as `[SQUAD <name>]`: a member asked its'
+      + ' lead (or its squad) a question and nobody has answered it for a quarter of an hour — or'
+      + ' at once, when the lead is already gone. A member has no other door: it cannot ask you or'
+      + ' the operator, its lead is its only way up, and this is what happens when that way is'
+      + ' silent. The message carries the question and the exact `answer_peer` call. Answer it'
+      + ' yourself if you can — from fleet state, from recall, from what the operator said; if only'
+      + ' the lead can, `send_to_agent` the lead to read its mail; if the lead is gone, answer it or'
+      + ' hand the member\'s work to someone else. It repeats at 45 minutes and then every two'
+      + ' hours, several members in one message, and stops the moment the question is answered'
+      + ' or the member leaves. Past an hour the operator is told in their own feed.',
+    '',
     '**A heartbeat** arrives as `[HEARTBEAT]` when you have had no turn for a while. Call'
       + ' `briefing`; if it shows something owed — a blocked agent, a mission waiting on you, a'
       + ' finished worker nobody reported — handle it. If nothing needs you, do nothing: no'

@@ -527,6 +527,23 @@ export default {
         `cached=${clean?.memCachedBytes?.value} older=${older?.memCachedBytes === undefined ? 'absent' : 'present'}`);
     }),
 
+    test('a stopped session retaining memory crosses as a `session` stray with its bytes; an unknown kind is dropped', () => {
+      const wire = JSON.parse(JSON.stringify(report())) as Record<string, unknown>;
+      wire['strays'] = [
+        // Lo que manda collector/reap.ts: el resto que el hub tiraba por tipo desconocido.
+        { id: 'stray_session_208fd608', kind: 'session', verdict: 'orphan', action: 'terminate', label: 'K9 · done · 612M retained',
+          pid: 36570, startedAt: 1, agentId: '208fd608', rssBytes: 612 * 1024 * 1024, evidence: ['ORCA launched K9 (verified by the spawn record)'] },
+        { id: 'stray_x_1', kind: 'mystery', verdict: 'orphan', action: 'terminate', label: 'x', pid: 2, evidence: [] },
+        { id: 'stray_vite_3', kind: 'vite', verdict: 'orphan', action: 'terminate', label: 'vite', pid: 3, rssBytes: -5, evidence: [] },
+      ];
+      const clean = sanitizeReport(wire);
+      const s = clean?.strays?.find((x) => x.kind === 'session');
+      return ok('session kept with rssBytes; mystery kind dropped; a negative rss is not a cost',
+        !!clean && clean.strays?.length === 2 && s?.rssBytes === 612 * 1024 * 1024 && s.agentId === '208fd608'
+        && clean.strays.find((x) => x.kind === 'vite')?.rssBytes === undefined,
+        `${clean?.strays?.map((x) => `${x.kind}:${x.rssBytes ?? '—'}`).join(', ')}`);
+    }),
+
     test('sanitize rejects a frame that is not a report at all', () => {
       const cases = [null, 42, {}, { categories: 'no', volumes: [] }, { categories: [], volumes: [] }];
       const wrong = cases.filter((v) => sanitizeReport(v) !== null);

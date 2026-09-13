@@ -121,6 +121,17 @@ function lines(dir: string): JournalEntry[] {
 /* ── las pruebas ──────────────────────────────────────────────────── */
 
 const tests = [
+  test('cumulative ends count once per machine/session, using the maximum even when counters decrease', async () => {
+    const b = box();
+    try {
+      for (const [machineId, agentId, input] of [['m1', 'a', 100], ['m1', 'a', 150], ['m1', 'a', 120], ['m2', 'a', 40]] as const) {
+        b.journal.record({ kind: 'end', machineId, agentId, projectId: 'p_ax', tokens: { input, output: 0, cacheRead: 0, thinking: 0 }, state: 'done' });
+      }
+      await b.journal.flush();
+      const s = b.journal.stats();
+      return ok('maxima, not sum or last; project agrees', s.usage.tokens === 190 && s.usage.measured === 2 && s.usage.avgTokens === 95 && s.byProject[0]?.totalTokens === 190 && s.entries === 4);
+    } finally { await b.close(); }
+  }),
   test('a launch and its end land on disk with who, what, and how much', async () => {
     const b = box();
     try {

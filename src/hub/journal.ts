@@ -354,7 +354,7 @@ export interface JournalStats {
   doneRate: number | null;
   /**
    * Uso, que es lo que sustituyó al dinero el 2026-09-12. `measured` dice
-   * sobre cuántos fines se midió: un `0` con `measured: 0` es un journal que
+   * sobre cuántas sesiones se midió: un `0` con `measured: 0` es un journal que
    * no anotó tokens, no una flota que no consumió.
    */
   usage: { tokens: number; avgTokens: number | null; measured: number };
@@ -606,6 +606,7 @@ export class Journal {
     const byLauncher: Record<LaunchedBy, number> = { human: 0, capcom: 0, agent: 0 };
     const ends = { done: 0, dead: 0 };
     const used: number[] = [];
+    const sessionUsage = new Map<string, JournalEntry>();
     const dur: number[] = [];
     const proj = new Map<string, ProjectStats & { used: number[]; durs: number[] }>();
     const projOf = (e: JournalEntry) => {
@@ -640,7 +641,13 @@ export class Journal {
           const p = projOf(e);
           if (e.state === 'done') p.done += 1; else if (e.state === 'dead') p.dead += 1;
           const tok = entryTokens(e);
-          if (tok !== null) { used.push(tok); p.used.push(tok); p.totalTokens += tok; }
+          if (tok !== null) {
+            // Ends are cumulative snapshots, including after reopen. Missing
+            // identity stays independent rather than merging unrelated records.
+            const key = e.agentId ? JSON.stringify([e.machineId ?? null, e.agentId]) : e.id;
+            const previous = sessionUsage.get(key);
+            if (!previous || tok > entryTokens(previous)!) sessionUsage.set(key, e);
+          }
           if (typeof e.durationMs === 'number') { dur.push(e.durationMs); p.durs.push(e.durationMs); }
           if (e.agentId && e.state) finals.set(e.agentId, e.state);
           break;
@@ -665,6 +672,14 @@ export class Journal {
         case 'rotation': rotations += 1; break;
         case 'landing': if (e.ok === false) landings.failed += 1; else landings.ok += 1; break;
       }
+    }
+
+    for (const e of sessionUsage.values()) {
+      const tok = entryTokens(e)!;
+      used.push(tok);
+      const p = projOf(e);
+      p.used.push(tok);
+      p.totalTokens += tok;
     }
 
     const avg = (xs: number[]): number | null => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);

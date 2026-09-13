@@ -19,8 +19,9 @@
  * El par lo pone la escuadra del arnés (`injectSquad`): el líder y sus
  * miembros. Si en esta corrida ningún miembro tiene baldosa propia en la
  * fila de abajo del líder —se pliegan en su bandeja hasta hablar con otro—,
- * el script lo dice y sale limpio: es un skip, no un fallo. Un rojo que
- * depende de la suerte del fixture envenena la suite para el siguiente.
+ * el script lo dice y sale con el código de omisión: ni rojo ni verde. Un
+ * rojo que depende de la suerte del fixture envenena la suite para el
+ * siguiente; un verde que no miró nada la vacía de contenido.
  */
 
 import { chromium, type Page } from 'playwright';
@@ -28,6 +29,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { GPU_ARGS, SHOTS, ensureServers, injectSquad, newPage, open, shutdown, uiPort, waitForFleet } from './visual.ts';
+import { skipShot } from './shot-skip.ts';
 import { sleep } from './harness.ts';
 import { GAP_Y, TILE_H } from '../src/ui/field/layout.ts';
 import { SHELF_H } from '../src/ui/field/shelf.ts';
@@ -91,8 +93,13 @@ async function main() {
      * foto necesita envenena la suite para el siguiente; lo que se AFIRMA es
      * sólo lo que, dado el par, no depende de la suerte — lo que la rejilla
      * reserva y cuánto bajó la fila.
+     *
+     * Pero tampoco es un verde: salía con cero y el tablero lo contaba entre
+     * los que pasan, seis veces distintas. `skipShot` deja el código de
+     * salida en `SKIP_CODE` y el runner lo pinta amarillo, con su motivo y
+     * su recuento aparte. Ver `shot-skip.ts`.
      */
-    const skip = (why: string) => { console.log(`[shelf-routes] skip · ${why} · no fotografío`); };
+    const skip = (why: string) => { skipShot(`shelf-routes · ${why} · no fotografío`); };
     squad = await injectSquad();
     if (!squad) return skip('el hub no aceptó la escuadra del arnés');
     const lead = 'sess_vsquad_z1';

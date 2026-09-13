@@ -1,6 +1,8 @@
 /**
  * Corre los shots: `test/*.shots.ts`, uno detrás de otro, y sale distinto de
- * cero si alguno falla.
+ * cero si alguno falla. Tres estados: pasa, falla y OMITE —lo que un shot
+ * dice cuando el fixture no le dio con qué afirmar nada (`shot-skip.ts`)—,
+ * que se cuenta aparte y nunca como verde.
  *
  *   npm run shots                    los dieciséis
  *   npm run shots -- hud improve     los que llevan alguno de esos en el nombre
@@ -45,6 +47,8 @@ import { spawn } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
+import { SKIP_CODE, skipReasonOf } from './shot-skip.ts';
+
 const DIR = new URL('.', import.meta.url).pathname;
 const ROOT = dirname(DIR.replace(/\/$/, ''));
 const ARGS = process.argv.slice(2);
@@ -54,7 +58,14 @@ const TIMEOUT_MS = Number(ARGS.find((a) => a.startsWith('--timeout='))?.slice('-
 /** Lo que se enseña de un shot que falla: el final, que es donde está la aserción. */
 const TAIL = 30;
 
-type Verdict = { file: string; ok: boolean; secs: number; why: string; out: string };
+/**
+ * Tres estados, no dos. Un shot que se omite —le faltó del fixture lo que
+ * necesitaba para afirmar nada— no es verde: contarlo como éxito es lo que
+ * hacía que `shelf-routes.shots.ts` se leyera como una prueba pasada seis
+ * veces sin haber mirado la foto. Ver `shot-skip.ts`.
+ */
+type Status = 'ok' | 'skip' | 'fail';
+type Verdict = { file: string; status: Status; secs: number; why: string; out: string };
 
 /**
  * Un shot, en su propio proceso.
@@ -93,17 +104,34 @@ function runShot(file: string): Promise<Verdict> {
     p.on('close', (code) => {
       clearTimeout(timer);
       const secs = Math.round((Date.now() - t0) / 1000);
+      const status = statusOf(timedOut, code);
       resolve({
-        file, secs, out,
-        ok: !timedOut && code === 0,
-        why: timedOut ? `se colgó (${Math.round(TIMEOUT_MS / 1000)}s)` : code === 0 ? '' : `salió con ${code}`,
+        file, secs, out, status,
+        why: timedOut ? `se colgó (${Math.round(TIMEOUT_MS / 1000)}s)`
+          : status === 'skip' ? skipReasonOf(out) || 'omitido sin decir por qué'
+          : status === 'ok' ? '' : `salió con ${code}`,
       });
     });
     p.on('error', (err) => {
       clearTimeout(timer);
-      resolve({ file, secs: Math.round((Date.now() - t0) / 1000), out: String(err), ok: false, why: 'no arrancó' });
+      resolve({ file, secs: Math.round((Date.now() - t0) / 1000), out: String(err), status: 'fail', why: 'no arrancó' });
     });
   });
+}
+
+/**
+ * Qué fue de un shot, por su código de salida y nada más.
+ *
+ * Por señal y no por lo que imprima: el motivo del skip es texto para un
+ * humano, pero lo que decide el veredicto es el `SKIP_CODE`, que ningún
+ * cambio de mensaje puede desafinar. Un cuelgue es un fallo, no una omisión:
+ * el shot no decidió nada, se lo llevó el reloj.
+ */
+export function statusOf(timedOut: boolean, code: number | null): Status {
+  if (timedOut) return 'fail';
+  if (code === 0) return 'ok';
+  if (code === SKIP_CODE) return 'skip';
+  return 'fail';
 }
 
 /** La aserción que falló, si la hay: es lo único que se quiere leer de 400 líneas. */
@@ -124,6 +152,20 @@ export function pickShots(files: readonly string[], filters: readonly string[]):
   return filters.length ? shots.filter((f) => filters.some((x) => f.includes(x))) : shots;
 }
 
+/**
+ * El recuento, con las omisiones en su propia columna.
+ *
+ * Aparte y pura porque es lo que se lee del tablero, y lo que no se puede
+ * dejar volver a mentir: un omitido no suma en los que pasan.
+ */
+export function tally(verdicts: readonly { status: Status }[]): { ok: number; skip: number; fail: number } {
+  return {
+    ok: verdicts.filter((v) => v.status === 'ok').length,
+    skip: verdicts.filter((v) => v.status === 'skip').length,
+    fail: verdicts.filter((v) => v.status === 'fail').length,
+  };
+}
+
 async function main() {
   const files = pickShots(await readdir(DIR), FILTERS);
 
@@ -142,23 +184,41 @@ async function main() {
     process.stdout.write(`  ${String(i + 1).padStart(2)}/${files.length}  ${f.padEnd(28)}`);
     const v = await runShot(f);
     verdicts.push(v);
-    console.log(v.ok ? `\x1b[32mOK\x1b[0m    ${v.secs}s` : `\x1b[31mFALLA\x1b[0m ${v.secs}s  ${v.why}`);
-    if (!v.ok) console.log(v.out.split('\n').slice(-TAIL).map((l) => `      ${l}`).join('\n'));
+    console.log(v.status === 'ok' ? `\x1b[32mOK\x1b[0m    ${v.secs}s`
+      : v.status === 'skip' ? `\x1b[33mOMITE\x1b[0m ${v.secs}s  ${v.why}`
+      : `\x1b[31mFALLA\x1b[0m ${v.secs}s  ${v.why}`);
+    if (v.status === 'fail') console.log(v.out.split('\n').slice(-TAIL).map((l) => `      ${l}`).join('\n'));
   }
 
-  const bad = verdicts.filter((v) => !v.ok);
+  const { ok, skip, fail } = tally(verdicts);
   const secs = verdicts.reduce((a, v) => a + v.secs, 0);
-  console.log(`\n${bad.length ? '\x1b[31m' : '\x1b[32m'}${verdicts.length - bad.length}/${verdicts.length} shots pasan\x1b[0m · ${Math.round(secs / 60)}m`);
-  for (const v of bad) console.log(`  \x1b[31m${v.file}\x1b[0m  ${assertionOf(v.out) || v.why}`);
-  process.exit(bad.length ? 1 : 0);
+  /*
+   * El denominador son los que de verdad afirmaron algo: `12/12 shots pasan`
+   * con cuatro omitidos al lado dice la verdad; `16/16` la escondería.
+   */
+  console.log(`\n${fail ? '\x1b[31m' : '\x1b[32m'}${ok}/${ok + fail} shots pasan\x1b[0m`
+    + (skip ? ` · \x1b[33m${skip} omitido(s)\x1b[0m` : '')
+    + ` · ${Math.round(secs / 60)}m`);
+  for (const v of verdicts.filter((x) => x.status === 'fail')) {
+    console.log(`  \x1b[31m${v.file}\x1b[0m  ${assertionOf(v.out) || v.why}`);
+  }
+  // Una omisión es legítima, pero se dice: es lo que nadie miró en esta corrida.
+  for (const v of verdicts.filter((x) => x.status === 'skip')) {
+    console.log(`  \x1b[33m${v.file}\x1b[0m  ${v.why}`);
+  }
+  process.exit(fail ? 1 : 0);
 }
 
 /*
  * Sólo cuando se le llama a él. Importarlo —lo hace su suite, para mirar la
  * selección sin levantar dieciséis navegadores— no corre nada. Mismo criterio
  * que `test/visual.ts`.
+ *
+ * El nombre entero, no el sufijo: `endsWith('shots.ts')` también case con
+ * `tether.shots.ts`, y bastaría con que un shot importase algo de aquí para
+ * que abriese dieciséis navegadores dentro de sí mismo.
  */
-if ((process.argv[1] ?? '').endsWith('shots.ts')) {
+if (/(?:^|\/)shots\.ts$/.test(process.argv[1] ?? '')) {
   main().catch((err) => {
     console.error('el runner de shots se cayó:', err);
     process.exit(1);

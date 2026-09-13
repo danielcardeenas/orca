@@ -27,7 +27,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { ok, eq, test, type TestModule } from './harness.ts';
-import { assertionOf, pickShots } from './shots.ts';
+import { SKIP_CODE, skipReasonOf } from './shot-skip.ts';
+import { assertionOf, pickShots, statusOf, tally } from './shots.ts';
 
 const DIR = fileURLToPath(new URL('.', import.meta.url));
 
@@ -68,6 +69,41 @@ export default {
 
     test('de una salida sin fallo no se inventa ninguno', () => {
       return eq('verde', assertionOf('AUTOMEJORA: … passed.\n/repo/test/shots/hud-improve.png'), '');
+    }),
+
+    test('una omisión no es un verde: código propio, y nunca el del éxito ni el del fallo', () => {
+      return ok('estados',
+        statusOf(false, 0) === 'ok'
+        && statusOf(false, SKIP_CODE) === 'skip'
+        && statusOf(false, 1) === 'fail'
+        && statusOf(false, null) === 'fail'
+        // Un cuelgue es un fallo aunque el shot alcanzara a pedir la omisión:
+        // el reloj se lo llevó, no decidió nada.
+        && statusOf(true, SKIP_CODE) === 'fail',
+        `skip=${SKIP_CODE}`);
+    }),
+
+    test('el recuento no mete los omitidos entre los que pasan', () => {
+      const vs = [
+        { status: 'ok' as const }, { status: 'ok' as const },
+        { status: 'skip' as const }, { status: 'fail' as const },
+      ];
+      const t = tally(vs);
+      return ok('recuento', t.ok === 2 && t.skip === 1 && t.fail === 1, JSON.stringify(t));
+    }),
+
+    test('el motivo de la omisión llega al resumen, y el último es el que manda', () => {
+      const salida = [
+        '[visual] starting hub on 51474',
+        '[shot:skip] shelf-routes · la escuadra nunca apareció en el campo · no fotografío',
+        '[shot:skip] shelf-routes · el líder no tiene baldosa propia · no fotografío',
+      ].join('\n');
+      return eq('motivo', skipReasonOf(salida),
+        'shelf-routes · el líder no tiene baldosa propia · no fotografío');
+    }),
+
+    test('de una salida sin omisión no se inventa ningún motivo', () => {
+      return eq('sin marca', skipReasonOf('[shelf-routes] ok · padre → hijo'), '');
     }),
 
     test('la puerta está enchufada: npm run shots existe y llama al runner', () => {

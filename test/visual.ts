@@ -670,6 +670,24 @@ const SQUAD_NAME = 'ledger-close';
 const SHOWCASE_CALLSIGN = 'Z9';
 
 /**
+ * Where this squad says it came from, and why it is NOT the mock's.
+ *
+ * The mark itself is not optional: this thing opens a collector socket and
+ * declares a machine with a `blocking` question on it. Unmarked, the hub has
+ * no way to tell that question from a real one — which is the incident of
+ * 2026-09-07 all over again, the one that left 299 fake agents out of 595 in
+ * this hub's archive. `synthetic` is a declaration by the machine, never a
+ * deduction by the hub (src/shared/synthetic.ts), so it has to be said here.
+ *
+ * But the enclosure it lands in follows `harnessOf`, and sharing the mock's
+ * would file these seven inside the grid that recomposes itself on every
+ * birth — losing the one property this squad exists for: being a subject that
+ * holds still while everything else moves. Its own slug keeps it in its own
+ * island.
+ */
+const SQUAD_HARNESS = 'visual-squad';
+
+/**
  * Six agents under one squad label, one of them blocked on a question only a
  * person can answer, plus a seventh standing alone for the tier-5 tile.
  *
@@ -693,6 +711,9 @@ export async function injectSquad(): Promise<{ close(): void } | null> {
   const machine: Machine = {
     id: SQUAD_MACHINE, hostname: 'visual-squad', platform: 'linux',
     version: '0.1.0-visual', online: true, lastSeen: now, connectedAt: now, load,
+    // See SQUAD_HARNESS: the mark quarantines the fake question, the slug
+    // keeps these seven out of the mock's shifting grid.
+    synthetic: true, harnessOf: SQUAD_HARNESS,
   };
   const project: Project = {
     id: SQUAD_PROJECT, machineId: SQUAD_MACHINE, slug: '-srv-ledger', name: 'ledger',
@@ -804,7 +825,23 @@ export async function newPage(browser: Browser, w: number, h: number): Promise<P
     viewport: { width: w, height: h },
     // Tiny5 is a pixel face; at 1x the screenshot resamples it into mush.
     deviceScaleFactor: 2,
-    reducedMotion: 'no-preference',
+    /*
+     * `reduce`, and it buys three of the four sources of movement at once:
+     * the camera stops easing its flights (field/camera.ts), every tween
+     * collapses to zero (motion.ts `dur()`), and the shaders stop breathing
+     * the tiles and running the traces down the pipes (field/swarm.ts,
+     * field/command.ts, field/pipes.ts). None of these shots asserts anything
+     * about an animation — they wait for counts and for a tile to hold still
+     * — and one of them, `tether`, compares two photographs of a 6×13 px
+     * patch: with a tile breathing next to it that patch changes on its own,
+     * so the test could pass without the thing it claims to measure ever
+     * lighting up. The fourth source, births and deaths, is the mock's, and
+     * `ORCA_FLEET_STILL` is what holds it (see `ensureServers`).
+     *
+     * Only the shots come through here; the comp frames of `npm run visual`
+     * build their own contexts.
+     */
+    reducedMotion: 'reduce',
   });
   const page = await ctx.newPage();
   // Fixtures include unknown/external origins; photograph the whole synthetic fleet.
@@ -1118,7 +1155,22 @@ export async function ensureServers(
     // CAPCOM inside, and this harness has already decided what it is allowed to
     // share (see `sharing`). It no longer opens a real hub — that door is the
     // hub's now — so by here the target is a test hub either way.
-    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=3', '--anyway']);
+    //
+    // `--speed=1` and not the 3 that stood here for months: the mock applies
+    // the multiplier twice — once shortening the tick interval, once
+    // lengthening the step (`every()` and `tick()` in fake-collector.ts) — so
+    // a 3 ran the state machine at 9×. Measured, that was a birth every 0.84 s
+    // and a death every 1.45 s; the whole synthetic fleet is one island whose
+    // column count is a function of its population, so every one of those
+    // moved tiles under a shot that was measuring pixels. At 1 the same churn
+    // happens twenty times less often.
+    //
+    // `--still` when the shot runner asks for it (`ORCA_FLEET_STILL`): the
+    // fourth source of movement — births and deaths — has no
+    // `prefers-reduced-motion` to obey, and this is its switch. Never for the
+    // comp frames: those want a fleet that is going somewhere.
+    const still = process.env['ORCA_FLEET_STILL'] === '1' ? ['--still'] : [];
+    spawnProc('fleet', 'npx', ['tsx', 'test/fake-collector.ts', `--hub=ws://127.0.0.1:${hub}`, '--speed=1', '--anyway', ...still]);
     fleetStarted = true;
   }
 
@@ -1150,8 +1202,12 @@ export async function ensureServers(
 async function hasSyntheticFleet(): Promise<boolean> {
   try {
     const r = await fetch(`http://127.0.0.1:${hubPort()}/api/health`, { signal: AbortSignal.timeout(2000) });
-    const h = await r.json() as { machines?: { list?: { online: boolean; synthetic?: boolean }[] } };
-    return (h.machines?.list ?? []).some((m) => m.online && m.synthetic === true);
+    const h = await r.json() as { machines?: { list?: { id: string; online: boolean; synthetic?: boolean }[] } };
+    // The injected squad is synthetic too, and it is not a fleet: it never
+    // transitions and it publishes nothing. Counting it would leave a reused
+    // hub without the mock — and every frame that needs a working agent
+    // waiting for one that is never coming.
+    return (h.machines?.list ?? []).some((m) => m.online && m.synthetic === true && m.id !== SQUAD_MACHINE);
   } catch { return false; }
 }
 

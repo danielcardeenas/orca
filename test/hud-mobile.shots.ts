@@ -414,7 +414,15 @@ async function main() {
       ...PHONE && { viewport: PHONE },
       deviceScaleFactor: 3, isMobile: true, hasTouch: true,
       userAgent: devices['iPhone 13'].userAgent,
-      reducedMotion: 'no-preference',
+      /*
+       * `reduce`, como el resto de la puerta. Este shot no llega a `newPage`
+       * —se hace su propio contexto de teléfono—, y es el que más lo
+       * necesita: casi todo lo que afirma cuelga de `settledTile`, que busca
+       * una baldosa que esté en el mismo sitio en dos muestras separadas
+       * medio segundo y se rinde tras seis reencuadres. Con la cámara
+       * easeando y las baldosas respirando, esa espera es una lotería.
+       */
+      reducedMotion: 'reduce',
     });
     const page = await ctx.newPage();
     const errors: string[] = [];

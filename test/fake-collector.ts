@@ -34,6 +34,8 @@
  *   --agents=<n>    escala la flota hasta ~n agentes iniciales (default: 20)
  *   --squad[=name]  añade un escuadrón (un líder + 3 hijos) en la 1ª máquina
  *   --quiet         menos ruido en stdout
+ *   --still         población congelada: nadie nace, nadie muere, todo lo
+ *                   demás sigue vivo. Ver `FakeFleetOptions.still`.
  */
 
 import { createHash } from 'node:crypto';
@@ -510,6 +512,7 @@ export class FakeMachine {
   private token: string;
   private quiet: boolean;
   private speed: number;
+  private still: boolean;
 
   private ws: WebSocket | null = null;
   private machine: Machine;
@@ -529,6 +532,8 @@ export class FakeMachine {
     spec: MachineSpec,
     opts: {
       hub: string; token: string; quiet: boolean; speed: number;
+      /** Población congelada. Ver `FakeFleetOptions.still`. */
+      still?: boolean;
       /** Preset de escuadrón: un líder y N miembros que se hablan por squad. */
       squad?: { name: string; size: number } | null;
     },
@@ -538,6 +543,8 @@ export class FakeMachine {
     this.token = opts.token;
     this.quiet = opts.quiet;
     this.speed = opts.speed;
+    // Antes de poblar: los presupuestos de hijos se reparten en `spawn`.
+    this.still = opts.still === true;
 
     this.machine = {
       id: spec.id, hostname: spec.hostname, platform: spec.platform,
@@ -874,7 +881,9 @@ export class FakeMachine {
 
     this.agents.set(agent.id, {
       agent, dwell: rnd(600, 4_000), escalationId: null,
-      spawnBudget: depth === 0 ? int(0, 3) : 0,
+      // Tercera guarda de `still`: sin presupuesto de hijos no hay altas por
+      // `Task`, que es el otro manantial de población. Ver `FakeFleetOptions`.
+      spawnBudget: depth === 0 && !this.still ? int(0, 3) : 0,
     });
     project.sessionIds = [...project.sessionIds, agent.id];
 
@@ -1066,7 +1075,9 @@ export class FakeMachine {
       case 'working':
         if (chance(0.10)) next = 'blocked';
         else if (chance(0.07)) next = 'idle';
-        else if (chance(0.03)) next = 'done';
+        // Segunda guarda de `still`: `done` es absorbente y su única salida es
+        // la retirada, así que no basta con no retirar — hay que no entrar.
+        else if (!this.still && chance(0.03)) next = 'done';
         else next = 'thinking';
         local.dwell = rnd(900, 9_000);
         break;
@@ -1081,14 +1092,18 @@ export class FakeMachine {
         break;
       case 'idle':
         if (chance(0.35)) next = 'thinking';
-        else if (chance(0.08)) next = 'done';
+        else if (!this.still && chance(0.08)) next = 'done';
         local.dwell = rnd(4_000, 25_000);
         break;
       case 'done':
       case 'dead':
         // Los terminados se van reciclando para que la flota no se apague.
         local.dwell = rnd(20_000, 60_000);
-        if (chance(0.5)) { this.retire(local); return; }
+        // Primera guarda de `still`: la retirada es la única baja, y cada una
+        // repone una raíz nueva en otro proyecto — dos movimientos de rejilla
+        // por muerte. Con `still` los pocos que ya estaban en `done` se
+        // quedan ahí, quietos, y nadie más llega.
+        if (!this.still && chance(0.5)) { this.retire(local); return; }
         break;
     }
 
@@ -1482,6 +1497,29 @@ export interface FakeFleetOptions {
   chaos?: boolean;
   speed?: number;
   quiet?: boolean;
+  /**
+   * Población congelada: nadie nace y nadie muere. Todo lo demás sigue vivo
+   * —estados, herramientas, artefactos, escalaciones, colisiones, feed,
+   * latido—, que es deliberado: los artefactos con bytes que mira
+   * `shelf.shots.ts` los produce la entrada en `working` con `Write`, y una
+   * flota apagada no publica ninguno.
+   *
+   * Para qué. Toda la flota sintética vive en UNA isla cuyo número de
+   * columnas es `ceil(sqrt(n · 1,35))`, así que cada alta o baja recoloca
+   * baldosas y, al cruzar un umbral, las recoloca TODAS. Medido: la flota no
+   * sólo rota, crece —de 26 agentes a más de 100 en dos minutos y medio—
+   * porque cada retirada repone una raíz con presupuesto nuevo de hijos. Los
+   * shots miden píxeles encima de eso.
+   *
+   * Son tres guardas y no una, y a medias es peor que nada: no retirar
+   * (`transition`, caso `done`), no ENTRAR en `done` —es absorbente, y sin
+   * esto la flota se apaga sola y deja de producir— y el presupuesto de
+   * hijos a cero (`spawn`), que es el otro manantial de altas.
+   *
+   * No es para todo el arnés: las escenas de `npm run visual` quieren una
+   * flota andando. Lo enciende el runner de los shots (`test/shots.ts`).
+   */
+  still?: boolean;
   /** Escala la topología hasta ~n agentes iniciales. Sin esto, los 20 de siempre. */
   agents?: number;
   /**
@@ -1509,7 +1547,7 @@ export function startFakeFleet(
   const squadName = opts.squad === true ? DEFAULT_SQUAD
     : typeof opts.squad === 'string' && opts.squad ? opts.squad : null;
   const machines = specs.map((spec, i) => new FakeMachine(spec, {
-    hub, token, quiet, speed,
+    hub, token, quiet, speed, still: opts.still === true,
     squad: squadName !== null && i === 0
       ? { name: squadName, size: opts.squadSize ?? 3 } : null,
   }));
@@ -1733,6 +1771,8 @@ if (runDirectly) {
     speed: speedFlag ? Number(speedFlag.slice('--speed='.length)) || 1 : 1,
     agents: agentsFlag ? Number(agentsFlag.slice('--agents='.length)) || 0 : 0,
     quiet: process.argv.includes('--quiet'),
+    // `--still` y no `--quiet`, que ya está cogido y significa «no imprimas».
+    still: process.argv.includes('--still'),
   });
   const total = fleet.machines.reduce((n, m) => n + m.spec.agents, 0);
   console.log(`[fake] ${fleet.machines.length} máquinas, ${total} agentes iniciales`);

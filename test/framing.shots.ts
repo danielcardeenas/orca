@@ -106,7 +106,14 @@ async function main() {
   await mkdir(SHOTS, { recursive: true });
   const browser = await chromium.launch({ headless: !headed, args: GPU_ARGS });
   try {
-    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, reducedMotion: 'no-preference' });
+    /*
+     * `reduce` como en `newPage`: este shot vuela la cámara a una baldosa y
+     * exige que aterrice —dos lecturas iguales seguidas—, y el easing del
+     * vuelo es justo lo que hace que esas dos lecturas no coincidan nunca.
+     * No se afirma nada sobre una animación: se espera a una cuenta de
+     * ventanas y a que la baldosa se quede quieta.
+     */
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, reducedMotion: 'reduce' });
     const page = await ctx.newPage();
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));

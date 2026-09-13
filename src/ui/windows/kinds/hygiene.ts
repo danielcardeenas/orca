@@ -33,6 +33,7 @@
 
 import { hub } from '../../net/client.ts';
 import type { Stray, StrayOutcome } from '../../../shared/strays.ts';
+import { retainedBySessions } from '../../../shared/reap.ts';
 import { store } from '../../store.ts';
 import type { Console } from '../../console.ts';
 import type { WinCtx } from '../wm.ts';
@@ -344,9 +345,13 @@ export function mountHygiene(ctx: WinCtx, c: Console) {
     straysEl.hidden = all.length === 0;
     if (!all.length) return;
     const orphans = all.filter((s) => s.verdict === 'orphan');
+    // Sesiones detenidas que siguen reteniendo memoria: la cifra que habría
+    // hecho innecesaria la investigación del 2026-09-13. Ver shared/reap.ts.
+    const retained = retainedBySessions(all);
     straysEl.innerHTML = `
       <header class="hyg__strays-head">
-        <span class="px px--tiny">LEFT BEHIND <b>${orphans.length}</b> OF ${all.length}</span>
+        <span class="px px--tiny">LEFT BEHIND <b>${orphans.length}</b> OF ${all.length}${retained.count
+          ? ` · <span data-retained>${retained.count} STOPPED SESSION${retained.count === 1 ? '' : 'S'} RETAIN <b>${esc(formatBytes(retained.bytes))}</b></span>` : ''}</span>
         ${orphans.length ? `<button class="chip hyg__stray-all" type="button" data-clean-all${busy ? ' disabled' : ''}>CLEAN ${orphans.length}</button>` : ''}
       </header>
       <p class="px px--tiny hyg__legend">

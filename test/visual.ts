@@ -696,6 +696,27 @@ const SQUAD_HARNESS = 'visual-squad';
  * mission take the line, and its `lastSay` carries an emoji, so the filter has
  * to remove it rather than leave a box on the tile.
  */
+/**
+ * The machine this harness introduces itself as, on its own so a suite can
+ * assert on it without opening a socket.
+ *
+ * It is a fixture that declares a `blocking` question, so the mark on it is
+ * the only thing standing between an invented question and a real CAPCOM's
+ * context — see `SQUAD_HARNESS` and `test/injected-squad.test.ts`, which is
+ * there because this is a field that falls off in a refactor and whose
+ * symptom then shows up somewhere else entirely.
+ */
+export function squadMachine(now = Date.now()): Machine {
+  return {
+    id: SQUAD_MACHINE, hostname: 'visual-squad', platform: 'linux',
+    version: '0.1.0-visual', online: true, lastSeen: now, connectedAt: now,
+    load: { sessions: 7, activeSessions: 5, cpuPct: 61, memPct: 48 },
+    // See SQUAD_HARNESS: the mark quarantines the fake question, the slug
+    // keeps these seven out of the mock's shifting grid.
+    synthetic: true, harnessOf: SQUAD_HARNESS,
+  };
+}
+
 export async function injectSquad(): Promise<{ close(): void } | null> {
   const token = orcaToken();
   const ws = new WebSocket(`ws://127.0.0.1:${hubPort()}${PATHS.collector}?token=${encodeURIComponent(token)}`);
@@ -707,14 +728,8 @@ export async function injectSquad(): Promise<{ close(): void } | null> {
   if (!opened) return null;
 
   const now = Date.now();
-  const load = { sessions: 7, activeSessions: 5, cpuPct: 61, memPct: 48 };
-  const machine: Machine = {
-    id: SQUAD_MACHINE, hostname: 'visual-squad', platform: 'linux',
-    version: '0.1.0-visual', online: true, lastSeen: now, connectedAt: now, load,
-    // See SQUAD_HARNESS: the mark quarantines the fake question, the slug
-    // keeps these seven out of the mock's shifting grid.
-    synthetic: true, harnessOf: SQUAD_HARNESS,
-  };
+  const machine = squadMachine(now);
+  const load = machine.load;
   const project: Project = {
     id: SQUAD_PROJECT, machineId: SQUAD_MACHINE, slug: '-srv-ledger', name: 'ledger',
     path: '/srv/ledger', code: 'LG', gitBranch: 'main', gitDirty: false,

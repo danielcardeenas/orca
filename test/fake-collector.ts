@@ -65,7 +65,11 @@ import { HARNESS_ENV } from '../src/shared/synthetic.ts';
  * pegado a la isla de ese proyecto, en vez de dejarlo caer en un slot
  * cualquiera de la espiral entre islas de verdad. Ver src/shared/synthetic.ts.
  */
-const HARNESS_HOME = pathToSlug(process.cwd());
+// Exportado para que una prueba pueda comparar contra ÉL y no contra una
+// copia: lo que hay que sostener es que la escuadra inyectada declare un
+// arnés distinto de éste, y una segunda definición del mismo slug dejaría
+// pasar el día en que uno de los dos cambie.
+export const HARNESS_HOME = pathToSlug(process.cwd());
 
 /* ── azar ─────────────────────────────────────────────────────────── */
 

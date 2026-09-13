@@ -956,7 +956,7 @@ must not become arbitrary code execution on your laptop.
 | `ORCA_JOURNAL_MAX_BYTES` | `8388608` | rotate the fleet journal past this size |
 | `ORCA_JOURNAL_KEEP` | `6` | rotated journal files to keep |
 | `ORCA_STRICT_AUTH` | unset | refuse the localhost-without-token shortcut |
-| `ORCA_DEFAULT_BUDGET_USD` | unset | dollar ceiling for every worker that has no budget of its own; empty = no limit |
+| `ORCA_DEFAULT_BUDGET_TOKENS` | `23000000` | token ceiling for every worker without its own budget (CAPCOM excluded); unset, empty or invalid uses this default |
 | `ORCA_DEFAULT_BUDGET_MIN` | unset | the same, in minutes of wall clock since launch |
 | `ORCA_BUDGET_ACTION` | `stop` | what 100 % of a budget does to an agent that has stopped progressing: `stop` it, or only `warn` |
 | `ORCA_BUDGET_PROGRESS_MIN` | `3` | minutes without a tool call or an edit before an agent counts as "not progressing" |

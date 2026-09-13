@@ -360,7 +360,7 @@ parado o en una máquina no conectada.
 
 | Variable | Por defecto | Qué hace |
 |---|---|---|
-| `ORCA_DEFAULT_BUDGET_TOKENS` | ninguno | Techo en tokens para todo worker sin techo propio. |
+| `ORCA_DEFAULT_BUDGET_TOKENS` | 23.000.000 | Techo en tokens para todo worker sin techo propio; CAPCOM queda excluido. Ausente, vacío o inválido usa el defecto. |
 | `ORCA_DEFAULT_BUDGET_MIN` | ninguno | Igual, en minutos **activos**. |
 | `ORCA_BUDGET_ACTION` | `stop` | Qué hace el 100 % sin progreso. `warn` sólo reporta. |
 | `ORCA_BUDGET_PROGRESS_MIN` | `3` | Minutos de silencio antes de contar como parado. |

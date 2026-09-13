@@ -392,7 +392,28 @@ const envDefaults = test('ORCA_DEFAULT_BUDGET_TOKENS alcanza a quien no tiene te
   const st = b.agentStatus(fleet.k9, fleet, {}, now);
   const r2 = eq('inspect lo ve como techo por defecto', st.lines.map((l) => l.scope), ['default']);
   if (!r2.pass) return r2;
-  return eq('vacío = sin límite', budgetConfig({ ORCA_DEFAULT_BUDGET_TOKENS: '', ORCA_DEFAULT_BUDGET_MIN: ' ' } as NodeJS.ProcessEnv).defaultTokens, null);
+  return eq('vacío usa el defecto', budgetConfig({ ORCA_DEFAULT_BUDGET_TOKENS: '', ORCA_DEFAULT_BUDGET_MIN: ' ' } as NodeJS.ProcessEnv).defaultTokens, 23 * M);
+});
+
+const builtInDefault = test('sin entorno: 23M avisa al 80%, al 100% sólo para sin progreso', () => {
+  let now = T0;
+  const b = book({}, () => now);
+  const fleet = {
+    worker: agent({ id: 'worker', metrics: { inputTokens: 18.4 * M } }),
+    cap: agent({ id: 'cap', role: 'capcom', metrics: { inputTokens: 50 * M } }),
+  };
+  const first = b.tick(fleet, {}, now);
+  let r = eq('80% del defecto, CAPCOM exento', first.map(e => e.kind === 'swarm' ? e.kind : `${e.kind}:${e.scope.ref}`), ['warn:worker']);
+  if (!r.pass) return r;
+  fleet.worker.metrics.inputTokens = 23 * M;
+  fleet.worker.metrics.toolCalls = 1;
+  const full = b.tick(fleet, {}, now += 1000);
+  r = eq('100% con progreso sólo reporta', kinds(full), ['over']);
+  if (!r.pass) return r;
+  const stalled = b.tick(fleet, {}, now += 4 * 60_000);
+  r = eq('100% sin progreso para', kinds(stalled), ['stop']);
+  if (!r.pass) return r;
+  return eq('inválido usa el defecto', budgetConfig({ ORCA_DEFAULT_BUDGET_TOKENS: 'invalid' }).defaultTokens, 23 * M);
 });
 
 /* ── 7 · presupuesto de escuadrón compartido ──────────────────────── */
@@ -401,6 +422,7 @@ const squadShared = test('el techo de un escuadrón es la suma de sus miembros, 
   let now = T0;
   const b = book({ ORCA_BUDGET_PROGRESS_MIN: '2' }, () => now);
   b.set({ kind: 'squad', ref: 'audit-01' }, cap({ tokens: 10 * M }));
+  b.set({ kind: 'agent', ref: 'other' }, cap({ tokens: 100 * M }));
   const fleet = {
     lead: agent({ id: 'lead', squad: 'audit-01', lead: true, metrics: { inputTokens: 3 * M, toolCalls: 1 } }),
     m1: agent({ id: 'm1', squad: 'audit-01', metrics: { inputTokens: 3 * M, toolCalls: 1 } }),
@@ -450,6 +472,7 @@ const broodIsCharged = test('lo que gastan los subagentes Task cuenta contra su 
   let now = T0;
   const b = book({}, () => now);
   b.set({ kind: 'agent', ref: 'lead' }, cap({ tokens: 8 * M }));
+  b.set({ kind: 'agent', ref: 'peer' }, cap({ tokens: 100 * M }));
   const fleet = {
     lead: agent({ id: 'lead', metrics: { inputTokens: M, toolCalls: 3 } }),
     // Cuatro subagentes, y uno de ellos con nieto.
@@ -722,7 +745,7 @@ const mod: TestModule = {
     thresholds, tokenUnit, cacheReadsNoBudget, progressSpares, linesCountAsProgress, actionWarn,
     activeTime, idleIsSilent, retiredStaysQuiet, progressIsNotInvented,
     ghostsAreSilent, adviceIsExecutable,
-    envDefaults, squadShared, missionBudget,
+    envDefaults, builtInDefault, squadShared, missionBudget,
     broodIsCharged, broodBrake,
     moneyIsGone, orphansArePruned,
     rearmAndPersist, limitParsing,

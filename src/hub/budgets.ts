@@ -95,7 +95,7 @@
  * anterior.
  *
  * Environment:
- *   ORCA_DEFAULT_BUDGET_TOKENS techo en tokens para todo worker sin techo propio. Vacío = ninguno.
+ *   ORCA_DEFAULT_BUDGET_TOKENS techo en tokens para todo worker sin techo propio. Ausente, vacío o inválido = 23.000.000.
  *   ORCA_DEFAULT_BUDGET_MIN    igual, en minutos ACTIVOS.
  *   ORCA_BUDGET_ACTION         warn | stop (por defecto stop) — qué hace el 100 % sin progreso.
  *   ORCA_BUDGET_PROGRESS_MIN   minutos de silencio antes de "sin progreso" (por defecto 3).
@@ -182,7 +182,7 @@ export function budgetConfig(env: NodeJS.ProcessEnv = process.env): BudgetConfig
   const action = env['ORCA_BUDGET_ACTION']?.trim().toLowerCase();
   const swarm = env['ORCA_SWARM_ACTION']?.trim().toLowerCase();
   return {
-    defaultTokens: envNumber(env['ORCA_DEFAULT_BUDGET_TOKENS'], null),
+    defaultTokens: envNumber(env['ORCA_DEFAULT_BUDGET_TOKENS'], 23_000_000),
     defaultMin: envNumber(env['ORCA_DEFAULT_BUDGET_MIN'], null),
     action: action === 'warn' ? 'warn' : 'stop',
     progressMs: (envNumber(env['ORCA_BUDGET_PROGRESS_MIN'], DEFAULT_PROGRESS_MIN) ?? DEFAULT_PROGRESS_MIN) * 60_000,

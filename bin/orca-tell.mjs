@@ -30,10 +30,11 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 
 import { waitFor } from './lib/wait-for.mjs';
+import { projectRoot } from './lib/project-root.mjs';
+import { describeReceipt, readReceipt, receiptsDir, sweepReceipts, writeReceipt } from './lib/receipt.mjs';
 import { sessionId } from './lib/whoami.mjs';
 
 const argv = process.argv.slice(2);
@@ -45,7 +46,7 @@ const KINDS = ['notice', 'ask', 'handoff', 'warning'];
 function parse(args) {
   const out = {
     subject: '', body: null, kind: 'notice', to: null, files: [],
-    wait: false, timeoutMin: 60, ttlMin: null, replyTo: null,
+    wait: false, timeoutMin: 60, ttlMin: null, replyTo: null, check: null,
     project: null, agentId: sessionId(), json: false,
   };
   for (let i = 0; i < args.length; i++) {
@@ -60,6 +61,7 @@ function parse(args) {
       case '--timeout': out.timeoutMin = Number(next() ?? 60); break;
       case '--ttl': out.ttlMin = Number(next() ?? 0) || null; break;
       case '--reply': out.replyTo = next() ?? null; break;
+      case '--check': out.check = next() ?? null; break;
       case '--project': case '-p': out.project = next() ?? null; break;
       case '--agent': out.agentId = next() ?? null; break;
       case '--json': out.json = true; break;
@@ -87,6 +89,8 @@ function usage() {
       --timeout <min>     give up waiting after this long (default: 60)
       --ttl <min>         retire the message after this long
       --reply <id>        answer someone else's ask and unblock them
+      --check <id>        what happened to something you sent: filed, picked
+                          up, delivered, read — or never picked up at all
   -p, --project <path>    project root (default: git root, else cwd)
       --agent <id>        your session id, so the console attributes it right
       --json              machine-readable output
@@ -109,18 +113,9 @@ function usage() {
 
 /* ── Where to write ───────────────────────────────────────────────── */
 
-function projectRoot(explicit) {
-  if (explicit) return resolve(explicit);
-  try {
-    // The message lands in the repo the agent is actually working in, which is
-    // what the collector maps to a project.
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || process.cwd();
-  } catch {
-    return process.cwd();
-  }
-}
+// The message lands in the repo the agent is working in — folded back to the
+// project the collector actually watches, which is not the same directory once
+// the agent is inside a worktree. See lib/project-root.mjs.
 
 /**
  * ORCA is "running here" if a collector has ever touched this machine. Without
@@ -137,7 +132,22 @@ function orcaPresent() {
 const opts = parse(argv);
 const root = projectRoot(opts.project);
 const outDir = join(root, '.orca', 'out');
+// Los recibos NO van en el buzón de salida: el collector se lleva de ahí todo
+// lo que acabe en `.json` y borra lo que no sea un mensaje. Ver lib/receipt.mjs.
+const receiptDir = receiptsDir(root);
 const inDir = join(root, '.orca', 'in');
+
+// `--check` mira el recibo y ya está: no manda nada, así que no exige subject
+// ni que ORCA esté vivo. Preguntar qué pasó con lo que mandaste tiene que
+// funcionar sobre todo cuando algo va mal.
+if (opts.check) {
+  const receipt = readReceipt(receiptDir, opts.check);
+  if (opts.json) console.log(JSON.stringify(receipt ?? { msgId: opts.check, state: null }));
+  else console.log(describeReceipt(receipt));
+  // 0 si se sabe que llegó, 3 si no. Un script que reintenta necesita poder
+  // distinguirlo sin parsear la frase.
+  process.exit(receipt && (receipt.state === 'delivered' || receipt.state === 'read') ? 0 : 3);
+}
 
 if (!opts.subject.trim()) { usage(); process.exit(1); }
 
@@ -192,6 +202,27 @@ try {
   rmSync(tmpPath, { force: true });
   console.error('orca-tell: could not file the message:', err.message);
   process.exit(2);
+}
+
+// El recibo nace aquí, en `filed`, y el collector lo promueve. Se escribe
+// DESPUÉS del mensaje a propósito: un recibo sin mensaje diría que se mandó
+// algo que no se mandó, y de los dos errores posibles ése es el que engaña.
+writeReceipt(receiptDir, id, {
+  msgId: id,
+  state: 'filed',
+  to: opts.to ?? 'fleet',
+  kind: opts.replyTo ? 'reply' : opts.kind,
+  recipients: [],
+  detail: null,
+  at: Date.now(),
+  updatedAt: Date.now(),
+});
+
+// Lo que mandaste antes y nadie recogió. Se dice aquí porque es el momento en
+// el que todavía puedes hacer algo: estás usando el canal, y acabas de meter
+// un mensaje más en el mismo sitio donde los otros se quedaron parados.
+for (const stranded of sweepReceipts(receiptDir, outDir)) {
+  console.error(`orca-tell: ${stranded.msgId} (${stranded.kind} → ${stranded.to}) was never picked up by the collector.`);
 }
 
 if (!opts.wait) {

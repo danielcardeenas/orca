@@ -3152,6 +3152,21 @@ function inspectMission(ctx: CeoContext, input: Record<string, unknown>): ToolOu
 const BRIEFING_PER_SECTION = 8;
 const BRIEFING_DEFAULT_HOURS = 6;
 
+/**
+ * Cuánto puede llevar colgada una pregunta entre agentes antes de salir en el
+ * briefing.
+ *
+ * Quince minutos es más que un turno largo de CLI y menos que el rato en el
+ * que quien preguntó todavía puede hacer algo con la respuesta. Por debajo, el
+ * briefing se llenaría de preguntas que están siendo contestadas ahora mismo y
+ * CAPCOM aprendería a saltarse la sección.
+ *
+ * La sección existe por el 2026-09-13: un miembro preguntó a su líder, la
+ * pregunta no llegó, y se salvó porque el líder leyó el disco por costumbre.
+ * Una costumbre no es un mecanismo. Lo que no se ve, no se debe.
+ */
+const PEER_ASK_STALE_MS = 15 * 60_000;
+
 /** One section: a heading with the count, the first lines, and the rest as a number. */
 function section(title: string, lines: string[], max = BRIEFING_PER_SECTION): string[] {
   if (lines.length === 0) return [`${title}: none`];
@@ -3198,6 +3213,25 @@ function briefing(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome 
     blocked.push(`${a.callsign} [${code(a.projectId)}] ${a.block?.kind ?? 'blocked'} ${ago(now - since)}: "${clip(a.block?.summary ?? 'blocked', 140)}"`
       + (a.block?.escalationId ? ` (${a.block.escalationId})` : ''));
   }
+
+  /* Preguntas entre agentes que nadie ha contestado.
+   *
+   * BLOCKED, arriba, mira a QUIEN ESPERA: sale el que preguntó, con su bloqueo
+   * `peer`. Esto mira al otro lado, a QUIEN DEBE LA RESPUESTA, que es el único
+   * dato con el que CAPCOM puede hacer algo — y el que no aparecía en ninguna
+   * parte. Peor todavía cuando el destinatario ya no está vivo: esa pregunta no
+   * la va a contestar nadie nunca, y hasta hoy nada lo decía. */
+  const asks = ctx.messages()
+    .filter((m) => m.kind === 'ask' && m.answer === null && now - m.at > PEER_ASK_STALE_MS)
+    .sort((a, b) => a.at - b.at)
+    .map((m) => {
+      const to = m.toAgentId ? name(m.toAgentId) : m.toSquad ? `squad ${m.toSquad}` : `[${code(m.toProjectId ?? m.fromProjectId)}]`;
+      const target = m.toAgentId ? ctx.agent(m.toAgentId) : undefined;
+      // Un destinatario muerto o terminado convierte la espera en permanente.
+      const gone = m.toAgentId && (!target || TERMINAL_STATES.has(target.state));
+      return `${m.fromCallsign} → ${to}, waiting ${ago(now - m.at)}${gone ? ' · RECIPIENT IS GONE, nobody will answer this' : ''}`
+        + `: "${clip(m.subject, 140)}" (${m.id})`;
+    });
 
   /* Missions owed, oldest debt first: a human waiting an hour outranks one waiting a minute. */
   const debts = Object.values(ctx.missions?.all() ?? {})
@@ -3279,6 +3313,7 @@ function briefing(ctx: CeoContext, input: Record<string, unknown>): ToolOutcome 
     ...section('CAPCOM SESSION HANDOFFS — earlier history is stored separately', (ctx.handoffs?.() ?? []).slice(-3).map(handoffText), 3),
     ...section('CAPCOM MODEL CHANGES — same session, history retained', ctx.agents().filter(a => a.role === 'capcom').flatMap(a => a.modelControl?.events.slice(-3).map(e => `${new Date(e.at).toISOString()} ${e.text}`) ?? []), 3),
     ...section('BLOCKED — answer with answer_agent or pass up with ask_human', blocked),
+    ...section('PEER QUESTIONS UNANSWERED — answer_agent, or chase whoever owes it', asks),
     ...section('MISSIONS WAITING ON YOU — inspect_mission, then report_mission', owed),
     ...section('MISSIONS ACTIVE WITH NO PROGRESS — inspect_mission; re-send, reassign or close. ORCA retries nothing for you', stalled),
     ...section(`FINISHED IN THE LAST ${hours}h, NOT REPORTED — report_mission or archive_agents`, finished),

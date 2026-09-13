@@ -30,8 +30,10 @@ cubrir. Callarlo convierte «los tests pasan» en una frase sin contenido. Debaj
 dice si lo mira un shot o una escena visual, que esta corrida no ejecuta.
 
 Si no se ejecuta ninguna suite, la corrida sale con código 3, no en verde: «no
-ejecuté nada» y «ejecuté y pasó» son cosas distintas. La única excepción es
-`--changed` con el árbol limpio, que no tiene nada que verificar.
+ejecuté nada» y «ejecuté y pasó» son cosas distintas. Las dos excepciones son
+`--changed` con el árbol limpio, y haber tocado sólo documentación (Markdown
+en `docs/` o en la raíz): ahí no hay nada que una suite pudiera mirar, y sale
+con 0 diciéndolo.
 
 Otras formas:
 

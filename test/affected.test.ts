@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { affected, reach } from './affected.ts';
+import { affected, isProse, reach } from './affected.ts';
 import { test, ok } from './harness.ts';
 
 /**
@@ -118,6 +118,24 @@ export default { suite: 'Affected suites', tests: [
       const { suites } = await affected(r.dir, ['src/ui/sheets/window.css'], r.root);
       assert.deepEqual(suites, ['sheets.test.ts']);
       return ok('las pruebas declaran; el producto no', true);
+    } finally { r.dispose(); }
+  }),
+  test('la documentación se reconoce por forma: Markdown en docs/ o en la raíz, y nada más', () => {
+    for (const p of ['docs/ENTREGA-X-2026-09-13.md', 'docs/sub/nota.md', 'README.md', 'AGENTS.md']) assert.ok(isProse(p), `${p} es documentación`);
+    // Un .md dentro de src/ o bin/ puede ser algo que un fixture lee; y una hoja, un script o una imagen nunca son prosa.
+    for (const p of ['src/shared/brief.md', 'bin/README.md', 'src/ui/styles/hud.css', 'public/sw.js', 'docs/foto.png', 'docs/plan.txt']) assert.ok(!isProse(p), `${p} no es documentación`);
+    return ok('lista permitida por forma, no excepciones', true);
+  }),
+  test('un doc tocado junto a una hoja: la hoja selecciona sus suites y el doc queda aparte, sin contar como sin verificar', async () => {
+    const r = rig(); try {
+      fs.mkdirSync(path.join(r.root, 'docs'));
+      fs.writeFileSync(path.join(r.root, 'docs/ENTREGA.md'), '# x\n');
+      const { suites, uncovered } = await affected(r.dir, ['docs/ENTREGA.md', 'src/ui/sheets/hud.css'], r.root);
+      assert.deepEqual(suites, ['link.test.ts', 'sheets.test.ts']);
+      const rel = uncovered.map((u) => path.relative(r.root, u));
+      assert.deepEqual(rel, ['docs/ENTREGA.md']);
+      assert.deepEqual(rel.filter((u) => !isProse(u)), [], 'nada de código sin cubrir');
+      return ok('lo que run.ts enseña en amarillo es sólo lo que es código', true);
     } finally { r.dispose(); }
   }),
   test('una corrida que no ejecuta ninguna suite no sale en verde', () => {

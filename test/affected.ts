@@ -132,6 +132,17 @@ export function reaches(r: Reach, file: string): boolean {
  * `.shots.ts` o `.visual.ts` responde quién más mira un fichero fuera de esta
  * corrida.
  */
+/**
+ * Documentación: lo que ningún proceso ejecuta ni lee. Tocarla sola no deja
+ * nada sin verificar, y una corrida vacía por eso es verde de verdad, no un
+ * «no ejecuté nada» disfrazado. Se reconoce por forma —Markdown en `docs/` o
+ * en la raíz del repo—, no por una lista de excepciones que crezca: un `.md`
+ * dentro de `src/` o de `bin/` podría ser algo que un fixture lee, y sigue
+ * contando como código hasta que una suite lo alcance.
+ */
+const PROSE = /^(?:docs\/.+|[^/]+)\.md$/;
+export function isProse(rel: string): boolean { return PROSE.test(rel); }
+
 export async function affected(dir: string, changed: string[], root: string, suffix = '.test.ts', m = memo()) {
   const want = changed.map((c) => resolve(root, c));
   const files = (await readdir(dir)).filter((f) => f.endsWith(suffix)).sort();

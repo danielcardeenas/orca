@@ -46,7 +46,7 @@ import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isRealOrcaHome } from '../src/hub/harness.ts';
-import { affected } from './affected.ts';
+import { affected, isProse } from './affected.ts';
 import { runSuite, type TestFn, type TestModule, type TestResult } from './harness.ts';
 
 /*
@@ -137,16 +137,25 @@ async function main() {
   let files = (await readdir(DIR)).filter((f) => f.endsWith('.test.ts')).sort();
   let why = 'todas las suites';
   let touched: number | undefined;
+  // Tocado, sin suite, y código: lo único que de verdad queda sin verificar.
+  let unverified = 0;
 
   if (SINCE || ARGS.includes('--changed')) {
     const changed = changedFiles();
     touched = changed.length;
-    const { suites, uncovered } = await affected(DIR, changed, ROOT);
-    files = suites;
-    why = `${changed.length} fichero(s) tocado(s) → ${suites.length} suite(s)`;
+    const all = await affected(DIR, changed, ROOT);
+    files = all.suites;
+    why = `${changed.length} fichero(s) tocado(s) → ${all.suites.length} suite(s)`;
+    const rel = (u: string) => u.slice(ROOT.length + 1);
+    // La documentación no la lee ningún proceso: tocarla sola no deja nada sin
+    // mirar, y decir «sin suite que la cubra» de un .md sería pedir una prueba
+    // que no puede existir. Se dice aparte y no cuenta.
+    const prose = all.uncovered.filter((u) => isProse(rel(u)));
+    const uncovered = all.uncovered.filter((u) => !isProse(rel(u)));
+    unverified = uncovered.length;
+    if (prose.length) console.log(`sólo documentación, nada que probar (${prose.length}): ${prose.map(rel).join(', ')}`);
     // Correr menos tests solo es honesto si se ve qué se ha quedado fuera.
     if (uncovered.length) {
-      const rel = (u: string) => u.slice(ROOT.length + 1);
       console.log(`\x1b[33msin suite que los cubra\x1b[0m (${uncovered.length}): ${uncovered.map(rel).join(', ')}`);
       // Y si lo que queda fuera lo mira un shot o una escena visual, decirlo:
       // esta corrida no los ejecuta, pero «nadie lo mira» sería mentira.
@@ -164,6 +173,8 @@ async function main() {
 
   if (!files.length) {
     if (touched === 0) { console.log(`nada tocado, nada que verificar (${why})`); return; }
+    // Sólo documentación tocada: no hay nada que una suite pudiera mirar.
+    if (touched !== undefined && unverified === 0 && !FILTERS.length) { console.log(`sólo documentación tocada, nada que verificar (${why})`); return; }
     console.log(`\x1b[33mninguna suite ejecutada\x1b[0m (${why}): no se ha verificado nada`);
     process.exit(NOTHING_RAN);
   }

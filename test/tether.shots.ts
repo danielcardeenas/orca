@@ -261,6 +261,19 @@ async function main() {
     });
     assert.ok(grip, 'la superficie lleva su asa de redimensionar');
     await page.mouse.move(grip.x, grip.y);
+    /*
+     * Que el puntero esté de verdad sobre el asa antes de apretar. El rojo
+     * «tirar del asa ensancha la superficie: 541 → 541 px» salió tres veces
+     * en doce corridas de hoy y no dice nada: un asa que no responde y un
+     * asa que no recibió el `pointerdown` —porque otra superficie, una
+     * ficha o el HUD están encima— acaban en el mismo número. Se pregunta al
+     * DOM, que es quien reparte el puntero, y si no es el asa se dice qué es.
+     */
+    const bajoElAsa = await page.evaluate(({ x, y }) => {
+      const e = document.elementFromPoint(x, y) as HTMLElement | null;
+      return e ? (e.closest('.srf-grip') ? 'asa' : `${e.tagName.toLowerCase()}.${[...e.classList].join('.')}`) : 'nada';
+    }, grip);
+    assert.equal(bajoElAsa, 'asa', `el puntero cae sobre el asa y no sobre ${bajoElAsa}`);
     await page.mouse.down();
     await page.mouse.move(grip.x + 60, grip.y + 30, { steps: 6 });
     await page.mouse.move(grip.x + 120, grip.y + 60, { steps: 6 });

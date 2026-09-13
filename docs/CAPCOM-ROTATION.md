@@ -17,7 +17,7 @@ Tres señales, cualquiera de ellas basta:
 | Señal | Por defecto | Variable |
 | --- | --- | --- |
 | Fracción de la ventana ocupada por el último prompt | 75 % | `ORCA_CAPCOM_MAX_CONTEXT_PCT` |
-| Compactaciones observadas en el transcript | 2 | `ORCA_CAPCOM_MAX_COMPACTIONS` |
+| Compactaciones observadas en el transcript | 4 | `ORCA_CAPCOM_MAX_COMPACTIONS` |
 | Turnos | 300 | `ORCA_CAPCOM_MAX_TURNS` |
 
 La fracción de la ventana es la señal preferente porque llega **antes** de la

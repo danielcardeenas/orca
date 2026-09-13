@@ -19,7 +19,7 @@
  *                      remoto. SÓLO UNA máquina de la flota debe llevarlo.
  *   ORCA_CAPCOM_DIR    dónde vive esa sesión; por defecto ~/.orca/capcom
  *   ORCA_CAPCOM_MAX_COMPACTIONS   compactaciones a partir de las cuales se
- *                      recicla la sesión CAPCOM por una limpia (2; 0 apaga)
+ *                      recicla la sesión CAPCOM por una limpia (4; 0 apaga)
  *   ORCA_CAPCOM_MAX_TURNS         lo mismo por turnos (300; 0 apaga)
  *   ORCA_CAPCOM_ROTATE_IDLE_MS    cuánto ha de llevar CAPCOM en silencio para
  *                      rotarlo (30000). Nunca se rota con un turno en curso ni

@@ -61,7 +61,7 @@ export interface RotationConfig {
 }
 
 export const ROTATION_DEFAULTS: RotationConfig = {
-  maxCompactions: 2,
+  maxCompactions: 4,
   maxTurns: 300,
   maxContextFraction: 0.75,
   idleMs: 30_000,

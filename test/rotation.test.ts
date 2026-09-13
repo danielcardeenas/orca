@@ -165,12 +165,12 @@ async function fakeCollector(hub: Hub): Promise<{ ws: WebSocket; says: { agentId
 
 const tests = [
   test('under the threshold nothing rotates, however idle the session is', () => {
-    const v = rotationVerdict(observation({ compactions: 1, turns: 299 }), ROTATION_DEFAULTS, NOW);
+    const v = rotationVerdict(observation({ compactions: 3, turns: 299 }), ROTATION_DEFAULTS, NOW);
     return ok('under the threshold nothing rotates', !v.rotate && !v.due, v.reason);
   }),
 
   test('over the threshold it rotates only when idle: not mid-turn, not blocked, not with a question pending', () => {
-    const over = { compactions: 2 };
+    const over = { compactions: 4 };
     const idle = rotationVerdict(observation(over), ROTATION_DEFAULTS, NOW);
     const thinking = rotationVerdict(observation({ ...over, state: 'thinking' }), ROTATION_DEFAULTS, NOW);
     const working = rotationVerdict(observation({ ...over, state: 'working' }), ROTATION_DEFAULTS, NOW);
@@ -203,13 +203,13 @@ const tests = [
 
   test('the thresholds come from the environment, with sensible defaults and junk ignored', () => {
     const defaults = rotationConfig({});
-    const custom = rotationConfig({ ORCA_CAPCOM_MAX_COMPACTIONS: '4', ORCA_CAPCOM_MAX_TURNS: '0', ORCA_CAPCOM_ROTATE_IDLE_MS: '5000' });
+    const custom = rotationConfig({ ORCA_CAPCOM_MAX_COMPACTIONS: '2', ORCA_CAPCOM_MAX_TURNS: '0', ORCA_CAPCOM_ROTATE_IDLE_MS: '5000' });
     const junk = rotationConfig({ ORCA_CAPCOM_MAX_COMPACTIONS: 'lots', ORCA_CAPCOM_MAX_TURNS: '-3', ORCA_CAPCOM_ROTATE_IDLE_MS: '' });
     return ok(
       'the thresholds come from the environment',
-      defaults.maxCompactions === 2 && defaults.maxTurns === 300 && defaults.idleMs === 30_000
-      && custom.maxCompactions === 4 && custom.maxTurns === 0 && custom.idleMs === 5000
-      && junk.maxCompactions === 2 && junk.maxTurns === 300 && junk.idleMs === 30_000,
+      defaults.maxCompactions === 4 && defaults.maxTurns === 300 && defaults.idleMs === 30_000
+      && custom.maxCompactions === 2 && custom.maxTurns === 0 && custom.idleMs === 5000
+      && junk.maxCompactions === 4 && junk.maxTurns === 300 && junk.idleMs === 30_000,
       JSON.stringify(custom),
     );
   }),
@@ -230,12 +230,12 @@ const tests = [
   }),
 
   test('a prepared session rotates by preparing its replacement, and a failed attempt is not retried every tick', () => {
-    const due = observation({ compactions: 3 });
+    const due = observation({ compactions: 4 });
     const claude = rotationRoute(due, { prepared: false, lastHandoffAt: 0 }, ROTATION_DEFAULTS, NOW);
     const codex = rotationRoute(due, { prepared: true, lastHandoffAt: 0 }, ROTATION_DEFAULTS, NOW);
     const justTried = rotationRoute(due, { prepared: true, lastHandoffAt: NOW - 60_000 }, ROTATION_DEFAULTS, NOW);
     const longEnough = rotationRoute(due, { prepared: true, lastHandoffAt: NOW - HANDOFF_RETRY_MS - 1 }, ROTATION_DEFAULTS, NOW);
-    const busy = rotationRoute(observation({ compactions: 3, state: 'working' }), { prepared: true, lastHandoffAt: 0 }, ROTATION_DEFAULTS, NOW);
+    const busy = rotationRoute(observation({ compactions: 4, state: 'working' }), { prepared: true, lastHandoffAt: 0 }, ROTATION_DEFAULTS, NOW);
     const clean = rotationRoute(due, { prepared: true, lastHandoffAt: 0 }, { ...ROTATION_DEFAULTS, mode: 'clean' }, NOW);
     return ok(
       'kill-and-relaunch only for a session ORCA named; prepared ones hand off, with a pause between attempts',

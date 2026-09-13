@@ -374,7 +374,7 @@ A CLI session compacts its context when it fills up, and it does so for ever:
 after the third or fourth compaction the commander works from a summary of a
 summary, and nothing errors — answers just get vaguer. So the collector
 **rotates** it: once the session has compacted `ORCA_CAPCOM_MAX_COMPACTIONS`
-times (2) or run `ORCA_CAPCOM_MAX_TURNS` turns (300), and only when it is idle
+times (4) or run `ORCA_CAPCOM_MAX_TURNS` turns (300), and only when it is idle
 — no turn in progress, no escalation pending on that machine, nothing
 delivered to it for `ORCA_CAPCOM_ROTATE_IDLE_MS` (30 s) — it is stopped and a
 fresh session starts with the same brief and a prompt that says to call
@@ -948,7 +948,7 @@ must not become arbitrary code execution on your laptop.
 | `ORCA_FLEET_WINDOW_MS` | `86400000` | how far back a session still counts |
 | `ORCA_CAPCOM` | on when the hub is local | `1` forces CAPCOM on this collector (`--capcom`), `0` turns it off (`--no-capcom`) |
 | `ORCA_CAPCOM_DIR` | `~/.orca/capcom` | where the command session lives |
-| `ORCA_CAPCOM_MAX_COMPACTIONS` | `2` | recycle CAPCOM after this many context compactions; `0` disables |
+| `ORCA_CAPCOM_MAX_COMPACTIONS` | `4` | recycle CAPCOM after this many context compactions; `0` disables |
 | `ORCA_CAPCOM_MAX_TURNS` | `300` | recycle CAPCOM after this many turns; `0` disables |
 | `ORCA_CAPCOM_ROTATE_IDLE_MS` | `30000` | how long CAPCOM must be idle before it is recycled |
 | `ORCA_HOME` | `~/.orca` | moves everything: token, hub files, `fleets/`, `capcom/` |

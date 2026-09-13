@@ -376,9 +376,16 @@ select.input option { background: var(--shell); color: var(--ink); }
  * `vh` se queda con la altura grande, así que el fondo de la ventana —donde
  * está siempre la caja de escribir— quedaba debajo del borde. `--kb` sube
  * todo lo que haga falta cuando aparece el teclado virtual, medido con
- * `visualViewport` en `hud/sections.ts`. */
+ * `visualViewport` en `hud/sections.ts`.
+ *
+ * Y de lado también: un teléfono girado mide 844 de ancho y por ancho salía
+ * la ventana de escritorio —una caja de 500×178 con asa y arrastre, 108px de
+ * cuerpo para leer a CAPCOM en 390 de alto—. La condición es la de
+ * `src/ui/phone.ts`, la misma que consulta el `wm` para no arrastrar ni
+ * capturar al canvas, y la misma del mástil en `hud.css`: si se cambia, se
+ * cambia en los tres, y `test/phone-media.test.ts` lo vigila. */
 
-@media (max-width: 720px) {
+@media (max-width: 720px), ((max-width: 1180px) and (max-height: 560px)) {
   .wm { z-index: calc(var(--z-hud) + 1); }
   .win {
     left: 0 !important; top: 46px !important; width: 100vw !important;
@@ -398,8 +405,16 @@ select.input option { background: var(--shell); color: var(--ink); }
   .slab-btn { min-height: 44px; }
 }
 
-/* En apaisado el alto es lo escaso: la ventana se come el hueco del mástil. */
-@media (max-width: 720px) and (max-height: 560px) {
+/* En apaisado el alto es lo escaso: la ventana se come el hueco del mástil.
+ *
+ * Este bloque pedía `(max-width: 720px) and (max-height: 560px)`: el ancho de
+ * un teléfono de pie Y el alto de uno de lado, a la vez. 844×390 falla el
+ * ancho, 390×844 falla el alto; medido con `matchMedia` en 844×390, 926×428 y
+ * 390×844 daba falso en los tres; sólo entraban los de 720 o menos girados, un
+ * Android de 360 (640×360) o un 4,7" (667×375), y ninguno de hoy. Parecía
+ * cubierto y no lo estaba. Es la mitad corta de `phone.ts`,
+ * la que ya usaba `hud.css` para la hoja en apaisado. */
+@media (max-width: 1180px) and (max-height: 560px) {
   .win { top: 8px !important; height: calc(100dvh - 8px - 118px - var(--kb, 0px) - env(safe-area-inset-bottom, 0px)) !important; }
 }
 
@@ -464,7 +479,9 @@ select.input option { background: var(--shell); color: var(--ink); }
   .win__btn--x:active { border-color: var(--red); color: var(--red); }
 }
 
-@media (pointer: coarse) and (max-width: 720px) {
+/* Con el dedo y en un teléfono, de pie o de lado: las dos ramas de `phone.ts`,
+   cada una con el puntero delante, porque `and` no reparte sobre la coma. */
+@media (pointer: coarse) and (max-width: 720px), (pointer: coarse) and (max-width: 1180px) and (max-height: 560px) {
   .mission-win__act, .mission-win__reph, .mission-win__cs, .mission-win__file, .chip { min-height: 38px; }
   /* Y centrado: un `min-height` mayor no mueve el texto por sí solo, y el
      `align-items: baseline` de `.chip` lo deja pegado al borde de arriba. */

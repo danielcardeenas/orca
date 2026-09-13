@@ -639,7 +639,7 @@ async function main() {
     /*
      * Cada control por su nombre, y si se ve o no. En el teléfono la ventana
      * no está sobre un plano espacial (`spatial` en wm.ts es falso con
-     * `MOBILE()`), así que FRONT y PIN —que sólo significan algo en el
+     * `isPhone()`), así que FRONT y PIN —que sólo significan algo en el
      * canvas— se retiran con `hidden` y miden 0x0. Medirlos junto a los
      * demás es lo que tenía este bloque en rojo desde el día en que nació:
      * afirmaba 44x44 sobre dos botones que el dedo no puede tocar, y nadie
@@ -1107,6 +1107,34 @@ async function main() {
     // cabecera iba por ancho y la de los botones por puntero, y este tamaño
     // cumplía una sola. Se mide aquí a propósito.
     await openSome(page);
+    // Y la ventana ES la pantalla también de lado. Por ancho, 844 pasaba por
+    // escritorio y aquí salía una caja de 500×178 con asa y arrastre, con 108px
+    // de cuerpo para leer a CAPCOM. Se mide lo que decide `phone.ts` para las
+    // dos partes a la vez: la hoja (sin asa, el ancho entero, sitio para leer)
+    // y el `wm` (la cabecera no arrastra).
+    const landWin = await page.evaluate(() => {
+      const w = [...document.querySelectorAll<HTMLElement>('.win')].at(-1);
+      if (!w) return null;
+      const r = w.getBoundingClientRect();
+      const body = w.querySelector<HTMLElement>('.win__body')?.getBoundingClientRect();
+      const grip = w.querySelector<HTMLElement>('.win__grip');
+      return { x: Math.round(r.x), w: Math.round(r.width), bodyH: body ? Math.round(body.height) : 0, grip: grip ? getComputedStyle(grip).display : 'none' };
+    });
+    assert.ok(landWin, 'landscape: a window is open to measure');
+    assert.equal(landWin.x, 0, `landscape: the window starts at the left edge (${landWin.x})`);
+    assert.equal(landWin.w, LANDSCAPE.width, `landscape: and spans the whole width (${landWin.w})`);
+    assert.equal(landWin.grip, 'none', 'landscape: nothing to drag or resize by');
+    assert.ok(landWin.bodyH >= 180, `landscape: the body has room to read (${landWin.bodyH}px)`);
+    {
+      const head = (await page.locator('.win .win__head').last().boundingBox())!;
+      await page.mouse.move(head.x + head.width / 2, head.y + head.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(head.x + head.width / 2 + 60, head.y + head.height / 2 + 40, { steps: 6 });
+      await page.mouse.up();
+      await page.waitForTimeout(300);
+      const after = await page.evaluate(() => Math.round([...document.querySelectorAll('.win')].at(-1)!.getBoundingClientRect().x));
+      assert.equal(after, 0, `landscape: the header does not drag on a phone (moved to ${after})`);
+    }
     await chromeFits(page, '844x390 landscape');
     await headerClear(page, '844x390 landscape');
     await shootHead(page, join(SHOTS, 'mobile-08c-chrome-landscape.png'));

@@ -325,6 +325,14 @@ const c: Console = {
     if (!p) return;
     openFilesAt(p.path, { project: p.code, key: `files:${projectId}`, at });
   },
+  openWorktree(agentId, at) {
+    const a = store.world.agents[agentId];
+    if (!a?.worktree) return;
+    const p = store.world.projects[a.projectId];
+    // Por ruta y no por agente: un squad entero comparte worktree, y abrirlo
+    // desde dos de sus miembros tiene que ser la misma ventana.
+    openFilesAt(a.worktree, { project: p?.code, at });
+  },
   openProject(projectId, at) {
     const p = store.world.projects[projectId];
     wm.open({ kind: 'fleet', key: `project:${projectId}`, callsign: p?.code ?? '??', title: p?.name, at: at && { x: at.x, y: at.y }, params: { scope: 'project', id: projectId } });

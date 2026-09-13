@@ -41,15 +41,62 @@ function bytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** What the hub said when it refused, as a line the operator can act on. Shared with the browser (files.ts). */
-export function refusal(status: number, body: string): string {
+/**
+ * The 403 bodies the hub sends (`hub/files.ts`, `REFUSAL`), as the line the
+ * operator reads — and whether ALLOW can do anything about it.
+ *
+ * A copy, not an import: this module is bundled for the browser and
+ * `hub/files.ts` drags `node:fs` behind it. `test/file-browser.shots.ts`
+ * imports the original and checks against the live hub that both halves still
+ * say the same thing.
+ */
+const REFUSALS: Array<{ body: string; line: string; allow: boolean }> = [
+  {
+    body: 'ruta privada excluida',
+    allow: false,
+    line: 'NOT SERVED BY POLICY · a private folder or a credential name · no ALLOW opens it',
+  },
+  {
+    body: 'fuera de las raíces de proyecto conocidas',
+    allow: true,
+    line: 'OUTSIDE THE PROJECT ROOTS · the hub serves known projects, the agents\' scratchpad and folders you allow',
+  },
+  {
+    body: 'la ruta apunta fuera de las raíces (symlink)',
+    allow: false,
+    line: 'OUTSIDE THE PROJECT ROOTS · a symlink pointing out of them · allowing this folder would not move where it points',
+  },
+];
+
+/**
+ * What the hub said when it refused, and whether to offer ALLOW.
+ *
+ * Every 403 used to print one fixed line — "outside the project roots" — and
+ * then offer the button. For a path vetoed by policy the line was false and
+ * the button could never work: `files:allow` goes through the very check that
+ * just said no (`hub/file-roots.ts`). That cost a red shot a diagnosis. The
+ * reason has always travelled in the body; this reads it.
+ */
+export function refusalOf(status: number, body: string): { line: string; allow: boolean } {
+  const said = body.trim();
   switch (status) {
-    case 401: return 'NOT AUTHORISED · the console has no token for this hub';
-    case 403: return 'OUTSIDE THE PROJECT ROOTS · the hub serves known projects, the agents\' scratchpad and folders you allow';
-    case 404: return 'NOT FOUND · not on the hub\'s machine, or not a file';
-    case 413: return `TOO BIG · ${body || 'above the hub\'s limit'}`;
-    default: return `HTTP ${status}${body ? ` · ${body}` : ''}`;
+    case 401: return { line: 'NOT AUTHORISED · the console has no token for this hub', allow: false };
+    case 403: {
+      const known = REFUSALS.find((r) => r.body === said);
+      // A 403 we do not know: show what it said and keep offering ALLOW, which
+      // is what the console did before it could tell them apart.
+      return known ? { line: known.line, allow: known.allow }
+        : { line: said ? `NOT SERVED · ${said}` : 'NOT SERVED · the hub refused this path', allow: true };
+    }
+    case 404: return { line: 'NOT FOUND · not on the hub\'s machine, or not a file', allow: false };
+    case 413: return { line: `TOO BIG · ${said || 'above the hub\'s limit'}`, allow: false };
+    default: return { line: `HTTP ${status}${said ? ` · ${said}` : ''}`, allow: false };
   }
+}
+
+/** The line alone, which is all the folder browser needs (files.ts). */
+export function refusal(status: number, body: string): string {
+  return refusalOf(status, body).line;
 }
 
 export function mountFile(ctx: WinCtx, _c: Console) {
@@ -88,10 +135,11 @@ export function mountFile(ctx: WinCtx, _c: Console) {
   body.querySelector('[data-raw]')!.addEventListener('click', () => window.open(url, '_blank', 'noopener'));
 
   const fail = (status: number, text: string) => {
-    view.innerHTML = `<p class="px px--tiny file__msg is-warn">${esc(refusal(status, text))}</p>`;
+    const why = refusalOf(status, text);
+    view.innerHTML = `<p class="px px--tiny file__msg is-warn">${esc(why.line)}</p>`;
     meta.textContent = `HTTP ${status}`;
-    if (status !== 403 || !store.linkUp) return;
-    // A 403 is a folder the hub does not know, not a file it will never
+    if (!why.allow || !store.linkUp) return;
+    // This 403 is a folder the hub does not know, not a file it will never
     // show. One press names the folder; the hub remembers it (file-roots.ts).
     const allow = document.createElement('button');
     allow.className = 'slab-btn slab-btn--sm slab-btn--fit';

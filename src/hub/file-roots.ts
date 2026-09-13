@@ -18,6 +18,13 @@
  * salta ninguna de esas puertas: `acceptableRoot` decide aquí igual que al
  * servir, y `resolveServedPath` vuelve a mirar cada raíz en cada petición.
  *
+ * Por eso mismo, desde que `privatePath` abre `<proyecto>/.claude/worktrees/
+ * <nombre>`, el worktree de un agente **sí** se puede autorizar como raíz.
+ * Es deliberado y es la consecuencia buscada: quien puede mirar ese árbol
+ * desde el navegador puede también fijarlo. Lo que no cambia es el resto de
+ * `.claude`, que sigue sin poder serlo, ni `~/.claude`, que la excepción
+ * excluye a propósito.
+ *
  * Revocar es borrar la línea del json y reiniciar el hub, o vaciar el
  * archivo. No hay comando para ello a propósito: nadie lo ha necesitado y
  * un comando que nadie usa es una puerta más que vigilar.

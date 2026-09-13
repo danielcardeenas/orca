@@ -37,6 +37,15 @@ export interface Console {
    * Read-only; one window per project. From the project's context menu.
    */
   openFiles(projectId: string, at?: At): void;
+  /**
+   * The agent's own worktree, in that same browser. It lives in
+   * `<project>/.claude/worktrees/<name>` — the hub serves it, but only that
+   * subfolder of `.claude`, so it never shows up in the project's listing and
+   * the browser only ever descends through what it lists. Opening it at the
+   * root is the door. Does nothing for an agent working on the project's own
+   * tree, which has no worktree.
+   */
+  openWorktree(agentId: string, at?: At): void;
   openProject(projectId: string, at?: At): void;
   openMachine(machineId: string, at?: At): void;
   openGroup(agentIds: string[], at?: At): void;

@@ -8,58 +8,77 @@
  * corre su sesión entera cuando el fichero de entrada acaba así.
  *
  * La flota sintética declara proyectos que no existen en este disco, así que
- * la carpeta que se navega es este mismo repo —o el checkout principal, si
- * este es un worktree bajo `.claude`, que el hub no sirve: ver
- * `repoQueElHubSirve`—. El hub del arnés la abre por `ORCA_FILE_ROOTS` y la
- * ventana se levanta por el gancho `__orca.openFiles`, que es lo mismo que
- * BROWSE FILES en el menú de un proyecto con esa ruta.
+ * la carpeta que se navega es este mismo repo, sea el checkout principal o un
+ * worktree de agente bajo `.claude/worktrees`: desde que `privatePath` abre
+ * ese subdirectorio (`src/hub/files.ts`), las dos cosas se sirven igual. El
+ * hub del arnés la abre por `ORCA_FILE_ROOTS` y la ventana se levanta por el
+ * gancho `__orca.openFiles`, que es lo mismo que BROWSE FILES en el menú de
+ * un proyecto con esa ruta.
  *
  * Lo que se comprueba es lo que `npm test` ya prueba contra un DOM suelto,
  * pero aquí con main.ts delante del teclado: que `j`, `G`, `gg`, `l`, `h`,
  * `/` y `q` llegan a la ventana y no al campo ni a la línea de mando, y que
  * abrir un archivo pone el visor delante del navegador.
+ *
+ * Y dos cosas que sólo se ven con el hub de verdad delante, sobre un proyecto
+ * de mentira que este fichero fabrica en un temporal (`arbolDeMentira`):
+ *
+ *   · que el worktree de un agente **sí** se lista, y que dentro de ese mismo
+ *     worktree un `.env` o un `.claude/settings.json` anidados **siguen sin**
+ *     servirse. Esa asimetría es todo el cambio: el permiso es posicional, no
+ *     una subcadena, y si un refactor lo convierte en subcadena este shot se
+ *     entera.
+ *   · que el 403 dice cuál de los cuatro motivos fue, y que el botón ALLOW
+ *     sólo aparece cuando puede funcionar. Antes el visor pintaba una frase
+ *     fija —«fuera de las raíces»— para una ruta vetada por política, que es
+ *     falsa, y ofrecía debajo un ALLOW que `files:allow` iba a negar con la
+ *     misma comprobación. Aquí se atan las dos mitades: el vocabulario del
+ *     hub (`REFUSAL`) se importa y se compara con lo que sale en pantalla.
  */
 
 import { chromium, type Page } from 'playwright';
-import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
+import { REFUSAL } from '../src/hub/files.ts';
 
 // Antes de importar el arnés: sus servidores nacen con este entorno.
 process.env['ORCA_VISUAL_ISOLATED'] = '1';
 
+/** Este repo, sea checkout principal o worktree: el hub sirve los dos. */
+const REPO = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+
 /**
- * La carpeta que se navega: este repo, y si este repo no se puede servir, el
- * checkout principal.
+ * Un proyecto de mentira con un worktree dentro, para probar la regla sin
+ * depender de dónde se corra este fichero.
  *
- * El hub no sirve NADA que lleve un segmento `.claude` (`privatePath`, en
- * `src/hub/files.ts`): ahí viven la configuración y las credenciales de los
- * agentes, y esa puerta está cerrada a propósito. Los worktrees con los que
- * trabaja un agente de FORGE viven justo ahí, en `.claude/worktrees/<x>`, así
- * que corrido desde uno de ellos este shot pedía una carpeta que el hub
- * devuelve con un 403 y se quedaba quince segundos esperando una fila que no
- * iba a llegar. No es un fallo del navegador de archivos ni de la regla: es
- * que la carpeta elegida era imposible. `--git-common-dir` da el `.git` del
- * checkout principal, cuyo padre sí se sirve y tiene los mismos `src/` y
- * `package.json` que esta prueba nombra.
+ * Tiene lo justo para que la asimetría se vea: código dentro del worktree, y
+ * al lado —dentro del mismo worktree— las dos cosas que no se sirven nunca.
+ * En un temporal con suficiente profundidad, que `acceptableRoot` rechaza los
+ * contenedores de `/var/folders` pero no lo que cuelga de ellos.
  */
-function repoQueElHubSirve(): string {
-  const aqui = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
-  const privada = (p: string) => p.split('/').some((seg) => seg === '.claude');
-  if (!privada(aqui)) return aqui;
-  try {
-    const comun = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: aqui, encoding: 'utf8' }).trim();
-    const principal = dirname(comun.replace(/\/$/, ''));
-    if (principal && !privada(principal)) return principal;
-  } catch { /* sin git, o un worktree que ya no cuelga de nadie */ }
-  return aqui;
+function arbolDeMentira(): { raiz: string; proyecto: string; worktree: string } {
+  const raiz = mkdtempSync(join(tmpdir(), 'orca-fb-'));
+  const proyecto = join(raiz, 'proyecto');
+  const worktree = join(proyecto, '.claude', 'worktrees', 'k9');
+  mkdirSync(join(proyecto, 'src'), { recursive: true });
+  mkdirSync(join(worktree, 'src'), { recursive: true });
+  mkdirSync(join(worktree, '.claude'), { recursive: true });
+  writeFileSync(join(proyecto, 'src', 'main.ts'), 'export const donde = "el proyecto";\n');
+  writeFileSync(join(proyecto, '.claude', 'settings.json'), '{ "no": "se sirve" }\n');
+  writeFileSync(join(worktree, 'src', 'dentro.ts'), 'export const donde = "el worktree";\n');
+  writeFileSync(join(worktree, '.env'), 'SECRETO=no\n');
+  writeFileSync(join(worktree, '.claude', 'settings.json'), '{ "tampoco": true }\n');
+  writeFileSync(join(raiz, 'fuera.txt'), 'ni siquiera es un proyecto\n');
+  return { raiz, proyecto, worktree };
 }
 
-const REPO = repoQueElHubSirve();
-process.env['ORCA_FILE_ROOTS'] = REPO;
+const FAKE = arbolDeMentira();
+process.env['ORCA_FILE_ROOTS'] = `${REPO}:${FAKE.proyecto}`;
 
-const { GPU_ARGS, SHOTS, ensureServers, newPage, open, shutdown, uiPort, waitForFleet } = await import('./visual.ts');
+const { GPU_ARGS, SHOTS, ensureServers, hubPort, newPage, open, orcaToken, shutdown, uiPort, waitForFleet } = await import('./visual.ts');
 const { sleep } = await import('./harness.ts');
 
 const headed = process.argv.includes('--headed');
@@ -85,6 +104,22 @@ function state(page: Page): Promise<FbState> {
 }
 
 const closeAll = (page: Page) => page.evaluate(() => { document.querySelectorAll<HTMLElement>('.win [data-w-close]').forEach((b) => b.click()); });
+
+/** Lo que enseña el visor cuando el hub dice que no: la línea, y si hay botón. */
+function visor(page: Page): Promise<{ msg: string; allow: string | null }> {
+  return page.evaluate(() => {
+    const win = document.querySelector<HTMLElement>('.win.is-file');
+    const btn = [...(win?.querySelectorAll<HTMLElement>('.slab-btn') ?? [])].find((b) => b.textContent?.startsWith('ALLOW'));
+    return { msg: win?.querySelector<HTMLElement>('.file__msg')?.textContent ?? '', allow: btn?.textContent ?? null };
+  });
+}
+
+/** El hub por delante de la consola, para ver el motivo tal cual sale por el cable. */
+async function alHub(ruta: '/api/file' | '/api/dir', path: string): Promise<{ status: number; body: string }> {
+  const url = `http://127.0.0.1:${hubPort()}${ruta}?path=${encodeURIComponent(path)}&token=${encodeURIComponent(orcaToken())}`;
+  const res = await fetch(url);
+  return { status: res.status, body: (await res.text()).slice(0, 200).trim() };
+}
 
 async function main() {
   await ensureServers();
@@ -172,10 +207,57 @@ async function main() {
     s = await state(page);
     assert.ok(!s.windows.includes('files'), 'q closed the browser');
 
+    /* 7 · el worktree de un agente se sirve; lo sensible de dentro, no */
+    // El permiso es posicional: `.claude` deja de vetar sólo cuando lo sigue
+    // `worktrees`. Por el cable, para ver el motivo exacto y no una frase.
+    const dentro = join(FAKE.worktree, 'src', 'dentro.ts');
+    assert.equal((await alHub('/api/dir', FAKE.worktree)).status, 200, 'el worktree se lista');
+    assert.equal((await alHub('/api/file', dentro)).status, 200, 'un fichero del worktree se sirve');
+    for (const prohibido of [join(FAKE.worktree, '.env'), join(FAKE.worktree, '.claude', 'settings.json'), join(FAKE.proyecto, '.claude', 'settings.json')]) {
+      const r = await alHub('/api/file', prohibido);
+      assert.equal(r.status, 403, `sigue vetado: ${prohibido}`);
+      assert.equal(r.body, REFUSAL.private, `y por política, no por raíces: ${prohibido}`);
+    }
+    assert.equal((await alHub('/api/file', join(FAKE.raiz, 'fuera.txt'))).body, REFUSAL.roots, 'fuera de la raíz sigue siendo el otro motivo');
+
+    /* 8 · y el navegador lo enseña así: el worktree entra, sin lo vetado */
+    await page.evaluate((root) => (window.__orca as unknown as { openFiles(r: string, at: { x: number; y: number }): void }).openFiles(root, { x: 420, y: 160 }), FAKE.worktree);
+    await page.waitForSelector('.win.is-files .fb__row', { timeout: 15_000 });
+    await sleep(700);
+    s = await state(page);
+    assert.equal(s.dir, FAKE.worktree, 'el navegador abrió en el worktree');
+    assert.ok(s.rows.includes('src/'), `el código del worktree se lista: ${s.rows.join(' ')}`);
+    assert.ok(!s.rows.some((r) => r === '.env' || r === '.claude/'), `y lo privado de dentro no: ${s.rows.join(' ')}`);
+    await page.screenshot({ path: join(SHOTS, 'file-browser-04-worktree.png') });
+    await closeAll(page);
+    await sleep(500);
+
+    /* 9 · el 403 dice cuál de los motivos fue, y ALLOW sólo cuando sirve */
+    // La laguna que dejó la entrega de raíces permitidas: esto nunca se había
+    // mirado en la consola viva. Las dos mitades, atadas aquí.
+    await page.evaluate((p) => (window.__orca as unknown as { openFile(p: string): void }).openFile(p), join(FAKE.worktree, '.env'));
+    await page.waitForFunction(() => !!document.querySelector('.win.is-file .file__msg.is-warn'), null, { timeout: 15_000 });
+    await sleep(500);
+    let v = await visor(page);
+    assert.ok(v.msg.includes('POLICY'), `la política se dice como tal: ${v.msg}`);
+    assert.ok(!v.msg.includes('OUTSIDE THE PROJECT ROOTS'), `y no como lo que no es: ${v.msg}`);
+    assert.equal(v.allow, null, 'sin ALLOW: files:allow pasa por la misma comprobación que acaba de negarla');
+    await page.screenshot({ path: join(SHOTS, 'file-browser-05-policy.png') });
+    await closeAll(page);
+    await sleep(500);
+
+    await page.evaluate((p) => (window.__orca as unknown as { openFile(p: string): void }).openFile(p), join(FAKE.raiz, 'fuera.txt'));
+    await page.waitForFunction(() => !!document.querySelector('.win.is-file .file__msg.is-warn'), null, { timeout: 15_000 });
+    await sleep(500);
+    v = await visor(page);
+    assert.ok(v.msg.includes('OUTSIDE THE PROJECT ROOTS'), `fuera de las raíces sigue diciéndolo: ${v.msg}`);
+    assert.ok(v.allow?.startsWith('ALLOW'), 'y ahí el botón sigue, porque ahí sí puede funcionar');
+
     assert.deepEqual(errors, [], 'no page errors');
     console.log('[file-browser] ok');
   } finally {
     await browser.close();
+    rmSync(FAKE.raiz, { recursive: true, force: true });
     if (!keep) shutdown();
   }
 }

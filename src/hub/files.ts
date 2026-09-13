@@ -23,6 +23,14 @@
  *     existe no puede tener realpath, así que se contiene primero por ruta
  *     léxica —para poder decir 404 y no 403— y luego por la real.
  *
+ *  2bis. **Nombres privados, con una excepción posicional.** No se sirve nada
+ *     que lleve un segmento `.ssh`, `.claude`, `.git`… ni un nombre de
+ *     credencial (`privatePath`). La única excepción es
+ *     `<proyecto>/.claude/worktrees/<nombre>`, el árbol aislado de un agente:
+ *     sin ella no se puede mirar desde la consola el único sitio donde hoy se
+ *     escribe código. La excepción abre ese segmento y nada más; dentro del
+ *     worktree las reglas siguen siendo las mismas.
+ *
  *  3. **Raíces que no son raíces.** Un collector podría declarar un proyecto en
  *     `/` o en `$HOME` y convertir toda la máquina en servible. Se ignoran las
  *     raíces con menos de dos segmentos, contenedores temporales, rutas
@@ -138,15 +146,45 @@ export function acceptableRoot(root: string, home: string = homedir()): boolean 
     '/var/tmp', '/private/var/tmp', tmpdir()];
   if (containers.some((p) => norm === resolve(p))) return false;
   if (/^\/(?:private\/)?var\/folders(?:\/[^/]+){0,3}$/.test(norm)) return false;
-  if (privatePath(norm)) return false;
+  if (privatePath(norm, home)) return false;
   return true;
 }
 
-/** Defensa por nombres conocidos; una extensión inocua no certifica contenido. */
-function privatePath(path: string): boolean {
+/** Carpetas cuyo nombre veta por sí solo. `.claude` tiene una excepción: ver `privatePath`. */
+const PRIVATE_SEGMENT = /^(?:\.ssh|\.aws|\.azure|\.config|\.gnupg|\.kube|\.claude|\.codex|\.docker|\.git)$/i;
+
+/**
+ * Defensa por nombres conocidos; una extensión inocua no certifica contenido.
+ *
+ * `.claude` deja de vetar en un solo sitio: cuando el segmento siguiente es
+ * `worktrees`, que es donde vive el árbol aislado de un agente
+ * (`<proyecto>/.claude/worktrees/<nombre>`). Eso es código versionado —lo que
+ * `git worktree add` deja— y es justo lo que hay que poder mirar desde la
+ * consola desde que todo cambio en ORCA pasa por un squad FORGE.
+ *
+ * El permiso es POSICIONAL a propósito, y ahí está toda la seguridad: sólo se
+ * abre ese segmento, y los posteriores se siguen examinando con estas mismas
+ * reglas. Dentro del worktree, un `.claude/settings.json` anidado, un `.env` o
+ * un `.ssh/id_ed25519` siguen perdiendo. Una comprobación de subcadena
+ * (`path.includes('.claude/worktrees')`) haría lo contrario: convertiría en
+ * territorio libre todo lo que empezara ahí.
+ *
+ * `~/.claude/worktrees` no cuenta. Ahí no hay worktrees —los pone el CLI en
+ * cada proyecto— y la home del hub, donde viven los transcripts de todas las
+ * sesiones, no puede volverse servible por una regla pensada para los
+ * proyectos. Por eso hace falta `home`: la excepción mira dónde cuelga ese
+ * `.claude`, no sólo cómo se llama.
+ */
+function privatePath(path: string, home: string = homedir()): boolean {
   const parts = path.split(sep).filter(Boolean);
   if (/^\/(?:private\/)?etc(?:\/|$)/i.test(path)) return true;
-  if (parts.some((p) => /^(?:\.ssh|\.aws|\.azure|\.config|\.gnupg|\.kube|\.claude|\.codex|\.docker|\.git)$/i.test(p))) return true;
+  const homeParts = resolve(home).split(sep).filter(Boolean);
+  const worktreesOf = (i: number): boolean => (
+    /^\.claude$/i.test(parts[i]!)
+    && parts[i + 1]?.toLowerCase() === 'worktrees'
+    && !(i === homeParts.length && homeParts.every((h, j) => h === parts[j]))
+  );
+  if (parts.some((p, i) => PRIVATE_SEGMENT.test(p) && !worktreesOf(i))) return true;
   if (parts.some((p) => /^(?:\.env(?:\..*)?|\.npmrc|\.netrc|\.pypirc|\.claude\.json|credentials(?:\..*)?|secrets?(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx|keychain(?:-db)?))$/i.test(p))) return true;
   if (/\/.orca\/(?:token|config(?:\.[^/]*)?)(?:\/|$)/i.test(path)) return true;
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -154,6 +192,26 @@ function privatePath(path: string): boolean {
 }
 
 /* ── Contención ───────────────────────────────────────────────────── */
+
+/**
+ * Por qué se rechazó, con nombre y en un sitio.
+ *
+ * Los 403 de esta puerta no son el mismo rechazo, y el cuerpo de la respuesta
+ * es lo único que los distingue: una ruta vetada por política no se servirá
+ * nunca, una que cae fuera de las raíces está a un `files:allow` de distancia.
+ * La consola decide con eso qué frase pinta y si ofrece el botón
+ * (`ui/windows/kinds/file.ts`). Que las frases vivan aquí, y no escritas a
+ * mano en cada `return`, es lo que permite atarlas desde una prueba en lugar
+ * de compararlas de memoria.
+ */
+export const REFUSAL = {
+  /** Nombre de carpeta o de archivo excluido. Ningún ALLOW la abre: `acceptableRoot` mira lo mismo. */
+  private: 'ruta privada excluida',
+  /** Fuera de lo que el hub conoce. Esto sí lo arregla autorizar la carpeta. */
+  roots: 'fuera de las raíces de proyecto conocidas',
+  /** Resuelve fuera: autorizar la carpeta del enlace no mueve su destino. */
+  symlink: 'la ruta apunta fuera de las raíces (symlink)',
+} as const;
 
 export type Resolution =
   | { ok: true; path: string; size: number; mime: string }
@@ -190,7 +248,7 @@ function containPath(requested: string, roots: Iterable<string>, home: string): 
   if (!isAbsolute(raw)) return { ok: false, status: 400, reason: 'la ruta tiene que ser absoluta' };
 
   const lexical = resolve(raw);
-  if (privatePath(lexical)) return { ok: false, status: 403, reason: 'ruta privada excluida' };
+  if (privatePath(lexical, home)) return { ok: false, status: 403, reason: REFUSAL.private };
   const accepted: string[] = [];
   const realRoots: string[] = [];
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -212,14 +270,14 @@ function containPath(requested: string, roots: Iterable<string>, home: string): 
   }
   // Incluir la forma canónica de cada raíz, no cualquier symlink de entrada.
   if (!accepted.some((r) => within(lexical, r))) {
-    return { ok: false, status: 403, reason: 'fuera de las raíces de proyecto conocidas' };
+    return { ok: false, status: 403, reason: REFUSAL.roots };
   }
 
   let real: string;
   try { real = realpathSync(lexical); } catch { return { ok: false, status: 404, reason: 'no existe' }; }
 
-  if (privatePath(real) || !realRoots.some((r) => within(real, r))) {
-    return { ok: false, status: 403, reason: 'la ruta apunta fuera de las raíces (symlink)' };
+  if (privatePath(real, home) || !realRoots.some((r) => within(real, r))) {
+    return { ok: false, status: 403, reason: REFUSAL.symlink };
   }
   return { ok: true, real, realRoots };
 }
@@ -307,7 +365,7 @@ export function resolveServedDir(
   const entries: DirEntry[] = [];
   for (const d of names) {
     const full = join(real, d.name);
-    if (privatePath(full)) continue;
+    if (privatePath(full, home)) continue;
     let kind: DirEntry['kind'] = 'other';
     let size: number | null = null;
     let mtime: number | null = null;
@@ -315,7 +373,7 @@ export function resolveServedDir(
       let target = full;
       if (d.isSymbolicLink()) {
         target = realpathSync(full);
-        if (privatePath(target) || !c.realRoots.some((r) => within(target, r))) { entries.push({ name: d.name, kind: 'other', size: null, mtime: null }); continue; }
+        if (privatePath(target, home) || !c.realRoots.some((r) => within(target, r))) { entries.push({ name: d.name, kind: 'other', size: null, mtime: null }); continue; }
       }
       const ts = statSync(target);
       if (uid !== null && ts.uid !== uid) kind = 'other';

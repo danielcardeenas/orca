@@ -108,6 +108,11 @@ function agentMenu(d: CtxDeps, id: string, selection: string[], at: At) {
     { label: 'SAY…', key: group ? undefined : 's', off: !alive(a), hint: alive(a) ? undefined : stateWord(a), run: () => d.sayTo([id]) },
     { label: 'SPAWN CHILD', key: 'c', run: () => c.openSpawn(a.projectId, id) },
   );
+  // El árbol aislado donde trabaja, cuando lo tiene. Sólo se ofrece si existe:
+  // vive bajo `.claude/worktrees`, que no aparece en el listado del proyecto, y
+  // el navegador no tiene dónde teclear una ruta — sin esta entrada no hay
+  // forma de llegar a él (kinds/files.ts).
+  if (a.worktree) items.push({ label: 'BROWSE WORKTREE', hint: 'VIM KEYS', key: group ? undefined : 'w', run: () => c.openWorktree(id, at) });
   if (kids.length || squad || p) items.push({ sep: true });
   if (kids.length) items.push({ label: 'SELECT CHILDREN', hint: String(kids.length), run: () => c.field.select(kids.map((k) => k.id)) });
   if (squad) {

@@ -5,10 +5,26 @@
  * tiene socket, tiene un filesystem, así que hablar con otro agente es dejar un
  * archivo y esperar a que el collector lo recoja.
  *
- *   <project>/.orca/out/<id>.json           el agente manda algo
- *   <project>/.orca/in/<id>.json            lo que le llega a él (lo escribimos)
- *   <project>/.orca/in/<id>.read            marca de leído (la escribe el agente)
- *   <project>/.orca/in/<id>.answer.json     la respuesta a un `ask` suyo
+ *   <project>/.orca/out/<id>.json            el agente manda algo
+ *   <project>/.orca/in/<id>.<agente>.json    lo que le llega a ÉL (lo escribimos)
+ *   <project>/.orca/in/<id>.<agente>.read    marca de leído (la escribe el agente)
+ *   <project>/.orca/in/<id>.answer.json      la respuesta a un `ask` suyo
+ *   <project>/.orca/receipts/<stem>.json     qué le pasó a lo que mandó
+ *
+ * El `.<agente>` del buzón de entrada es de hoy y arregla un fallo medido: un
+ * proyecto tiene UN `.orca/in/`, y hasta ahora el fichero se llamaba sólo por
+ * el id del mensaje y no decía a quién iba. Diecisiete agentes leyendo el mismo
+ * directorio con `orca-read`, que no podía filtrar por destinatario porque el
+ * dato no estaba, y una marca `.read` global: **el primero que leía se llevaba
+ * el correo de todos** y los destinatarios veían `nothing new`. Le pasó al
+ * líder de este mismo squad tres veces, la última consigo mismo.
+ *
+ * El nombre lleva el destinatario en vez de dejar que `orca-read` lo deduzca
+ * del contenido porque quien enruta ya resolvió esa pregunta: el hub sabe qué
+ * agentes de qué escuadrón reciben (`server.ts`, `routeMessage`) y llama aquí
+ * una vez por cada uno. Que el CLI volviera a derivar el escuadrón por su
+ * cuenta es exactamente la forma del fallo del worktree — dos lados resolviendo
+ * lo mismo por separado, y discrepando. Aquí sólo se resuelve una vez.
  *
  * Dos invariantes mandan sobre todo lo demás:
  *
@@ -26,10 +42,12 @@
  * se valida forma, tamaño y ruta antes de que nada salga al hub.
  */
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
+import { readReceipt, receiptsDir, writeReceipt } from '../../bin/lib/receipt.mjs';
 import type { AgentMessage, MessageKind, MessageScope } from '../shared/types.ts';
 import { squadName } from '../shared/squads.ts';
 import {
@@ -58,6 +76,14 @@ const MAX_OUT_BYTES = 256 * 1024;
  */
 const DEFAULT_NOTICE_TTL_MIN = 360;
 
+/**
+ * Cuántos emisores se recuerdan para poder anotarles el recibo, y por cuánto.
+ * Un día es el TTL del propio recibo (`bin/lib/receipt.mjs`): recordar más
+ * tiempo que el fichero que se va a escribir no sirve de nada.
+ */
+const MAX_TRACKED_SENT = 2_000;
+const SENT_TTL_MS = 24 * 3600_000;
+
 const KINDS = new Set<string>(['notice', 'ask', 'handoff', 'warning']);
 
 /* ── estado interno ───────────────────────────────────────────────── */
@@ -84,6 +110,27 @@ interface Delivered {
   agentId: string;
   file: string;
   readMark: string;
+}
+
+/**
+ * De dónde salió un mensaje, para poder contestarle a su emisor qué pasó con
+ * él.
+ *
+ * `orca-tell` deja un recibo en `filed` al mandar; el emisor promueve solo ese
+ * primer salto a `picked` porque la ausencia del fichero en su buzón de salida
+ * ya lo demuestra. Lo que sólo sabe el collector, y es lo que se anota aquí, es
+ * el final: `delivered`, `undeliverable` o `read`.
+ *
+ * Hace falta el `stem` —el nombre que le puso el agente, `tell_xxx`— porque el
+ * recibo se llama como él y el `msg.id` es un hash de otra cosa. Ese nombre
+ * sólo se conoce al recoger el fichero, así que se guarda entonces.
+ */
+interface Sent {
+  /** El directorio de recibos del emisor, ya resuelto. */
+  dir: string;
+  /** El nombre del fichero que escribió el agente, sin `.json`. */
+  stem: string;
+  at: number;
 }
 
 /**
@@ -119,6 +166,7 @@ export class MessageWatcher {
   private tracked = new Map<string, Tracked>();
   private open = new Map<string, OpenAsk>();
   private delivered = new Map<string, Delivered>();
+  private sent = new Map<string, Sent>();
   private watchers = new Map<string, fs.FSWatcher>();
   private timer: NodeJS.Timeout | null = null;
   private msgCbs: ((m: AgentMessage) => void)[] = [];
@@ -292,6 +340,10 @@ export class MessageWatcher {
     if (msg.kind === 'ask') {
       this.open.set(msg.id, { msg, inDir: t.inDir, stem });
     }
+    // Dónde dejarle el recibo a quien lo mandó. Se apunta aquí porque éste es
+    // el único momento en el que se ven a la vez el id que usará el hub y el
+    // nombre con el que el agente lo conoce.
+    this.rememberSender(msg.id, t.projectPath, stem);
     for (const cb of this.msgCbs) { try { cb(msg); } catch { /* aislar */ } }
     log('info', SCOPE, `${msg.kind}/${msg.scope} ${msg.id}: ${oneLine(msg.subject, 80)}`);
 
@@ -424,6 +476,78 @@ export class MessageWatcher {
     };
   }
 
+  /* ── recibos: qué pasó con lo que mandaste ────────────────────── */
+
+  private rememberSender(msgId: string, projectPath: string, stem: string): void {
+    this.sent.set(msgId, { dir: receiptsDir(projectPath), stem, at: Date.now() });
+    if (this.sent.size > MAX_TRACKED_SENT) this.forgetOldSent();
+  }
+
+  /**
+   * El mapa es una comodidad, no un registro: se poda por edad y por tamaño.
+   * Perder una entrada sólo cuesta un recibo que se queda en `picked`, que es
+   * justo lo que este módulo hace cuando no sabe algo con certeza.
+   */
+  private forgetOldSent(now = Date.now()): void {
+    for (const [id, s] of this.sent) {
+      if (now - s.at > SENT_TTL_MS) this.sent.delete(id);
+    }
+    while (this.sent.size > MAX_TRACKED_SENT) {
+      const oldest = this.sent.keys().next();
+      if (oldest.done) break;
+      this.sent.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Anota en el recibo del emisor qué acabó pasando con su mensaje.
+   *
+   * Tres reglas, y las tres son sobre no mentir:
+   *
+   *  1. **Sin emisor conocido, no se escribe nada.** Un mensaje cuyo emisor
+   *     está en otra máquina lo entrega este collector, pero su recibo vive en
+   *     el disco del otro. Aquí se queda en `picked` y el emisor lee «la
+   *     entrega está fuera del alcance de esta máquina», que es verdad. Un
+   *     recibo que miente es peor que uno incompleto.
+   *  2. **`delivered` no se degrada a `undeliverable`.** Un mensaje al
+   *     escuadrón va a varios destinatarios y puede llegarle a tres y fallar
+   *     con el cuarto. Llegó, y el recibo tiene que decir a quién.
+   *  3. **`read` es el final.** Que alguien lo leyera no lo devuelve a
+   *     entregado en la siguiente entrega de la misma tanda.
+   *
+   * Best-effort y síncrono a propósito: es una nota al margen del canal, y si
+   * el disco del emisor no se deja escribir, el mensaje ya está entregado. No
+   * puede tirar una entrega que sí ocurrió.
+   */
+  private noteReceipt(
+    msgId: string,
+    change: { state: 'delivered' | 'undeliverable' | 'read'; recipient?: string; detail?: string },
+  ): void {
+    const s = this.sent.get(msgId);
+    if (!s) return;
+    try {
+      const now = Date.now();
+      const prev = readReceipt(s.dir, s.stem);
+      if (!prev) return;   // nunca se filió desde aquí: no es nuestro recibo
+      if (prev.state === 'read' && change.state !== 'read') return;
+      if (prev.state === 'delivered' && change.state === 'undeliverable') return;
+
+      const recipients = change.recipient && !prev.recipients?.includes(change.recipient)
+        ? [...(prev.recipients ?? []), change.recipient]
+        : (prev.recipients ?? []);
+
+      writeReceipt(s.dir, s.stem, {
+        ...prev,
+        state: change.state,
+        recipients,
+        detail: change.detail ?? prev.detail ?? null,
+        updatedAt: now,
+      });
+    } catch (err) {
+      log('debug', SCOPE, `recibo de ${msgId}: ${errText(err)}`);
+    }
+  }
+
   /* ── entrega ──────────────────────────────────────────────────── */
 
   /**
@@ -443,17 +567,26 @@ export class MessageWatcher {
     if (!ID_RE.test(msg.id)) return { ok: false, detail: `id de mensaje inválido: ${msg.id}` };
 
     const inDir = path.join(projectPath, IN_DIR);
-    const file = path.join(inDir, `${msg.id}.json`);
-    const ok = await writeAtomic(file, inboxPayload(msg));
-    if (!ok) return { ok: false, detail: 'no pude escribir el buzón de entrada' };
+    const stem = inboxStem(msg.id, recipientAgentId);
+    const file = path.join(inDir, `${stem}.json`);
+    const readMark = path.join(inDir, `${stem}.read`);
+    const ok = await writeAtomic(file, inboxPayload(msg, recipientAgentId));
+    if (!ok) {
+      const detail = 'no pude escribir el buzón de entrada';
+      this.noteReceipt(msg.id, { state: 'undeliverable', detail });
+      return { ok: false, detail };
+    }
 
     if (recipientAgentId) {
-      this.delivered.set(msg.id, {
-        msgId: msg.id, agentId: recipientAgentId, file,
-        readMark: path.join(inDir, `${msg.id}.read`),
+      this.delivered.set(`${msg.id}:${recipientAgentId}`, {
+        msgId: msg.id, agentId: recipientAgentId, file, readMark,
       });
     }
-    log('info', SCOPE, `entregado ${msg.id} en ${inDir}`);
+    this.noteReceipt(msg.id, {
+      state: 'delivered',
+      ...(recipientAgentId ? { recipient: this.deps.callsignOf(recipientAgentId) } : {}),
+    });
+    log('info', SCOPE, `entregado ${msg.id} en ${inDir} para ${recipientAgentId ?? 'todos'}`);
     return { ok: true };
   }
 
@@ -500,8 +633,12 @@ export class MessageWatcher {
      * mensaje vuelve a ser nuevo. Sin esto la respuesta salía por el cable pero
      * `orca-read` decía "nothing new" — el fallo silencioso de manual.
      */
-    await writeAtomic(path.join(o.inDir, `${o.msg.id}.json`), {
-      ...inboxPayload(o.msg),
+    // El eco va al buzón DE QUIEN PREGUNTÓ, y lleva su nombre: es su respuesta,
+    // no correo del proyecto. Antes se escribía sin destinatario y cualquier
+    // otro agente del mismo checkout podía consumirla antes que él.
+    const echoStem = inboxStem(o.msg.id, o.msg.fromAgentId);
+    await writeAtomic(path.join(o.inDir, `${echoStem}.json`), {
+      ...inboxPayload(o.msg, o.msg.fromAgentId),
       kind: 'notice' as const,
       subject: oneLine(`re: ${o.msg.subject}`, MAX_SUBJECT),
       body: text,
@@ -510,8 +647,10 @@ export class MessageWatcher {
       answeredBy: by,
       answeredByCallsign: by ? this.deps.callsignOf(by) : null,
     });
-    await fsp.unlink(path.join(o.inDir, `${o.msg.id}.read`)).catch(() => { /* nunca se leyó */ });
-    this.delivered.delete(o.msg.id);
+    await fsp.unlink(path.join(o.inDir, `${echoStem}.read`)).catch(() => { /* nunca se leyó */ });
+    for (const key of [...this.delivered.keys()]) {
+      if (key === o.msg.id || key.startsWith(`${o.msg.id}:`)) this.delivered.delete(key);
+    }
 
     o.msg.answer = text;
     o.msg.answeredAt = at;
@@ -522,14 +661,22 @@ export class MessageWatcher {
     return { ok: true };
   }
 
-  /** El agente escribió `<id>.read`: el contrato tiene `readBy`, lo llenamos. */
+  /**
+   * El agente escribió su `<id>.<agente>.read`: el contrato tiene `readBy`, lo
+   * llenamos, y el emisor se entera por su recibo.
+   *
+   * La marca es por agente desde hoy, así que `readBy` dice por fin quién leyó
+   * de verdad. Antes la marca era una sola para todos los destinatarios y el
+   * primero en leer la ponía en nombre de los demás.
+   */
   private async sweepRead(t: Tracked): Promise<void> {
     if (this.delivered.size === 0) return;
-    for (const [id, d] of this.delivered) {
+    for (const [key, d] of this.delivered) {
       if (!d.file.startsWith(t.inDir + path.sep)) continue;
       if (!fs.existsSync(d.readMark)) continue;
-      this.delivered.delete(id);
-      const o = this.open.get(id);
+      this.delivered.delete(key);
+      this.noteReceipt(d.msgId, { state: 'read', recipient: this.deps.callsignOf(d.agentId) });
+      const o = this.open.get(d.msgId);
       if (!o || o.msg.readBy.includes(d.agentId)) continue;
       o.msg.readBy.push(d.agentId);
       for (const cb of this.msgCbs) { try { cb(o.msg); } catch { /* aislar */ } }
@@ -602,8 +749,32 @@ export function expiryOf(kind: MessageKind, at: number, ttlMin: number | null): 
   return null;
 }
 
-/** Lo que ve el agente en su buzón. Plano a propósito: `jq` tiene que bastar. */
-function inboxPayload(m: AgentMessage): Record<string, unknown> {
+/**
+ * El nombre del fichero en el buzón de entrada: el mensaje, y para quién.
+ *
+ * Sin destinatario conocido se cae al nombre de siempre, y eso significa «para
+ * todo el que lea este buzón». Es el caso de los ~200 ficheros que ya estaban
+ * depositados cuando esto se escribió: no llevan destinatario y no se les puede
+ * inventar uno. Hacerlos desaparecer para todo el mundo cambiaría un fallo por
+ * otro peor —correo que existe y nadie ve— así que se quedan visibles para
+ * todos, como hasta hoy. Ver el filtro en `bin/orca-read.mjs`.
+ */
+export function inboxStem(msgId: string, recipientAgentId: string | null): string {
+  return recipientAgentId && ID_RE.test(recipientAgentId)
+    ? `${msgId}.${recipientAgentId}`
+    : msgId;
+}
+
+/**
+ * Lo que ve el agente en su buzón. Plano a propósito: `jq` tiene que bastar.
+ *
+ * `to`, `toAgentId` y `toSquad` son de hoy. El payload no decía a quién iba el
+ * mensaje, y por eso `orca-read` no **podía** filtrar aunque quisiera: el dato
+ * no existía en disco. El nombre del fichero es lo que decide quién lo ve
+ * (`inboxStem`); estos campos son para que un agente —o un `jq`— pueda además
+ * ver a quién iba dirigido y por qué le llegó.
+ */
+function inboxPayload(m: AgentMessage, recipientAgentId: string | null = null): Record<string, unknown> {
   return {
     id: m.id,
     kind: m.kind,
@@ -611,6 +782,9 @@ function inboxPayload(m: AgentMessage): Record<string, unknown> {
     from: m.fromCallsign,
     fromAgentId: m.fromAgentId,
     fromProjectId: m.fromProjectId,
+    to: recipientAgentId,
+    toAgentId: m.toAgentId,
+    toSquad: m.toSquad,
     subject: m.subject,
     body: m.body,
     files: m.files,
@@ -627,9 +801,29 @@ export function clamp(text: string, max: number): string {
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
 
-/** tmp + rename: el otro lado hace polling y no puede leer un JSON a medias. */
+/**
+ * tmp + rename: el otro lado hace polling y no puede leer un JSON a medias.
+ *
+ * El temporal lleva pid + azar, y eso es el arreglo de un fallo medido. Antes
+ * era `.${basename}.tmp`, un nombre derivado sólo del destino: correcto
+ * mientras hubiera un escritor, y hay varios. `routeMessage` despacha un
+ * `deliver` por destinatario y todos los de un mismo proyecto comparten `inDir`
+ * y `msg.id`, o sea el mismo destino y el mismo temporal. El primero en
+ * renombrar se llevaba el `.tmp`; los demás fallaban con ENOENT en el rename.
+ *
+ * No perdía un solo mensaje —el fichero es uno y lo escribe el que gana— pero
+ * producía 288 avisos de «no pude escribir el buzón de entrada» en siete días,
+ * 22 de ellos el 2026-09-13, y ésa fue la pista que desvió dos investigaciones
+ * de una pérdida que estaba en otro sitio. Un aviso que salta siempre es un
+ * aviso que nadie lee, y encima tapa al que sí importa.
+ *
+ * Misma forma que `trust.ts`, que ya lo hacía bien.
+ */
 async function writeAtomic(file: string, payload: unknown): Promise<boolean> {
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp`);
+  const tmp = path.join(
+    path.dirname(file),
+    `.${path.basename(file)}.${process.pid}-${randomUUID().slice(0, 8)}.tmp`,
+  );
   try {
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8');

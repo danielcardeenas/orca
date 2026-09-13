@@ -399,6 +399,23 @@ async function main() {
      * ventana de flota— y el almacén lo sigue recordando con su escuadra.
      * El tirante tiene que ir entonces al puerto del bloque, no a la nada.
      */
+    /*
+     * Las superficies de `who` se retiran antes: ya están medidas y aquí
+     * estorban. Una superficie colocada es DOM sobre el lienzo, y `fotograma
+     * 0` —ensanchada 120 px en el paso del asa— quedaba encima de la esquina
+     * del bloque `ledger-close` cuando la flota ponía a `who` pegado al
+     * recinto del arnés. El parche del puerto fotografiaba entonces una
+     * superficie, no el puerto, y la prueba decía que el tirante no se
+     * enciende cuando lo que pasaba es que no se veía: «cuatro veces con el
+     * campo quieto y el parche no cambió · puerto 626,353». Es el mismo
+     * estorbo que `file-viewer` se hacía a sí mismo con su ventana del paso 1.
+     */
+    await page.evaluate(() => {
+      for (const el of document.querySelectorAll<HTMLElement>('.srf')) {
+        if ((el.textContent ?? '').includes('fotograma')) el.querySelector<HTMLElement>('[data-close]')?.click();
+      }
+    });
+    await sleep(400);
     squad = await injectSquad();
     assert.ok(squad, 'el hub aceptó la escuadra del arnés');
     const member = 'sess_vsquad_z2';
@@ -464,6 +481,14 @@ async function main() {
      * parche justo a la izquierda del rótulo, centrado en su altura, es el
      * puerto — apagado en reposo, lima con el puntero sobre la superficie.
      */
+    // Y que el parche esté a la vista: el puerto es WebGL y cualquier DOM
+    // encima —una superficie, una ventana, el HUD— lo tapa sin que el tirante
+    // tenga nada que ver. Si lo tapa algo, que el rojo lo nombre.
+    const sobreElPuerto = await page.evaluate(({ x, y }) => {
+      const e = document.elementFromPoint(x, y) as HTMLElement | null;
+      return !e || e.closest('[data-field]') === e || e.tagName === 'CANVAS' ? '' : `${e.tagName.toLowerCase()}.${[...e.classList].join('.')}`;
+    }, { x: rot!.x - 20, y: rot!.y + rot!.h / 2 });
+    assert.equal(sobreElPuerto, '', `el parche del puerto de la escuadra está a la vista y no bajo ${sobreElPuerto}`);
     const sqMudo = await lightsUp(page,
       () => rect('.squad[data-squad="ledger-close"]'),
       (r) => ({ x: r.x - 40, y: r.y + r.h / 2 - 14, w: 40, h: 28 }),

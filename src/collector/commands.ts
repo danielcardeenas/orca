@@ -26,6 +26,7 @@ import path from 'node:path';
 import type { Command, SpawnAck } from '../shared/protocol.ts';
 import { SPAWN_ACK_TIMEOUT_MS } from '../shared/protocol.ts';
 import { squadName } from '../shared/squads.ts';
+import { describeStop, type StopOutcome } from '../shared/reap.ts';
 import {
   INTERRUPT_EVIDENCE_MS, QUEUED_MARK, describeOutcome, interruptPlan,
   type InterruptOutcome,
@@ -77,9 +78,12 @@ const PERMISSION_MODES = new Set([
 
 /** Un id de sesión/short id sólo puede ser esto. Corta cualquier argv raro. */
 const ID_RE = /^[A-Za-z0-9_-]{4,64}$/;
+/** Cuánto se le da al CLI para salir solo tras dos Ctrl-C antes de cerrar su pane. */
+const PANE_EXIT_GRACE_MS = 6_000;
 
 export interface AgentHandle {
   origin?: 'orca' | 'external';
+  role?: import('../shared/types.ts').AgentRole;
   cwd?: string;
   parentId?: string | null;
   squad?: string | null;
@@ -145,6 +149,13 @@ export interface CommandDeps {
    * probar sin matar nada. Ver collector/strays.ts.
    */
   strays?(): import('./strays.ts').StrayWatch | null;
+  /**
+   * El cierre del proceso de una sesión que terminó, si esta máquina lo tiene
+   * montado. Opcional por lo mismo que `strays`: sin él, `stop` y `remove`
+   * terminan la sesión como siempre y no afirman nada del proceso. Ver
+   * collector/reap.ts.
+   */
+  reaper?(): import('./reap.ts').SessionReaper | null;
   messages: MessageWatcher;
   artifacts: ArtifactIndex;
   /** Sólo devuelve agentes que ORCA está observando ahora mismo. */
@@ -344,7 +355,17 @@ export class CommandRunner {
     if (!watch) return { ok: false, detail: 'este collector no tiene el escáner de restos montado' };
     const ids = (Array.isArray(cmd.ids) ? cmd.ids : []).filter((x) => typeof x === 'string').slice(0, 64);
     if (ids.length === 0) return { ok: false, detail: 'no se pidió limpiar nada' };
-    const outcomes = await watch.clean(ids, { dryRun: cmd.dryRun === true });
+    // Los restos `session` los decide el reaper, con la misma decisión que
+    // cierra tras un `stop`; el resto va por el escáner de siempre.
+    const sessions = ids.filter((id) => id.startsWith('stray_session_'));
+    const rest = ids.filter((id) => !id.startsWith('stray_session_'));
+    const outcomes = rest.length ? await watch.clean(rest, { dryRun: cmd.dryRun === true }) : [];
+    const reaper = this.deps.reaper?.();
+    for (const id of sessions) {
+      outcomes.push(reaper
+        ? await reaper.clean(id, { dryRun: cmd.dryRun === true })
+        : { id, label: id, result: 'failed', detail: 'este collector no tiene el cierre de procesos montado' });
+    }
     const stopped = outcomes.filter((o) => o.result === 'stopped').length;
     const detail = `${cmd.dryRun ? 'dry run: ' : ''}${stopped}/${outcomes.length} terminado(s)`;
     log('info', SCOPE, `strays:clean ${detail}`);
@@ -1034,16 +1055,42 @@ export class CommandRunner {
 
   /* ── stop / rm ────────────────────────────────────────────────── */
 
+  /**
+   * Detener (o retirar) una sesión, y cerrar su proceso.
+   *
+   * Dos efectos y dos resultados, separados a propósito. Primero la sesión:
+   * Ctrl-C y su pane, o `claude stop`. DESPUÉS, y sólo si terminó, el reaper
+   * comprueba que el proceso sigue siendo el que era y lo cierra. Si la sesión
+   * no terminó, el proceso no se toca: cerrar el de un agente que escribe es
+   * corromper su trabajo. Si terminó y el proceso no se pudo cerrar, el ack es
+   * `ok` con las dos partes dichas por separado —fue una detención, no una
+   * detención fallida— porque colapsarlas en un veredicto es confundir lo que
+   * el hub cree con lo que la máquina hace. Ver shared/reap.ts.
+   */
   private async simple(agentId: string, verb: string[], what: string): Promise<CommandResult> {
-    if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
     const a = this.deps.agent(agentId);
     if (!a) return { ok: false, detail: `agente desconocido: ${agentId}` };
+    const session = await this.endSession(a, verb, what);
+    if (!session.ok) return session;
+    const reaper = this.deps.reaper?.();
+    if (!reaper) return session;
+    const outcome: StopOutcome = {
+      session: { stopped: true, detail: session.detail ?? what },
+      process: await reaper.afterStop(a.sessionId),
+    };
+    return { ok: true, detail: describeStop(outcome), data: outcome };
+  }
+
+  /** La sesión y sólo la sesión: lo que `stop` y `rm` hacían antes de que existiera el cierre. */
+  private async endSession(a: AgentHandle, verb: string[], what: string): Promise<CommandResult> {
     if (a.pane) {
+      // Un pane se para con tmux: el binario `claude` no hace falta para nada.
       if (what !== 'remove') return this.stopPane(a.pane);
       const r = await this.killPane(a.pane);
       if (r.ok) await this.cleanupWorktree(a);
       return r;
     }
+    if (!this.bin) return { ok: false, detail: 'binario `claude` no disponible' };
     if (a.runtime !== 'claude') return { ok: false, detail: `${a.callsign} corre ${a.runtime} fuera de ORCA: sin pane no se puede parar` };
     const id = a.shortId ?? a.sessionId;
     if (!ID_RE.test(id)) return { ok: false, detail: 'id inválido' };
@@ -1183,6 +1230,11 @@ export class CommandRunner {
    * Parar a un agente hospedado: dos Ctrl-C, que es como se sale del CLI a
    * mano, y si el pane sigue ahí pasados unos segundos, se mata. El transcript
    * queda; `resume` lo trae de vuelta al mismo pane con el mismo id.
+   *
+   * Se ESPERA a que el pane se vaya, en vez de dejar un temporizador y
+   * contestar «interrumpido»: el cierre del proceso viene detrás y sólo puede
+   * empezar cuando la sesión ha terminado de verdad, y el ack tiene que decir
+   * lo que pasó, no lo que se programó.
    */
   private async stopPane(pane: string): Promise<CommandResult> {
     const tmux = this.deps.tmux;
@@ -1191,11 +1243,22 @@ export class CommandRunner {
     if (!first.ok) return { ok: false, detail: first.detail };
     await sleep(300);
     await tmux.keys(pane, ['C-c']);
-    const t = setTimeout(() => {
-      void tmux.has(pane).then((alive) => { if (alive) void tmux.kill(pane); });
-    }, 6_000);
-    t.unref?.();
-    return { ok: true, detail: `interrumpido ${pane}; si no sale solo, se cierra en 6s` };
+    if (await this.paneGone(pane, PANE_EXIT_GRACE_MS)) return { ok: true, detail: `${pane} salió con Ctrl-C` };
+    const killed = await tmux.kill(pane);
+    if (await this.paneGone(pane, 3_000)) {
+      return { ok: true, detail: `${pane} no salió con Ctrl-C; cerrado a los ${PANE_EXIT_GRACE_MS / 1000}s` };
+    }
+    return { ok: false, detail: `${pane} sigue en el servidor de tmux${killed.ok ? '' : `: ${killed.detail}`}` };
+  }
+
+  /** ¿Se fue el pane? Sondeo corto sobre `has-session`. */
+  private async paneGone(pane: string, within: number): Promise<boolean> {
+    const until = Date.now() + within;
+    for (;;) {
+      if (!(await this.deps.tmux.has(pane))) return true;
+      if (Date.now() >= until) return false;
+      await sleep(300);
+    }
   }
 
   private async killPane(pane: string): Promise<CommandResult> {

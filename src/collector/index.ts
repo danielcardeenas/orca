@@ -57,6 +57,7 @@ import { CollisionIndex } from './collisions.ts';
 import { EscalationWatcher } from './escalate.ts';
 import { ImproveDropWatcher, type ImproveAck } from './improve-drop.ts';
 import { StrayWatch, type AgentView } from './strays.ts';
+import { SessionReaper, type ReapAgentView } from './reap.ts';
 import { HygieneSampler } from './hygiene.ts';
 import { memoryPct } from './memory.ts';
 import { liveText, promptOn, permissionClosed, screenSignature } from './screen.ts';
@@ -177,6 +178,8 @@ class Collector {
   private readonly improveDrops: ImproveDropWatcher;
   /** Lo que ORCA dejó atrás en esta máquina: procesos, puertos, panes. */
   private readonly strays: StrayWatch;
+  /** El cierre del proceso de una sesión que terminó. Ver reap.ts. */
+  private readonly reaper: SessionReaper;
   /** `reportId` → dónde espera su respuesta el revisor. La ruta no sale de aquí. */
   private readonly improveAcks = new Map<string, string>();
   private readonly messages: MessageWatcher;
@@ -296,6 +299,18 @@ class Collector {
       // mapa está vacío y toda la flota parecería muerta. Ver `livenessReady`.
       livenessReady: () => this.liveness.size > 0 || this.derivers.size === 0,
     });
+    this.reaper = new SessionReaper({
+      tmux: this.tmux,
+      agent: (sessionId) => this.reapAgent(sessionId),
+      sessionIds: () => [...this.derivers.values()].map((d) => d.ref.sessionId),
+      // Todo pid que la liveness liste vivo, de cualquier sesión y cualquier
+      // origen: el reaper no señala nada de esto, sea de quien sea.
+      alivePids: () => [...this.liveness.values()].flatMap((l) => (l.alive && typeof l.pid === 'number' && l.pid > 0 ? [l.pid] : [])),
+      panes: () => new Set([...this.panes].filter(([, info]) => !info.dead).map(([name]) => name)),
+      refresh: () => this.pollLiveness(),
+      livenessReady: () => this.liveness.size > 0 || this.derivers.size === 0,
+      feed: (level, text, agentId) => this.note(level, text, agentId),
+    });
     this.messages = new MessageWatcher({
       resolveAgent: (projectId, hint) => this.resolveAgent(projectId, hint),
       agentByCallsign: (cs) => this.agentByCallsign(cs),
@@ -322,6 +337,7 @@ class Collector {
       lineage: this.lineage,
       escalations: this.escalations,
       strays: () => this.strays,
+      reaper: () => this.reaper,
       messages: this.messages,
       artifacts: this.artifacts,
       agent: (id) => this.agentHandle(id),
@@ -665,6 +681,14 @@ class Collector {
     }
     this.liveness = next;
     await this.pollScreens();
+
+    // El reaper recuerda el pid de cada sesión MIENTRAS vive: en cuanto termina,
+    // el CLI deja de listarla y el pane desaparece, que es cuando hace falta.
+    for (const [sessionId, l] of next) {
+      if (typeof l.pid === 'number' && l.pid > 0) this.reaper.note(sessionId, l.pid, l.pane ? 'pane' : 'cli');
+    }
+    await this.reaper.remember();
+    void this.reaper.sweep();
 
     // Los background publican su propio estado en ~/.claude/jobs/<id>/state.json,
     // que es lo más cercano a "el agente dice que está bloqueado" que existe hoy.
@@ -1448,6 +1472,18 @@ class Collector {
     return false;
   }
 
+  /** Lo que el reaper necesita saber de una sesión para decidir si cierra su proceso. */
+  private reapAgent(sessionId: string): ReapAgentView | null {
+    const d = this.derivers.get(sessionId)
+      ?? [...this.derivers.values()].find((x) => x.ref.sessionId === sessionId && x.ref.agentId === null);
+    if (!d) return null;
+    const snap = d.snapshot();
+    return {
+      callsign: snap.callsign, origin: snap.origin, role: snap.role, subagent: snap.subagent,
+      state: snap.state, alive: this.liveness.get(sessionId)?.alive ?? false,
+    };
+  }
+
   private agentHandle(id: string): AgentHandle | null {
     const d = this.derivers.get(id);
     if (!d) return null;
@@ -1469,6 +1505,7 @@ class Collector {
       transcriptPath: d.ref.path,
       model: d.snapshot().model,
       state: d.snapshot().state,
+      role: d.snapshot().role,
       blockKind: d.snapshot().block?.kind,
       worktree: this.lineage.worktreeOf(d.ref.sessionId, l?.shortId ?? null),
       mission: d.snapshot().mission,
@@ -1785,6 +1822,9 @@ class Collector {
        */
       try { report.strays = await this.strays.scan(); }
       catch (err) { report.limits.push(`stray scan failed: ${errText(err)}`); }
+      // Sesiones que terminaron y cuyo proceso sigue vivo, con su coste. Ver reap.ts.
+      try { report.strays = [...(report.strays ?? []), ...await this.reaper.scan()]; }
+      catch (err) { report.limits.push(`session reap scan failed: ${errText(err)}`); }
       this.send({ t: 'hygiene', machineId: this.machineId, report });
     } catch (err) {
       log('warn', SCOPE, `higiene: ${errText(err)}`);

@@ -93,8 +93,10 @@ export function parsePs(text: string, now: number, etime: (s: string, now: numbe
  *   `orca`   un entrypoint de ORCA: el hub, el collector, la CLI
  *   `pane`   un pane de tmux cuyo programa ya salió
  *   `agent`  un agente que sigue en el mundo sin proceso ni pane
+ *   `session` lo contrario: una sesión que terminó y cuyo proceso sigue vivo,
+ *            reteniendo su memoria. Lo decide `shared/reap.ts`.
  */
-export type StrayKind = 'vite' | 'orca' | 'pane' | 'agent';
+export type StrayKind = 'vite' | 'orca' | 'pane' | 'agent' | 'session';
 
 /**
  * `orphan` cumple las tres condiciones y se puede limpiar. `ambiguous` es
@@ -119,6 +121,8 @@ export interface Stray {
   startedAt?: number | null;
   /** Puertos que escucha, cuando se pudo saber. Informativo: nunca es prueba. */
   ports?: number[];
+  /** RSS del proceso, medido en el escaneo. Sólo en `session`: es el coste que se enseña. */
+  rssBytes?: number;
   /** El cwd, ya relativo a `~`. Sólo cuando se pudo leer con fiabilidad. */
   cwd?: string;
   /** El agente o el pane al que corresponde, cuando lo hay. */

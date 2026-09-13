@@ -185,8 +185,9 @@ Verificaciones por pieza, en sus entregas: 6F `--changed` 77 suites 971/971; 7F 
 - **Arreglo 3**: el aviso «lo miran fuera de esta corrida» (shots/visual) no tiene prueba
   propia. La excepción de sólo-documentación está probada como unidad (`isProse` y mezcla
   doc + hoja en `affected.test.ts`) y de extremo a extremo por la propia corrida
-  `--since=main` de arriba (6 docs apartados, código 0), no por un test que ejecute `run.ts`
-  con un doc solo. `src/ui/main.ts` sigue sin suite que lo alcance (ahora lo dice y no sale
+  `--since=main` de arriba (6 docs apartados, código 0) y por `npm test -- --since=HEAD~1`
+  sobre el commit de este mismo documento («sólo documentación tocada, nada que verificar»,
+  código 0); no por un test que ejecute `run.ts` con un doc solo. `src/ui/main.ts` sigue sin suite que lo alcance (ahora lo dice y no sale
   verde).
 - **Arreglo 4**: `bin/orca.mjs` (`orca journal --stats`): la prueba lo ejecuta como proceso
   y salió `withdrawn 0, open 0`, pero no afirma sobre la palabra nueva.

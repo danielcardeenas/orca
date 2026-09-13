@@ -24,7 +24,7 @@ import type { HygieneReport, Reading } from '../shared/hygiene.ts';
 import type { Stray } from '../shared/strays.ts';
 
 /** Lo que un collector puede declarar. Nada fuera de estas listas cruza. */
-const STRAY_KINDS: readonly string[] = ['vite', 'orca', 'pane', 'agent'];
+const STRAY_KINDS: readonly string[] = ['vite', 'orca', 'pane', 'agent', 'session'];
 const STRAY_VERDICTS: readonly string[] = ['orphan', 'ambiguous', 'protected'];
 const STRAY_ACTIONS: readonly string[] = ['terminate', 'retire', 'none'];
 import { CATEGORIES, sumReadings, unavailable, type HygieneCategory } from '../shared/hygiene.ts';
@@ -223,6 +223,8 @@ export function sanitizeReport(v: unknown): HygieneReport | null {
         ? { ports: x['ports'].filter((n): n is number => typeof n === 'number' && n > 0 && n < 65_536).slice(0, 8) }
         : {}),
       ...(cwd ? { cwd } : {}),
+      // El coste de una sesión detenida con proceso vivo. Ver shared/reap.ts.
+      ...(typeof x['rssBytes'] === 'number' && x['rssBytes'] >= 0 ? { rssBytes: Math.round(x['rssBytes']) } : {}),
       ...(typeof x['agentId'] === 'string' ? { agentId: str(x['agentId'], 120) } : {}),
       ...(typeof x['pane'] === 'string' ? { pane: str(x['pane'], 120) } : {}),
       evidence: (Array.isArray(x['evidence']) ? x['evidence'] : [])

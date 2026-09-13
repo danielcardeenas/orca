@@ -359,7 +359,19 @@ body.tray-mode .tray .tile { width: 72px; }
   box-shadow: inset 0 0 0 0 var(--amber); opacity: 0;
 }
 
-@media (max-width: 720px) {
+/*
+ * Un teléfono es un teléfono también de lado. Girado mide 844×390 —o 926×428—,
+ * y por ancho pasaba por escritorio: el mástil entero con sus quince abridores
+ * envolvía en cuatro filas hasta los 239px de un alto de 390, volvían el
+ * radar, las pistas y los marcadores, y con las puertas y la línea de comando
+ * debajo quedaba libre un 15% de la pantalla, en una franja de 50px. Y el
+ * mástil recibe el dedo en toda su caja (`.hud > *`), también en los huecos
+ * entre botones: no había baldosa que tocar. Lo midió `hud-mobile.shots.ts`,
+ * que no encontraba «a tile standing still in landscape», y lo sufría
+ * cualquiera con el teléfono en horizontal. La misma condición que ya usa la
+ * hoja en apaisado (`max-width: 1180px` y `max-height: 560px`, más abajo).
+ */
+@media (max-width: 720px), ((max-width: 1180px) and (max-height: 560px)) {
   .mast { left: 14px; right: 14px; flex-wrap: wrap; gap: 8px; }
   .gauges { display: none; }
   /*
@@ -435,7 +447,8 @@ body.tray-mode .tray .tile { width: 72px; }
 
 .snd { letter-spacing: 0.14em; }
 
-@media (max-width: 720px) {
+/* Y de lado, por lo mismo que el mástil de arriba. */
+@media (max-width: 720px), ((max-width: 1180px) and (max-height: 560px)) {
   .bmarks { display: none; }
 }
 

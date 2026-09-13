@@ -33,7 +33,7 @@ import { createAuth } from '../src/hub/auth.ts';
 import { PATHS, newId, type ServerFrame } from '../src/shared/protocol.ts';
 import { emptyRollup, type Agent, type Project } from '../src/shared/types.ts';
 import {
-  CAPCOM_DIR_REFUSAL, OFF_FLEET_LABEL, OFF_FLEET_REFUSAL, excludedWorkspace, hiddenInWorkspace,
+  CAPCOM_DIR_REFUSAL, OFF_FLEET_LABEL, OFF_FLEET_REFUSAL, capcomHandoffsHome, excludedWorkspace, hiddenInWorkspace,
   islandOf, isOffFleet, offFleetProjectId, pathToSlug,
 } from '../src/shared/workspaces.ts';
 import { ok, test, until, type TestModule } from './harness.ts';
@@ -123,6 +123,14 @@ const registry = [
     // Una prueba que alguien lanzó dentro: mismo sitio, misma respuesta.
     assert.equal(excludedWorkspace(`${CAPCOM_SLUG}-probe`, CAPCOM), 'capcom');
     assert.equal(excludedWorkspace(pathToSlug(`${CAPCOM}/notes`), CAPCOM), 'capcom');
+    // El directorio de los relevos, HERMANO del mando: un CAPCOM relevado corre
+    // ahí, y no es un proyecto. Cae en la misma regla porque el slug no
+    // distingue `/` de `-`; el nombre se eligió contando con eso, y esto es lo
+    // que rompe si alguien lo renombra.
+    const handoffs = capcomHandoffsHome({ ORCA_CAPCOM_DIR: CAPCOM });
+    assert.equal(handoffs, `${CAPCOM}-handoffs`);
+    assert.equal(excludedWorkspace(handoffs, CAPCOM), 'capcom');
+    assert.equal(excludedWorkspace(pathToSlug(`${handoffs}/162ee578-7258-4c87-8d60-9e9d1957f0db/runtime`), CAPCOM), 'capcom');
     // El scratchpad por sesión, en sus dos formas (macOS resuelve /tmp).
     assert.equal(excludedWorkspace('/private/tmp/claude-501/x/scratchpad/probe-a', CAPCOM), 'scratchpad');
     assert.equal(excludedWorkspace('/tmp/claude-501/session/scratchpad', CAPCOM), 'scratchpad');

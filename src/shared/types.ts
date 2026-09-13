@@ -348,6 +348,30 @@ export interface SessionRollup {
  */
 export type EscalationStatus = 'pending' | 'with_ceo' | 'answered' | 'withdrawn' | 'expired';
 
+/**
+ * Por qué una pregunta dejó de existir sin que nadie la contestara. Viaja en
+ * el evento `escalation:withdraw` del hub y se anota en el diario, para que
+ * el recuento de «sin respuesta» no la cuente: una pregunta que nadie
+ * contestó y una que dejó de hacer falta son dos hechos distintos.
+ *
+ *   agent       el collector la retiró: el agente siguió solo, se le contestó
+ *               en su terminal, o su sesión terminó
+ *   permission  el collector retiró un diálogo de permisos: la pantalla cambió
+ *               o el diálogo desapareció sin confirmar nada. Es la clase que
+ *               engorda cuando el detector minta una escalación por cada
+ *               cambio de pantalla, y por eso se cuenta aparte de `agent`
+ *   gone        el agente que preguntaba salió del mundo
+ *   superseded  la sustituyó otro diálogo de permisos del mismo agente
+ *   expired     la cola de preguntas desbordó y caducó por vieja
+ *   dismissed   una persona la descartó desde la consola
+ *
+ * Se deduce de lo que el hub sabe (si la escalación era de permisos, quién
+ * la cierra), nunca del texto del motivo: el motivo es prosa del collector y
+ * se guarda tal cual, para leerlo, no para clasificarlo.
+ */
+export type WithdrawCause = 'agent' | 'permission' | 'gone' | 'superseded' | 'expired' | 'dismissed';
+export const WITHDRAW_CAUSES: readonly WithdrawCause[] = ['agent', 'permission', 'gone', 'superseded', 'expired', 'dismissed'];
+
 export interface Escalation {
   /** Terminal approval: sending a key is not resolution. */
   permission?: { phase: 'requested' | 'pending' | 'confirmed'; fingerprint: string };

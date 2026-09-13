@@ -108,6 +108,8 @@ export function roots(): Root[] {
     { category: 'recovery', path: path.join(orca, 'history.jsonl') },
     { category: 'recovery', path: path.join(orca, 'recovery-images') },
     { category: 'recovery', path: path.join(orca, 'capcom') },
+    // CAPCOM's handoffs: beside its directory, not under it (capcom.ts, `capcomHandoffsDir`).
+    { category: 'recovery', path: path.join(orca, 'capcom-handoffs') },
     { category: 'recovery', path: path.join(orca, 'worker-recovery') },
     { category: 'recovery', path: path.join(claude, 'history.jsonl') },
 

@@ -134,7 +134,7 @@ export function codexConfigPath(env: Record<string, string | undefined> = proces
  * The same promise for Codex, whose trust lives in TOML instead of JSON.
  *
  * A handoff resumes its destination in a directory that did not exist a second
- * earlier — `handoffs/<planId>/runtime` — so the TUI opens on "Do you trust the
+ * earlier — `<capcomHandoffsDir>/<planId>/runtime` — so the TUI opens on "Do you trust the
  * contents of this directory?" and stops there. Nobody is watching that pane:
  * readiness times out, the original is retained, and a clean reset reports a
  * failure while the old context stays exactly where it was.
@@ -189,6 +189,24 @@ export function preTrust(dir: string, file: string = claudeConfigPath()): 'alrea
 export function capcomDir(): string {
   return process.env['ORCA_CAPCOM_DIR'] ?? path.join(orcaDir(), 'capcom');
 }
+
+/**
+ * Where its handoffs are archived, and where a relieved CAPCOM runs: a SIBLING
+ * of the CAPCOM directory, never a descendant.
+ *
+ * A CLI loads the rule files of every ancestor of its cwd. While handoffs
+ * lived at `~/.orca/capcom/handoffs/<id>/runtime`, `~/.orca/capcom/CLAUDE.md`
+ * — the full brief, rewritten at every collector start for the CAPCOM that
+ * runs directly there — reached every relieved session on top of its own
+ * brief: twice on a continuity handoff, and the whole text on a CLEAN reset
+ * whose entire point is not to inject it. `<dir>-handoffs` shares no ancestor
+ * below `~/.orca`, and nothing there carries a rule file. The name follows the
+ * CAPCOM directory so that moving one moves the other (`ORCA_CAPCOM_DIR`), and
+ * so that the console keeps classifying it as command space, not as a project:
+ * see `excludedWorkspace` in `shared/workspaces.ts`.
+ */
+export function capcomHandoffsDirFor(dir: string): string { return `${dir}-handoffs`; }
+export function capcomHandoffsDir(): string { return capcomHandoffsDirFor(capcomDir()); }
 
 /**
  * Does this collector carry CAPCOM?
@@ -395,6 +413,8 @@ export interface CapcomDeps {
 
 export class CapcomSession {
   readonly dir: string;
+  /** Where its handoffs go: next to `dir`, never under it. See `capcomHandoffsDirFor`. */
+  readonly handoffsDir: string;
   private deps: CapcomDeps;
   private now: () => number;
   /** The session we believe is CAPCOM, or null when there is none. */
@@ -411,6 +431,7 @@ export class CapcomSession {
   constructor(deps: CapcomDeps) {
     this.deps = deps;
     this.dir = deps.dir ?? capcomDir();
+    this.handoffsDir = capcomHandoffsDirFor(this.dir);
     this.now = deps.now ?? (() => Date.now());
   }
 

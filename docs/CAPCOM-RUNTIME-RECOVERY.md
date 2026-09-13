@@ -200,7 +200,7 @@ instalado no garantiza acceso al modelo ni cuota: la preparación comprueba la
 respuesta real antes del relevo.
 
 Elegir otro proveedor crea un respaldo, todavía sin invocar el modelo destino:
-`~/.orca/capcom/handoffs/<uuid>/source.jsonl`, `conversation.md`, `HANDOFF.md`,
+`~/.orca/capcom-handoffs/<uuid>/source.jsonl`, `conversation.md`, `HANDOFF.md`,
 configuración de recuperación anterior y `manifest.json` con SHA-256. La
 conversación incluye el historial archivado previo y el transcript actual;
 el checkpoint incluye tareas, escalaciones, mensajes y estado de los workers.

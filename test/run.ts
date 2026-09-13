@@ -10,7 +10,17 @@
  *
  * `--changed` existe porque la suite completa tarda minutos y un agente que
  * verifica un cambio de dos ficheros no necesita las 62. La selección sale del
- * grafo de imports (ver affected.ts), no de una lista que haya que mantener.
+ * grafo de imports y de las rutas que las pruebas leen del disco (ver
+ * affected.ts), no de una lista que haya que mantener.
+ *
+ * Una corrida que no ejecuta ninguna suite no sale en verde. «No ejecuté
+ * nada» y «ejecuté y pasó» son cosas distintas, y durante semanas el código de
+ * salida dijo lo segundo cuando pasaba lo primero: se tocó sólo `hud.css`,
+ * ninguna suite la alcanzaba por imports, y la verificación fue verde sin
+ * mirar nada. Ahora sale con NOTHING_RAN, distinto del 1 de los fallos, para
+ * que quien lea el código sepa cuál de las dos cosas pasó. La única corrida
+ * vacía que es verde de verdad es `--changed` con el árbol limpio: no hay
+ * nada tocado, luego nada sin verificar.
  */
 
 // El collector loguea a nivel info por diseño: es un daemon desatendido. En una
@@ -36,7 +46,7 @@ import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isRealOrcaHome } from '../src/hub/harness.ts';
-import { affected } from './affected.ts';
+import { affected, isProse } from './affected.ts';
 import { runSuite, type TestFn, type TestModule, type TestResult } from './harness.ts';
 
 /*
@@ -106,6 +116,8 @@ function adapt(file: string, mod: Record<string, unknown>): TestModule | null {
 const DIR = new URL('.', import.meta.url).pathname;
 const ROOT = dirname(DIR.replace(/\/$/, ''));
 const ARGS = process.argv.slice(2);
+/** Código de salida cuando no se ejecutó ninguna suite: ni verde ni el rojo de un fallo. */
+export const NOTHING_RAN = 3;
 const FILTERS = ARGS.filter((a) => !a.startsWith('--'));
 const SINCE = ARGS.find((a) => a.startsWith('--since='))?.slice('--since='.length);
 
@@ -124,14 +136,34 @@ function changedFiles(): string[] {
 async function main() {
   let files = (await readdir(DIR)).filter((f) => f.endsWith('.test.ts')).sort();
   let why = 'todas las suites';
+  let touched: number | undefined;
+  // Tocado, sin suite, y código: lo único que de verdad queda sin verificar.
+  let unverified = 0;
 
   if (SINCE || ARGS.includes('--changed')) {
     const changed = changedFiles();
-    const { suites, uncovered } = await affected(DIR, changed, ROOT);
-    files = suites;
-    why = `${changed.length} fichero(s) tocado(s) → ${suites.length} suite(s)`;
+    touched = changed.length;
+    const all = await affected(DIR, changed, ROOT);
+    files = all.suites;
+    why = `${changed.length} fichero(s) tocado(s) → ${all.suites.length} suite(s)`;
+    const rel = (u: string) => u.slice(ROOT.length + 1);
+    // La documentación no la lee ningún proceso: tocarla sola no deja nada sin
+    // mirar, y decir «sin suite que la cubra» de un .md sería pedir una prueba
+    // que no puede existir. Se dice aparte y no cuenta.
+    const prose = all.uncovered.filter((u) => isProse(rel(u)));
+    const uncovered = all.uncovered.filter((u) => !isProse(rel(u)));
+    unverified = uncovered.length;
+    if (prose.length) console.log(`sólo documentación, nada que probar (${prose.length}): ${prose.map(rel).join(', ')}`);
     // Correr menos tests solo es honesto si se ve qué se ha quedado fuera.
-    if (uncovered.length) console.log(`\x1b[33msin suite que los cubra\x1b[0m (${uncovered.length}): ${uncovered.map((u) => u.slice(ROOT.length + 1)).join(', ')}`);
+    if (uncovered.length) {
+      console.log(`\x1b[33msin suite que los cubra\x1b[0m (${uncovered.length}): ${uncovered.map(rel).join(', ')}`);
+      // Y si lo que queda fuera lo mira un shot o una escena visual, decirlo:
+      // esta corrida no los ejecuta, pero «nadie lo mira» sería mentira.
+      for (const [suffix, how] of [['.shots.ts', 'npm run shots -- <nombre>'], ['.visual.ts', 'npm run visual']] as const) {
+        const others = await affected(DIR, uncovered.map(rel), ROOT, suffix);
+        if (others.suites.length) console.log(`  lo miran fuera de esta corrida: ${others.suites.join(' ')}  (${how})`);
+      }
+    }
   }
 
   if (FILTERS.length) {
@@ -140,8 +172,11 @@ async function main() {
   }
 
   if (!files.length) {
-    console.log(`no test files (${why})`);
-    return;
+    if (touched === 0) { console.log(`nada tocado, nada que verificar (${why})`); return; }
+    // Sólo documentación tocada: no hay nada que una suite pudiera mirar.
+    if (touched !== undefined && unverified === 0 && !FILTERS.length) { console.log(`sólo documentación tocada, nada que verificar (${why})`); return; }
+    console.log(`\x1b[33mninguna suite ejecutada\x1b[0m (${why}): no se ha verificado nada`);
+    process.exit(NOTHING_RAN);
   }
   if (files.length !== (await readdir(DIR)).filter((f) => f.endsWith('.test.ts')).length) console.log(`${why}: ${files.join(' ')}\n`);
 

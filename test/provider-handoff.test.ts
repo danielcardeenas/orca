@@ -3,19 +3,29 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ProviderHandoffs, transcriptMarkdown, demoteArchivedRules } from '../src/collector/provider-handoff.ts';
-import { capcomBrief } from '../src/collector/briefs.ts';
+import { capcomBrief, cleanCapcomBrief } from '../src/collector/briefs.ts';
 import type { AgentHandle } from '../src/collector/commands.ts';
-import { CapcomSession } from '../src/collector/capcom.ts';
+import { CapcomSession, capcomHandoffsDirFor } from '../src/collector/capcom.ts';
 import { test, ok } from './harness.ts';
 const sourceId = '11111111-2222-4333-8444-555555555555';
 const targetId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 function rig() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-provider-'));
+  // Como en producción: bajo un mismo padre, el directorio de CAPCOM y, a su
+  // lado —no debajo—, el de sus relevos.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-provider-'));
+  const dir = path.join(root, 'capcom'); fs.mkdirSync(dir, { mode: 0o700 });
+  const archives = capcomHandoffsDirFor(dir);
   const source = path.join(dir, 'source.jsonl');
   fs.writeFileSync(source, JSON.stringify({ type: 'response_item', timestamp: '2026-09-06T01:00:00Z', payload: { type: 'message', role: 'user', content: [{ text: 'Do not lose the hygiene task.' }] } }) + '\n');
   const a = { id: sourceId, sessionId: sourceId, runtime: 'codex', model: 'gpt-6-astra', pane: 'orca-source', alive: true, state: 'idle', transcriptPath: source } as AgentHandle;
   const holds: boolean[] = []; const activations: string[] = [];
-  const deps = { dir: () => dir, agent: () => a, owns: () => true, context: () => 'Pending: hygiene', busy: () => false,
+  // El dueño de los ficheros con los que arranca un CAPCOM: el mismo que los
+  // escribe al activar y al recuperar. El servicio de relevos sólo le pide que
+  // amueble el cwd del destino.
+  const cap = new CapcomSession({ dir, bin: '/fake/claude', hubUrl: 'ws://127.0.0.1:1', token: '', trust: false,
+    alive: () => false, note() {}, lineage: { noteSpawn() {}, bind() {}, demote() {} } });
+  const deps = { dir: () => dir, archives: () => archives, configure: (cwd: string, mode: 'continuity' | 'clean') => cap.writeConfig(cwd, mode),
+    agent: () => a, owns: () => true, context: () => 'Pending: hygiene', busy: () => false,
     models: () => [{ runtime: 'claude' as const, id: 'sonnet', label: 'Sonnet', installed: true }],
     hold: (_id: string, on: boolean) => { holds.push(on); },
     activate: async (_p: unknown, id: string) => { activations.push(id); },
@@ -23,13 +33,14 @@ function rig() {
   };
   const service = new ProviderHandoffs(deps);
   async function settle() { for (let i = 0; i < 100 && service.locked(a.id); i++) await Promise.resolve(); }
-  return { dir, source, a, deps, service, settle, holds, activations, dispose: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  return { root, dir, archives, source, a, deps, service, settle, holds, activations, dispose: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
 /**
  * Los ficheros de reglas que un CLI cargaría desde un cwd: el suyo y el de
  * todos sus ancestros hasta la raíz que se le dé. Es el camino que convirtió
- * un respaldo en instrucciones, así que la prueba lo recorre igual.
+ * un respaldo en instrucciones y el que le colaba el brief largo a un reset
+ * limpio, así que la prueba lo recorre igual.
  */
 function rulesOnPath(cwd: string, root: string, name = 'CLAUDE.md'): string[] {
   const out: string[] = [];
@@ -40,49 +51,99 @@ function rulesOnPath(cwd: string, root: string, name = 'CLAUDE.md'): string[] {
   }
   return out;
 }
+/** ¿Cuelga `child` de `parent`? Lo que el cwd de un relevo ya no puede hacer del directorio de CAPCOM. */
+const under = (child: string, parent: string) => child === parent || child.startsWith(parent + path.sep);
 export default { suite: 'Provider handoff', tests: [
-  test('the rules backup leaves the ancestor chain, so a relieved session loads its brief once', () => {
+  test('a relieved session runs beside the CAPCOM directory, and loads its brief exactly once', () => {
     const r = rig(); try {
-      // Como en producción: el brief vivo del directorio de CAPCOM, que es
-      // ancestro de todo cwd de relevo y no se puede quitar de ahí.
+      // Como en producción: el brief vivo del directorio de CAPCOM, que el
+      // collector reescribe al arrancar y que no se puede quitar de ahí.
       const brief = capcomBrief();
       for (const name of ['CLAUDE.md', 'AGENTS.md']) fs.writeFileSync(path.join(r.dir, name), brief);
       const plan = r.service.review(r.a.id, 'codex', 'gpt-6-astra', 'hygiene pending', 'continuity');
+      // El archivo y el cwd viven en el hermano, no bajo el directorio de CAPCOM.
+      assert.ok(under(plan.archive, r.archives) && under(plan.cwd!, plan.archive));
+      assert.equal(under(plan.cwd!, r.dir), false);
       // El respaldo se conserva, byte a byte, y no en un ancestro del destino.
       assert.equal(fs.existsSync(path.join(plan.archive, 'CLAUDE.md')), false);
       assert.equal(fs.existsSync(path.join(plan.archive, 'AGENTS.md')), false);
       assert.equal(fs.readFileSync(path.join(plan.archive, 'rules', 'CLAUDE.md'), 'utf8'), brief);
       assert.equal(fs.readFileSync(path.join(plan.archive, 'rules', 'AGENTS.md'), 'utf8'), brief);
       assert.match(fs.readFileSync(plan.checkpointPath, 'utf8'), /copies in rules\/ inside this archive/);
-      // Y el relevo sigue arrancando con su brief completo en su propio cwd.
+      // El relevo arranca con su brief completo en su propio cwd, amueblado por
+      // el dueño de la configuración: el MCP y los settings llegan con él.
       assert.equal(fs.readFileSync(path.join(plan.cwd!, 'CLAUDE.md'), 'utf8'), brief);
       assert.equal(fs.readFileSync(path.join(plan.cwd!, 'AGENTS.md'), 'utf8'), brief);
+      assert.ok(fs.existsSync(path.join(plan.cwd!, '.mcp.json')) && fs.existsSync(path.join(plan.cwd!, '.claude', 'settings.json')));
       // Lo que se cobraba: tres ficheros de reglas en la cadena, dos idénticos.
-      // Lo que queda: el del cwd y el vivo del directorio de CAPCOM.
-      assert.deepEqual(rulesOnPath(plan.cwd!, r.dir), [path.join(plan.cwd!, 'CLAUDE.md'), path.join(r.dir, 'CLAUDE.md')]);
-      assert.deepEqual(rulesOnPath(plan.cwd!, r.dir, 'AGENTS.md'), [path.join(plan.cwd!, 'AGENTS.md'), path.join(r.dir, 'AGENTS.md')]);
-      return ok('backup kept, ancestor chain clean, destination brief intact', true);
+      // Después del respaldo en rules/: dos, el del cwd y el vivo de CAPCOM.
+      // Ahora: uno. Recorrido hasta el padre común, que es donde se separan.
+      assert.deepEqual(rulesOnPath(plan.cwd!, r.root), [path.join(plan.cwd!, 'CLAUDE.md')]);
+      assert.deepEqual(rulesOnPath(plan.cwd!, r.root, 'AGENTS.md'), [path.join(plan.cwd!, 'AGENTS.md')]);
+      return ok('archive beside CAPCOM, backup kept, one brief on the chain', true);
     } finally { r.dispose(); }
   }),
-  test('a clean reset loads the brief exactly once, and earlier archives stop charging for theirs', () => {
+  test('a clean reset receives only the short brief: nothing above its runtime carries the long one', () => {
     const r = rig(); try {
       const brief = capcomBrief();
       for (const name of ['CLAUDE.md', 'AGENTS.md']) fs.writeFileSync(path.join(r.dir, name), brief);
-      // Un archivo escrito antes del arreglo: el respaldo en la raíz, que es
-      // ancestro del cwd de la sesión que manda ahora mismo.
-      const old = path.join(r.dir, 'handoffs', 'aaaaaaaa-1111-4111-8111-111111111111');
-      fs.mkdirSync(path.join(old, 'runtime'), { recursive: true });
-      for (const name of ['CLAUDE.md', 'AGENTS.md']) fs.writeFileSync(path.join(old, name), brief);
       const plan = r.service.review(r.a.id, 'codex', 'gpt-6-astra', '', 'clean');
+      // Lo que hoy no se cumplía: el modo que promete no inyectar las reglas
+      // persistentes las recibía enteras por el ancestro. Un solo fichero en
+      // la cadena, y es el corto.
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+        const chain = rulesOnPath(plan.cwd!, r.root, name);
+        assert.deepEqual(chain, [path.join(plan.cwd!, name)]);
+        assert.equal(fs.readFileSync(chain[0]!, 'utf8'), cleanCapcomBrief());
+        assert.equal(chain.some(f => fs.readFileSync(f, 'utf8') === brief), false, `${name}: the long brief reached a clean reset`);
+      }
+      // El largo sigue archivado como evidencia, donde ningún CLI lo carga.
+      assert.equal(fs.readFileSync(path.join(plan.archive, 'rules', 'CLAUDE.md'), 'utf8'), brief);
+      return ok('clean reset: the short brief, once, and nothing else on the chain', true);
+    } finally { r.dispose(); }
+  }),
+  test('archives written under the CAPCOM directory stay there: still found by id, demoted and pruned', () => {
+    const r = rig(); try {
+      const brief = capcomBrief();
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) fs.writeFileSync(path.join(r.dir, name), brief);
+      // Un archivo de antes: bajo el directorio de CAPCOM, con el respaldo en
+      // la raíz y su plan. Es historial de sesiones anteriores: no se mueve.
+      const oldId = 'aaaaaaaa-1111-4111-8111-111111111111';
+      const old = path.join(r.dir, 'handoffs', oldId);
+      fs.mkdirSync(path.join(old, 'runtime'), { recursive: true });
+      for (const name of ['CLAUDE.md', 'AGENTS.md', 'source.jsonl', 'conversation.md']) fs.writeFileSync(path.join(old, name), brief);
+      fs.writeFileSync(path.join(old, 'plan.json'), JSON.stringify({ id: oldId, fromId: 'x', fromRuntime: 'codex', fromModel: null, runtime: 'codex', model: 'gpt-6-astra', at: 1, archive: old, historyPath: path.join(old, 'conversation.md'), checkpointPath: path.join(old, 'HANDOFF.md'), bytes: 0, sha256: '', phase: 'complete', detail: '' }));
+      const plan = r.service.review(r.a.id, 'codex', 'gpt-6-astra', '', 'clean');
+      assert.equal(under(plan.archive, r.archives), true);
+      assert.equal(fs.existsSync(old), true, 'the old archive is not moved');
+      // Se sigue encontrando por id, donde está.
+      assert.equal(r.service.has(oldId), true);
+      assert.equal(r.service.status(oldId).archive, old);
+      // Su respaldo baja a rules/, como prometía el arreglo anterior; lo que
+      // le queda por ancestro es el brief vivo de CAPCOM, que sólo deja de
+      // cobrar cuando esa sesión se releva a un cwd de fuera.
       assert.equal(fs.existsSync(path.join(old, 'CLAUDE.md')), false);
       assert.equal(fs.readFileSync(path.join(old, 'rules', 'CLAUDE.md'), 'utf8'), brief);
-      assert.deepEqual(rulesOnPath(path.join(old, 'runtime'), r.dir), [path.join(r.dir, 'CLAUDE.md')]);
-      // El destino limpio: su brief corto, y el brief largo una sola vez.
-      const chain = rulesOnPath(plan.cwd!, r.dir);
-      assert.deepEqual(chain, [path.join(plan.cwd!, 'CLAUDE.md'), path.join(r.dir, 'CLAUDE.md')]);
-      assert.equal(chain.filter(f => fs.readFileSync(f, 'utf8') === brief).length, 1);
-      assert.equal(demoteArchivedRules(path.join(r.dir, 'handoffs')), 0);
-      return ok('clean reset pays the brief once; pre-existing archives migrate', true);
+      assert.deepEqual(rulesOnPath(path.join(old, 'runtime'), r.root), [path.join(r.dir, 'CLAUDE.md')]);
+      // Y la poda de lo superado sigue alcanzándolo, como antes.
+      assert.equal(fs.existsSync(path.join(old, 'source.jsonl')), false);
+      assert.ok(fs.existsSync(path.join(old, 'PRUNED.md')));
+      assert.equal(demoteArchivedRules(r.archives) + demoteArchivedRules(path.join(r.dir, 'handoffs')), 0);
+      return ok('legacy archives: in place, found by id, demoted and pruned', true);
+    } finally { r.dispose(); }
+  }),
+  test('without an owner for the runtime files a fresh-context handoff is refused; a plain one runs where CAPCOM runs', () => {
+    const r = rig(); try {
+      const { configure: _configure, ...orphan } = r.deps;
+      const service = new ProviderHandoffs(orphan);
+      assert.throws(() => service.review(r.a.id, 'codex', 'gpt-6-astra', '', 'clean'), /furnish/);
+      assert.equal(fs.existsSync(r.archives), false, 'nothing was written');
+      // Sin contexto nuevo no hay cwd que amueblar: el destino corre donde el
+      // origen, y el plan lo dice en vez de dejar que alguien lo deduzca.
+      const plain = service.review(r.a.id, 'claude', 'sonnet', 'pending');
+      assert.equal(plain.cwd, r.dir);
+      assert.equal(fs.existsSync(path.join(plain.archive, 'runtime')), false);
+      return ok('no owner, no fresh runtime; a plain handoff keeps its cwd explicit', true);
     } finally { r.dispose(); }
   }),
   test('review archives exact bytes and requires confirmation before destination preparation', async () => {

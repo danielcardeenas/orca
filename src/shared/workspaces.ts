@@ -65,6 +65,16 @@ export function capcomHome(env: Record<string, string | undefined> = process.env
 }
 
 /**
+ * Dónde se archivan los relevos de CAPCOM, y dónde corre un CAPCOM relevado:
+ * `<capcomHome>-handoffs`, HERMANO del directorio del mando y no hijo, para
+ * que el brief de ahí no sea ancestro del cwd del destino. La misma
+ * resolución que `capcomHandoffsDir()` en el collector.
+ */
+export function capcomHandoffsHome(env: Record<string, string | undefined> = process.env): string {
+  return `${capcomHome(env)}-handoffs`;
+}
+
+/**
  * El scratchpad de Claude Code: `/tmp/claude-<uid>/…` y su forma resuelta en
  * macOS, `/private/tmp/claude-<uid>/…`. Se reconoce sobre el slug para que
  * valga igual con ruta o con slug.
@@ -80,6 +90,13 @@ export type ExcludedWorkspace = 'capcom' | 'scratchpad';
  * Acepta las dos formas porque el collector tiene una u otra según el momento:
  * el slug siempre, el `cwd` sólo después de leer una línea del transcript.
  * Un subdirectorio cuenta como el directorio: `~/.orca/capcom/notes` es CAPCOM.
+ *
+ * Y el directorio de los relevos también, aunque sea hermano y no hijo: el
+ * slug no distingue `/` de `-`, así que `~/.orca/capcom-handoffs/<id>/runtime`
+ * empieza igual que el del mando y cae en la misma regla. No es un accidente
+ * que se tolere: el nombre se eligió así (`capcomHandoffsHome`), y la prueba
+ * de workspaces lo afirma para que renombrarlo no deje al CAPCOM relevado
+ * pintado como un proyecto.
  *
  * `capcomDir` se pasa cuando quien pregunta ya sabe dónde vive el mando —el
  * collector lo sabe, es él quien lo arranca— y así no hay dos resoluciones que

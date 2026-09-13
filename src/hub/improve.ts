@@ -821,15 +821,41 @@ export function buildDigest(input: {
   const lines: string[] = [];
 
   lines.push(`fleet now: ${fleet.agents} agents, ${fleet.blocked} blocked, ${fleet.missionsOpen} open missions (${fleet.missionsOwed} owed an answer)`);
-  lines.push(`launches: ${stats.launches} (human ${stats.byLauncher.human}, capcom ${stats.byLauncher.capcom}, agent ${stats.byLauncher.agent})`);
+  lines.push(`launches: ${stats.launches} distinct agents (human ${stats.byLauncher.human}, capcom ${stats.byLauncher.capcom}, agent ${stats.byLauncher.agent} — those three count launch ENTRIES, so a relaunched agent adds one)`);
   lines.push(`endings: ${stats.ends.done} done, ${stats.ends.dead} dead${stats.doneRate === null ? '' : ` (${Math.round(stats.doneRate * 100)}% done)`}`);
   lines.push(`use: ${fmtTokens(stats.usage.tokens)} tokens total, ${stats.usage.avgTokens === null ? '—' : fmtTokens(stats.usage.avgTokens)} per agent over ${stats.usage.measured} measured end(s), avg run ${mins(stats.duration.avgMs)}`);
   lines.push(`escalations: ${stats.escalations.asked} asked · capcom answered ${stats.escalations.answeredByCapcom} · human answered ${stats.escalations.answeredByHuman} · ${stats.escalations.unanswered} unanswered · avg wait ${mins(stats.escalations.avgWaitMs)}`);
   lines.push(`capcom rotations: ${stats.rotations} · landings ${stats.landings.ok} ok / ${stats.landings.failed} failed`);
 
-  const projects = stats.byProject.slice(0, 5)
-    .map((p) => `${p.project ?? p.projectId ?? '?'} ${p.launches}L ${p.dead}✝ ${fmtTokens(p.totalTokens)}`);
-  if (projects.length) lines.push(`by project: ${projects.join(' · ')}`);
+  /*
+   * Cinco proyectos y el resto dicho, no callado.
+   *
+   * La línea suma por ENTRADAS de lanzamiento y la cabecera cuenta AGENTES
+   * distintos, así que las dos cifras no tienen por qué coincidir aunque nada
+   * esté roto; lo que sí rompía la lectura era recortar a cinco sin decirlo:
+   * el revisor comparaba 42 arriba con 39 abajo y buscaba un fallo donde sólo
+   * había cuatro proyectos fuera de la lista.
+   */
+  const shown = stats.byProject.slice(0, 5);
+  const projects = shown.map((p) => `${p.project ?? p.projectId ?? '?'} ${p.launches}L ${p.dead}✝ ${fmtTokens(p.totalTokens)}`);
+  if (projects.length) {
+    const rest = stats.byProject.length - shown.length;
+    const restLaunches = stats.byProject.slice(5).reduce((a, p) => a + p.launches, 0);
+    lines.push(`by project (launch entries; top 5 of ${stats.byProject.length}): ${projects.join(' · ')}`
+      + (rest > 0 ? ` · +${rest} more project(s) with ${restLaunches}L not shown` : ''));
+  }
+
+  /*
+   * Lo que NO está contado, en la misma línea que los totales.
+   *
+   * El diario marca lo que escribió el arnés en vez de tirarlo
+   * (`hub/journal.ts`), y todo lo de arriba lo excluye. Decir cuánto es la
+   * mitad del trato: la primera vez que alguien vea una cifra caer sin motivo
+   * escrito dejará de creerse las dos.
+   */
+  lines.push(stats.excluded > 0
+    ? `synthetic excluded: ${stats.excluded} harness entr${stats.excluded === 1 ? 'y' : 'ies'} in this window are NOT counted above (test fixtures, see shared/synthetic.ts)`
+    : 'synthetic excluded: none — no harness entry falls in this window');
 
   /*
    * Desde cuándo cuentan los contadores de aquí abajo. Un cero sin fecha no se

@@ -18,7 +18,7 @@ import { appendFile, mkdir, readdir, rm, stat, writeFile, rename } from 'node:fs
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CeoMessage, Escalation } from '../shared/types.ts';
-import { MAX_ARCHIVED, isArchivedAgent, isUnarchived, type ArchivedAgent, type Unarchived } from '../shared/archive.ts';
+import { MAX_ARCHIVED, isArchivedAgent, isSyntheticMark, isUnarchived, syntheticMark, type ArchivedAgent, type Unarchived } from '../shared/archive.ts';
 import type { WorldEvent } from './world.ts';
 import { readJsonlTail } from './jsonl.ts';
 import { ORCA_DIR } from './auth.ts';
@@ -137,6 +137,16 @@ export class HubStore {
     this.queue(join(this.dir, 'archived.jsonl'), { id, at, undo: true } satisfies Unarchived);
   }
 
+  /**
+   * "Aquella lápida era del arnés": una corrección, en la única forma que
+   * admite un archivo append-only. No reescribe la lápida ni la quita; la
+   * siguiente lectura la devuelve marcada.
+   */
+  appendSyntheticMark(ids: readonly string[], at: number): void {
+    const file = join(this.dir, 'archived.jsonl');
+    for (const id of ids) this.queue(file, syntheticMark(id, at));
+  }
+
   /** Lo que se cayó del frame por recorte: sale del mundo, no de la historia. */
   overflow(kind: string, items: unknown[]): void {
     const file = join(this.dir, 'overflow', `${dayStamp()}.jsonl`);
@@ -166,11 +176,27 @@ export class HubStore {
   loadArchived(limit = MAX_ARCHIVED): ArchivedAgent[] {
     const lines = readTailLines(join(this.dir, 'archived.jsonl'), ARCHIVED_TAIL_BYTES);
     const live = new Map<string, ArchivedAgent>();
+    /*
+     * Las marcas se recuerdan aparte y no sólo se aplican al pasar.
+     *
+     * Una marca es una corrección sobre una lápida que ya estaba escrita, así
+     * que normalmente va DETRÁS; pero un id puede desarchivarse y volver a
+     * archivarse después, y entonces la lápida nueva es posterior a su marca.
+     * Recordarla cubre los dos órdenes sin depender de cuál ocurrió.
+     */
+    const marked = new Set<string>();
     for (const line of lines) {
       let v: unknown;
       try { v = JSON.parse(line); } catch { continue; }
       if (isUnarchived(v)) live.delete(v.id);
-      else if (isArchivedAgent(v)) { live.delete(v.id); live.set(v.id, v); }
+      else if (isSyntheticMark(v)) {
+        marked.add(v.id);
+        const t = live.get(v.id);
+        if (t) live.set(v.id, { ...t, synthetic: true });
+      } else if (isArchivedAgent(v)) {
+        live.delete(v.id);
+        live.set(v.id, marked.has(v.id) ? { ...v, synthetic: true } : v);
+      }
     }
     return [...live.values()].slice(-limit);
   }

@@ -108,6 +108,8 @@ export function queryOf(input: Record<string, unknown>, now = Date.now()): Journ
     kind: (kind as JournalKind | null), since, until,
     state: state as 'done' | 'dead' | null, by: by as JournalQuery['by'],
     text: str(input.text), limit, order: input.newest_first === false ? 'asc' : 'desc',
+    // La serie completa hay que pedirla: el defecto es uso real (hub/journal.ts).
+    includeSynthetic: input.include_synthetic === true,
   };
 }
 
@@ -138,7 +140,9 @@ export function run(ctx: CeoContext, name: string, input: Record<string, unknown
       result: JSON.stringify(s, null, 1),
       summary: `journal stats${scope ? ` (${scope})` : ''}: ${s.launches} launch(es), ${s.ends.done} done / ${s.ends.dead} dead`
         + (s.doneRate !== null ? ` (${Math.round(s.doneRate * 100)}% done)` : '')
-        + `, ${fmtTokens(s.usage.tokens)} tokens over ${s.usage.measured} measured end(s), ${s.escalations.asked} escalation(s), ${s.escalatedBriefs.length} brief(s) that escalated`,
+        + `, ${fmtTokens(s.usage.tokens)} tokens over ${s.usage.measured} measured end(s), ${s.escalations.asked} escalation(s), ${s.escalatedBriefs.length} brief(s) that escalated`
+        // Lo apartado se dice con el total, o el total miente por omisión.
+        + (s.excluded > 0 ? ` · ${s.excluded} harness entr${s.excluded === 1 ? 'y' : 'ies'} excluded` : ''),
     };
   }
 

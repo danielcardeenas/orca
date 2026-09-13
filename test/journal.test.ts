@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { AgentLifecycle } from '../src/hub/lifecycle.ts';
 import type { AutonomyDeps } from '../src/hub/autonomy.ts';
 import {
-  Journal, createJournal, parseWhen, JOURNAL_FILE, BRIEFING_MAX_LINES,
+  Journal, createJournal, parseWhen, JOURNAL_FILE, BRIEFING_MAX_LINES, MAX_LIMIT,
   type JournalApi, type JournalEntry,
 } from '../src/hub/journal.ts';
 import { TOOLS, run, queryOf, compact, briefingLines } from '../src/agents/tools-journal.ts';
@@ -512,11 +512,15 @@ tests.push(test('orca journal: one line per entry, --stats, --json, and a window
   });
   const fleet = startFakeFleet({ hub: `ws://127.0.0.1:${hub.port}`, token: 'test-token-journal', quiet: true, speed: 6 });
   try {
-    // La flota falsa entra, pero es del arnés y el diario no la anota: lo que
-    // el subcomando imprime lo pone aquí una máquina real, a mano.
+    // La flota falsa entra y el diario la anota MARCADA; lo que ninguna
+    // lectura hace es contarla, así que todo lo que el subcomando imprime lo
+    // pone aquí una máquina real, a mano.
     const fleetIn = await until(() => Object.keys(hub.world.state.agents).length > 5, 8000, 100);
     if (!fleetIn) throw new Error('the fake fleet never came in');
-    if (hub.autonomy.journal.sweep() !== 0) throw new Error('the sweep journaled the fake fleet');
+    hub.autonomy.journal.sweep();
+    await hub.autonomy.journal.flush();
+    if (hub.autonomy.journal.query({ limit: 500 }).length !== 0) throw new Error('a reading counted the fake fleet');
+    if (hub.autonomy.journal.query({ limit: 500, includeSynthetic: true }).length === 0) throw new Error('the harness was not journaled at all');
     for (const [i, id] of ['r1', 'r2', 'r3'].entries()) {
       hub.autonomy.journal.record({
         kind: 'launch', at: Date.now() - 3_000 + i, agentId: id, callsign: id.toUpperCase(), machineId: 'm-real',
@@ -529,6 +533,8 @@ tests.push(test('orca journal: one line per entry, --stats, --json, and a window
     });
     await hub.autonomy.journal.flush();
     const plain = await cliRun(hub.port, ['journal', '--kind', 'launch', '--limit', '3']);
+    // La serie completa, pedida por su nombre, y el aviso de cuánto se aparta.
+    const whole = await cliRun(hub.port, ['journal', '--limit', '50', '--synthetic']);
     const asJson = await cliRun(hub.port, ['journal', '--json', '--limit', '2', '--asc']);
     const parsed = JSON.parse(asJson.stdout) as { ok: boolean; result: { count: number; entries: JournalEntry[] } };
     const stats = await cliRun(hub.port, ['journal', '--stats']);
@@ -538,19 +544,24 @@ tests.push(test('orca journal: one line per entry, --stats, --json, and a window
       plain.code === 0 && plain.stdout.trim().split('\n').length === 3 && plain.stdout.split('\n').every((l) => !l || /^\d{2}-\d{2} \d{2}:\d{2}  launch/.test(l))
       && asJson.code === 0 && parsed.ok && parsed.result.count === 2 && parsed.result.entries[0]!.at <= parsed.result.entries[1]!.at
       && stats.code === 0 && stats.stdout.startsWith('launches ') && stats.stdout.includes('project ')
+      && stats.stdout.includes('harness entries in this window are NOT counted above')
+      && whole.code === 0 && whole.stdout.trim().split('\n').length > 4
       && bad.code === 3 && bad.stderr.includes('since=')
       && none.code === 0 && none.stdout.includes('nothing matches'),
-      JSON.stringify({ plain: plain.stdout.slice(0, 300), stats: stats.stdout.slice(0, 200), bad: bad.stderr.slice(0, 120), none: none.stdout }));
+      JSON.stringify({ plain: plain.stdout.slice(0, 300), whole: whole.stdout.trim().split('\n').length, stats: stats.stdout.slice(0, 260), bad: bad.stderr.slice(0, 120), none: none.stdout }));
   } finally {
     fleet.stop();
     await hub.close();
+    // El barrido del diario sigue anotando (marcado) mientras el hub cierra:
+    // sin drenarlo, el rmSync deja un ENOENT en la salida de la suite.
+    await hub.autonomy.journal.flush();
     rmSync(dir, { recursive: true, force: true });
   }
 }));
 
-/* ── el arnés fuera del diario ────────────────────────────────────── */
+/* ── el arnés, marcado y fuera de toda cuenta ─────────────────────── */
 
-tests.push(test('a synthetic machine leaves nothing in the journal; a real one next to it does', async () => {
+tests.push(test('the harness is written MARKED, and no aggregate reading counts it', async () => {
   const b = box();
   try {
     b.machines.set('fx', { id: 'fx', synthetic: true } as Machine);
@@ -568,14 +579,54 @@ tests.push(test('a synthetic machine leaves nothing in the journal; a real one n
     // Uno que sólo el barrido ve, terminado, del arnés.
     b.agents.set('fx2', agent({ id: 'fx2', machineId: 'fx', state: 'dead' }));
     const swept = b.journal.sweep();
-    const landed = b.journal.landed({ agentId: 'fx1', branch: 'orca/fx1', target: 'main', ok: true });
-    const recorded = b.journal.record({ kind: 'launch', agentId: 'x', callsign: null, machineId: 'fx', projectId: null, project: null, squad: null, missionId: null });
+    b.journal.landed({ agentId: 'fx1', branch: 'orca/fx1', target: 'main', ok: true });
+    b.journal.record({ kind: 'launch', agentId: 'x', callsign: null, machineId: 'fx', projectId: null, project: null, squad: null, missionId: null });
     await b.journal.flush();
-    const all = lines(b.dir);
-    const summary = all.map((e) => `${e.kind}:${e.agentId}`).join(' ');
-    return ok('the harness stays out of the journal',
-      summary === 'launch:w1 end:w1' && swept === 0 && landed === null && recorded === null,
-      `${summary} · sweep ${swept} · landed ${String(landed)} · record ${String(recorded)}`);
+
+    const onDisk = lines(b.dir);
+    // En disco está todo, y cada entrada del arnés dice que lo es.
+    const marked = onDisk.filter((e) => e.synthetic === true).map((e) => `${e.kind}:${e.agentId}`).join(' ');
+    const real = onDisk.filter((e) => e.synthetic !== true).map((e) => `${e.kind}:${e.agentId}`).join(' ');
+    // Y ninguna lectura lo cuenta, salvo que se pida la serie entera.
+    const read = b.journal.query({ limit: 100 }).map((e) => `${e.kind}:${e.agentId}`).sort().join(' ');
+    const whole = b.journal.query({ limit: 100, includeSynthetic: true }).length;
+    const st = b.journal.stats();
+    const checks = {
+      // El CAPCOM del arnés no escribe rotación ni se vuelve el CAPCOM conocido.
+      noSyntheticRotation: !onDisk.some((e) => e.kind === 'rotation'),
+      markedOnDisk: marked === 'launch:fx1 escalation:fx1 answer:fx1 end:fx1 launch:fx2 end:fx2 landing:fx1 launch:x',
+      realOnDisk: real === 'launch:w1 end:w1',
+      sweptTheHarnessToo: swept === 2,
+      readsExcludeIt: read === 'end:w1 launch:w1',
+      wholeSeriesOnRequest: whole === onDisk.length,
+      statsCount: st.entries === 2 && st.launches === 1 && st.ends.done === 1 && st.escalations.asked === 0,
+      statsSaysHowMuch: st.excluded === marked.split(' ').length,
+    };
+    return ok('the harness is marked, not counted', Object.values(checks).every(Boolean), JSON.stringify(checks));
+  } finally { await b.close(); }
+}));
+
+tests.push(test('stats() reads the WHOLE window, not the first 500 entries of it', async () => {
+  const b = box();
+  try {
+    b.machines.set('m1', { id: 'm1' } as Machine);
+    /*
+     * El informe del 2026-09-08 dijo «500 lanzamientos, 0 finales» sobre una
+     * ventana de 112.216 entradas: `stats()` pedía 500.000 y `query()` se lo
+     * recortaba a MAX_LIMIT con un Math.min silencioso, quedándose con las
+     * más VIEJAS —que eran todas lanzamientos—. Con 600 agentes lanzados y
+     * terminados, un recorte a 500 vuelve a dar finales de menos.
+     */
+    for (let i = 0; i < 600; i += 1) {
+      b.journal.record({ kind: 'launch', at: 1_000 + i, agentId: `a${i}`, callsign: null, machineId: 'm1', projectId: 'p_ax', project: 'AX', squad: null, missionId: null, by: 'human' });
+      b.journal.record({ kind: 'end', at: 900_000 + i, agentId: `a${i}`, callsign: null, machineId: 'm1', projectId: 'p_ax', project: 'AX', squad: null, missionId: null, state: 'done' });
+    }
+    await b.journal.flush();
+    const st = b.journal.stats();
+    const page = b.journal.query({ limit: 10_000 }).length;
+    return ok('no silent truncation in an aggregate',
+      st.entries === 1_200 && st.launches === 600 && st.ends.done === 600 && page === MAX_LIMIT,
+      `entries ${st.entries} · launches ${st.launches} · done ${st.ends.done} · one page ${page}`);
   } finally { await b.close(); }
 }));
 

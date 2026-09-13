@@ -456,7 +456,7 @@ function hubProcess(env: NodeJS.ProcessEnv): Promise<{ code: number | null; out:
 const ROOT = new URL('..', import.meta.url).pathname;
 
 const disk = [
-  test('el diario no anota al arnés, y al collector real de al lado sí', async () => {
+  test('el diario marca al arnés y no lo cuenta; al collector real de al lado sí', async () => {
     return await withHub(async (hub) => {
       // El fixture de verdad, el de test/fake-collector.ts: lanza por snapshot,
       // que es lo que el barrido convierte en entradas.
@@ -482,10 +482,20 @@ const disk = [
         const all = hub.autonomy.journal.query({ limit: 500 });
         const leaked = all.filter((e) => e.machineId === 'm-fake' || (e.machineId !== null && isFixtureMachineId(e.machineId)));
         const kinds = all.filter((e) => e.machineId === 'm-real').map((e) => e.kind).sort().join(',');
+        // El arnés SÍ se escribe, marcado: se pide aparte y cada entrada suya
+        // lo dice. Lo que ninguna lectura por defecto hace es contarlo, y eso
+        // es `leaked`. `stats().excluded` es la otra mitad del trato: decir
+        // cuánto se apartó, en el mismo sitio donde se lee el total.
+        const whole = hub.autonomy.journal.query({ limit: 500, includeSynthetic: true });
+        const harness = whole.filter((e) => e.synthetic === true);
+        const unmarked = harness.filter((e) => e.machineId !== 'm-fake' && !(e.machineId !== null && isFixtureMachineId(e.machineId)));
+        const excluded = hub.autonomy.journal.stats().excluded;
         return ok(
-          'sólo lo real llega al diario',
-          fleetIn && leaked.length === 0 && swept === 0 && kinds === 'end,escalation,launch',
-          `${all.length} entradas · del arnés: ${leaked.length} · barrido escribió ${swept} · reales: ${kinds}`,
+          'lo real se cuenta, el arnés se marca y se aparta',
+          fleetIn && leaked.length === 0 && kinds === 'end,escalation,launch'
+          && swept > 0 && harness.length > 0 && unmarked.length === 0 && excluded === harness.length,
+          `${all.length} contadas · del arnés en la cuenta: ${leaked.length} · marcadas: ${harness.length}`
+          + ` (mal marcadas ${unmarked.length}) · excluded ${excluded} · barrido escribió ${swept} · reales: ${kinds}`,
         );
       } finally { real.close(); fake.close(); fleet.stop(); }
     });

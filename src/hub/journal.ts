@@ -152,6 +152,18 @@ export interface JournalEntry {
   detail?: string | null;
 
   note?: string | null;
+
+  /**
+   * La escribió una máquina del arnés (`shared/synthetic.ts`).
+   *
+   * Se anota y NO se descarta. Descartar era lo de antes, y descartar es
+   * borrar: dejaba el diario limpio pero sin forma de contestar «¿cuánto de
+   * aquello era de pruebas?» ni de enseñar la serie completa a quien la
+   * pidiera. Con la marca, toda lectura agregada la excluye por defecto —que
+   * es lo único que importa para que una cifra sea uso real— y además puede
+   * decir cuánto excluyó. Ausente significa real, como en toda la frontera.
+   */
+  synthetic?: true;
 }
 
 export type JournalInput = Omit<JournalEntry, 'id' | 'at'> & { at?: number };
@@ -251,6 +263,12 @@ export interface JournalQuery {
   limit?: number | null;
   /** Por defecto las más nuevas primero. */
   order?: 'asc' | 'desc' | null;
+  /**
+   * Incluir lo que escribió el arnés. Por defecto NO: una cifra agregada es
+   * uso real o no es nada. Quien quiera la serie completa lo pide, y entonces
+   * cada entrada dice de cuál de los dos mundos viene.
+   */
+  includeSynthetic?: boolean | null;
 }
 
 export const DEFAULT_LIMIT = 50;
@@ -288,6 +306,16 @@ export interface JournalStats {
   since: number | null;
   until: number | null;
   entries: number;
+  /**
+   * Entradas del arnés que NO están contadas arriba.
+   *
+   * Va en la misma estructura que los totales y no en un log, porque el sitio
+   * donde hay que poder leer «esto excluye 12.647 entradas de pruebas» es el
+   * mismo donde se lee el total. Un total que cae a la mitad sin explicación
+   * escrita al lado deja a quien lo mira sin saber cuál de las dos cifras
+   * creer, y la respuesta que se aprende es ninguna.
+   */
+  excluded: number;
   launches: number;
   byLauncher: Record<LaunchedBy, number>;
   ends: { done: number; dead: number };
@@ -488,7 +516,18 @@ export class Journal {
 
   /* ── lectura ──────────────────────────────────────────────────── */
 
-  query(q: JournalQuery = {}): JournalEntry[] {
+  /**
+   * Todo lo que casa con la consulta, sin recortar y ya ordenado.
+   *
+   * Separado de `query()` porque el tope de 500 es de la API —lo que una
+   * consola o un CLI pueden pedir de una vez— y no una propiedad del diario.
+   * `stats()` pedía 500.000 y `query()` se lo recortaba a 500 con un
+   * `Math.min` silencioso: el informe del 2026-09-08 dijo «500 lanzamientos,
+   * 0 finales» porque leyó las 500 entradas MÁS VIEJAS de una ventana de
+   * 112.216 y ninguna era un final. Un agregado no puede recortar la
+   * población que agrega, y menos sin decirlo.
+   */
+  private select(q: JournalQuery = {}): JournalEntry[] {
     const project = q.project ? q.project.trim().toLowerCase() : null;
     const squad = q.squad ? q.squad.trim().toLowerCase() : null;
     const agent = q.agent ? q.agent.trim().toLowerCase() : null;
@@ -496,11 +535,12 @@ export class Journal {
     const text = q.text ? normalize(q.text) : null;
     const since = q.since ?? null;
     const until = q.until ?? null;
-    const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(q.limit ?? DEFAULT_LIMIT)));
     const desc = (q.order ?? 'desc') !== 'asc';
+    const withSynthetic = q.includeSynthetic === true;
 
     const out: JournalEntry[] = [];
     for (const e of this.scan()) {
+      if (!withSynthetic && e.synthetic === true) continue;
       if (since !== null && e.at < since) continue;
       if (until !== null && e.at > until) continue;
       if (kinds && !kinds.has(e.kind)) continue;
@@ -516,11 +556,21 @@ export class Journal {
     }
     out.sort((a, b) => (a.at - b.at) || a.id.localeCompare(b.id));
     if (desc) out.reverse();
-    return out.slice(0, limit);
+    return out;
+  }
+
+  /** Una página para quien pregunta: el tope de la API, aquí y sólo aquí. */
+  query(q: JournalQuery = {}): JournalEntry[] {
+    const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(q.limit ?? DEFAULT_LIMIT)));
+    return this.select(q).slice(0, limit);
   }
 
   stats(q: Pick<JournalQuery, 'project' | 'since' | 'until' | 'squad'> = {}): JournalStats {
-    const entries = this.query({ ...q, limit: MAX_LIMIT * 1000, order: 'asc' });
+    // Una sola pasada para las dos cifras: lo que se cuenta y lo que se aparta
+    // salen del mismo recorrido, así que no pueden contradecirse.
+    const all = this.select({ ...q, order: 'asc', includeSynthetic: true });
+    const entries = all.filter((e) => e.synthetic !== true);
+    const excluded = all.length - entries.length;
     const byLauncher: Record<LaunchedBy, number> = { human: 0, capcom: 0, agent: 0 };
     const ends = { done: 0, dead: 0 };
     const used: number[] = [];
@@ -612,6 +662,7 @@ export class Journal {
     return {
       since: q.since ?? null, until: q.until ?? null,
       entries: entries.length,
+      excluded,
       launches: launches.size || entries.filter((e) => e.kind === 'launch').length,
       byLauncher,
       ends,
@@ -682,10 +733,10 @@ export interface JournalApi {
   rotated(input: RotationInput): void;
   /** server.ts: quién pidió un spawn, para atribuir el launch que viene. */
   spawnRequested(hint: SpawnHint): void;
-  /** Pieza C: un worktree aterrizó (o no). Null si era de una máquina sintética. */
-  landed(input: LandingInput): JournalEntry | null;
-  /** Cualquier otra pieza: una entrada a mano. Null si era de una máquina sintética. */
-  record(input: JournalInput): JournalEntry | null;
+  /** Pieza C: un worktree aterrizó (o no). Marcada si era de una máquina sintética. */
+  landed(input: LandingInput): JournalEntry;
+  /** Cualquier otra pieza: una entrada a mano. Marcada si era de una máquina sintética. */
+  record(input: JournalInput): JournalEntry;
   /**
    * Recorre la flota y anota lo que los eventos no trajeron: agentes sin
    * launch, terminados sin end. Corre solo cada SWEEP_MS; expuesto para que
@@ -745,15 +796,18 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
   const openById = new Map<string, JournalEntry>();
 
   /*
-   * El arnés no entra en el diario.
+   * El arnés entra MARCADO, y ninguna lectura agregada lo cuenta.
    *
-   * El mundo ya resta a las máquinas sintéticas del coste; el diario no las
-   * miraba en ningún punto, y un hub de pruebas lo llenaba de lanzamientos
-   * del fixture: 18.686 entradas en un solo rotado, todas del mock. Lo que se
-   * construye encima —el informe de AUTOMEJORA, los briefings de CAPCOM— es
-   * uso real o no es nada, así que la regla va aquí, en el único sitio por el
-   * que se escribe, y no en cada lector. Incluso en un hub de pruebas: sus
-   * fixtures se miran en la consola, no se auditan.
+   * Hasta el 2026-09-13 esto descartaba la entrada. Limpiaba las cifras —lo
+   * que se construye encima, el informe de AUTOMEJORA y los briefings de
+   * CAPCOM, es uso real o no es nada— pero descartar es borrar: el diario no
+   * podía enseñar la serie completa a quien la pidiera ni decir cuánto había
+   * dejado fuera, y un total que cambia sin explicación al lado es peor que
+   * uno equivocado. Así que la regla sigue estando aquí, en el único sitio
+   * por el que se escribe, y ahora ES UNA MARCA: `query()` la excluye por
+   * defecto, `includeSynthetic` devuelve la serie entera y `stats().excluded`
+   * dice cuánto se apartó. Incluso en un hub de pruebas: sus fixtures se
+   * miran en la consola, no se auditan.
    *
    * Por la marca que la máquina declara en su `hello` y nada más: una lista
    * de nombres se queda atrás el día que el mock cambia de flota. Sin máquina
@@ -761,8 +815,8 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
    */
   const synthetic = (machineId: string | null | undefined): boolean =>
     machineId ? isSynthetic(deps.machine?.(machineId)) : false;
-  const write = (input: JournalInput): JournalEntry | null =>
-    (synthetic(input.machineId) ? null : journal.append(input));
+  const write = (input: JournalInput): JournalEntry =>
+    journal.append(synthetic(input.machineId) ? { ...input, synthetic: true } : input);
 
   const code = (projectId: string | null): string | null => (projectId ? deps.project(projectId)?.code ?? null : null);
   const missionOf = (a: Pick<Agent, 'id' | 'squad'>): string | null => {
@@ -853,17 +907,18 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
 
   const offs = [
     deps.lifecycle.on('agent:new', (a, at) => {
-      // Antes que la rama de CAPCOM: un CAPCOM del arnés no es una rotación
-      // del de verdad, ni el punto de partida de la siguiente.
-      if (a.subagent || synthetic(a.machineId)) return;
-      if (a.role === 'capcom') { capcomArrived(a, at); return; }
+      if (a.subagent) return;
+      // Un CAPCOM del arnés no es una rotación del de verdad, ni el punto de
+      // partida de la siguiente: eso es estado del hub, no un renglón que se
+      // pueda marcar y luego filtrar.
+      if (a.role === 'capcom') { if (!synthetic(a.machineId)) capcomArrived(a, at); return; }
       if (!journal.hasLaunch(a.id)) recordLaunch(a, at);
       // Llegó ya terminado (snapshot tras un reinicio del hub): el fin no se
       // vio pasar, pero cuenta igual.
       if (TERMINAL_STATES.has(a.state) && !journal.hasEnd(a.id)) recordEnd(a, a.state as FinalState, a.updatedAt || at, true);
     }),
     deps.lifecycle.on('agent:state', (c) => {
-      if (c.agent.subagent || c.agent.role === 'capcom' || synthetic(c.agent.machineId)) return;
+      if (c.agent.subagent || c.agent.role === 'capcom') return;
       if (!TERMINAL_STATES.has(c.to as Agent['state'])) { journal.reopen(c.agent.id); return; }
       if (journal.hasEnd(c.agent.id)) return;
       if (!journal.hasLaunch(c.agent.id)) recordLaunch(c.agent, c.at);
@@ -879,7 +934,6 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
         escalationId: e.id, question: e.question, urgency: e.urgency ?? null, options: e.options ?? [],
         by: e.from === 'ceo' ? 'capcom' : undefined,
       });
-      if (!entry) return;
       if (e.id) openById.set(e.id, entry);
       if (e.agentId) open.set(e.agentId, entry);
     }),
@@ -904,8 +958,9 @@ export function createJournal(deps: AutonomyDeps): JournalApi {
     const now = deps.now();
     let wrote = 0;
     for (const a of deps.agents()) {
-      if (a.subagent || synthetic(a.machineId)) continue;
+      if (a.subagent) continue;
       if (a.role === 'capcom') {
+        if (synthetic(a.machineId)) continue;
         if (!TERMINAL_STATES.has(a.state) && capcomId !== a.id && capcomArrived(a, now)) wrote += 1;
         continue;
       }

@@ -78,6 +78,17 @@ export interface ArchivedAgent {
   archivedAt: number;
   /** Quién lo archivó: "capcom", "console", "cli"… texto libre y corto. */
   by: string;
+  /**
+   * Su máquina era del arnés (`shared/synthetic.ts`).
+   *
+   * La lápida es el único sitio donde ese dato sobrevive: la marca la declara
+   * la máquina en su `hello`, y para cuando alguien suma el archivo esa
+   * máquina hace días que no está en ningún mundo que se pueda consultar. Sin
+   * esto, media población del archivo es de pruebas y ninguna cifra agregada
+   * puede saberlo — que es exactamente lo que pasó: 299 de 509 lápidas de este
+   * hub son del fixture. Ausente significa real, como en toda la frontera.
+   */
+  synthetic?: true;
 }
 
 /**
@@ -184,8 +195,13 @@ export function archiveCandidates(
   return { archive, kept, squadsRetired };
 }
 
-/** La lápida de un agente, ahora. */
-export function tombstone(a: Agent, by: string, now = Date.now()): ArchivedAgent {
+/**
+ * La lápida de un agente, ahora.
+ *
+ * `synthetic` lo decide quien llama, porque quien llama es el que tiene el
+ * mundo delante: el agente no lleva la marca, la lleva su máquina.
+ */
+export function tombstone(a: Agent, by: string, now = Date.now(), synthetic = false): ArchivedAgent {
   return {
     id: a.id, machineId: a.machineId, projectId: a.projectId, callsign: a.callsign,
     squad: a.squad, lead: a.lead,
@@ -193,6 +209,7 @@ export function tombstone(a: Agent, by: string, now = Date.now()): ArchivedAgent
     title: a.title, mission: a.mission, parentId: a.parentId,
     startedAt: a.startedAt, finishedAt: a.updatedAt, archivedAt: now,
     by: archiveBy(by),
+    ...(synthetic ? { synthetic: true as const } : {}),
   };
 }
 
@@ -211,6 +228,47 @@ export function isUnarchived(v: unknown): v is Unarchived {
   if (typeof v !== 'object' || v === null) return false;
   const o = v as Record<string, unknown>;
   return typeof o['id'] === 'string' && typeof o['at'] === 'number' && o['undo'] === true;
+}
+
+/**
+ * "Esta lápida era del arnés": una corrección, no una lápida nueva.
+ *
+ * El archivo es append-only y sus líneas ya escritas no se reescriben nunca —
+ * `Unarchived` es la prueba de que una corrección aquí se hace añadiendo, no
+ * tocando. Lo mismo vale para una marca que llega tarde: las lápidas anteriores
+ * al 2026-09-13 no guardaron `synthetic` porque el campo no existía, y la
+ * alternativa a esta línea era reescribir el histórico entero o borrarlo. Se
+ * marca.
+ */
+export interface SyntheticMark { id: string; at: number; synthetic: true; mark: true }
+
+export function isSyntheticMark(v: unknown): v is SyntheticMark {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return typeof o['id'] === 'string' && typeof o['at'] === 'number'
+    && o['synthetic'] === true && o['mark'] === true;
+}
+
+export function syntheticMark(id: string, at: number): SyntheticMark {
+  return { id, at, synthetic: true, mark: true };
+}
+
+/** Cuántas lápidas del arnés hay aquí, y cuántas reales. Una lectura agregada las separa. */
+export function countSynthetic(archived: readonly ArchivedAgent[]): { real: number; synthetic: number } {
+  let synthetic = 0;
+  for (const t of archived) if (t.synthetic === true) synthetic += 1;
+  return { real: archived.length - synthetic, synthetic };
+}
+
+/**
+ * El archivo sin el arnés, que es lo que toda cuenta agregada quiere.
+ *
+ * Por defecto se excluye y se dice cuánto: un total que cae a la mitad sin
+ * explicación escrita quema la confianza en los dos totales, el viejo y el
+ * nuevo.
+ */
+export function withoutSynthetic(archived: readonly ArchivedAgent[]): ArchivedAgent[] {
+  return archived.filter((t) => t.synthetic !== true);
 }
 
 /**

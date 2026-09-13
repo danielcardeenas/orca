@@ -69,7 +69,7 @@ function parse(args) {
   const opts = {};
   const pos = [];
   const multi = new Set(['member']);
-  const flags = new Set(['json', 'blocked', 'waiting', 'full', 'fg', 'help', 'h', 'dry-run', 'hidden', 'stats', 'asc', 'no-tests', 'force']);
+  const flags = new Set(['json', 'blocked', 'waiting', 'full', 'fg', 'help', 'h', 'dry-run', 'hidden', 'stats', 'asc', 'no-tests', 'force', 'synthetic']);
   // `--lead` is a flag on `spawn` and carries the lead's brief on `squad`.
   const maybe = new Set(['lead']);
   for (let i = 0; i < args.length; i++) {
@@ -126,7 +126,9 @@ function usage() {
   orca recall "<question>"  ·  orca remember "<question>" "<rule>" [--project <p>]
   orca journal [--project <p>] [--squad <s>] [--task <id>] [--agent <K9>] [--kind launch|end|escalation|answer|rotation|landing]
                [--since 24h|2d|<iso>] [--until ...] [--state done|dead] [--by human|capcom|agent] [--text "..."]
-               [--limit 50] [--asc] [--full]         what the fleet has done, newest first
+               [--limit 50] [--asc] [--full] [--synthetic]
+                                               what the fleet has done, newest first; --synthetic adds the
+                                               test-harness entries, which every count leaves out
   orca journal --stats [--project <p>] [--squad <s>] [--since 7d]
                                                cost and duration per project, done vs dead, briefs that escalated
   orca tools  ·  orca health
@@ -445,6 +447,9 @@ function printJournalStats(s) {
     + ` · ${tokens(s.usage?.tokens)} tokens over ${s.usage?.measured ?? 0} measured, ${s.usage?.avgTokens != null ? tokens(s.usage.avgTokens) : '—'} avg, ${s.duration?.avgMs != null ? span(s.duration.avgMs) : '—'} avg`
     + ` · escalations ${s.escalations?.asked ?? 0} (capcom ${s.escalations?.answeredByCapcom ?? 0}, human ${s.escalations?.answeredByHuman ?? 0}, open ${s.escalations?.unanswered ?? 0})`
     + ` · rotations ${s.rotations ?? 0} · landings ${s.landings?.ok ?? 0} ok / ${s.landings?.failed ?? 0} failed`);
+  // Un total que cambia sin explicación al lado es peor que uno equivocado:
+  // lo que el diario aparta por ser del arnés se dice aquí, no en un comentario.
+  if (s.excluded > 0) console.log(`(${s.excluded} harness entries in this window are NOT counted above)`);
   if (s.byProject?.length) {
     console.log(`\n${pad('project', 8)} ${pad('launch', 6)} ${pad('done', 5)} ${pad('dead', 5)} ${pad('rate', 5)} ${pad('tokens', 9)} ${pad('avg tok', 8)} ${pad('avg time', 9)} esc`);
     for (const p of s.byProject) {
@@ -751,6 +756,8 @@ async function main() {
         state: opts.state ?? null, by: opts.by ?? null, text: opts.text ?? null,
         limit: opts.limit !== undefined ? Number(opts.limit) : null,
         newest_first: opts.asc !== true, full: opts.full === true,
+        // La serie completa, arnés incluido, sólo si se pide por su nombre.
+        include_synthetic: opts.synthetic === true,
       });
       if (json || out.isError) return print(out);
       return printJournal(out.result);

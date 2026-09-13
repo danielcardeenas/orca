@@ -1648,7 +1648,9 @@ export class World {
     const now = this.now();
     const plan = archiveCandidates(this.state.agents, filter, now);
     const by = archiveBy(opts.by, 'hub');
-    const archived = plan.archive.map((a) => tombstone(a, by, now));
+    // La marca del arnés se copia AQUÍ o se pierde: la declara la máquina, y
+    // la máquina se va del mundo mucho antes de que nadie sume el archivo.
+    const archived = plan.archive.map((a) => tombstone(a, by, now, isSynthetic(this.state.machines[a.machineId])));
     const outcome: ArchiveOutcome = {
       dryRun: opts.dryRun === true, archived, kept: plan.kept, squadsRetired: plan.squadsRetired,
     };

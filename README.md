@@ -7,7 +7,8 @@
 **A containment console for fleets of coding agents.**
 
 Watch every agent you run, on every machine, in one field.<br>
-Command them all through one voice. Let the fleet improve its own console.
+Command them all through one voice.<br>
+Then ask it to change itself, and watch it do it.
 
 <br>
 
@@ -16,6 +17,36 @@ Command them all through one voice. Let the fleet improve its own console.
 <br>
 
 <sub>Nineteen agents on the field. Two FORGE squads and a mission wired to their leads. CAPCOM in cyan, standing by.</sub>
+
+<br><br>
+
+<table>
+<tr>
+<td align="center" width="140">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/readme/icons/claude-dark.svg">
+<img src="docs/readme/icons/claude-light.svg" alt="Claude" height="36">
+</picture><br>
+<sub><b>Claude Code</b></sub>
+</td>
+<td align="center" width="140">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/readme/icons/codex-dark.svg">
+<img src="docs/readme/icons/codex-light.svg" alt="OpenAI" height="36">
+</picture><br>
+<sub><b>Codex</b></sub>
+</td>
+<td align="center" width="140">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/readme/icons/grok-dark.svg">
+<img src="docs/readme/icons/grok-light.svg" alt="Grok" height="36">
+</picture><br>
+<sub><b>Grok</b></sub>
+</td>
+</tr>
+</table>
+
+<sub>One field for all three. Solid, dashed and dotted stripes tell them apart on a tile.</sub>
 
 <br><br>
 
@@ -28,6 +59,8 @@ Command them all through one voice. Let the fleet improve its own console.
 You run coding agents in more places than you can watch: a laptop, a VPS, a second Mac, a container. Each one is a terminal tab, and the one that needs you is never the tab you are looking at.
 
 ORCA reads what those agents already write to disk and turns it into a single live picture. It does not wrap the agents, does not patch them and never calls a model itself. Claude Code, Codex and Grok sessions appear on the field the moment they start, whoever started them.
+
+And ORCA is one of the projects on its own field. It reviews how it is being used, proposes what to change, and, once you say yes, sends a squad to rewrite itself while the fleet keeps running.
 
 Three processes, every connection outbound:
 
@@ -89,13 +122,21 @@ Without CAPCOM, ORCA is still a fleet monitor: every question goes straight to y
 
 ---
 
-## It improves itself
+## It knows itself
 
-ORCA has a section that looks at the instrument instead of the fleet.
+The console has one section that is not about the fleet. It is about the console.
 
-A reviewer agent watches how the console and CAPCOM are actually being used and writes proposals: what gets in the way, what costs too much, what could be better. Nothing happens until you approve one. Then a **FORGE** lead takes the proposal, forms a squad in a worktree, implements it against the test suite and hands the branch to CAPCOM to land.
+**It watches how it is used.** ORCA launches a reviewer agent over its own repository. It appears on the field like any other agent, with its callsign, its state and its spend, except that it wears violet and has had its editing tools taken away. It reads how the console and CAPCOM are actually being driven, what gets in the way, what costs too much, what the operator keeps doing by hand.
 
-That is how a good part of this repository was written.
+**It proposes, with receipts.** Each proposal says whether it stands on measured numbers or on a hypothesis, and the card's texture shows which. Invented measurements are rejected before they reach you. Ideas the data cannot support are welcome, as long as they say so.
+
+**You decide.** Nothing happens on its own. Reply, snooze, dismiss, or press IMPLEMENT.
+
+**Then it rewrites itself.** IMPLEMENT opens a mission and hands it to **FORGE**, a lead that forms a squad in a worktree of this repository, implements the change against the type checker and the test suite, and gives the branch to CAPCOM to land. The hub and collector reload under the new code. The agents on the field never notice.
+
+**Or just ask.** ORCA's own repository is a project on the field, so "make the queue louder" said to CAPCOM becomes a worker on this code like any other. Rules you give it are kept and handed to every CAPCOM after it.
+
+A good part of this repository was written this way.
 
 ---
 
@@ -145,7 +186,7 @@ docs/            design records, contracts and delivery notes
 
 - [The manual](docs/MANUAL.md) covers every part of the above in depth.
 - [DESIGN.md](DESIGN.md) is the visual contract: palette, type, the field, windows.
-- Contracts: [escalation](docs/ESCALATION.md), [messaging](docs/MESSAGING.md), [missions](docs/MISSIONS.md), [budgets](docs/BUDGETS.md), [FORGE](docs/FORGE.md), [self-improvement](docs/AUTOMEJORA.md).
+- Contracts: [escalation](docs/ESCALATION.md), [messaging](docs/MESSAGING.md), [missions](docs/MISSIONS.md), [budgets](docs/BUDGETS.md), [FORGE](docs/FORGE.md), [self-review](docs/AUTOMEJORA.md).
 - Operations: [remote access](docs/REMOTE-ACCESS.md), [phone](docs/PWA.md), [two Macs](docs/FLEET-MULTI-MAC.md), [production](docs/PRODUCCION.md).
 
 Most design records are in Spanish. The code, the console and the manual are in English.

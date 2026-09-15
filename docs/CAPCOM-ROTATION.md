@@ -1,79 +1,80 @@
-# Rotación de CAPCOM: relevar antes de que olvide
+# CAPCOM rotation: hand off before it forgets
 
-Una sesión de CLI compacta su contexto cuando se llena, y lo sigue haciendo
-indefinidamente. A la tercera o cuarta compactación el mando trabaja sobre un
-resumen de un resumen: nada falla, las respuestas solo se vuelven más vagas.
+A CLI session compacts its context when it fills up, and it keeps doing so
+indefinitely. By the third or fourth compaction the command is working off a
+summary of a summary: nothing breaks, the answers just get vaguer.
 
-La salida no es alargar la conversación, es dejar de tratarla como el registro.
-El registro es el hub —tareas, escalaciones, memoria persistente— y `briefing`
-lo lee en una llamada. Así que una sesión pasada de umbral se sustituye por otra
-con el mismo brief. Eso es una rotación, y `src/collector/rotation.ts` es la
-regla que dice cuándo.
+The way out is not to make the conversation longer, it is to stop treating it as
+the record. The record is the hub — tasks, escalations, persistent memory — and
+`briefing` reads it in one call. So a session past the threshold is replaced by
+another with the same brief. That is a rotation, and `src/collector/rotation.ts`
+is the rule that says when.
 
-## Cuándo
+## When
 
-Tres señales, cualquiera de ellas basta:
+Three signals, any one of them is enough:
 
-| Señal | Por defecto | Variable |
+| Signal | Default | Variable |
 | --- | --- | --- |
-| Fracción de la ventana ocupada por el último prompt | 75 % | `ORCA_CAPCOM_MAX_CONTEXT_PCT` |
-| Compactaciones observadas en el transcript | 4 | `ORCA_CAPCOM_MAX_COMPACTIONS` |
-| Turnos | 300 | `ORCA_CAPCOM_MAX_TURNS` |
+| Fraction of the window taken by the last prompt | 75 % | `ORCA_CAPCOM_MAX_CONTEXT_PCT` |
+| Compactions observed in the transcript | 4 | `ORCA_CAPCOM_MAX_COMPACTIONS` |
+| Turns | 300 | `ORCA_CAPCOM_MAX_TURNS` |
 
-La fracción de la ventana es la señal preferente porque llega **antes** de la
-primera compactación: el relevo hereda un checkpoint en vez de un resumen de un
-resumen. No sirve como medida de pérdida acumulada —el número cae a unos pocos
-miles después de cada compactación—, así que no puede ser la única. Las
-compactaciones son la medida de lo ya perdido y solo crecen. Los turnos son la
-red para un CLI que no reporta ni ventana ni compactaciones. Un `0` apaga cada
-señal; las tres a `0` apagan la rotación.
+The fraction of the window is the preferred signal because it arrives **before**
+the first compaction: the handoff inherits a checkpoint instead of a summary of a
+summary. It does not work as a measure of accumulated loss — the number drops to a
+few thousand after every compaction — so it cannot be the only one. Compactions
+are the measure of what has already been lost and they only grow. Turns are the
+net for a CLI that reports neither window nor compactions. A `0` turns off each
+signal; all three at `0` turn off rotation.
 
-Codex reporta las tres: `last_token_usage.input_tokens` sobre
-`model_context_window` para la ventana, y una línea `compacted` por compactación.
-Claude reporta compactaciones (`compact_boundary`) y tokens de contexto.
+Codex reports all three: `last_token_usage.input_tokens` over
+`model_context_window` for the window, and one `compacted` line per compaction.
+Claude reports compactions (`compact_boundary`) and context tokens.
 
-Y solo cuando es seguro: la sesión ociosa, sin escalaciones pendientes en esta
-máquina y en silencio `ORCA_CAPCOM_ROTATE_IDLE_MS` (30 s por defecto). Puede
-esperar indefinidamente: un CAPCOM ocupado es un CAPCOM trabajando, tenga el
-contexto que tenga. Mientras espera, lo dice una vez en el log.
+And only when it is safe: the session idle, with no escalations pending on this
+machine and silent for `ORCA_CAPCOM_ROTATE_IDLE_MS` (30 s by default). It can wait
+indefinitely: a busy CAPCOM is a CAPCOM working, whatever context it has. While it
+waits, it says so once in the log.
 
-## Cómo
+## How
 
-Dos caminos, según cómo naciera la sesión actual:
+Two paths, depending on how the current session was born:
 
-- **Relanzar.** Si ORCA eligió su identificador (`claude --session-id`), se para
-  el pane y se arranca otro con `CAPCOM_ROTATED_PROMPT`. Se avisa al hub antes,
-  para que retenga el correo, y no se carga al tope de relanzamientos: es
-  política, no una caída.
-- **Traspaso preparado.** Si la sesión venía preparada —cualquier Codex, o un
-  traspaso ya activado—, su identificador no era de ORCA y no se puede recrear:
-  hay que preparar el relevo, comprobar que arranca y solo entonces retirar al
-  anterior. Es exactamente lo que hace `New CAPCOM` a mano; la rotación
-  automática pide lo mismo por dentro (`ProviderHandoffs.fresh`), con la
-  retención de correo y el archivo que ese camino ya trae. Ver
+- **Relaunch.** If ORCA chose its identifier (`claude --session-id`), the pane is
+  stopped and another is started with `CAPCOM_ROTATED_PROMPT`. The hub is warned
+  first, so it holds the mail, and it does not count against the relaunch cap: it
+  is policy, not a crash.
+- **Prepared handoff.** If the session came prepared — any Codex, or a handoff
+  already activated — its identifier was not ORCA's and cannot be recreated: the
+  replacement has to be prepared, checked that it starts, and only then is the
+  previous one retired. It is exactly what `New CAPCOM` does by hand; automatic
+  rotation asks for the same thing internally (`ProviderHandoffs.fresh`), with the
+  mail retention and the archiving that path already brings. See
   [CAPCOM-NEW.md](CAPCOM-NEW.md).
 
-Entre dos intentos de traspaso pasan diez minutos. El umbral que disparó la
-rotación sigue superado mientras el CAPCOM actual siga siendo el actual, así que
-sin ese freno una preparación que falla por cuota pediría un proceso del CLI
-cada diez segundos. Un fallo deja al CAPCOM actual exactamente donde estaba.
+Ten minutes pass between two handoff attempts. The threshold that triggered the
+rotation is still exceeded for as long as the current CAPCOM is still the current
+one, so without that brake a preparation failing on quota would ask for a CLI
+process every ten seconds. A failure leaves the current CAPCOM exactly where it
+was.
 
-## Con qué contexto arranca el relevo
+## What context the replacement starts with
 
-`ORCA_CAPCOM_ROTATE_MODE` elige entre los dos modos de `New CAPCOM`:
+`ORCA_CAPCOM_ROTATE_MODE` chooses between the two `New CAPCOM` modes:
 
-- `continuity` (por defecto): hereda el checkpoint corto que escribe el hub
-  —tareas abiertas, preguntas sin resolver, reglas persistentes, referencias de
-  la flota— y sigue. Una rotación que nadie pidió no debería costarle al
-  operador el hilo en el que estaba.
-- `clean`: arranca vacío y espera instrucciones. Es lo que un operador elige
-  deliberadamente, no lo que conviene a una rotación desatendida.
+- `continuity` (the default): it inherits the short checkpoint the hub writes —
+  open tasks, unresolved questions, persistent rules, fleet references — and
+  carries on. A rotation nobody asked for should not cost the operator the thread
+  they were on.
+- `clean`: it starts empty and waits for instructions. That is what an operator
+  chooses deliberately, not what suits an unattended rotation.
 
-En ningún caso se tocan tareas, conversaciones del hub, reglas ni workers: eso
-es estado del hub y sobrevive a cualquier relevo. Es justamente lo que permite
-que la sesión sea desechable.
+In neither case are tasks, hub conversations, rules or workers touched: that is
+hub state and it survives any handoff. That is precisely what makes the session
+disposable.
 
-## Verificación
+## Verification
 
 ```sh
 npm run typecheck

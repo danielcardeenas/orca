@@ -1,649 +1,644 @@
-# ORCA — identidad de agentes y escuadrones en el campo
+# ORCA — agent and squad identity in the field
 
-Diseño, 2026-09-05, a partir de dos capturas del campo real (una región de 33
-tiles y un tile ampliado a tier 5) y de los frames del comp `offworld.mp4`
-entre 7,5 s y 12 s (el árbol de tuberías NULL→ACTIVE y la rejilla de tiles).
-Cada sección fija una decisión. El reparto de archivos al final es el contrato
-entre agentes.
+Design, 2026-09-05, drawn from two screenshots of the real field (a 33-tile
+region and a tile blown up to tier 5) and from the frames of the `offworld.mp4`
+comp between 7.5 s and 12 s (the NULL→ACTIVE pipe tree and the tile grid).
+Each section settles one decision. The file split at the end is the contract
+between agents.
 
-**La tesis.** Hoy un agente es un rectángulo con muesca y una franja de color;
-un escuadrón es una palabra flotando sobre un bloque sin borde; una relación
-es una tubería lima que cruza por encima de lo que sea. Las tres cosas usan la
-misma lima, así que el ojo no distingue *estructura* (quién es de quién) de
-*actividad* (quién está trabajando). El comp sí lo distingue: la estructura es
-gris y lleva la lima *por dentro*; el tile encendido es el único bloque lima
-sólido; y ningún cable cruza un tile. El diseño de abajo reparte esos tres
-papeles y le da a cada agente y a cada escuadrón una marca que sobrevive al
-zoom.
+**The thesis.** Today an agent is a notched rectangle with a colored stripe; a
+squad is a word floating over a borderless block; a relation is a lime pipe
+that crosses over whatever is in its way. All three use the same lime, so the
+eye cannot tell *structure* (who belongs to whom) from *activity* (who is
+working). The comp does tell them apart: structure is grey and carries the lime
+*inside*; the lit tile is the only solid lime block; and no cable crosses a
+tile. The design below splits those three roles and gives every agent and every
+squad a mark that survives zoom.
 
 ---
 
-## 0. Lo que las capturas muestran roto (arreglar antes de diseñar encima)
+## 0. What the screenshots show broken (fix before designing on top)
 
-| # | Síntoma en la captura | Causa | Arreglo |
+| # | Symptom in the screenshot | Cause | Fix |
 |---|---|---|---|
-| 0.1 | La tubería lima pasa **por encima** del texto del tile LL y de la fila B1…2T | `createSwarm` se llama antes que `createPipes` (`field.ts:186-187`); ambos materiales son `transparent` sin `depthWrite`, y Three ordena objetos transparentes en la misma posición por orden de inserción | `mesh.renderOrder = -1` para bus, núcleo y puertos en `pipes.ts`; pulsos a `+1`. El z ya es menor que el de los tiles; sólo falta que el orden lo respete |
-| 0.2 | Las tuberías cruzan filas enteras de tiles (bus horizontal a media altura de B1…2T) | `routeLineage` dobla en `midY` entre padre e hijo; con dos filas de distancia el codo cae sobre la fila intermedia | Enrutado por **cunetas** (§4.1). Ninguna tubería toca un tile |
-| 0.3 | `$0.00` y `LL` arrancan debajo de la franja de estado | La franja mide `max(4.5 %, 2.5 px)` del tile; `--pad-x` mide `4px·u` ≈ 1,6 % | Las tres bandas arrancan en `left: 7%` (§2.1) |
-| 0.4 | `UPTIME  TURNS` queda bajo la banda azul que corre | La banda del shader ocupa el 7–10 % inferior; la banda DOM inferior llega a `bottom: 0` | `.lbl__bot { bottom: 11% }` (§2.1) |
-| 0.5 | `Inventory OR…` y `I have a co…` cortados a once caracteres | Las dos líneas viven en la banda media, limitada al 66 % por la muesca | La línea NOW baja a la banda inferior, que es de ancho completo; misión a dos líneas (§2.2) |
-| 0.6 | `axolots-25` como título | Es el título de sesión de Claude Code y repite el proyecto | Regla: si el título empieza por el nombre del proyecto, se descarta y la misión sube (§2.2) |
-| 0.7 | Un `□` suelto bajo la línea NOW | Un emoji en `lastSay` que ni Geist Mono ni Tiny5 tienen | `lbl.ts` filtra `\p{Extended_Pictographic}` y variation selectors antes de pintar |
+| 0.1 | The lime pipe runs **over** the text of tile LL and of row B1…2T | `createSwarm` is called before `createPipes` (`field.ts:186-187`); both materials are `transparent` without `depthWrite`, and Three sorts transparent objects at the same position by insertion order | `mesh.renderOrder = -1` for bus, core and ports in `pipes.ts`; pulses to `+1`. The z is already below the tiles'; all that is missing is for the order to respect it |
+| 0.2 | Pipes cross whole rows of tiles (horizontal bus halfway up B1…2T) | `routeLineage` bends at `midY` between parent and child; two rows apart, the elbow lands on the row in between | Routing through **gutters** (§4.1). No pipe touches a tile |
+| 0.3 | `$0.00` and `LL` start underneath the status stripe | The stripe measures `max(4.5 %, 2.5 px)` of the tile; `--pad-x` measures `4px·u` ≈ 1.6 % | All three bands start at `left: 7%` (§2.1) |
+| 0.4 | `UPTIME  TURNS` ends up under the blue band that runs | The shader band occupies the bottom 7–10 %; the bottom DOM band reaches `bottom: 0` | `.lbl__bot { bottom: 11% }` (§2.1) |
+| 0.5 | `Inventory OR…` and `I have a co…` clipped at eleven characters | Both lines live in the middle band, capped at 66 % by the notch | The NOW line moves down to the bottom band, which is full width; mission gets two lines (§2.2) |
+| 0.6 | `axolots-25` as the title | It is the Claude Code session title and it repeats the project | Rule: if the title starts with the project's name, it is discarded and the mission moves up (§2.2) |
+| 0.7 | A stray `□` under the NOW line | An emoji in `lastSay` that neither Geist Mono nor Tiny5 has | `lbl.ts` filters `\p{Extended_Pictographic}` and variation selectors before painting |
 
-Estos siete son mecánicos y no admiten opinión; van primero porque cualquier
-foto del diseño nuevo saldría mal con ellos dentro.
+These seven are mechanical and not a matter of opinion; they come first because
+any photo of the new design would come out wrong with them still in it.
 
 ---
 
-## 1. El agente: una marca que no es texto
+## 1. The agent: a mark that is not text
 
-### 1.1 El sigilo
+### 1.1 The sigil
 
-**Decisión.** Cada tile lleva un **sigilo**: un glifo de píxeles 5×5,
-simétrico en X, en la esquina superior derecha del tile (x 0,80–0,955 ·
-y 0,775–0,93, libre de la muesca que va de y 0,30 a 0,70). Quince bits
-deciden el dibujo. Es la marca que identifica a un agente cuando el tile mide
-60 px y no cabe ni el callsign, y es la misma marca que verá en la cabecera de
-su ventana.
+**Decision.** Every tile carries a **sigil**: a 5×5 pixel glyph, mirrored on X,
+in the tile's top-right corner (x 0.80–0.955 · y 0.775–0.93, clear of the notch
+that runs from y 0.30 to 0.70). Fifteen bits decide the drawing. It is the mark
+that identifies an agent when the tile is 60 px and not even the callsign fits,
+and it is the same mark you will see in its window's header.
 
-**De dónde salen los bits.** Del hash FNV de una *semilla*:
+**Where the bits come from.** From the FNV hash of a *seed*:
 
-- agente suelto → `agent.id`;
-- miembro de un escuadrón → **el nombre del escuadrón**, no su id. Así cinco
-  miembros llevan el mismo parche en el hombro y el bloque se lee como un
-  cuerpo aun antes de ver el contorno;
-- el líder lleva el **sigilo invertido**: un bloque de tinta con el glifo
-  recortado en color de cuerpo. Sustituye al cuadrado relleno de hoy
-  (`swarm.ts`, `mark`), que decía "líder" pero no de qué.
+- standalone agent → `agent.id`;
+- squad member → **the squad's name**, not its id. That way five members wear
+  the same shoulder patch and the block reads as one body even before you see
+  the outline;
+- the lead carries the **inverted sigil**: a block of ink with the glyph
+  knocked out in body color. It replaces today's filled square (`swarm.ts`,
+  `mark`), which said "lead" but not of what.
 
-**Técnica.** Un atributo por instancia `iSigil` (float; quince bits caben
-exactos en la mantisa). En el fragment, para la celda `(cx, cy)` del glifo
-con `cx' = min(cx, 4 − cx)`, el bit es
-`mod(floor(iSigil / exp2(cy·3 + cx')), 2)`. Coste: una multiplicación y dos
-`floor` por píxel dentro de una región de 0,15×0,15 del tile. Cero CPU. El
-mismo `sigilBits(seed)` vive en `gfx/sigil.ts` y también renderiza el glifo a
-DOM (`<i class="sigil">` con 25 `box-shadow`) para la cabecera de ventana y el
-rótulo de escuadrón.
+**Implementation.** One per-instance attribute `iSigil` (float; fifteen bits
+fit exactly in the mantissa). In the fragment, for cell `(cx, cy)` of the glyph
+with `cx' = min(cx, 4 − cx)`, the bit is
+`mod(floor(iSigil / exp2(cy·3 + cx')), 2)`. Cost: one multiply and two `floor`
+per pixel inside a 0.15×0.15 region of the tile. Zero CPU. The same
+`sigilBits(seed)` lives in `gfx/sigil.ts` and also renders the glyph to DOM
+(`<i class="sigil">` with 25 `box-shadow`) for the window header and the squad
+label.
 
-**Color.** Tinta (`uInk`) sobre cuerpo oscuro; cuerpo (`uBody`) sobre tile
-ámbar pleno. Nunca el color de estado: el sigilo dice *quién*, la franja dice
-*cómo está*.
+**Color.** Ink (`uInk`) on a dark body; body (`uBody`) on a full amber tile.
+Never the status color: the sigil says *who*, the stripe says *how it is doing*.
 
-### 1.2 El runtime, en la franja
+### 1.2 The runtime, in the stripe
 
-**Decisión.** La franja de estado del borde izquierdo lleva la **textura del
-runtime**: continua para Claude, a trazos 2:1 para Codex, a puntos 1:1 para
-Grok, continua fina para cualquier otro. Es la única señal de runtime que
-sobrevive a todos los zooms; el chip `.lbl__rt` sigue diciéndolo en letras
-cuando cabe. La forma del tile no cambia por runtime: las bandas del texto
-están construidas alrededor de *esta* muesca y una muesca distinta por CLI las
-rompería.
+**Decision.** The status stripe on the left edge carries the **runtime
+texture**: solid for Claude, 2:1 dashes for Codex, 1:1 dots for Grok, thin
+solid for anything else. It is the only runtime signal that survives every
+zoom; the `.lbl__rt` chip still spells it out in letters when there is room.
+The tile's shape does not change per runtime: the text bands are built around
+*this* notch and a different notch per CLI would break them.
 
-**Técnica.** `iAux` pasa de `vec3` a `vec4`; `.w` es el id de runtime
-(0 claude, 1 codex, 2 grok, 3 otro). El patrón se calcula en `t.y` con
-`fract(t.y · 10)`, en unidades del tile, para que un tile grande no muestre
-cien trazos.
+**Implementation.** `iAux` goes from `vec3` to `vec4`; `.w` is the runtime id
+(0 claude, 1 codex, 2 grok, 3 other). The pattern is computed on `t.y` with
+`fract(t.y · 10)`, in tile units, so a large tile does not show a hundred
+dashes.
 
 ### 1.3 CAPCOM
 
-Uno solo por flota, y es la voz que contesta. Es la única excepción por rol,
-y es una excepción de **color**, no de forma (revisado 2026-09-06):
+Only one per fleet, and it is the voice that answers. It is the only exception
+by role, and it is an exception of **color**, not of shape (revised
+2026-09-06):
 
-- **Cyan** (`--cyan`, `#4fe3ff`). El contorno es cyan permanente, el halo es
-  cyan y respira despacio aunque el tile esté en reposo, el sigilo (la `C` de
-  `gfx/logo.ts`) es tinta cyan, y el cuerpo lleva un 7 % de cyan sobre el
-  oscuro. Un **trazo** cruza el tile de arriba abajo cada ~6 s con una estela
-  corta, como el haz de un osciloscopio; con `prefers-reduced-motion` se queda
-  quieto. Nada más en el campo puede vestir este color: lima es la flota,
-  ámbar es la persona, cyan es el mando.
-- **Fuera de los proyectos.** No vive en ninguna región: está en el origen de
-  la espiral (`layout.ts`, la ranura 0 pasa a un anillo fuera) con las
-  regiones alrededor, a escala `CAPCOM_SCALE` (1,4). Su carpeta en disco es
-  su casa, no un repo, y no gana región; un trabajador extraviado ahí sí, y
-  así se ve el extravío. Sus tuberías van en ruta directa, como las de un
-  tile fijado a mano.
-- **Dos rótulos.** Sobre el tile, centrado en su borde superior, un chip
-  `CAPCOM · COMMAND` en cyan (`.rgn--capcom`), el equivalente al rótulo de
-  una región o al de una flotilla; como el de una flotilla, no se oculta a
-  ningún zoom ni cede ante una colisión, y un clic abre la conversación.
-  Dentro del tile, `CAPCOM` donde iría el callsign, y `HL · COMMAND` donde un
-  trabajador lleva su proyecto y su origen, con una baliza delante que
-  respira al mismo ritmo. En reposo no se atenúa: CAPCOM idle es CAPCOM
-  escuchando. En la consola, el chip de destino de la línea de comandos, el
-  nombre de su ventana y su voz en TALK llevan el mismo cyan.
-- **Holgura.** Si una región o un tile arrastrados a mano cubren el origen,
-  CAPCOM se aparta hacia arriba hasta el primer hueco libre (`CAPCOM_CLEAR`):
-  nunca queda dentro de un proyecto ni de una flotilla.
-- **Un cuerpo, no varios** (revisado 2026-09-06). CAPCOM sigue siendo *un*
-  tile: partirlo en bloques lo haría indistinguible de una flotilla (§3). Lo
-  que dice que es el puesto de mando es lo que lleva alrededor, y eso vive en
-  `field/command.ts` — un solo quad, un solo shader, un `draw call`:
-  - **El anillo.** Un contorno redondeado a `RING_OFF` del borde del tile,
-    partido en un arco por tarea abierta (`WorldState.tasks`, estado
-    `active`). El arco está encendido mientras la tarea se mueve —
-    conversación fresca (`TASK_HOT_MS`) o algún agente suyo trabajando— y
-    apagado mientras espera; la que el operador tiene abierta va con el trazo
-    al doble. Una tarea completada desaparece del anillo. Sin tareas, el
-    anillo es una línea tenue continua: el puesto está, y no sostiene nada.
-  - **Las muescas.** Ticks ámbar en la parte baja del anillo, uno por
-    escalación que nadie ha contestado (`pending` o `with_ceo`). Es la carga
-    que el operador va a tener que tomar, y por eso es ámbar y no cyan.
-  - **El turno.** En reposo el núcleo respira como siempre; en turno
-    (`thinking`/`working`) late 2,6× más rápido y su contorno se hace sólido;
-    esperando al operador, el halo y el brillo se tiñen de ámbar. Llega al
-    shader del tile como el uniform `uCap`: hay un solo CAPCOM, así que no
-    cuesta un atributo por instancia.
-  - **Los vínculos.** Tuberías cyan tenues (`PipeKind` `command`, sin puertos)
-    de CAPCOM a lo que lanzó — hijo suyo, o raíz con `origin: 'orca'` — que
-    bajan a un tercio cuando el agente termina. Con cincuenta agentes son
-    ruido, así que son preferencia y están apagados por defecto.
+- **Cyan** (`--cyan`, `#4fe3ff`). The outline is permanently cyan, the halo is
+  cyan and breathes slowly even when the tile is at rest, the sigil (the `C`
+  from `gfx/logo.ts`) is cyan ink, and the body carries 7 % cyan over the dark.
+  A **stroke** sweeps the tile top to bottom every ~6 s with a short trail,
+  like an oscilloscope beam; with `prefers-reduced-motion` it stays still.
+  Nothing else in the field may wear this color: lime is the fleet, amber is
+  the person, cyan is command.
+- **Outside the projects.** It does not live in any region: it sits at the
+  spiral's origin (`layout.ts`, slot 0 moves to an outer ring) with the regions
+  around it, at scale `CAPCOM_SCALE` (1.4). Its folder on disk is its home,
+  not a repo, and earns no region; a stray worker in there does earn one, and
+  that is how the straying shows. Its pipes take the direct route, like those
+  of a hand-pinned tile.
+- **Two labels.** Over the tile, centered on its top edge, a `CAPCOM · COMMAND`
+  chip in cyan (`.rgn--capcom`), the equivalent of a region's label or a
+  squad's; like a squad's, it never hides at any zoom nor yields to a
+  collision, and a click opens the conversation. Inside the tile, `CAPCOM`
+  where the callsign would go, and `HL · COMMAND` where a worker carries its
+  project and its origin, with a beacon in front breathing at the same rate.
+  At rest it does not dim: CAPCOM idle is CAPCOM listening. In the console, the
+  command line's target chip, its window's name and its voice in TALK all carry
+  the same cyan.
+- **Clearance.** If a hand-dragged region or tile covers the origin, CAPCOM
+  moves up to the first free gap (`CAPCOM_CLEAR`): it never ends up inside a
+  project or a squad.
+- **One body, not several** (revised 2026-09-06). CAPCOM is still *one* tile:
+  splitting it into blocks would make it indistinguishable from a squad (§3).
+  What says it is the command post is what it carries around it, and that lives
+  in `field/command.ts` — a single quad, a single shader, one `draw call`:
+  - **The ring.** A rounded outline at `RING_OFF` from the tile's edge, split
+    into one arc per open task (`WorldState.tasks`, state `active`). The arc is
+    lit while the task is moving — fresh conversation (`TASK_HOT_MS`) or one of
+    its agents working — and unlit while it waits; the one the operator has
+    open goes at double stroke. A completed task disappears from the ring. With
+    no tasks, the ring is a faint continuous line: the post is there, and it is
+    holding nothing.
+  - **The notches.** Amber ticks at the bottom of the ring, one per escalation
+    nobody has answered (`pending` or `with_ceo`). It is the load the operator
+    is going to have to take on, and that is why it is amber and not cyan.
+  - **The turn.** At rest the core breathes as always; on its turn
+    (`thinking`/`working`) it beats 2.6× faster and its outline goes solid;
+    waiting on the operator, the halo and the glow tint amber. It reaches the
+    tile shader as the uniform `uCap`: there is only one CAPCOM, so it does not
+    cost a per-instance attribute.
+  - **The links.** Faint cyan pipes (`PipeKind` `command`, no ports) from
+    CAPCOM to whatever it launched — its own child, or a root with
+    `origin: 'orca'` — dropping to a third when the agent finishes. With fifty
+    agents they are noise, so they are a preference and are off by default.
 
-  Las cuatro piezas son banderas de `prefs.ts` (`capcomTasks`,
-  `capcomNotches`, `capcomPulse`, `capcomLinks`) y cada una apagada devuelve
-  el campo a lo que dibujaba antes. El anillo no se dibuja en el deck: un aro
-  alrededor de un tile en una rejilla estricta cruzaría a sus vecinos.
+  The four pieces are flags in `prefs.ts` (`capcomTasks`, `capcomNotches`,
+  `capcomPulse`, `capcomLinks`) and each one turned off returns the field to
+  what it drew before. The ring is not drawn in the deck: a hoop around a tile
+  in a strict grid would cross its neighbors.
 
 ---
 
-## 2. El texto dentro del tile
+## 2. The text inside the tile
 
-### 2.1 Las bandas
+### 2.1 The bands
 
-Las tres bandas se quedan; cambian sus bordes y su reparto.
+The three bands stay; their edges and their share change.
 
 ```
  ┌─────────────────────────────────────┐
- │▌ top  auto     x 7–78 %   LL  AX ·CX │▒▒▒│  ← sigilo en 80–95 %
- │▌ mid  flex 1   x 7–66 %          ▐████│  ← muesca 70–100 %, sólo < 320 px
- │▌               (x 7–96 % desde 320 px) │
+ │▌ top  auto     x 7–78 %   LL  AX ·CX │▒▒▒│  ← sigil at 80–95 %
+ │▌ mid  flex 1   x 7–66 %          ▐████│  ← notch 70–100 %, only < 320 px
+ │▌               (x 7–96 % from 320 px)  │
  │▌ bot  auto     x 7–96 %  NOW ─────────│
  │▌               $  TOK/S  UP  TURNS  [PILL]│
- │▌ (banda del shader, 0–10 %)            │
+ │▌ (shader band, 0–10 %)                 │
  └─────────────────────────────────────┘
 ```
 
-- `left: 7%` en las tres: la franja mide 4,5 % y necesita aire.
-- La columna termina en `bottom: 11%`: por debajo corre la banda de velocidad.
-- **Las bandas son una columna flex, no tres cajas a altura fija.** La de
-  abajo mide lo que contiene y la del medio se queda con el resto y recorta
-  sus líneas. Con alturas en porcentaje, NOW y las métricas se cortaban a un
-  zoom y sobraban a otro; ahora no se cortan a ninguno. (Los porcentajes van
-  en una columna absoluta dentro del tile, `.lbl__col`: un `padding` en
-  porcentaje sobre `.lbl` se resuelve contra la capa entera, no contra el
-  tile.)
-- **La muesca se retira al acercarse.** Cita la tarjeta del comp de un
-  vistazo, pero en un tile donde ya cabe una frase sólo se come palabras. El
-  shader la desliza fuera del borde derecho entre 260 y 320 px; desde el
-  tier 4 la banda media tiene todo el ancho.
-- La **píldora de estado** deja la esquina superior derecha (ahora es del
-  sigilo) y se pone al final de la fila de métricas, alineada a la derecha.
-  Es donde el comp pone `OFFLINE` en la tarjeta DEEP-SPACE RADAR ARRAY: bajo
-  el título, no sobre él.
+- `left: 7%` on all three: the stripe measures 4.5 % and needs air.
+- The column ends at `bottom: 11%`: the speed band runs below it.
+- **The bands are a flex column, not three fixed-height boxes.** The bottom one
+  measures what it contains and the middle one takes the rest and clips its
+  lines. With percentage heights, NOW and the metrics were clipped at one zoom
+  and left slack at another; now they are clipped at none. (The percentages go
+  in an absolute column inside the tile, `.lbl__col`: a percentage `padding` on
+  `.lbl` resolves against the whole layer, not against the tile.)
+- **The notch withdraws as you get closer.** It quotes the comp's card at a
+  glance, but on a tile where a sentence already fits it only eats words. The
+  shader slides it out past the right edge between 260 and 320 px; from tier 4
+  on, the middle band has the full width.
+- The **status pill** leaves the top-right corner (that is the sigil's now) and
+  goes at the end of the metrics row, right-aligned. It is where the comp puts
+  `OFFLINE` on the DEEP-SPACE RADAR ARRAY card: under the title, not over it.
 
-### 2.1b El contorno del tile
+### 2.1b The tile's outline
 
-**Decisión.** El borde de un tile es una **banda de 2 px de pantalla** en
-`#4a5262` —un paso por encima de `--line`—, no la línea de 1 px de `--line`
-sobre un cuerpo dos tonos más oscuro que no se encontraba. La banda sigue la
-silueta, bocado incluido: el shader muestrea la forma a 2 px en las cuatro
-direcciones y pinta donde el interior no llega (`uLinePx`). Selección, hover
-y CAPCOM conservan sus colores de línea; sólo cambia el reposo. El contorno
-de ventana sigue en `--line`: se dibuja una vez alrededor de un panel, no
-cuarenta veces sobre el suelo con ruido.
+**Decision.** A tile's border is a **2 screen-px band** in `#4a5262` — one step
+above `--line` — not the 1 px `--line` over a body two shades darker that you
+could never find. The band follows the silhouette, bite included: the shader
+samples the shape at 2 px in the four directions and paints where the interior
+does not reach (`uLinePx`). Selection, hover and CAPCOM keep their line colors;
+only the resting state changes. The window outline stays at `--line`: it is
+drawn once around a panel, not forty times over the ground as noise.
 
-### 2.2 Qué va en cada banda, y la escalera
+### 2.2 What goes in each band, and the ladder
 
-| Tier | ancho px | top | mid | bot |
+| Tier | width px | top | mid | bot |
 |---|---|---|---|---|
-| 1 | ≥ 44 | callsign · proyecto | — | — |
-| 2 | ≥ 112 | + chip runtime | título **o** misión, 2 líneas | — |
-| 3 | ≥ 190 | | | **NOW**, 1 línea, ancho completo |
-| 4 | ≥ 320 | | título 1 línea + misión 2 líneas | NOW + métricas |
-| 5 | ≥ 520 | + `RUNTIME · MODEL · MACHINE` | | + píldora |
+| 1 | ≥ 44 | callsign · project | — | — |
+| 2 | ≥ 112 | + runtime chip | title **or** mission, 2 lines | — |
+| 3 | ≥ 190 | | | **NOW**, 1 line, full width |
+| 4 | ≥ 320 | | title 1 line + mission 2 lines | NOW + metrics |
+| 5 | ≥ 520 | + `RUNTIME · MODEL · MACHINE` | | + pill |
 
-Reglas nuevas:
+New rules:
 
-- **NOW vive abajo.** Es la línea que más cambia y la que más se cortaba en el
-  66 %. Abajo tiene el 89 % del tile y una sola línea.
-- **La misión gana dos líneas** (`-webkit-line-clamp: 2`). Es la frase que
-  explica por qué existe el agente; once caracteres no explican nada.
-- **El título es un nombre, no el brief.** El collector cae al primer prompt
-  cuando la sesión no tiene `ai-title`, así que media squad se titulaba `Eres
-  el agente A en una prueba corta de saludo…`. `nameOf()` (`ui/util.ts`):
-  si el título mide 56+ caracteres o abre diciéndole al agente quién es
-  (`Eres…`, `You are…`, `Actúa como…`), o es un id de sesión pelado
-  (`9585cb99`), y la misión es más corta, se pinta la misión. La ventana del
-  agente usa la misma regla para su cabecera.
-- **Título repetido, título fuera.** Si `title` empieza por el nombre o el
-  código del proyecto (caso `axolots-25`), no se pinta y la misión ocupa su
-  sitio. Si no hay misión, se pinta el título aunque repita: mejor un dato
-  redundante que un hueco.
-- **Sin markdown.** `**No he podido escribir**`, `## Recomendación`, `- ` de
-  lista, `[texto](url)` y las comillas de código se quitan antes de pintar
-  (`plain()`); quedan las palabras en su orden. `snake_case` no es cursiva.
-- **Métricas honestas, columnas fijas.** Las cuatro columnas no se mueven
-  para que el ojo las encuentre; un valor sin sentido en el estado actual
-  (TOK/S en idle) se pinta `—` en `--ink-faint`, no `0`.
-- **Sin tofu.** Emojis y variation selectors se filtran del texto que llega
-  del agente antes de pintarlo.
+- **NOW lives at the bottom.** It is the line that changes most and the one
+  that was clipped most at 66 %. At the bottom it has 89 % of the tile and a
+  single line.
+- **The mission gains two lines** (`-webkit-line-clamp: 2`). It is the sentence
+  that explains why the agent exists; eleven characters explain nothing.
+- **The title is a name, not the brief.** The collector falls back to the first
+  prompt when the session has no `ai-title`, so half the squad was titled `Eres
+  el agente A en una prueba corta de saludo…`. `nameOf()` (`ui/util.ts`): if
+  the title is 56+ characters or opens by telling the agent who it is
+  (`Eres…`, `You are…`, `Actúa como…`), or is a bare session id
+  (`9585cb99`), and the mission is shorter, the mission is painted. The agent
+  window uses the same rule for its header.
+- **Repeated title, title out.** If `title` starts with the project's name or
+  code (the `axolots-25` case), it is not painted and the mission takes its
+  place. If there is no mission, the title is painted even if it repeats:
+  better a redundant fact than a gap.
+- **No markdown.** `**No he podido escribir**`, `## Recomendación`, list `- `,
+  `[texto](url)` and code backticks are stripped before painting (`plain()`);
+  the words remain in their order. `snake_case` is not italics.
+- **Honest metrics, fixed columns.** The four columns do not move, so the eye
+  can find them; a value that makes no sense in the current state (TOK/S while
+  idle) is painted `—` in `--ink-faint`, not `0`.
+- **No tofu.** Emojis and variation selectors are filtered out of the text
+  coming from the agent before it is painted.
 
-Nada de esto cambia el sistema de unidad `--u` ni la regla de que sólo el
-cruce de un peldaño reescribe el interior.
+None of this changes the `--u` unit system or the rule that only crossing a
+rung rewrites the interior.
 
-### 2.3 La forma dice algo
+### 2.3 The shape says something
 
-**Decisión.** Cada rasgo de la silueta responde a una pregunta que el
-operador se hace de lejos. Nada es adorno; el bocado deja de serlo.
+**Decision.** Every feature of the silhouette answers a question the operator
+asks from a distance. Nothing is ornament; the bite stops being one.
 
-| Rasgo | Significa | Quién lo lleva |
+| Feature | Means | Who carries it |
 |---|---|---|
-| Bocado a la derecha | "tengo padre": es el puerto donde aterriza su tubería | sólo los hijos; una raíz es un rectángulo entero |
-| Pestaña bajo el borde inferior (x 0,11–0,25) | "tengo hijos": por ahí salen mis lazos | padres |
-| Una placa detrás, un tono más clara, un paso abajo-derecha | miembro de escuadrón | miembros |
-| Dos placas | líder de escuadrón | líderes |
-| Contorno a guiones largos (28 px, 72 % lleno) | sesión que ORCA no lanzó: en la flota, no de la flota | `origin: 'external'` |
-| Línea de perforación en el margen inferior (y 0,09, bajo la columna de texto) | `done`: el ticket ya se usó; la línea de corte del talón | terminados |
-| Hueco: contorno y sigilo, sin cuerpo | `dead`, como el puerto que se vacía cuando su núcleo drena | muertos |
+| Bite on the right | "I have a parent": it is the port where its pipe lands | children only; a root is a whole rectangle |
+| Tab under the bottom edge (x 0.11–0.25) | "I have children": my ties leave through there | parents |
+| One plate behind, a shade lighter, one step down-right | squad member | members |
+| Two plates | squad lead | leads |
+| Long-dashed outline (28 px, 72 % filled) | a session ORCA did not launch: in the fleet, not of the fleet | `origin: 'external'` |
+| Perforation line in the bottom margin (y 0.09, under the text column) | `done`: the ticket has been used; the stub's tear line | finished |
+| Hollow: outline and sigil, no body | `dead`, like the port that empties when its core drains | dead |
 
-**Técnica.** Un atributo `iForm` por instancia: escala, placas (0–2), bits de
-topología (1 hijo · 2 padre · 4 externo) y vida (0 · 1 done · 2 dead). La
-silueta es una función `shape(t, bk, tab)` que el shader muestrea también
-para el borde de 2 px y para las placas, así todo sigue la misma forma. El
-píxel se calcula con la escala de la instancia, porque una celda de bandeja
-es el mismo shader a 0,3.
+**Implementation.** One `iForm` attribute per instance: scale, plates (0–2),
+topology bits (1 child · 2 parent · 4 external) and life (0 · 1 done · 2 dead).
+The silhouette is a `shape(t, bk, tab)` function that the shader also samples
+for the 2 px border and for the plates, so everything follows the same form.
+The pixel is computed with the instance's scale, because a tray cell is the
+same shader at 0.3.
 
-Se descartó el hueco en el borde para `blocked`: el tile ya se invierte a
-ámbar, y una segunda señal de forma para lo mismo sería ruido sobre lo único
-que debe gritar.
+The notch in the edge for `blocked` was discarded: the tile already inverts to
+amber, and a second shape signal for the same thing would be noise on top of
+the one thing that has to shout.
 
-### 2.4 Bloques: el padre y los hijos que sólo hablan con él
+### 2.4 Blocks: the parent and the children that only talk to it
 
-**Decisión.** Un hijo cuyo único interlocutor es su padre no es un nodo del
-grafo: es parte del padre. Se pliega en el **bloque** del padre: una
-**bandeja** —una celda de la rejilla junto al tile del padre— con hasta seis
-celdas, sin tubería entre ellas. Padre y bandeja se apoyan en una **losa**:
-un plano relleno un paso más claro que el suelo (`#141721`), sin contorno.
-La losa dice "una pieza" sin añadir una línea a un campo que ya tiene la de
-la región y la del escuadrón; el contorno (lima) aparece sólo con el bloque
-seleccionado. De lejos, una silueta; de cerca, callsign y estado de cada
-celda. Un séptimo hijo abre una segunda bandeja.
+**Decision.** A child whose only interlocutor is its parent is not a node in
+the graph: it is part of the parent. It folds into the parent's **block**: a
+**tray** — a grid cell next to the parent's tile — with up to six cells and no
+pipe between them. Parent and tray rest on a **slab**: a filled plane one step
+lighter than the ground (`#141721`), with no outline. The slab says "one piece"
+without adding a line to a field that already has the region's and the squad's;
+the outline (lime) appears only when the block is selected. From afar, one
+silhouette; up close, the callsign and status of each cell. A seventh child
+opens a second tray.
 
-**Las celdas crecen según cuántas son** (`trayGrid`): un hijo solo ocupa casi
-toda la bandeja (escala 0,62), dos van a 0,44, tres o cuatro a 0,42 en 2 × 2,
-cinco o seis a 0,3 en 3 × 2. Una celda sola no es una mota en una bandeja
-vacía; su callsign se lee dos pasos de zoom antes que el de seis. Su borde
-es de 1 px, no de 2: con dos, el borde sería casi toda la celda.
+**The cells grow according to how many there are** (`trayGrid`): a lone child
+takes up almost the whole tray (scale 0.62), two go to 0.44, three or four to
+0.42 in 2 × 2, five or six to 0.3 in 3 × 2. A single cell is not a speck in an
+empty tray; its callsign becomes readable two zoom steps before the callsign of
+six does. Its border is 1 px, not 2: at 2, the border would be most of the
+cell.
 
-**El bloque se mueve como una pieza.** Arrastrar al padre o cualquier celda
-arrastra padre, bandejas y celdas juntos. Sólo el padre queda anclado: el
-layout pone la bandeja al lado de un padre anclado, y una celda anclada
-volvería a ser tile (`blocks.ts`), así que el bloque estallaría en la mano.
-Un clic sobre una celda sigue siendo un clic sobre esa celda.
+**The block moves as one piece.** Dragging the parent or any cell drags parent,
+trays and cells together. Only the parent gets pinned: the layout puts the tray
+next to a pinned parent, and a pinned cell would become a tile again
+(`blocks.ts`), so the block would burst in your hand. A click on a cell is
+still a click on that cell.
 
-**Aire.** El contorno de escuadrón deja `SQUAD_PAD` (0,15) entre los tiles y
-la línea; la losa deja `BLOCK_PAD` (0,08). Ambos caben en la cuneta (0,24) y
-son distintos para que un bloque dentro de un escuadrón enseñe dos cosas y no
-una línea dibujada dos veces. Un marco pegado al borde del tile se leía como
-borde del tile, y un tile que lo tocaba, como salido.
+**Air.** The squad outline leaves `SQUAD_PAD` (0.15) between the tiles and the
+line; the slab leaves `BLOCK_PAD` (0.08). Both fit in the gutter (0.24) and are
+different so that a block inside a squad shows two things and not one line
+drawn twice. A frame flush against the tile's edge read as the tile's edge, and
+a tile touching it read as spilling out.
 
-**Quién se pliega** (`blocks.ts`, `absorbedChildren`):
+**Who folds in** (`blocks.ts`, `absorbedChildren`):
 
-- todo subagente `Task` de Claude Code (`Agent.subagent`, nuevo campo que el
-  collector saca de la ruta `subagents/` del transcript), siempre;
-- un hijo lanzado por ORCA (`origin: 'orca'`) mientras su único tráfico sea
-  con su padre. El primer mensaje a o de cualquier otro —o a un proyecto, un
-  escuadrón o la flota— lo saca del bloque: gana tile y tubería. Es una
-  promoción visible: "este hijo ya habla con el mundo".
+- every Claude Code `Task` subagent (`Agent.subagent`, a new field the
+  collector pulls from the transcript's `subagents/` path), always;
+- a child launched by ORCA (`origin: 'orca'`) as long as its only traffic is
+  with its parent. The first message to or from anyone else — or to a project,
+  a squad or the fleet — takes it out of the block: it earns a tile and a pipe.
+  It is a visible promotion: "this child now talks to the world".
 
-**Nunca se pliega:** un hijo bloqueado en una persona (el ámbar se ve), uno
-con hijos propios, uno alistado en un escuadrón (el escuadrón es su bloque),
-uno de otro proyecto, uno cuyo padre no está en el campo, ni uno que el
-operador ancló a mano. El deck no pliega a nadie: su orden es la información.
+**Never folds in:** a child blocked on a person (the amber has to show), one
+with children of its own, one enlisted in a squad (the squad is its block), one
+from another project, one whose parent is not in the field, or one the operator
+pinned by hand. The deck folds nobody in: its order is the information.
 
-**Técnica.** `layoutFleet` recibe el mapa hijo → padre y mete una entrada
-`tray` justo detrás del padre en el orden de linaje; la bandeja hereda el
-escuadrón del padre para el empaquetado y sigue al padre si éste está
-anclado. Cada hijo plegado tiene su `Spot` con `scale: 0.3` y `trayOf`, así
-la selección, las ventanas y las etiquetas funcionan igual. `tie()` no dibuja
-el lazo de un hijo que está en la bandeja de su padre, y su nacimiento es
-una celda que crece, no un núcleo bajando por una tubería.
+**Implementation.** `layoutFleet` receives the child → parent map and inserts a
+`tray` entry right behind the parent in lineage order; the tray inherits the
+parent's squad for packing and follows the parent if the parent is pinned. Each
+folded child has its `Spot` with `scale: 0.3` and `trayOf`, so selection,
+windows and labels work the same. `tie()` does not draw the tie of a child that
+is in its parent's tray, and its birth is a cell growing, not a core coming
+down a pipe.
 
 ---
 
-## 3. El escuadrón: un tile de tiles
+## 3. The squad: a tile of tiles
 
-### 3.1 Contorno con muesca
+### 3.1 Notched outline
 
-**Decisión.** Un escuadrón tiene contorno: la línea de 1 px de `--line`
-(un paso más clara que la de región, que es `--line-soft`) alrededor del
-bloque de celdas de sus miembros, con la **misma muesca del tile** —
-escalón fijo de 0,50 × 0,30 unidades en la esquina superior derecha, no
-proporcional, porque un bloque ancho con una muesca proporcional parecería
-otra cosa. El escuadrón es un tile hecho de tiles y se dibuja como tal.
+**Decision.** A squad has an outline: the 1 px `--line` line (one step lighter
+than the region's, which is `--line-soft`) around the block of its members'
+cells, with the **same notch as the tile** — a fixed 0.50 × 0.30 unit step in
+the top-right corner, not proportional, because a wide block with a
+proportional notch would look like something else. The squad is a tile made of
+tiles and is drawn as one.
 
-El rótulo se apoya **sobre la línea superior**, a 0,3 unidades de la esquina
-izquierda, con fondo `--bezel`, como la leyenda de un `fieldset`: la línea
-pasa por debajo y el rótulo la interrumpe. Bajo foco, el contorno entero se
-enciende cuando cualquier miembro está en la selección (`focusNear` incluye a
-los compañeros de escuadrón).
+The label rests **on the top line**, 0.3 units from the left corner, with a
+`--bezel` background, like a `fieldset` legend: the line passes underneath and
+the label interrupts it. Under focus, the whole outline lights up when any
+member is in the selection (`focusNear` includes squad mates).
 
-**Técnica.** `pipes.add()` con la polilínea del contorno (nueve puntos, con
-el escalón), `thick 0.4`, `kind 'lineage'`, z −0,38 (encima de la región, bajo
-los tiles). Cuando el escuadrón aparece por primera vez, el contorno **se
-traza** desde la esquina del líder en sentido horario en `T.move` usando el
-mismo núcleo con relleno de §4.2 (`fill` 0→1). Sin fade.
+**Implementation.** `pipes.add()` with the outline's polyline (nine points,
+including the step), `thick 0.4`, `kind 'lineage'`, z −0.38 (above the region,
+below the tiles). When the squad appears for the first time, the outline is
+**drawn** from the lead's corner clockwise in `T.move` using the same filled
+core from §4.2 (`fill` 0→1). No fade.
 
-### 3.2 El rótulo y su escalera
+### 3.2 The label and its ladder
 
-El rótulo deja de ser dos palabras y pasa a tener tres estados según
+The label stops being two words and takes on three states depending on
 `pxPerUnit`:
 
-| ppu | Qué muestra |
+| ppu | What it shows |
 |---|---|
-| < 40 (tiles ilegibles) | **sigilo** del escuadrón + **roster** |
-| 40–120 | sigilo + nombre + `n` + roster |
-| ≥ 120 | + `LEAD K9` + la misión del líder en una línea (máx. 48 car.) + `2 NEED YOU` en ámbar si aplica |
+| < 40 (tiles illegible) | the squad's **sigil** + **roster** |
+| 40–120 | sigil + name + `n` + roster |
+| ≥ 120 | + `LEAD K9` + the lead's mission on one line (max 48 chars) + `2 NEED YOU` in amber when it applies |
 
-**El roster** es la pieza nueva: un cuadrado de 6×6 px por miembro, gap 2 px,
-en el orden de `Squad.memberIds` (líder primero, con marco de 1 px de tinta),
-cada uno del color de estado del miembro. Es el pulso del escuadrón a cualquier
-zoom: cuando los tiles son motas, el roster sigue diciendo "cinco trabajando,
-uno esperando por ti". Cambia por **corte**, con el mismo latido del tile: el
-cuadrado que cambia salta a `--ink-bright` un frame y cae a su color en
-`T.snap`. Tope 32 cuadrados (`MAX_SQUAD_NAME` ya limita el nombre; el roster
-limita el ancho).
+**The roster** is the new piece: a 6×6 px square per member, 2 px gap, in
+`Squad.memberIds` order (lead first, with a 1 px ink frame), each in that
+member's status color. It is the squad's pulse at any zoom: when the tiles are
+specks, the roster still says "five working, one waiting on you". It changes by
+**cut**, with the same heartbeat as the tile: the square that changes jumps to
+`--ink-bright` for a frame and falls to its color in `T.snap`. Cap of 32
+squares (`MAX_SQUAD_NAME` already limits the name; the roster limits the
+width).
 
-### 3.3 El puerto del escuadrón
+### 3.3 The squad's port
 
-Sobre la línea superior, a 0,15 unidades de la esquina izquierda y antes del
-rótulo, un **puerto cuadrado** (`pipes.port`, escala 1,3, `--ink-dim`). Es el
-punto donde aterriza un mensaje `toSquad` (hoy `squadAnchor` ya devuelve esa
-esquina) y desde donde sale el **abanico** (§5.3). Se enciende a tinta
-mientras haya un mensaje en vuelo hacia él y vuelve a `--ink-dim`.
+On the top line, 0.15 units from the left corner and before the label, a
+**square port** (`pipes.port`, scale 1.3, `--ink-dim`). It is the point where a
+`toSquad` message lands (today `squadAnchor` already returns that corner) and
+where the **fan-out** (§5.3) leaves from. It lights up to ink while there is a
+message in flight toward it and returns to `--ink-dim`.
 
-### 3.4 Lo que no cambia
+### 3.4 What does not change
 
-El empaquetado (`squadOrder`, `packCells`) ya hace bloques contiguos con el
-líder en la primera celda; la etiqueta ya no se oculta nunca; el hub ya enruta
-`scope:'squad'`. El diseño se apoya en eso y no lo toca.
+Packing (`squadOrder`, `packCells`) already makes contiguous blocks with the
+lead in the first cell; the label is never hidden any more; the hub already
+routes `scope:'squad'`. The design leans on that and does not touch it.
 
 ---
 
-## 4. Tuberías con sentido
+## 4. Pipes that mean something
 
-### 4.1 Cunetas
+### 4.1 Gutters
 
-**Decisión.** Toda tubería vive en las **cunetas** de la rejilla — los
-`GAP_Y` entre filas y `GAP_X` entre columnas — y entra a un tile sólo por
-un puerto en su borde. Ruta padre→hijo:
+**Decision.** Every pipe lives in the grid's **gutters** — the `GAP_Y` between
+rows and `GAP_X` between columns — and enters a tile only through a port on its
+edge. Parent→child route:
 
-1. sale por el puerto inferior del padre (`x = P.x − 0,32`);
-2. baja a la cuneta horizontal bajo el padre (`y = P.y − TILE_H/2 − GAP_Y/2`);
-3. corre hasta la cuneta vertical **a la izquierda de la columna del hijo**
+1. leaves through the parent's bottom port (`x = P.x − 0.32`);
+2. drops to the horizontal gutter under the parent
+   (`y = P.y − TILE_H/2 − GAP_Y/2`);
+3. runs to the vertical gutter **to the left of the child's column**
    (`x = C.x − TILE_W/2 − GAP_X/2`);
-4. baja por ella hasta la cuneta sobre el hijo;
-5. entra al hijo por su puerto superior (`x = C.x − 0,32`).
+4. goes down it to the gutter above the child;
+5. enters the child through its top port (`x = C.x − 0.32`).
 
-Seis puntos; dos si el hijo está justo debajo. Un hijo en la **misma fila**
-entra por abajo (baja, corre por la cuneta inferior, sube). Mensajes entre
-pares usan la misma rejilla: salen por un lado a la cuneta vertical, corren por
-una horizontal, entran por un lado. Un tile **anclado por el operador** ha roto
-la rejilla a propósito: para él se conserva `routeLineage`/`routeMessage`
-actuales.
+Six points; two if the child is directly below. A child in the **same row**
+enters from below (down, along the bottom gutter, up). Peer-to-peer messages
+use the same grid: they leave through a side to the vertical gutter, run along
+a horizontal one, and enter through a side. A tile **pinned by the operator**
+has broken the grid on purpose: for it, the current
+`routeLineage`/`routeMessage` are kept.
 
-**Carriles.** Una cuneta de 0,26 admite tres tuberías de 0,055 a
-`−0,075 · 0 · +0,075`. El carril se asigna por `hash(parentId) % 3`
-(mensajes: `hash(fromId)`), así los hijos de un padre comparten bus y dos
-familias en la misma cuneta no se pisan. Los cruces siguen existiendo; lo que
-ya no existe es una tubería sobre un tile.
+**Lanes.** A 0.26 gutter takes three 0.055 pipes at `−0.075 · 0 · +0.075`. The
+lane is assigned by `hash(parentId) % 3` (messages: `hash(fromId)`), so one
+parent's children share a bus and two families in the same gutter do not step
+on each other. Crossings still exist; what no longer exists is a pipe over a
+tile.
 
-El enrutador toma `gapX/gapY` del `Layout` (campo o deck tienen gaps distintos)
-en vez de constantes; `layout.ts` los expone.
+The router takes `gapX/gapY` from the `Layout` (field and deck have different
+gaps) instead of constants; `layout.ts` exposes them.
 
-### 4.2 Bus gris, núcleo lima
+### 4.2 Grey bus, lime core
 
-**Decisión.** El linaje se dibuja como en el comp: un **bus** gris
-(`C_LINE`, `thick 1.0`) y, por dentro, un **núcleo** (`thick 0.42`) que lleva
-la lima. El bus es estructura: existe desde que existe el hijo y no cambia. El
-núcleo es vida: lima plena si el hijo está `working`, lima al 55 % en
-`thinking/booting/idle`, **ausente** en `done/dead`. La lima deja de
-significar "hay una tubería" y vuelve a significar "hay actividad", que es lo
-que significa en el tile.
+**Decision.** Lineage is drawn as in the comp: a grey **bus** (`C_LINE`,
+`thick 1.0`) and, inside it, a **core** (`thick 0.42`) that carries the lime.
+The bus is structure: it exists from the moment the child exists and does not
+change. The core is life: full lime if the child is `working`, lime at 55 % in
+`thinking/booting/idle`, **absent** in `done/dead`. Lime stops meaning "there
+is a pipe" and goes back to meaning "there is activity", which is what it means
+on the tile.
 
-El lazo líder→miembro que hoy se pinta igual que el linaje se pinta igual
-también aquí; es la misma clase de lazo.
+The lead→member tie that today is painted the same as lineage is painted the
+same here too; it is the same class of tie.
 
-**Técnica.** Nuevo `PipeKind 'core'` (id 5). Para él, `iMeta.y` deja de ser
-edad y es la **longitud llena** en unidades de mundo; el fragment pinta
-`vAlong < iMeta.y`. `add()` devuelve la longitud total de la ruta para que
-quien llama pueda pasar `fill · len`. `fill` es un escalar animado (§5).
+**Implementation.** New `PipeKind 'core'` (id 5). For it, `iMeta.y` stops being
+age and becomes the **filled length** in world units; the fragment paints
+`vAlong < iMeta.y`. `add()` returns the route's total length so the caller can
+pass `fill · len`. `fill` is an animated scalar (§5).
 
-### 4.3 Puertos NULL / ACTV
+### 4.3 NULL / ACTV ports
 
-Los puertos son las cajas `NULL`/`ACTIVE` del comp sin la palabra: **rellenos
-de tinta** cuando el núcleo los alcanza, **huecos** (anillo) cuando no. Un hijo
-recién creado tiene su puerto hueco en su celda antes de tener tile.
+The ports are the comp's `NULL`/`ACTIVE` boxes without the word: **filled with
+ink** when the core reaches them, **hollow** (a ring) when it does not. A
+newly created child has its hollow port in its cell before it has a tile.
 
-**Técnica.** Segunda malla instanciada `holes` de cuadrados en `uBody` a
-escala 0,5 encima del puerto; `port(x, y, z, color, scale, sel, hollow)`.
+**Implementation.** A second instanced mesh `holes` of squares in `uBody` at
+scale 0.5 on top of the port; `port(x, y, z, color, scale, sel, hollow)`.
 
-### 4.4 Jerarquía de pesos y colores
+### 4.4 Hierarchy of weights and colors
 
-| Relación | Color | Grosor | Movimiento | ¿Se ve de lejos? |
+| Relation | Color | Weight | Motion | Visible from afar? |
 |---|---|---|---|---|
-| Región (contorno) | `--line-soft` | 0,4 | — | sí |
-| Escuadrón (contorno) | `--line` | 0,4 | se traza al nacer | sí |
-| Linaje, bus | `C_LINE` | 1,0 | guiones lentos padre→hijo | sólo si cruza región o es largo |
-| Linaje, núcleo | lima / lima 55 % | 0,42 | mismos guiones, en fase con el bus | igual que el bus |
-| Lazo líder→miembro | igual que linaje | 0,8 / 0,35 | igual | igual |
-| `ask` abierto | ámbar | 1,0 | guión rápido hacia quien debe | siempre |
-| Espera entre pares | azul | 1,0 | guión rápido hacia quien debe | siempre |
-| `notice` | azul | 0,7 | guiones lentos; se apaga en 60 s | sólo si cruza región o es largo |
-| Colisión | rojo | 1,0 | punteado, **quieto** | siempre |
-| Hot (selección) | lima plena | 1,2 | — (sólida) | siempre |
+| Region (outline) | `--line-soft` | 0.4 | — | yes |
+| Squad (outline) | `--line` | 0.4 | drawn at birth | yes |
+| Lineage, bus | `C_LINE` | 1.0 | slow dashes parent→child | only if it crosses a region or is long |
+| Lineage, core | lime / lime 55 % | 0.42 | same dashes, in phase with the bus | same as the bus |
+| Lead→member tie | same as lineage | 0.8 / 0.35 | same | same |
+| open `ask` | amber | 1.0 | fast dash toward whoever owes | always |
+| Peer-to-peer wait | blue | 1.0 | fast dash toward whoever owes | always |
+| `notice` | blue | 0.7 | slow dashes; goes out in 60 s | only if it crosses a region or is long |
+| Collision | red | 1.0 | dotted, **still** | always |
+| Hot (selection) | full lime | 1.2 | — (solid) | always |
 
-**Nada estructural es una línea sólida.** El bus y su núcleo son guiones de
-unos 18 px que derivan del padre al hijo a 40 px/s, al zoom que sea (el
-periodo y la velocidad se calculan en píxeles, no en unidades de mundo). Un
-`ask` lleva guiones más largos y más rápidos, en ámbar, así que los dos
-movimientos nunca se leen como uno. Sólo la selección (`hot`), los contornos
-(`frame`) y la respuesta que se retrae siguen sólidos.
+**Nothing structural is a solid line.** The bus and its core are dashes of
+about 18 px drifting from parent to child at 40 px/s, at any zoom (the period
+and the speed are computed in pixels, not in world units). An `ask` carries
+longer and faster dashes, in amber, so the two motions never read as one. Only
+the selection (`hot`), the outlines (`frame`) and the answer retracting stay
+solid.
 
-### 4.5 El zoom decide qué es cableado y qué es ruido
+### 4.5 Zoom decides what is wiring and what is noise
 
-**Decisión.** De lejos, la consola enseña **qué flotilla habla con cuál**; de
-cerca, **quién cuelga de quién**. Con cincuenta agentes y doscientas tuberías
-sólidas a la vista no se leía ninguna de las dos cosas.
+**Decision.** From afar, the console shows **which squad talks to which**; up
+close, **who hangs off whom**. With fifty agents and two hundred solid pipes in
+view, neither of the two could be read.
 
-Cada segmento lleva un **alcance** (`span`, 0 → 1, `spanOf`): 1 si la tubería
-sale de su región o recorre más de `SPAN_FAR` (3,2) unidades; 0 si une
-vecinos (menos de `SPAN_NEAR`, 1,4); una rampa suave entre ambos. Un lazo
-seleccionado o bajo el cursor es siempre alcance 1: lo que el operador mira
-nunca es detalle.
+Every segment carries a **span** (`span`, 0 → 1, `spanOf`): 1 if the pipe
+leaves its region or covers more than `SPAN_FAR` (3.2) units; 0 if it joins
+neighbors (less than `SPAN_NEAR`, 1.4); a smooth ramp in between. A tie that is
+selected or under the cursor is always span 1: what the operator is looking at
+is never detail.
 
-El zoom entra como `uLod` (`lodOf`): 0 cuando un tile mide menos de
-`LOD_FAR_PX` (100 px), 1 desde `LOD_NEAR_PX` (190 px, el peldaño de
-`labels.ts` en que el tile enseña qué está haciendo). El alfa de una tubería
-local de `lineage`, `core` o `notice` se multiplica por `mix(uLod, 1, span)`.
-Los puertos no tienen alfa, así que un puerto local **crece** con el zoom
-desde nada (`port(…, local)`), en vez de aparecer de golpe; los de YOU y los
-de escuadrón siempre están a su tamaño.
+Zoom comes in as `uLod` (`lodOf`): 0 when a tile is smaller than `LOD_FAR_PX`
+(100 px), 1 from `LOD_NEAR_PX` (190 px, the `labels.ts` rung at which the tile
+shows what it is doing). The alpha of a local `lineage`, `core` or `notice`
+pipe is multiplied by `mix(uLod, 1, span)`. Ports have no alpha, so a local
+port **grows** with zoom from nothing (`port(…, local)`) instead of appearing
+all at once; YOU's ports and the squads' are always at full size.
 
-Lo que necesita a una persona no se esconde a ningún zoom: `ask`, `hot` y
-colisión ignoran el alcance. El ámbar sigue siendo el ámbar.
+What needs a person does not hide at any zoom: `ask`, `hot` and collision
+ignore the span. Amber is still amber.
 
-El ámbar sigue reservado a lo que sólo una persona puede resolver
-(PLAN.md §5); nada aquí lo toca.
+Amber stays reserved for what only a person can resolve; nothing
+here touches that.
 
 ---
 
-## 5. Movimiento: GSAP para lo discreto, shader para lo continuo
+## 5. Motion: GSAP for the discrete, shader for the continuous
 
-**Arquitectura.** Hoy el campo anima con un `anims` propio y `backOut` a mano.
-Pasa a `field/anim.ts`: un registro de escalares `{ v }` tweenados por GSAP
-con `T`/`EASE`/`dur()` de `motion.ts`, leídos por el RAF (`anim.get('core:'+id)`).
-El shader conserva lo que no tiene fin (respiración, banda de velocidad,
-guiones); GSAP toma lo que tiene principio y fin. Los tres motores siguen
-leyendo un solo contrato.
+**Architecture.** Today the field animates with its own `anims` and a hand-made
+`backOut`. It moves to `field/anim.ts`: a registry of `{ v }` scalars tweened
+by GSAP with `T`/`EASE`/`dur()` from `motion.ts`, read by the RAF
+(`anim.get('core:'+id)`). The shader keeps what has no end (breathing, speed
+band, dashes); GSAP takes what has a beginning and an end. All three engines
+still read a single contract.
 
-### 5.1 Nacer (A8 del comp)
+### 5.1 Birth (A8 of the comp)
 
-Hoy el tile aparece sobre el padre y se desliza a su celda con la tubería ya
-puesta. Pasa a ser el gesto del comp:
+Today the tile appears over the parent and slides to its cell with the pipe
+already in place. It becomes the comp's gesture:
 
-1. la celda del hijo muestra su **puerto hueco** en el mismo frame del patch;
-2. el **bus** aparece entero (gris, corte);
-3. el **núcleo** crece del puerto del padre al del hijo en `T.move`,
+1. the child's cell shows its **hollow port** in the same frame as the patch;
+2. the **bus** appears whole (grey, cut);
+3. the **core** grows from the parent's port to the child's in `T.move`,
    `EASE.inout`;
-4. al llegar, el puerto se rellena y el **tile entra** con `back.out(2)` en
-   `T.quick`, ya en su celda.
+4. on arrival, the port fills and the **tile enters** with `back.out(2)` in
+   `T.quick`, already in its cell.
 
-Un escuadrón nace así en cadena: el líder crece de su padre; cada miembro
-crece del líder con los offsets de `beats(n)` que hoy ya calcula
-`burstOffset`. Con cinco miembros son cuatro núcleos a 100 ms, medio segundo
-de nada, y el quinto. Con `prefers-reduced-motion`, todo aterriza en el
-estado final.
+A squad is born this way in a chain: the lead grows from its parent; each
+member grows from the lead with the `beats(n)` offsets that `burstOffset`
+already computes today. With five members that is four cores at 100 ms — half a
+second, nothing — and then the fifth. With `prefers-reduced-motion`, everything
+lands in the final state.
 
-### 5.2 Morir y terminar
+### 5.2 Dying and finishing
 
-`dead`: el tile destella rojo una vez y se hunde (ya existe); el **núcleo
-drena** hacia el padre en `T.move` y el puerto del hijo queda hueco. `done`:
-igual sin el destello. El bus se queda: el hijo existió.
+`dead`: the tile flashes red once and sinks (this already exists); the **core
+drains** back toward the parent in `T.move` and the child's port is left
+hollow. `done`: the same without the flash. The bus stays: the child existed.
 
-### 5.3 Hablar
+### 5.3 Talking
 
-- **Mensaje a un agente.** El pulso deja de ser un cuadrado a velocidad
-  constante: es un **segmento** lima de 0,35 unidades que recorre la ruta con
-  `EASE.inout` (duración `len / 9`, mín. `T.quick`) y deja una estela que se
-  apaga en 0,6 s. Corte al llegar.
-- **Mensaje a un escuadrón.** El pulso llega al **puerto del escuadrón**
-  (§3.3), el puerto se enciende, y desde ahí salen `n` pulsos a los puertos
-  superiores de los miembros con offsets `beats(n)`: el **abanico**. Es la
-  imagen de "le hablé a la flotilla".
-- **Respuesta a un `ask`.** Cuando `m.answer` aparece: la tubería ámbar
-  **corta a lima plena un frame** y drena desde quien preguntó hacia quien
-  respondió en `T.quick`; luego no existe. Nunca un fade.
+- **Message to an agent.** The pulse stops being a square at constant speed:
+  it is a lime **segment** of 0.35 units travelling the route with `EASE.inout`
+  (duration `len / 9`, min. `T.quick`) leaving a trail that fades out in 0.6 s.
+  Cut on arrival.
+- **Message to a squad.** The pulse reaches the **squad's port** (§3.3), the
+  port lights up, and from there `n` pulses leave for the members' top ports
+  with `beats(n)` offsets: the **fan-out**. It is the picture of "I talked to
+  the squad".
+- **Answer to an `ask`.** When `m.answer` appears: the amber pipe **cuts to
+  full lime for a frame** and drains from whoever asked toward whoever answered
+  in `T.quick`; after that it does not exist. Never a fade.
 
-### 5.4 El roster
+### 5.4 The roster
 
-Cada cuadrado que cambia de estado salta a `--ink-bright` y cae a su color en
-`T.snap`, en el mismo frame que el tile hace su flash. Es el mismo latido a
-otra escala.
+Every square that changes state jumps to `--ink-bright` and falls to its color
+in `T.snap`, in the same frame the tile does its flash. It is the same
+heartbeat at another scale.
 
 ---
 
-## 6. Microanimaciones: cada interacción tiene un gesto
+## 6. Micro-animations: every interaction has a gesture
 
-**Regla.** Toda interacción del operador produce un gesto, y todo gesto sale
-del vocabulario del comp (IDEAS.md §A). Duraciones sólo de `T`; easings sólo
-de `EASE`; las paletas cortan, las formas easean; el rojo no se anima; nada
-llega a ritmo constante; con `prefers-reduced-motion` todo aterriza en el
-estado final vía `dur()`. Un gesto que no cabe en una fila de esta tabla no se
-implementa.
+**Rule.** Every operator interaction produces a gesture, and every gesture
+comes from the comp's vocabulary. Durations only from `T`;
+easings only from `EASE`; palettes cut, shapes ease; red is not animated;
+nothing arrives at a constant rate; with `prefers-reduced-motion` everything
+lands in the final state via `dur()`. A gesture that does not fit in a row of
+this table does not get implemented.
 
-### 6.1 Ventanas
+### 6.1 Windows
 
-| Momento | Gesto | Tiempo |
+| Moment | Gesture | Time |
 |---|---|---|
-| **Abrir** | El housing llega desde el punto que la abrió (tile, tray, comando) con `back.out(2)`, escala 0,86→1, **sin fade** (hoy hay `opacity 0→1`; fuera). En el mismo frame la tubería de anclaje al tile **se traza** del tile a la ventana (núcleo §4.2, `fill` 0→1). El callsign de la cabecera **se ensambla** de píxeles (A2): 3 frames de glifos revueltos y corta al real. Las secciones del cuerpo **caen en cascada** (A1): cada `.sec` aparece por corte, offsets `beats(n)` comprimidos a 40 ms por paso | housing `T.quick` · tubería `T.quick` · callsign 0,18 s · cascada ≤ 0,3 s |
-| **Cerrar (normal)** | Colapso corto (A12): el cuerpo cae bajo el borde, el housing se aplana a una barra de 2 px y corta. La tubería de anclaje **drena** hacia el tile a la vez | `T.quick`, `EASE.inout` |
-| **Cerrar (contestado / terminado / muerto)** | Ya existen: `wipe` lima, `check` píxel a píxel, y para `dead` corte a rojo y colapso sin destello | sin cambio |
-| **Foco** | La línea bajo la cabecera (`.win__head::after`) **crece de izquierda a derecha**; al perder el foco, corte | `T.snap` |
-| **Plegar al tray** | El housing vuela hacia su tile del tray (escala hasta 58×44, `EASE.inout`) y corta; el tile del tray **entra** con `back.out(2)` desde escala 0,6 | `T.quick` + `T.snap` |
-| **Desplegar** | Inverso: el tile del tray se aplana a barra y la ventana llega desde él | `T.quick` |
-| **PIN** | El botón corta a lima; la tubería de anclaje se traza (pin) o drena (unpin) | `T.quick` |
-| **Arrastrar / redimensionar** | Directo, sin tween: un chrome que retrasa la mano se siente roto. La tubería de anclaje sigue en cada frame (ya) | — |
-| **Telemetría hex** | Se revuelve a 70 ms **sólo mientras su agente está `working`** (A9); congelada en cualquier otro estado | 70 ms |
-| **Estado del agente cambia** | La cabecera hace el mismo flash que el tile: salta a `--ink-bright` un frame y cae al color de estado | `T.snap` |
+| **Open** | The housing arrives from the point that opened it (tile, tray, command) with `back.out(2)`, scale 0.86→1, **no fade** (today there is `opacity 0→1`; out). In the same frame the anchor pipe to the tile **is drawn** from the tile to the window (core §4.2, `fill` 0→1). The header's callsign **assembles itself** out of pixels (A2): 3 frames of scrambled glyphs, then a cut to the real one. The body's sections **cascade in** (A1): each `.sec` appears by cut, `beats(n)` offsets compressed to 40 ms per step | housing `T.quick` · pipe `T.quick` · callsign 0.18 s · cascade ≤ 0.3 s |
+| **Close (normal)** | Short collapse (A12): the body falls below the edge, the housing flattens into a 2 px bar and cuts. The anchor pipe **drains** back to the tile at the same time | `T.quick`, `EASE.inout` |
+| **Close (answered / finished / dead)** | These already exist: lime `wipe`, pixel-by-pixel `check`, and for `dead` a cut to red and a collapse without the flash | unchanged |
+| **Focus** | The line under the header (`.win__head::after`) **grows from left to right**; on losing focus, a cut | `T.snap` |
+| **Fold to the tray** | The housing flies toward its tray tile (scaling down to 58×44, `EASE.inout`) and cuts; the tray tile **enters** with `back.out(2)` from scale 0.6 | `T.quick` + `T.snap` |
+| **Unfold** | The inverse: the tray tile flattens into a bar and the window arrives from it | `T.quick` |
+| **PIN** | The button cuts to lime; the anchor pipe is drawn (pin) or drains (unpin) | `T.quick` |
+| **Drag / resize** | Direct, no tween: chrome that lags behind the hand feels broken. The anchor pipe follows every frame (already) | — |
+| **Hex telemetry** | Scrambles every 70 ms **only while its agent is `working`** (A9); frozen in any other state | 70 ms |
+| **Agent state changes** | The header does the same flash as the tile: it jumps to `--ink-bright` for a frame and falls to the status color | `T.snap` |
 
-### 6.2 Controles
+### 6.2 Controls
 
-| Control | Gesto |
+| Control | Gesture |
 |---|---|
-| `.btn` hover | Corte a lima (ya). Sin transición |
-| `.btn` press | `translate(1px, 1px)` mientras está pulsado; corte |
-| `.slab-btn` (lima) al confirmar | Invierte a tinta un frame y vuelve (`T.snap`): el destello local del comp. Si la acción tarda (spawn, launch), la banda de carga fina (A3) corre por el borde inferior del slab hasta el ack |
-| `kbd` | **Eco de teclado**: cuando el atajo se pulsa, su `kbd` visible corta a lima y cae en `T.snap`. Aplica a mast, ventanas, tray, bookmarks |
-| `pick` abrir | Llega con `back.out` (ya); las filas **caen en cascada** a 20 ms por corte |
-| `pick` elegir | La fila elegida salta a tinta un frame y cae a lima; el menú corta |
-| `toggle` | Corte (ya) + la banda fina corre una vez por el tile de 11 px en 120 ms |
-| `fold` | `+`→`−` corte; cuerpo corta (ya). Sin cambio |
-| Inputs | Nativos. Caret intacto |
+| `.btn` hover | Cut to lime (already). No transition |
+| `.btn` press | `translate(1px, 1px)` while held down; cut |
+| `.slab-btn` (lime) on confirm | Inverts to ink for a frame and back (`T.snap`): the comp's local flash. If the action takes a while (spawn, launch), the thin loading band (A3) runs along the slab's bottom edge until the ack |
+| `kbd` | **Keyboard echo**: when the shortcut is pressed, its visible `kbd` cuts to lime and falls in `T.snap`. Applies to the mast, windows, tray, bookmarks |
+| `pick` open | Arrives with `back.out` (already); the rows **cascade in** at 20 ms, by cut |
+| `pick` choose | The chosen row jumps to ink for a frame and falls to lime; the menu cuts |
+| `toggle` | Cut (already) + the thin band runs once across the 11 px tile in 120 ms |
+| `fold` | `+`→`−` cut; body cuts (already). Unchanged |
+| Inputs | Native. Caret untouched |
 
 ### 6.3 HUD
 
-| Pieza | Gesto |
+| Piece | Gesture |
 |---|---|
-| Línea de comandos: cambio de destino | El chip (`CAPCOM` → `@K9`) corta al nuevo color y hace un flash de tinta de un frame. `UNKNOWN` en rojo **no se anima** |
-| Línea de comandos: enviar | El texto se **barre en lima** de izquierda a derecha (A5 a escala de línea, `T.quick`) y se vacía por corte. El pulso en el campo (§5.3) arranca en el mismo frame |
-| Menú `/` | Filas en cascada a 30 ms; la selección se mueve por corte |
-| Tray: tile nuevo | Llega con `back.out(2)` desde la ventana que lo originó, escala 0,6→1 |
-| Tray: tile que se va | Se aplana a barra y corta (A12 corto) |
-| Tray: modo `` ` `` | La fila **sube 4 px** en `T.snap` (la forma easea); el borde lima corta. Salir: inverso |
-| Mast: contadores | Un número que cambia hace 3 frames de revuelto (A9) y aterriza. `NEED YOU` subiendo: corte a ámbar + el anillo de `alarm.ts` (ya) |
-| Bookmarks: guardar | La casilla corta a lima con un frame de tinta antes |
-| Minimapa | Construcción del eje (A13) al abrir y anillo por `patch` (A14); ya están en PLAN.md, sin cambio |
-| Cursor | Clic: el cuadrado de 8 px baja a 4 px y vuelve en `T.snap`. Sobre un objetivo bloqueado (tile ámbar, ventana `is-blocked`) la retícula corta a ámbar |
-| Región: hover | Borde corta a `--line` (ya). Clic: vuelo de cámara (ya) |
+| Command line: target change | The chip (`CAPCOM` → `@K9`) cuts to the new color and does a one-frame ink flash. `UNKNOWN` in red **is not animated** |
+| Command line: send | The text is **wiped in lime** from left to right (A5 at line scale, `T.quick`) and empties by cut. The pulse in the field (§5.3) starts in the same frame |
+| `/` menu | Rows cascade at 30 ms; the selection moves by cut |
+| Tray: new tile | Arrives with `back.out(2)` from the window that spawned it, scale 0.6→1 |
+| Tray: tile leaving | Flattens into a bar and cuts (short A12) |
+| Tray: `` ` `` mode | The row **rises 4 px** in `T.snap` (the shape eases); the lime border cuts. Leaving: the inverse |
+| Mast: counters | A number that changes scrambles for 3 frames (A9) and lands. `NEED YOU` going up: cut to amber + the `alarm.ts` ring (already) |
+| Bookmarks: save | The cell cuts to lime with a frame of ink first |
+| Minimap | Axis construction (A13) on open and a ring per `patch` (A14); already planned, unchanged |
+| Cursor | Click: the 8 px square drops to 4 px and comes back in `T.snap`. Over a blocked target (amber tile, `is-blocked` window) the reticle cuts to amber |
+| Region: hover | Border cuts to `--line` (already). Click: camera flight (already) |
 
-### 6.4 Campo
+### 6.4 Field
 
-| Momento | Gesto |
+| Moment | Gesture |
 |---|---|
-| Selección de tile | La línea lima corta (ya) y aparecen **cuatro esquinas** de 6 px alrededor de la etiqueta DOM (`.lbl.is-sel::before/::after` + dos `<i>`), por corte. Deselección: corte |
-| Subir de peldaño | Cuando el zoom cruza un `TIER_PX` hacia arriba, los elementos nuevos del interior caen en cascada a 30 ms. Bajar: corte |
-| Lasso | Rectángulo de 1 px lima a trazos mientras se arrastra (ya); al soltar, los tiles capturados hacen el flash del latido en el mismo frame |
-| Nacer / morir / hablar / responder | §5 |
+| Tile selection | The lime line cuts (already) and **four 6 px corners** appear around the DOM label (`.lbl.is-sel::before/::after` + two `<i>`), by cut. Deselection: cut |
+| Stepping up a rung | When the zoom crosses a `TIER_PX` upward, the new interior elements cascade in at 30 ms. Going down: cut |
+| Lasso | A 1 px dashed lime rectangle while dragging (already); on release, the captured tiles do the heartbeat flash in the same frame |
+| Birth / death / talking / answering | §5 |
 
 ---
 
-## 7. Reparto de archivos
+## 7. File split
 
-Seis columnas, disjuntas. Nadie edita fuera de la suya; lo que necesite de
-otra columna lo consume por la firma escrita aquí.
+Six columns, disjoint. Nobody edits outside their own; whatever they need from
+another column they consume through the signature written here.
 
-| Col. | Archivos | Qué |
+| Col. | Files | What |
 |---|---|---|
-| **A** | `src/ui/gfx/sigil.ts` (nuevo) · `src/ui/field/swarm.ts` | `sigilBits(seed): number` (15 bits, FNV-1a), `sigilHTML(bits: number, inverted?: boolean): string` (un `<i class="sigil">` con 25 `box-shadow`, 1 unidad = `1em/5`), `CAPCOM_BITS`. En swarm: `iSigil`, `iAux` → vec4 (`.w` runtime id), decodificado del sigilo, líder invertido, textura de franja por runtime, contorno lima permanente cuando `iAux.w == 9` (CAPCOM); borrar `mark`. `write()` gana `sigil: number, runtime: number` al final |
-| **B** | `src/ui/field/labels.ts` · `src/ui/styles/field.css` | §0.3–0.7, §2, §6.4 (esquinas de selección, cascada al subir de peldaño). CSS de `.sigil` y de `.squad`/`.roster` **no**: viven en `styles/squad.css` (D) y `styles/sigil.css` (A, importado desde `main.ts` por Fable) |
-| **C** | `src/ui/field/pipes.ts` · `src/ui/field/layout.ts` · `test/motion.test.ts` | `renderOrder` (−1 bus/núcleo/puertos, +1 pulsos); `PipeKind 'core'` (id 5, `iMeta.y` = longitud llena); `add(...)` devuelve `number` (longitud total); `port(x, y, z, color, scale?, sel?, hollow?)`; `routeGutter(P, C, gaps: {x: number; y: number}, lane: -1|0|1): Pt[]` y `routeGutterMsg(A, B, gaps, lane)`; `pulse()` como segmento con estela (§5.3). `Layout.gapX/gapY`. Test de propiedad: en rejilla 6×4 sintética ninguna ruta interseca ningún rectángulo de tile |
-| **D** | `src/ui/field/field.ts` · `src/ui/field/anim.ts` (nuevo) · `src/ui/styles/squad.css` (nuevo) · `test/visual.ts` | `anim.ts`: `grow(key, {to, dur, ease})`, `drain(key, ...)`, `get(key): number`, `has`, `kill(key)`, `sweep(liveKeys)`. En field: contorno + puerto + rótulo con roster (§3), `buildPipes` bus/núcleo/carriles (§4), nacer/morir/hablar/abanico/respuesta (§5), lasso-flash (§6.4); sustituir `anims`/`backOut`. Escenas visuales nuevas |
-| **E** | `src/ui/windows/wm.ts` · `src/ui/windows/fx.ts` · `src/ui/windows/kinds/*.ts` · `src/ui/styles/window.css` | §6.1 completo y §6.2 para `.btn`/`.slab-btn`/`kbd` dentro de ventanas. Sigilo junto al callsign en `chrome()` consumiendo `sigilHTML` de `gfx/sigil.ts` (firma arriba; si A no ha aterrizado, un stub local con la misma firma que se borra al integrar) |
-| **F** | `src/ui/controls.ts` · `src/ui/hud/*.ts` · `src/ui/styles/hud.css` | §6.2 (`pick`, `toggle`, eco de `kbd` en la mast) y §6.3 completo |
-| **Fable** | `src/ui/main.ts` · `DESIGN.md` · integración | Imports de `sigil.css`/`squad.css`; reescribir **Tiles**, **Pipes**, añadir **Squads** y **Micro-interactions** en el contrato; `npm run typecheck`, `npm test`, `npm run visual` al final |
+| **A** | `src/ui/gfx/sigil.ts` (new) · `src/ui/field/swarm.ts` | `sigilBits(seed): number` (15 bits, FNV-1a), `sigilHTML(bits: number, inverted?: boolean): string` (an `<i class="sigil">` with 25 `box-shadow`, 1 unit = `1em/5`), `CAPCOM_BITS`. In swarm: `iSigil`, `iAux` → vec4 (`.w` runtime id), sigil decoding, inverted lead, per-runtime stripe texture, permanent lime outline when `iAux.w == 9` (CAPCOM); delete `mark`. `write()` gains `sigil: number, runtime: number` at the end |
+| **B** | `src/ui/field/labels.ts` · `src/ui/styles/field.css` | §0.3–0.7, §2, §6.4 (selection corners, cascade when stepping up a rung). CSS for `.sigil` and for `.squad`/`.roster` **no**: those live in `styles/squad.css` (D) and `styles/sigil.css` (A, imported from `main.ts` by Fable) |
+| **C** | `src/ui/field/pipes.ts` · `src/ui/field/layout.ts` · `test/motion.test.ts` | `renderOrder` (−1 bus/core/ports, +1 pulses); `PipeKind 'core'` (id 5, `iMeta.y` = filled length); `add(...)` returns `number` (total length); `port(x, y, z, color, scale?, sel?, hollow?)`; `routeGutter(P, C, gaps: {x: number; y: number}, lane: -1|0|1): Pt[]` and `routeGutterMsg(A, B, gaps, lane)`; `pulse()` as a segment with a trail (§5.3). `Layout.gapX/gapY`. Property test: on a synthetic 6×4 grid, no route intersects any tile rectangle |
+| **D** | `src/ui/field/field.ts` · `src/ui/field/anim.ts` (new) · `src/ui/styles/squad.css` (new) · `test/visual.ts` | `anim.ts`: `grow(key, {to, dur, ease})`, `drain(key, ...)`, `get(key): number`, `has`, `kill(key)`, `sweep(liveKeys)`. In field: outline + port + label with roster (§3), `buildPipes` bus/core/lanes (§4), birth/death/talking/fan-out/answer (§5), lasso-flash (§6.4); replace `anims`/`backOut`. New visual scenes |
+| **E** | `src/ui/windows/wm.ts` · `src/ui/windows/fx.ts` · `src/ui/windows/kinds/*.ts` · `src/ui/styles/window.css` | All of §6.1 and §6.2 for `.btn`/`.slab-btn`/`kbd` inside windows. Sigil next to the callsign in `chrome()`, consuming `sigilHTML` from `gfx/sigil.ts` (signature above; if A has not landed yet, a local stub with the same signature, deleted on integration) |
+| **F** | `src/ui/controls.ts` · `src/ui/hud/*.ts` · `src/ui/styles/hud.css` | §6.2 (`pick`, `toggle`, `kbd` echo in the mast) and all of §6.3 |
+| **Fable** | `src/ui/main.ts` · `DESIGN.md` · integration | Imports of `sigil.css`/`squad.css`; rewrite **Tiles**, **Pipes**, add **Squads** and **Micro-interactions** to the contract; `npm run typecheck`, `npm test`, `npm run visual` at the end |
 
-Firmas que cruzan columnas, fijadas aquí para que nadie espere a nadie:
+Signatures that cross columns, fixed here so nobody waits on anybody:
 
 ```ts
-// gfx/sigil.ts (A) — la consumen E y D
+// gfx/sigil.ts (A) — consumed by E and D
 export function sigilBits(seed: string): number;          // 0 … 2^15−1
 export function sigilHTML(bits: number, inverted?: boolean): string;
 export const CAPCOM_BITS: number;
 
-// field/pipes.ts (C) — la consume D
-add(points, z, color, kind, age, thick?, sel?): number;   // longitud total
+// field/pipes.ts (C) — consumed by D
+add(points, z, color, kind, age, thick?, sel?): number;   // total length
 port(x, y, z, color, scale?, sel?, hollow?): void;
 routeGutter(P: Pt, C: Pt, gaps: {x: number; y: number}, lane: -1 | 0 | 1): Pt[];
 routeGutterMsg(A: Pt, B: Pt, gaps: {x: number; y: number}, lane: -1 | 0 | 1): Pt[];
 type PipeKind = 'lineage' | 'notice' | 'ask' | 'collision' | 'hot' | 'core';
 
-// field/layout.ts (C) — la consume D
+// field/layout.ts (C) — consumed by D
 interface Layout { …; gapX: number; gapY: number }
 
-// field/swarm.ts (A) — la consume D
+// field/swarm.ts (A) — consumed by D
 write(slot, x, y, z, scale, color, alert, speed, sel, alpha, seed,
       flash, focusAlpha, lead, sigil: number, runtime: number): void;
-// runtime: 0 claude · 1 codex · 2 grok · 3 otro · 9 capcom
+// runtime: 0 claude · 1 codex · 2 grok · 3 other · 9 capcom
 ```
 
-## 8. Verificación
+## 8. Verification
 
-- `npm run typecheck` y `npm test` en verde (incluye el test de cunetas).
-- `npm run visual`: las escenas nuevas y las antiguas sin regresión.
-- `npm run stress`: 1.000 agentes a 60 fps con bus+núcleo (dos `add` por
-  linaje duplica segmentos; la capacidad ya crece por dos).
-- A ojo, contra los frames del comp a 8,0 s y 10,5 s: el bus gris con la lima
-  dentro, los puertos huecos y llenos, ningún cable sobre un tile.
-- Las siete filas de §0, una a una, sobre la misma región de 33 tiles y el
-  mismo tile LL de las capturas.
-- Cada fila de §6, una a una, con `--headed`.
+- `npm run typecheck` and `npm test` green (includes the gutter test).
+- `npm run visual`: the new scenes and the old ones with no regressions.
+- `npm run stress`: 1,000 agents at 60 fps with bus+core (two `add` per lineage
+  doubles the segments; capacity already grows by two).
+- By eye, against the comp frames at 8.0 s and 10.5 s: the grey bus with the
+  lime inside, the hollow and filled ports, no cable over a tile.
+- The seven rows of §0, one by one, on the same 33-tile region and the same LL
+  tile from the screenshots.
+- Every row of §6, one by one, with `--headed`.

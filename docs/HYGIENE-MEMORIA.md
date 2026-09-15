@@ -1,65 +1,63 @@
-# Higiene — la memoria, medida en vez de acotada
+# Hygiene — memory, measured instead of bounded
 
-**Estado:** implementado y verificado en la máquina del operador.
+**Status:** implemented and verified on the operator's machine.
 
-Empezó con una captura de la ventana HYGIENE:
+It started with a screenshot of the HYGIENE window:
 
 ```
 MEMORY   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░  ≤47G of 48G
 ```
 
-La pregunta del operador —«¿por qué tenemos ocupada casi toda la memoria?»— era
-la correcta, y la respuesta era que no la teníamos.
+The operator's question —"why do we have almost all the memory used up?"— was
+the right one, and the answer was that we did not.
 
-## 1. Qué estaba mal
+## 1. What was wrong
 
-La fila salía de `os.totalmem() - os.freemem()`. En darwin `os.freemem()` cuenta
-sólo las páginas libres **en ese instante**, y macOS a propósito no deja casi
-ninguna: todo lo sobrante es caché de archivos o purgeable, y lo devuelve en
-cuanto alguien lo pide. La resta, por tanto, da «47 de 48» en una máquina con
-nueve gigas de margen. Linux tiene el mismo error por el mismo motivo:
-`MemFree` no es `MemAvailable`.
+The row came from `os.totalmem() - os.freemem()`. On darwin `os.freemem()`
+counts only the pages free **at that instant**, and macOS deliberately leaves
+almost none: everything spare is file cache or purgeable, and it hands it back as
+soon as anyone asks. The subtraction, therefore, gives "47 of 48" on a machine
+with nine gigabytes of headroom. Linux has the same bug for the same reason:
+`MemFree` is not `MemAvailable`.
 
-El código **ya sabía** que la cifra no era una medición: la marcaba `≤`, con el
-motivo en el tooltip. Y aun así era la cifra que se leía primero, con la barra
-casi llena, como una emergencia.
+The code **already knew** the figure was not a measurement: it marked it `≤`,
+with the reason in the tooltip. And even so it was the figure read first, with
+the bar almost full, like an emergency.
 
-De ahí la regla que se ha escrito en `shared/hygiene.ts`: **una cota es la
-segunda mejor respuesta**. Marcar bien un número no es medirlo, y un techo
-correctamente marcado puede seguir siendo el número que engaña. `atMost` es
-para cuando la plataforma no quiere decirlo — no en lugar de preguntárselo.
+Hence the rule now written into `shared/hygiene.ts`: **a bound is the
+second-best answer**. Marking a number correctly is not measuring it, and a
+correctly marked ceiling can still be the number that misleads. `atMost` is for
+when the platform will not say — not instead of asking it.
 
-## 2. Qué se hizo
+## 2. What was done
 
-`src/collector/memory.ts`, nuevo: se le pregunta a la plataforma en sus propios
-términos.
+`src/collector/memory.ts`, new: the platform is asked on its own terms.
 
 | | darwin (`vm_stat`) | linux (`/proc/meminfo`) |
 |---|---|---|
-| Comprometida | `wired + app + compressed`, donde app es `anónimas − purgeables` — lo que el Monitor de Actividad llama *Memory Used* | `MemTotal − MemAvailable` |
-| Caché | `file-backed + purgeables` | `Cached + Buffers + SReclaimable` |
+| Committed | `wired + app + compressed`, where app is `anonymous − purgeable` — what Activity Monitor calls *Memory Used* | `MemTotal − MemAvailable` |
+| Cache | `file-backed + purgeable` | `Cached + Buffers + SReclaimable` |
 | Swap | `sysctl vm.swapusage` | `SwapTotal − SwapFree` |
 
-Tres decisiones que valen su comentario:
+Three decisions that earn their comment:
 
-- **La caché es una fila propia, no un término de ninguna suma.** Es memoria en
-  uso *y* memoria disponible a la vez; meterla en cualquiera de los dos lados es
-  el error original en una dirección o en la otra.
-- **El swap sube al panel** porque es lo que dice si la presión es real: 80%
-  comprometido sin swap es una máquina cómoda, y ese mismo 80% con cuatro gigas
-  fuera no lo es.
-- **Un contador que falta rompe el parseo entero.** Un cero en «pages occupied
-  by compressor» habría restado diez gigas en esta máquina y habría parecido
-  razonable, que es la peor forma de estar mal.
+- **The cache is a row of its own, not a term in any sum.** It is memory in use
+  *and* memory available at the same time; putting it on either side is the
+  original mistake in one direction or the other.
+- **Swap comes up to the panel** because it is what says whether the pressure is
+  real: 80% committed with no swap is a comfortable machine, and that same 80%
+  with four gigabytes paged out is not.
+- **A missing counter breaks the whole parse.** A zero in "pages occupied by
+  compressor" would have subtracted ten gigabytes on this machine and would have
+  looked reasonable, which is the worst way to be wrong.
 
-Si `vm_stat` o `/proc/meminfo` no se pueden leer, vuelve el techo de siempre —
-con su `≤` y con su motivo, y nunca disfrazado de medición.
+If `vm_stat` or `/proc/meminfo` cannot be read, the usual ceiling comes back —
+with its `≤` and with its reason, and never dressed up as a measurement.
 
-El tamaño de página se lee de la cabecera de `vm_stat` (16K en Apple silicon,
-4K en Intel): darlo por supuesto multiplica o divide por cuatro cada cifra en
-media flota.
+The page size is read from `vm_stat`'s header (16K on Apple silicon, 4K on
+Intel): assuming it multiplies or divides every figure by four on half the fleet.
 
-## 3. Qué se ve ahora
+## 3. What you see now
 
 ```
 MEMORY   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░  39G of 48G
@@ -67,35 +65,35 @@ MEMORY   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░  39G of 48G
   SWAP                       4.2G of 5.0G
 ```
 
-Sin marca, porque está medido. La barra dibuja lo comprometido.
+With no mark, because it is measured. The bar draws what is committed.
 
-La franja de máquina del deck (`load.memPct`) usaba la misma resta y se ha
-pasado a la misma fuente; devuelve `null` en el primer latido, igual que la CPU,
-porque el latido es síncrono y no puede esperar a un subproceso.
+The deck's machine strip (`load.memPct`) used the same subtraction and has been
+moved to the same source; it returns `null` on the first heartbeat, just like the
+CPU, because the heartbeat is synchronous and cannot wait for a subprocess.
 
-## 4. En el cable
+## 4. On the wire
 
-`HygieneReport` gana tres lecturas **opcionales**: `memCachedBytes`,
-`swapUsedBytes`, `swapTotalBytes`. Opcionales porque un collector anterior no
-las manda, y ausente no es cero: la ventana omite la fila en vez de dibujar una
-caché vacía, y `sanitizeReport` deja el campo fuera del informe en vez de
-rellenarlo. La herramienta `hygiene_sample` de los agentes las expone con el
-nombre `memory_cached_returned_on_demand`, largo a propósito: un agente que
-sume caché y uso y declare la máquina llena la ha leído al revés.
+`HygieneReport` gains three **optional** readings: `memCachedBytes`,
+`swapUsedBytes`, `swapTotalBytes`. Optional because an older collector does not
+send them, and absent is not zero: the window omits the row instead of drawing an
+empty cache, and `sanitizeReport` leaves the field out of the report instead of
+filling it in. The agents' `hygiene_sample` tool exposes them under the name
+`memory_cached_returned_on_demand`, long on purpose: an agent that adds cache and
+usage together and declares the machine full has read it backwards.
 
-## 5. Cómo verificarlo
+## 5. How to verify it
 
 ```
 npm run typecheck
-npm test -- memory hygiene           42 pruebas (12 + 30)
-npx tsx test/hyg-memory.shots.ts     la sección, fotografiada
+npm test -- memory hygiene           42 tests (12 + 30)
+npx tsx test/hyg-memory.shots.ts     the section, photographed
 ```
 
-`memory.test.ts` guarda la salida real de `vm_stat` de la máquina de la captura,
-así que la aritmética que falló se comprueba con los números que fallaron —y en
-cualquiera de las dos plataformas, porque los parseadores son puros.
-`hyg-memory.shots.ts` fotografía la ventana y comprueba también que la barra
-dibuja lo comprometido: una barra casi llena con nueve gigas libres era la foto
-del error.
+`memory.test.ts` stores the real `vm_stat` output from the machine in the
+screenshot, so the arithmetic that failed is checked with the numbers that failed
+— and on either platform, because the parsers are pure.
+`hyg-memory.shots.ts` photographs the window and also checks that the bar draws
+what is committed: an almost-full bar with nine gigabytes free was the picture of
+the bug.
 
-Filtros que cubren esta entrega: `memory`, `hygiene`, `collector`.
+Filters that cover this delivery: `memory`, `hygiene`, `collector`.

@@ -1,17 +1,17 @@
-# New CAPCOM: contexto limpio o continuidad
+# New CAPCOM: clean context or continuity
 
-Implementado para `task_mtpbw5elzf26ioz1` / squad `task-03`. Esta entrega no activa un reset real, no reinicia servicios y no incluye commit, push ni deploy.
+Implemented for `task_mtpbw5elzf26ioz1` / squad `task-03`. This delivery does not trigger a real reset, does not restart services and does not include a commit, push or deploy.
 
-## Botón y comandos reales
+## The real button and commands
 
-En la ventana de mando, junto a **CHANGE MODEL**, aparece **New CAPCOM**. Abre una elección con el alcance explícito y dos acciones:
+In the command window, next to **CHANGE MODEL**, **New CAPCOM** appears. It opens a choice with explicit scope and two actions:
 
-| Acción | Contexto inicial | Actividad al arrancar |
+| Action | Initial context | Activity on startup |
 | --- | --- | --- |
-| **Clean context** | Instrucciones básicas de CAPCOM y verificación técnica de arranque. Sin resumen de pendientes, conversación, historial ni texto de reglas del hub. | Espera instrucciones o mensajes nuevos. No ejecuta `briefing`/`recall`, no reproduce backlog y no recibe el latido que ordena recuperar pendientes. |
-| **With continuity** | Checkpoint breve del hub: tareas abiertas, preguntas pendientes, referencias de agentes y reglas persistentes. Historial completo archivado en disco, sin introducirlo en el contexto. | Recupera la situación con `briefing` y consulta detalles puntuales cuando son necesarios. |
+| **Clean context** | CAPCOM's basic instructions and the technical startup check. No summary of pending items, no conversation, no history and no hub rules text. | Waits for instructions or new messages. It does not run `briefing`/`recall`, does not replay backlog and does not receive the heartbeat that orders it to recover pending items. |
+| **With continuity** | A short checkpoint from the hub: open tasks, pending questions, agent references and persistent rules. Full history archived on disk, without putting it into the context. | Recovers the situation with `briefing` and looks up specific details when needed. |
 
-Comandos de la barra ORCA:
+Commands from the ORCA bar:
 
 ```text
 /capcom-new
@@ -19,246 +19,255 @@ Comandos de la barra ORCA:
 /capcom-new continuity
 ```
 
-Sin argumento abre la elección; `clean` y `continuity` solicitan directamente el modo indicado. Un argumento desconocido se rechaza. `/clear` conserva su comportamiento de deseleccionar. No se envían comandos `/new` ni `/clear` al CLI. No había otra entrada `/capcom-new` en el registro de comandos.
+With no argument it opens the choice; `clean` and `continuity` request the given mode directly. An unknown argument is rejected. `/clear` keeps its deselect behavior. No `/new` or `/clear` commands are sent to the CLI. There was no other `/capcom-new` entry in the command registry.
 
-El protocolo interno es `{ k: 'capcom:new', agentId, mode: 'clean' | 'continuity' }`. El hub genera el checkpoint de continuidad; no confía en un checkpoint proporcionado por la consola. El estado utiliza `handoff:status` y un `planId`, también tras recargar la ventana.
+The internal protocol is `{ k: 'capcom:new', agentId, mode: 'clean' | 'continuity' }`. The hub generates the continuity checkpoint; it does not trust a checkpoint supplied by the console. State uses `handoff:status` and a `planId`, including after reloading the window.
 
-## Tres caminos, y cuál se toma
+## Three paths, and which one is taken
 
-Desde 2026-09-07, New CAPCOM elige según lo que de verdad cambie:
+Since 2026-09-07, New CAPCOM picks based on what actually changes:
 
-| Lo que cambia | Cómo |
+| What changes | How |
 | --- | --- |
-| Sólo el contexto | `/clear` del propio CLI |
-| Contexto y modelo, mismo runtime | selector nativo del modelo, y después `/clear` |
-| Runtime | sesión preparada aparte, verificada antes de retirar la anterior |
+| Context only | the CLI's own `/clear` |
+| Context and model, same runtime | native model selector, then `/clear` |
+| Runtime | a session prepared separately, verified before retiring the previous one |
 
-El modo y el destino son ejes distintos: **«limpio» significa lo mismo cruzando
-de proveedor** —sesión nueva, sin conversación ni checkpoint, sólo el brief—, y
-lo único que cambia es el mecanismo. Antes no era así: pedir un contexto nuevo
-con otro proveedor caía en `Fresh CAPCOM must retain its runtime and model`, y el
-único camino cruzado que quedaba llevaba la conversación entera, o sea lo
-contrario de lo que decía el botón pulsado.
+Mode and destination are separate axes: **"clean" means the same thing when
+crossing providers** — a new session, with no conversation and no checkpoint,
+only the brief — and the only thing that changes is the mechanism. It did not
+use to be like that: asking for a new context with another provider fell into
+`Fresh CAPCOM must retain its runtime and model`, and the only cross-provider
+path left carried the entire conversation, which is the opposite of what the
+button you pressed said.
 
-La consola ofrece los dos caminos en la misma lista y dice cuál es cuál —
-`clears in place` frente a `prepares and verifies · slower`—, un CLI no instalado
-aparece deshabilitado, y al elegir un modelo de otro proveedor los botones pasan
-a `Clean context · prepare` con una línea que explica que se arranca un segundo
-CLI, que tarda hasta dos minutos y que puede fallar por cuota o autenticación
-conservando la sesión actual. Es la misma acción con dos perfiles de riesgo muy
-distintos, y esconderlo detrás del mismo botón sería engañoso.
+The console offers both paths in the same list and says which is which —
+`clears in place` versus `prepares and verifies · slower` — a CLI that is not
+installed appears disabled, and choosing a model from another provider turns
+the buttons into `Clean context · prepare` with a line explaining that a second
+CLI is started, that it takes up to two minutes and that it can fail on quota
+or authentication while keeping the current session. It is the same action with
+two very different risk profiles, and hiding that behind the same button would
+be misleading.
 
-`/clear` no era una idea nueva sino una comprobación pendiente: en Codex 0.153.4
-se anuncia como «clear the terminal and start a new chat» y, al ejecutarlo, deja
-por escrito «To continue this session, run codex resume … \<uuid\>» y abre un
-hilo con uuid y archivo propios. Verificado con dos mensajes en un Codex real: el
-rollout anterior conserva el primero y no recibe el segundo. La sesión preparada
-por `codex exec` conseguía exactamente eso mismo dando un rodeo.
+`/clear` was not a new idea but a pending check: in Codex 0.153.4 it is
+advertised as "clear the terminal and start a new chat" and, when run, it
+writes down "To continue this session, run codex resume … \<uuid\>" and opens a
+thread with its own uuid and file. Verified with two messages in a real Codex:
+the previous rollout keeps the first one and does not receive the second. The
+session prepared by `codex exec` achieved exactly that same thing the long way
+round.
 
-Lo que ese rodeo compraba, y aquí no hace falta, era conocer el identificador por
-adelantado. Con `/clear` el id lo elige el CLI y no se lo dice a nadie, así que se
-descubre: se espera el transcript nuevo del mismo directorio, creado después del
-corte, y cuando aparece se renombra el pane a `orca-<uuid>`. Es el mismo camino
-que ya recorría un worker de Codex, que tampoco puede tomar su id por adelantado.
+What that detour bought, and is not needed here, was knowing the identifier in
+advance. With `/clear` the id is chosen by the CLI and it tells nobody, so it
+is discovered: you wait for the new transcript from the same directory, created
+after the cutoff, and when it appears the pane is renamed to `orca-<uuid>`. It
+is the same path a Codex worker already walked, since it cannot take its id in
+advance either.
 
-Un hilo sin turnos no se escribe en disco, así que el relevo se abre con un
-mensaje: en continuidad el checkpoint del hub, y en limpio una línea que sólo
-pide un recibo y prohíbe explícitamente herramientas, `briefing`, `recall` e
-historia. Ese intercambio es todo lo que hereda un contexto «limpio» — igual que
-antes heredaba el recibo de la preparación.
+A thread with no turns is not written to disk, so the rotation opens with a
+message: in continuity the hub's checkpoint, and in clean mode a line that only
+asks for a receipt and explicitly forbids tools, `briefing`, `recall` and
+history. That exchange is everything a "clean" context inherits — just as it
+used to inherit the preparation receipt.
 
-`/clear` no se puede ensayar: cuando vuelve, el contexto anterior ya no está. No
-hay «conservar el original» porque no hay dos sesiones entre las que elegir, sólo
-un proceso que ya se vació. Lo que sí se conserva es todo lo demás — el proceso
-sigue vivo, el transcript anterior sigue en el directorio del CLI con su uuid, y
-el registro del hub no se toca —, y por eso el cambio de runtime mantiene el
-camino preparado: ahí sí se arranca otro binario y verificar antes de retirar
-vale lo que cuesta. `ORCA_CAPCOM_PREPARED_RESET=1` devuelve el camino largo
-también para el mismo runtime, sin la elección de modelo.
+`/clear` cannot be rehearsed: when it returns, the previous context is already
+gone. There is no "keep the original" because there are no two sessions to
+choose between, only a process that has already been emptied. What is kept is
+everything else — the process is still alive, the previous transcript is still
+in the CLI's directory with its uuid, and the hub's registry is untouched — and
+that is why a runtime change keeps the prepared path: there you really do start
+another binary, and verifying before retiring is worth what it costs.
+`ORCA_CAPCOM_PREPARED_RESET=1` brings the long path back for the same runtime
+too, without the model choice.
 
-Adoptar el hilo nuevo no es sólo mover el rol en memoria: `ensure` lee primero
-`codex-recovery.json` —una recuperación preparada pesa más que un recuerdo— y su
-`sessionId` gana sobre `session.json`. Sin apuntarlo ahí, el vigilante devolvía
-el rol al hilo ya vaciado en su siguiente vuelta, y el hub decía «0 UNDER
-COMMAND» con el proceso corriendo delante. Se actualiza `sessionId`,
-`contextMode`, `cutoffAt` y `previousSessionId`; runtime, modelo y `cwd` no
-cambian, porque es el mismo proceso.
+Adopting the new thread is not just moving the role in memory: `ensure` reads
+`codex-recovery.json` first — a prepared recovery outweighs a memory — and its
+`sessionId` wins over `session.json`. Without writing it down there, the
+watchdog handed the role back to the already-emptied thread on its next pass,
+and the hub said "0 UNDER COMMAND" with the process running right in front of
+it. `sessionId`, `contextMode`, `cutoffAt` and `previousSessionId` are updated;
+runtime, model and `cwd` do not change, because it is the same process.
 
-El modelo se cambia **antes** de vaciar, con el selector nativo: el relevo debe
-nacer con el que se pidió, y mientras el contexto viejo sigue en pie un modelo
-sin cuota falla sin haber tocado nada.
+The model is changed **before** emptying, with the native selector: the
+replacement must be born with the one that was asked for, and while the old
+context is still standing a model with no quota fails without anything having
+been touched.
 
-## Un modelo del mismo proveedor, sin esperar al instante ocioso
+## A model from the same provider, without waiting for the idle moment
 
-Desde 2026-09-10. El catálogo nativo de una sesión (`choices`) sólo se llena
-tecleando `/model` en un CLI ocioso con el prompt limpio, y un CAPCOM al mando
-casi nunca está en ese instante cuando el operador abre el selector. Con el
-catálogo vacío, **CHANGE MODEL** enseñaba los modelos de Claude deshabilitados
-con «session catalog not ready · retry» y **New CAPCOM** no los enseñaba en
-absoluto, mientras cruzar a Codex sí funcionaba porque ese camino lee el
-catálogo de proveedores (`handoff:models`), que no necesita sesión. Cambiar de
-Opus a Sonnet era, en la práctica, imposible.
+Since 2026-09-10. A session's native catalog (`choices`) only fills up by
+typing `/model` into an idle CLI with a clean prompt, and a CAPCOM in command
+is almost never at that moment when the operator opens the selector. With an
+empty catalog, **CHANGE MODEL** showed the Claude models disabled with "session
+catalog not ready · retry" and **New CAPCOM** did not show them at all, while
+crossing to Codex did work because that path reads the provider catalog
+(`handoff:models`), which needs no session. Going from Opus to Sonnet was, in
+practice, impossible.
 
-Ahora los dos selectores ofrecen los modelos del mismo proveedor desde ese
-mismo catálogo, como opción real:
+Now both selectors offer the same provider's models from that same catalog, as
+a real option:
 
-| Dónde | Confirmado por el menú | Sólo en el catálogo del proveedor |
+| Where | Confirmed by the menu | Only in the provider catalog |
 | --- | --- | --- |
 | CHANGE MODEL | `same session` | `same session · CLI verifies when idle` |
 | New CAPCOM | `clears in place` | `clears in place · CLI verifies` |
 
-Lo que no cambia es la protección de verdad. `model:set` encola —como siempre—
-hasta que la sesión esté ociosa, y al aplicar abre el menú real del CLI: si el
-modelo no está, cierra el menú sin pulsar nada y queda en `failed` con «This CLI
-does not offer X in its model menu. No model was changed.». El collector acepta
-en `request` lo que el catálogo del proveedor instalado ofrece para ese runtime
-(`ModelController` recibe `catalog`), y sigue rechazando de entrada lo que no
-conoce nadie. En New CAPCOM el orden es el mismo de antes: `list`, `request`,
-menú confirmado, y sólo entonces `/clear`; un modelo que el menú no ofrece deja
-el contexto sin tocar. El hub no contrasta el modelo con ningún catálogo: lo
-pasa tal cual al collector.
+What does not change is the real protection. `model:set` queues — as always —
+until the session is idle, and on applying it opens the CLI's real menu: if the
+model is not there, it closes the menu without pressing anything and ends up
+`failed` with "This CLI does not offer X in its model menu. No model was
+changed.". The collector accepts in `request` whatever the installed provider's
+catalog offers for that runtime (`ModelController` receives `catalog`), and
+still rejects up front what nobody knows. In New CAPCOM the order is the same
+as before: `list`, `request`, menu confirmed, and only then `/clear`; a model
+the menu does not offer leaves the context untouched. The hub does not check
+the model against any catalog: it passes it to the collector as is.
 
-Los mensajes de los dos caminos siguen separados: quedarse en el proveedor es
-«clears in place» (segundos, misma sesión) y cruzar es «prepares and verifies ·
-slower» (proceso nuevo, hasta dos minutos). Lo único nuevo es la salvedad de que
-el CLI verifica el modelo que la sesión aún no había confirmado.
+The messages for the two paths are still separate: staying with the provider is
+"clears in place" (seconds, same session) and crossing is "prepares and
+verifies · slower" (new process, up to two minutes). The only new thing is the
+caveat that the CLI verifies the model the session had not yet confirmed.
 
-Cobertura: `npm test -- model-control capcom-new capcom-new-hub`, `npx tsx
-test/capcom-new.visual.ts` (sesión ocupada con `choices` vacío: el modelo del
-mismo runtime sale del catálogo y viaja en `capcom:new`), `npx tsx
-test/model-catalog.visual.ts` (catálogo nativo vacío: el modelo propio se pide
-con `model:set` en vez de ir deshabilitado). Este último arnés levanta ya su
-propio Vite, como el de New CAPCOM.
+Coverage: `npm test -- model-control capcom-new capcom-new-hub`, `npx tsx
+test/capcom-new.visual.ts` (busy session with empty `choices`: the same
+runtime's model comes from the catalog and travels in `capcom:new`), `npx tsx
+test/model-catalog.visual.ts` (empty native catalog: the own model is requested
+with `model:set` instead of being disabled). This last harness now brings up
+its own Vite, like New CAPCOM's.
 
-## Qué conserva y qué cambia
+## What it keeps and what it changes
 
-Se conserva el **runtime y modelo efectivo**, incluido Codex. No hay fallback a Claude ni a otro modelo. La acción requiere CAPCOM hospedado, vivo, con transcript y modelo conocidos, y sin turno ni cambio de modelo en curso. También admite un bloqueo de error/cuota; la preparación puede fallar por la cuota del mismo modelo y conserva el original.
+The **effective runtime and model** are kept, Codex included. There is no fallback to Claude or to another model. The action requires a CAPCOM that is hosted, alive, with a known transcript and model, and with no turn or model change in progress. It also accepts an error/quota block; preparation can fail on the same model's quota and keeps the original.
 
-Se cambia el UUID de sesión mediante un arranque nuevo preparado y un `resume` de **ese UUID nuevo** para abrir su terminal interactivo. No se reanuda la conversación antigua. El recibo de preparación forma parte del contexto técnico mínimo; «limpio» no significa una sesión sin instrucciones de rol o sin configuración MCP.
+The session UUID is changed through a new prepared startup and a `resume` of **that new UUID** to open its interactive terminal. The old conversation is not resumed. The preparation receipt is part of the minimal technical context; "clean" does not mean a session with no role instructions or no MCP configuration.
 
-Archivos de proyectos, workers, tareas, reglas persistidas, transcripts originales y conversaciones del hub no se borran. Retirar tareas es una decisión aparte y se pide aparte, con ARCHIVE o `/tasks` ([TASK-RETENTION.md](TASK-RETENTION.md)): el registro del hub es lo que permite que la sesión sea desechable, y borrarlo como efecto colateral de un reset de contexto sería justo lo contrario. El modo limpio no carga esas reglas automáticamente: el operador puede pedir recuperar información histórica después. La política limpia continúa en una reanudación o compactación y hasta otro cambio de modo; una instrucción explícita puede pedir información histórica puntual.
+Project files, workers, tasks, persisted rules, original transcripts and hub conversations are not deleted. Retiring tasks is a separate decision and is requested separately, with ARCHIVE or `/tasks` ([TASK-RETENTION.md](TASK-RETENTION.md)): the hub's registry is what makes the session disposable, and deleting it as a side effect of a context reset would be exactly the opposite. Clean mode does not load those rules automatically: the operator can ask to recover historical information afterwards. The clean policy carries on across a resume or a compaction and until another mode change; an explicit instruction can ask for specific historical information.
 
-Cada acción crea `<capcom-dir>/handoffs/<planId>/`:
+Each action creates `<capcom-dir>/handoffs/<planId>/`:
 
-- `source.jsonl`: el transcript anterior, enlazado en duro cuando el sistema de archivos lo permite y copiado cuando no. Los mismos bytes bajo otro nombre: sobrevive a que el CLI pode su directorio de sesiones, sin duplicar decenas de megabytes en cada intento.
-- `conversation.md`: historial acumulado consultable desde TALK.
-- `manifest.json`: hashes del transcript, historial y notas.
-- `HANDOFF.md`: checkpoint de continuidad o acta del reset limpio, sin pendientes en el segundo caso.
-- Copias de configuración/control previos, cuando existen.
-- `runtime/`: directorio propio de la sesión preparada, con `CLAUDE.md` y `AGENTS.md` específicos del modo.
-- `preparation.jsonl`, `preparation.stderr`, `destination-checkpoint.md` y `plan.json`: evidencia y resultado.
+- `source.jsonl`: the previous transcript, hard-linked when the filesystem allows it and copied when not. The same bytes under another name: it survives the CLI pruning its sessions directory, without duplicating tens of megabytes on every attempt.
+- `conversation.md`: accumulated history, readable from TALK.
+- `manifest.json`: hashes of the transcript, history and notes.
+- `HANDOFF.md`: the continuity checkpoint or the record of the clean reset, with no pending items in the second case.
+- Copies of the previous configuration/control, when they exist.
+- `runtime/`: the prepared session's own directory, with a `CLAUDE.md` and `AGENTS.md` specific to the mode.
+- `preparation.jsonl`, `preparation.stderr`, `destination-checkpoint.md` and `plan.json`: evidence and result.
 
-Al preparar un traspaso se podan los archivos anteriores: de cada uno que no sea
-el activo — el que nombra `codex-recovery.json` — ni el que se está preparando,
-se quitan `source.jsonl` y `conversation.md`, y queda un `PRUNED.md` que lo dice.
-El plan, el checkpoint, los hashes del manifiesto, el recibo de preparación y la
-pantalla del destino atascado se conservan: son lo que se abre para entender un
-fallo. La conversación que contenían sigue en la sesión que la tiene y en el
-transcript del propio CLI. La poda es de mejor esfuerzo y nunca hace fallar un
-traspaso.
+When a handoff is prepared, the previous archives are pruned: from each one that
+is neither the active one — the one `codex-recovery.json` names — nor the one
+being prepared, `source.jsonl` and `conversation.md` are removed, leaving a
+`PRUNED.md` that says so. The plan, the checkpoint, the manifest hashes, the
+preparation receipt and the stuck destination's screen are kept: they are what
+you open to understand a failure. The conversation they contained is still in
+the session that has it and in the CLI's own transcript. The pruning is
+best-effort and never makes a handoff fail.
 
-Las credenciales MCP se añaden al directorio de ejecución solo al abrir el terminal de destino, después de preparar y verificar el recibo. La preparación elimina variables `ORCA_*`; Claude no dispone de herramientas/MCP y Codex utiliza la ruta existente `exec --ignore-user-config ... -s read-only`. No se debe borrar un directorio `runtime/` que esté referenciado por la recuperación activa.
+MCP credentials are added to the execution directory only when the destination terminal is opened, after preparing and verifying the receipt. Preparation strips `ORCA_*` variables; Claude has no tools/MCP and Codex uses the existing `exec --ignore-user-config ... -s read-only` path. A `runtime/` directory referenced by the active recovery must not be deleted.
 
-Ese directorio `runtime/` no existía un segundo antes, así que el CLI de destino
-pediría confirmar su confianza y se quedaría esperando en un pane que nadie mira:
-la verificación agota los dos minutos y el CAPCOM original se conserva. Antes de
-abrir el terminal se registra la confianza de la carpeta donde cada CLI la guarda
-— `~/.claude.json` para Claude, `[projects."<dir>"] trust_level = "trusted"` en
-`~/.codex/config.toml` para Codex —, sin tocar una decisión ya tomada para esa
-carpeta ni un archivo ilegible; si no se puede escribir, queda un aviso en el
-feed. Cada traspaso añade así una entrada de proyecto al config de Codex. Cuando
-la verificación falla de todos modos, la última pantalla del destino se guarda en
-`resume-screen.txt` dentro del archivo.
+That `runtime/` directory did not exist a second earlier, so the destination CLI
+would ask to confirm trusting it and would sit waiting in a pane nobody is
+looking at: verification burns the full two minutes and the original CAPCOM is
+kept. Before opening the terminal, the folder's trust is registered where each
+CLI stores it — `~/.claude.json` for Claude, `[projects."<dir>"] trust_level =
+"trusted"` in `~/.codex/config.toml` for Codex — without touching a decision
+already made for that folder or an unreadable file; if it cannot be written, a
+warning is left in the feed. Each handoff therefore adds a project entry to
+Codex's config. When verification fails anyway, the destination's last screen is
+saved in `resume-screen.txt` inside the archive.
 
-Antes de retirar al anterior se comprueba que el plan siga describiéndolo: mismo
-runtime y mismo modelo efectivo que cuando se preparó (`fromRuntime`/`fromModel`).
-La comprobación se hace contra el **origen**, no contra el destino, y se aplica a
-todo traspaso. Comparar con el destino sólo funcionaba porque un contexto nuevo
-obligaba a conservar modelo —origen y destino coincidían— y habría rechazado
-justo el relevo que sí lo cambia; y dejarla fuera de los traspasos de proveedor
-significaba que un original que cambiaba de modelo a mitad de preparación pasaba
-inadvertido. Un plan anterior a estos campos se acepta: no hay con qué comparar,
-y el transcript, los hashes y el estado se siguen exigiendo igual.
+Before retiring the previous one, it is checked that the plan still describes
+it: same runtime and same effective model as when it was prepared
+(`fromRuntime`/`fromModel`). The check is made against the **origin**, not
+against the destination, and it applies to every handoff. Comparing with the
+destination only worked because a new context forced the model to be kept —
+origin and destination coincided — and it would have rejected exactly the
+rotation that does change it; and leaving it out of provider handoffs meant that
+an original that changed model halfway through preparation went unnoticed. A
+plan from before these fields is accepted: there is nothing to compare against,
+and the transcript, the hashes and the state are still required just the same.
 
-El checkpoint de continuidad enumera hasta 16 elementos por sección, recorta líneas descriptivas a 240 caracteres y conserva identificadores y vías de consulta. El prompt preparado tiene un límite de 48 KiB. El historial archivado no comparte ese límite de contexto. Si el transcript cambia durante la preparación o queda incompleto durante una escritura, se rechaza el traspaso y se mantiene el original.
+The continuity checkpoint lists up to 16 items per section, trims descriptive lines to 240 characters and preserves identifiers and lookup paths. The prepared prompt has a 48 KiB limit. The archived history does not share that context limit. If the transcript changes during preparation or is left incomplete mid-write, the handoff is rejected and the original is kept.
 
-## Coordinación y mensajes
+## Coordination and messages
 
-El corte de contexto se identifica con `cutoffAt` en el plan/evento. ORCA anuncia la retención antes de preparar el destino. Mientras dura:
+The context cutoff is identified by `cutoffAt` in the plan/event. ORCA announces the hold before preparing the destination. While it lasts:
 
-1. El watchdog y la rotación automática no intervienen. Los comandos incompatibles y la entrada al terminal original quedan bloqueados; TALK sigue aceptando mensajes.
-2. La preparación no recibe permiso para despachar trabajo. Debe devolver un UUID distinto y el recibo solicitado; limpio exige únicamente ese recibo.
-3. El destino se abre sin un turno nuevo de activación. ORCA verifica que su terminal ha llegado a un prompt inactivo; tiene hasta dos minutos para ello.
-4. Solo después de verificar el destino se detiene el pane anterior y se publica por rename la configuración de recuperación con el UUID nuevo. Se adopta ese UUID en el linaje y se publica el snapshot.
-5. La cola se libera al destino confirmado. Si aún no se ve su transcript, continúa retenida. Una preparación lenta no descarta el correo por timeout.
+1. The watchdog and automatic rotation do not intervene. Incompatible commands and input to the original terminal are blocked; TALK keeps accepting messages.
+2. The preparation is not given permission to dispatch work. It must return a different UUID and the requested receipt; clean mode requires only that receipt.
+3. The destination is opened without a new activation turn. ORCA verifies that its terminal has reached an idle prompt; it has up to two minutes for that.
+4. Only after verifying the destination is the previous pane stopped and the recovery configuration published by rename with the new UUID. That UUID is adopted into the lineage and the snapshot is published.
+5. The queue is released to the confirmed destination. If its transcript is not visible yet, it stays held. A slow preparation does not drop the mail on a timeout.
 
-Si falla preparación, autenticación/cuota, recibo, arranque, captura o readiness, el anterior no se detiene. Si falla detener el anterior, se cancela el destino y permanece la autoridad anterior. Las solicitudes duplicadas del mismo modo durante la preparación reutilizan el plan; otro modo o un segundo commit se rechazan.
+If preparation, authentication/quota, the receipt, startup, capture or readiness fails, the previous one is not stopped. If stopping the previous one fails, the destination is cancelled and the previous authority remains. Duplicate requests for the same mode during preparation reuse the plan; another mode or a second commit are rejected.
 
-Los mensajes nuevos de TALK, tareas y entregas directas al CAPCOM se retienen. En limpio, una instrucción nueva dentro de una tarea lleva su identificador y texto nuevo, sin adjuntar la conversación anterior. Lo mismo aplica a los resultados nuevos de workers. Las preguntas antiguas, los avisos de workers anteriores al corte y los incidentes de cuota históricos siguen guardados, pero no se vuelven a inyectar automáticamente; las preguntas/incidentes nuevos siguen llegando. El evento de handoff se muestra y persiste en la UI sin enviarlo como prompt al CAPCOM limpio.
+New TALK messages, tasks and deliveries sent directly to CAPCOM are held. In clean mode, a new instruction inside a task carries its identifier and new text, without attaching the previous conversation. The same applies to new worker results. Old questions, warnings from workers before the cutoff and historical quota incidents are still stored, but they are not injected again automatically; new questions/incidents still arrive. The handoff event is shown and persisted in the UI without being sent as a prompt to the clean CAPCOM.
 
-La activación mantiene un único CAPCOM con autoridad. Durante la verificación puede haber dos procesos CLI vivos: el original y el destino preparado, sin turno activo ni rol de CAPCOM todavía. No se debe escribir directamente en el tmux de destino ni usar comandos del CLI para cambiar de sesión al margen de ORCA.
+Activation keeps a single CAPCOM with authority. During verification there can be two live CLI processes: the original and the prepared destination, with no active turn and no CAPCOM role yet. Do not write directly into the destination's tmux or use CLI commands to switch sessions outside ORCA.
 
-## Quién manda, en un solo archivo
+## Who is in command, in a single file
 
-Desde 2026-09-07, `<capcom-dir>/capcom.json`. Antes ese hecho vivía repartido:
-`session.json` guardaba la sesión adoptada y `codex-recovery.json` la sesión con
-su runtime, su modelo y su cwd — y **ganaba** sobre el primero, sin que ninguna
-regla escrita dijera cuál actualizar. Un `/clear` actualizó el que no mandaba y
-el vigilante devolvió el mando al hilo ya vaciado: «0 UNDER COMMAND» con el
-proceso corriendo delante. Cinco escritores tocaban ese hecho —adopción,
-traspaso, reset, cambio de modelo, arranque— y bastaba con que uno se dejara el
-archivo con autoridad.
+Since 2026-09-07, `<capcom-dir>/capcom.json`. Before, that fact lived split up:
+`session.json` stored the adopted session and `codex-recovery.json` the session
+with its runtime, its model and its cwd — and it **won** over the first, with no
+written rule saying which one to update. A `/clear` updated the one that was not
+in charge and the watchdog handed command back to the already-emptied thread: "0
+UNDER COMMAND" with the process running right in front of it. Five writers
+touched that fact — adoption, handoff, reset, model change, startup — and it was
+enough for one of them to leave the authoritative file behind.
 
-Ahora es un archivo, una escritura atómica, y `recovery()` y la sesión adoptada
-son dos vistas de la misma lectura, así que no pueden discrepar. El nombre del
-pane se deriva; el rol en `lineage.json` y el `role:'capcom'` del hub son
-publicaciones de ese hecho, no copias con voto.
+Now it is one file, one atomic write, and `recovery()` and the adopted session
+are two views of the same read, so they cannot disagree. The pane's name is
+derived; the role in `lineage.json` and the hub's `role:'capcom'` are
+publications of that fact, not copies with a vote.
 
-La migración es automática al leer: si no hay `capcom.json` pero sí los
-anteriores, se combinan dando prioridad a la recuperación —que es la que la
-tenía— y se escribe una vez. No borra nada: los archivos viejos siguen siendo la
-evidencia de un traspaso, y un collector anterior que vuelva a arrancar encuentra
-lo suyo. La cuenta atrás de eso es que **volver a una versión anterior después de
-un cambio de sesión requiere reparar a mano**: los archivos viejos ya no se
-actualizan.
+Migration happens automatically on read: if there is no `capcom.json` but the
+previous ones are there, they are merged giving priority to the recovery — which
+is the one that had it — and written once. It deletes nothing: the old files are
+still the evidence of a handoff, and an older collector that starts up again
+finds its own. The bill for that is that **going back to an earlier version
+after a session change requires fixing things by hand**: the old files are no
+longer updated.
 
-Se rechaza en vez de adivinar una identidad sin sesión, con un runtime
-desconocido, o que declare un modelo preparado junto a un id que no es una sesión
-hospedada — reanudar eso lanzaría un CLI sobre una conversación que no existe. Un
-modelo sin declarar sí se acepta como `default`, que es lo que un `--bg` fue
-siempre, y `recovery()` lo lee como «nada que reanudar».
+An identity with no session, with an unknown runtime, or that declares a
+prepared model alongside an id that is not a hosted session is rejected instead
+of guessed — resuming that would launch a CLI over a conversation that does not
+exist. An undeclared model is accepted as `default`, which is what a `--bg`
+always was, and `recovery()` reads it as "nothing to resume".
 
-## Los avisos, plegados
+## The notices, collapsed
 
-Un traspaso deja su acta —«SESSION CHANGED», con enlaces a la conversación
-anterior y a las notas— y el propio traspaso deja la suya, con el estado del
-plan. Son útiles una vez y referencia después, pero desplegadas ocupaban entre
-las dos dos tercios del alto de la ventana, y la conversación viva quedaba en
-una franja de cuatro líneas; la del traspaso, además, no se podía cerrar de
-ninguna manera, así que ese recorte era permanente.
+A handoff leaves its record — "SESSION CHANGED", with links to the previous
+conversation and to the notes — and the handoff itself leaves its own, with the
+plan's state. They are useful once and reference afterwards, but expanded the
+two of them took up two thirds of the window's height, and the live conversation
+was left in a four-line strip; the handoff one, on top of that, could not be
+closed by any means, so that clipping was permanent.
 
-Ahora el estado normal de un aviso es una línea: título, resumen y hora. Se abre
-con un clic y se descarta con la ×, y ambas cosas se recuerdan en este navegador
-por id del aviso —descartar el acta de un traspaso no esconde la del siguiente,
-que es cuando hace falta leerla—. El aviso sigue en el hub: otra consola lo verá.
+Now a notice's normal state is one line: title, summary and time. It opens with
+a click and is dismissed with the ×, and both things are remembered in this
+browser by the notice's id — dismissing one handoff's record does not hide the
+next one's, which is when you need to read it. The notice is still in the hub:
+another console will see it.
 
-El acta del plan se abre sola mientras hay algo que decidir o algo en marcha
-—una revisión pendiente de confirmar, una preparación, un fallo que explica qué
-se conservó— y se pliega en cuanto es el recibo de algo que salió bien. La
-acción que sigue a un traspaso completo, ir al agente que continúa, queda fuera
-del plegado: se esconde el texto, no lo que hay que poder pulsar.
+The plan's record opens on its own while there is something to decide or
+something under way — a review pending confirmation, a preparation, a failure
+that explains what was kept — and collapses as soon as it is the receipt for
+something that went well. The action that follows a completed handoff, going to
+the agent that continues, stays outside the collapse: the text is hidden, not
+what you need to be able to press.
 
-## Activación operativa pendiente
+## Operational activation still pending
 
-1. Integrar estos cambios y ponerlos en servicio mediante el procedimiento habitual, en una ventana autorizada. Esta tarea no ejecutó ese paso.
-2. Abrir la ventana de mando, comprobar proveedor/modelo y esperar a que CAPCOM termine el turno. El botón explica cuándo no está disponible.
-3. Elegir **New CAPCOM → Clean context / With continuity**, o utilizar el comando equivalente.
-4. Esperar el resultado del plan. En caso de fallo, revisar el detalle y las evidencias del archivo antes de reintentar; no introducir `/new` en un terminal.
-5. Verificar el nuevo UUID, proveedor/modelo y un solo rol CAPCOM. En limpio debe quedar esperando, salvo mensajes nuevos recibidos durante el cambio. En continuidad debe recuperar pendientes. Comprobar entrega de los mensajes retenidos.
+1. Integrate these changes and put them into service through the usual procedure, in an authorized window. This task did not carry out that step.
+2. Open the command window, check provider/model and wait for CAPCOM to finish its turn. The button explains when it is unavailable.
+3. Choose **New CAPCOM → Clean context / With continuity**, or use the equivalent command.
+4. Wait for the plan's result. On failure, review the detail and the archive's evidence before retrying; do not type `/new` into a terminal.
+5. Verify the new UUID, provider/model and a single CAPCOM role. In clean mode it should be left waiting, except for new messages received during the change. In continuity it should recover pending items. Check delivery of the held messages.
 
-Los cambios de autoridad locales son persistentes; no constituyen una transacción distribuida con garantía de exactamente una entrega frente a una caída simultánea del hub, collector y filesystem. La cola de callbacks del router sigue siendo memoria del hub, como antes: un reinicio del hub durante la transición requiere reconciliar los mensajes conservados en tareas/conversación y el estado del handoff; no hacer reenvíos ciegos. El estado interrumpido consulta la configuración de recuperación para reconocer una activación ya persistida, sin lanzar otro runtime. No se ha ensayado aquí una pérdida de alimentación ni se ha activado una sesión real del operador.
+Local authority changes are persistent; they do not constitute a distributed transaction with exactly-once delivery guarantees against a simultaneous failure of the hub, collector and filesystem. The router's callback queue is still hub memory, as before: a hub restart during the transition requires reconciling the messages kept in tasks/conversation with the handoff state; do not do blind resends. The interrupted state consults the recovery configuration to recognize an already-persisted activation, without launching another runtime. No power loss was rehearsed here and no real operator session was activated.
 
-## Verificación
+## Verification
 
 ```sh
 npm run typecheck
@@ -274,6 +283,6 @@ node --import tsx test/capcom-handoff.visual.ts
 node --import tsx test/model-catalog.visual.ts
 ```
 
-La prueba visual crea su propio servidor Vite sin la configuración/proxy del proyecto ni conexión al hub real. Guarda capturas en `test/shots/capcom-new-{desktop,mobile}.png` y comprueba botón, ambos modos/comandos, alcance, modelo, borrador, fallo/reintento y overflow.
+The visual test creates its own Vite server without the project's config/proxy and without connecting to the real hub. It saves screenshots to `test/shots/capcom-new-{desktop,mobile}.png` and checks the button, both modes/commands, scope, model, draft, failure/retry and overflow.
 
-Las pruebas nuevas de runtime utilizan procesos CLI simulados con HOME/config/cwd temporales, y terminales inyectados para readiness/fallo/timeout. Las pruebas del hub usan WebSockets reales contra un hub temporal. Son comprobaciones de integración del controlador y los límites de proceso, no una certificación de cuota/autenticación ni una ejecución contra Claude/Codex de producción. La suite general también ejercita tmux en su entorno de prueba. No hubo rotación, reset ni envío de prompts al CAPCOM real.
+The new runtime tests use simulated CLI processes with temporary HOME/config/cwd, and injected terminals for readiness/failure/timeout. The hub tests use real WebSockets against a temporary hub. They are integration checks of the controller and the process boundaries, not a certification of quota/authentication nor a run against production Claude/Codex. The general suite also exercises tmux in its test environment. There was no rotation, reset or prompt sent to the real CAPCOM.

@@ -1,70 +1,69 @@
-# El handshake que no termina
+# The handshake that never ends
 
-Con un token que el hub no acepta, la consola celebraba.
+With a token the hub does not accept, the console celebrated.
 
-El socket abría —abrir un socket no requiere permiso—, la consola daba el
-enlace por bueno ahí mismo, mandaba el `hello`, y el hub cerraba. Reintento,
-socket abierto, «LINK UP» otra vez: el destello lima de pantalla entera que la
-consola reserva para una flota que sube, y su sonido, cada pocos segundos y
-para siempre. El operador veía la consola alegrándose sin parar mientras
-miraba un mundo congelado, y en ningún sitio decía «tu token no vale».
+The socket opened —opening a socket needs no permission—, the console took the
+link as good right there, sent the `hello`, and the hub closed. Retry, socket
+open, "LINK UP" again: the full-screen lime flash the console reserves for a
+fleet coming up, and its sound, every few seconds and forever. The operator
+watched the console cheering non-stop while looking at a frozen world, and
+nowhere did it say "your token is not valid".
 
-Dos arreglos, uno debajo del otro.
+Two fixes, one underneath the other.
 
-## El enlace se declara cuando el hub contesta
+## The link is declared when the hub answers
 
-`store.setLink(true)` estaba en `ws.onopen`, que es antes de que nadie te haya
-dicho quién eres. Ahora está en `handle()`: la primera trama que llega del hub
-es la prueba de que hay enlace **y** de que el token valía, porque no hay
-ninguna otra forma de recibir una. Un socket abierto que se cierra en seguida
-ya no es un enlace, así que no hay destello, no hay sonido y no hay ciclo.
+`store.setLink(true)` was in `ws.onopen`, which is before anyone has told you who
+you are. Now it is in `handle()`: the first frame that arrives from the hub is
+the proof that there is a link **and** that the token was valid, because there is
+no other way to receive one. An open socket that closes immediately is no longer
+a link, so there is no flash, no sound and no cycle.
 
-El mismo sitio pone `setAuth(true)`. El cierre con `CLOSE_UNAUTHORIZED` pone
-`setAuth(false)`. Los códigos de cierre viven ahora en `shared/protocol.ts` —
-los acuerdan hub y consola, y la consola no puede importar nada del hub;
-`hub/auth.ts` los reexporta para quien ya se los pedía a él.
+The same place sets `setAuth(true)`. A close with `CLOSE_UNAUTHORIZED` sets
+`setAuth(false)`. The close codes now live in `shared/protocol.ts` — hub and
+console agree on them, and the console cannot import anything from the hub;
+`hub/auth.ts` re-exports them for whoever was already asking it for them.
 
-Un enlace caído y un token rechazado son dos condiciones distintas y se miran
-distinto: la red vuelve sola y el mundo que ya estaba en pantalla sigue siendo
-la última verdad conocida, mientras que un token no se arregla esperando.
+A dropped link and a rejected token are two different conditions and they are
+looked at differently: the network comes back on its own and the world already on
+screen is still the last known truth, whereas a token is not fixed by waiting.
 
-## La pantalla
+## The screen
 
-Con el token rechazado, la consola se retira detrás del beat de handshake del
-arranque: el mismo rótulo, los mismos ocho bloques, las mismas clases
-(`ui/handshake.ts`, escena `pass` de `boot.ts`). Con la diferencia que es el
-mensaje entero: **no completa**. En el arranque los ocho bloques dan paso al
-barrido lima que dice «aceptado»; aquí se apagan y vuelven a empezar. Un
-handshake que no cierra es exactamente lo que está pasando.
+With the token rejected, the console retreats behind the boot's handshake beat:
+the same label, the same eight blocks, the same classes (`ui/handshake.ts`, `pass`
+scene from `boot.ts`). With the difference that is the whole message: it **does
+not complete**. At boot the eight blocks give way to the lime sweep that says
+"accepted"; here they go out and start over. A handshake that does not close is
+exactly what is happening.
 
-- **Sin texto de error y sin campo.** No es una pantalla de login: nada de lo
-  que se escriba ahí arregla esto —el token vive en el disco del hub y en el
-  `localStorage` de la consola— y una casilla prometería una salida que no
-  existe. Tampoco se dice qué falló: quien mira una consola ajena no tiene por
-  qué enterarse de cómo se autentica ésta.
-- **No se escribe detrás.** El panel cubre la pantalla y se come el ratón; el
-  teclado lo para un listener en captura sobre `window`, que corre antes que
-  los atajos de `main.ts`. Sin esto quedarían órdenes escribiéndose contra un
-  enlace que no existe.
-- **Se va sola.** El cliente reintenta con backoff; en cuanto el hub conteste
-  una trama, la pantalla se retira sin ceremonia.
+- **No error text and no field.** It is not a login screen: nothing typed there
+  fixes this —the token lives on the hub's disk and in the console's
+  `localStorage`— and a box would promise a way out that does not exist. It does
+  not say what failed either: someone looking at somebody else's console has no
+  business finding out how this one authenticates.
+- **You cannot type behind it.** The panel covers the screen and swallows the
+  mouse; the keyboard is stopped by a capture listener on `window`, which runs
+  before `main.ts`'s shortcuts. Without this there would be commands being typed
+  against a link that does not exist.
+- **It goes away by itself.** The client retries with backoff; as soon as the hub
+  answers with a frame, the screen withdraws without ceremony.
 
-## Verificación
+## Verification
 
 ```sh
 npm run typecheck
 npm test -- --changed
 ```
 
-Sin suite que lo cubra, y se dice: el comportamiento vive en el DOM, en gsap y
-en un `WebSocket` real, y las pruebas de este repo son node puro. Se comprobó a
-mano contra un hub estricto (`ORCA_STRICT_AUTH=1`) con Playwright, los cuatro
-caminos:
+No suite covers it, and that is said out loud: the behaviour lives in the DOM, in
+gsap and in a real `WebSocket`, and this repo's tests are pure node. It was
+checked by hand against a strict hub (`ORCA_STRICT_AUTH=1`) with Playwright, all
+four paths:
 
-- token inválido → la pantalla aparece y cicla (8 bloques encendidos, apagado,
-  vuelta a empezar);
-- doce segundos con ese token → **cero** destellos lima (`[data-alarm-flash]`
-  se muestreó a 10 Hz y nunca subió de 0); antes había uno por reintento;
-- una tecla con la pantalla puesta → no llega a `window` y no abre nada;
-- el hub reiniciado aceptando ese token → la pantalla se retira sola y la
-  consola vuelve.
+- invalid token → the screen appears and cycles (8 blocks lit, off, start over);
+- twelve seconds with that token → **zero** lime flashes (`[data-alarm-flash]`
+  was sampled at 10 Hz and never rose above 0); before there was one per retry;
+- a keystroke with the screen up → it does not reach `window` and opens nothing;
+- the hub restarted accepting that token → the screen withdraws by itself and the
+  console comes back.

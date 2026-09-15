@@ -1,163 +1,171 @@
-# ORCA en producción
+# ORCA in production
 
-Correr siempre el build optimizado, y que publicar mejoras no toque lo que hay
-en pie hasta que el operador lo decida.
+Always run the optimized build, and let publishing improvements leave what is
+standing alone until the operator decides otherwise.
 
-## El día a día
+## Day to day
 
 ```
-npm run publish     comprueba tipos, construye la consola y barre lo que sobra
-npm run prod        hub + collector, sin watch, sirviendo esa consola
+npm run publish     typechecks, builds the console and sweeps up what is left over
+npm run prod        hub + collector, no watch, serving that console
 ```
 
-`prod` levanta los dos bajo un supervisor, que es lo que permite reiniciarlos
-después desde la propia consola (más abajo).
+`prod` brings both up under a supervisor, which is what makes it possible to
+restart them later from the console itself (below).
 
-La consola sale por el puerto del hub —4479, o la url https que `tailscale
-serve` publica en la tailnet— y no hay un segundo proceso que mantener: Vite
-deja de estar en la ecuación. El hub sirve `dist/` con tres políticas de caché
-(`serveStatic` en `src/hub/server.ts`): `index.html` en `no-store`, los
-`/assets/*` con hash e `immutable` un año, y lo de nombre fijo —manifest,
-iconos, fuentes, sfx— revalidado con `Last-Modified`, que es un 304 sin cuerpo.
+The console comes out on the hub's port —4479, or the https url that `tailscale
+serve` publishes on the tailnet— and there is no second process to keep alive:
+Vite is out of the equation. The hub serves `dist/` with three cache policies
+(`serveStatic` in `src/hub/server.ts`): `index.html` as `no-store`, the
+`/assets/*` with a hash and `immutable` for a year, and the fixed-name things
+—manifest, icons, fonts, sfx— revalidated with `Last-Modified`, which is a 304
+with no body.
 
-Y con eso llega lo que en desarrollo no hay: bundle minificado, service worker,
-arranque sin red y la consola instalable en el teléfono (`docs/PWA.md`).
+And with that comes what development does not have: a minified bundle, a service
+worker, a boot with no network and a console installable on a phone
+(`docs/PWA.md`).
 
-## Publicar no recarga a nadie
+## Publishing does not reload anyone
 
-`npm run publish` (`tools/publish.mjs`) hace tres cosas en este orden:
+`npm run publish` (`tools/publish.mjs`) does three things, in this order:
 
-1. **`tsc --noEmit`.** Vite no comprueba tipos: sin esta puerta, publicar es
-   publicar a ciegas. Si falla, no se toca nada y sigue en pie el build de
-   antes.
-2. **`vite build`, que NO vacía `dist/`.** Es lo que permite construir sobre una
-   consola que alguien está mirando. Con el vaciado por defecto, durante los
-   segundos del build la página viva pierde fuentes, sonidos, `/sw.js` y el
-   index —y si el build falla, los pierde para siempre—. Sin vaciado el build
-   es aditivo: los `/assets/*` nuevos llevan hash y conviven con los de la
-   generación anterior, y el índice, que es lo único con nombre fijo que decide
-   qué build es, se reescribe al final. Un build roto no llega a tocarlo.
-3. **El barrido.** Se conservan dos generaciones: la que el índice servía antes
-   y la nueva. La primera es la que tiene cargada la pestaña que aún no ha
-   recargado; ya no va a pedir su bundle —lo tiene— pero sí su sourcemap si
-   alguien abre las herramientas. Lo anterior a esas dos no lo puede pedir
-   nadie, y se borra. Sin barrido, `dist/assets` crecería sin fin: por eso
-   `npx vite build` a pelo funciona pero deja basura.
+1. **`tsc --noEmit`.** Vite does not check types: without this gate, publishing
+   is publishing blind. If it fails, nothing is touched and the previous build
+   stays standing.
+2. **`vite build`, which does NOT empty `dist/`.** That is what makes it possible
+   to build on top of a console someone is looking at. With the default
+   emptying, for the seconds the build takes the live page loses fonts, sounds,
+   `/sw.js` and the index — and if the build fails, it loses them for good.
+   Without emptying, the build is additive: the new `/assets/*` carry a hash and
+   live alongside the previous generation's, and the index, which is the only
+   fixed-name thing that decides which build is which, is rewritten at the end. A
+   broken build never gets to touch it.
+3. **The sweep.** Two generations are kept: the one the index served before and
+   the new one. The first is the one loaded in the tab that has not reloaded yet;
+   it is not going to ask for its bundle any more —it has it— but it will ask for
+   its sourcemap if someone opens the dev tools. Anything older than those two
+   cannot be requested by anyone, and is deleted. Without the sweep,
+   `dist/assets` would grow without end: that is why a bare `npx vite build`
+   works but leaves rubbish behind.
 
-De ahí en adelante manda la doctrina de siempre: la consola no cambia bajo la
-mano del operador. El conjunto de `/assets/*` del índice **es** el build id; la
-página recuerda el suyo al cargar y lo compara cada minuto, al volver la
-pestaña al frente y al recuperar el enlace con el hub. Cuando difiere se
-enciende `UPDATE AVAILABLE · CLICK TO RELOAD`, y el clic es la recarga
-(`src/ui/hud/update.ts`). El service worker sigue la misma regla: el worker
-nuevo espera en `waiting` hasta ese clic, sin `skipWaiting` (`public/sw.js`).
+From there on the usual doctrine rules: the console does not change under the
+operator's hand. The index's set of `/assets/*` **is** the build id; the page
+remembers its own on load and compares it every minute, when the tab comes back
+to the front and when the link with the hub is recovered. When it differs,
+`UPDATE AVAILABLE · CLICK TO RELOAD` lights up, and the click is the reload
+(`src/ui/hud/update.ts`). The service worker follows the same rule: the new
+worker waits in `waiting` until that click, with no `skipWaiting`
+(`public/sw.js`).
 
-## Publicar solo, cuando el trabajo termina
+## Publishing by itself, when the work finishes
 
-Un paso manual entre «el agente terminó» y «el operador puede verlo» es un paso
-que no se da: el trabajo se queda en el disco, hecho y sin llegar. Por eso el
-hub publica él mismo (`src/hub/publisher.ts`) en dos momentos:
+A manual step between "the agent finished" and "the operator can see it" is a
+step that does not get taken: the work stays on disk, done and never arriving.
+That is why the hub publishes on its own (`src/hub/publisher.ts`) at two moments:
 
-- **Un agente que trabajaba sobre el repo de ORCA pasa a `done`.** Sólo `done`
-  —un agente muerto no terminó nada—, sólo trabajadores —el fin de un CAPCOM es
-  el fin de una sesión de mando, no de una tanda— y sólo el repo propio.
-- **Una rama aterriza en el repo de ORCA** (`land_work`, en `src/agents/tools.ts`).
+- **An agent that was working on ORCA's repo goes to `done`.** Only `done` —a
+  dead agent finished nothing—, only workers —the end of a CAPCOM is the end of a
+  command session, not of a batch of work— and only the repo itself.
+- **A branch lands in ORCA's repo** (`land_work`, in `src/agents/tools.ts`).
 
-Nada de eso recarga nada. Publicar produce el build; la píldora lo ofrece; el
-clic sigue siendo del operador. Automático hasta la oferta, nunca más allá.
+None of that reloads anything. Publishing produces the build; the pill offers it;
+the click is still the operator's. Automatic up to the offer, never beyond.
 
-Tres cosas hacen que no moleste:
+Three things keep it from being a nuisance:
 
-**Sólo el repo propio.** ORCA gobierna muchos proyectos y publicar sólo tiene
-sentido para el suyo. La comparación es de rutas resueltas contra el árbol desde
-el que corre el proceso, no por el nombre del proyecto: uno puede llamarse
-`orca` sin serlo, y el de verdad puede estar detrás de un enlace simbólico. Un
-worker en un worktree cuenta, porque su proyecto sigue siendo éste.
+**Only the repo itself.** ORCA governs many projects and publishing only makes
+sense for its own. The comparison is between resolved paths against the tree the
+process runs from, not by project name: one can be called `orca` without being
+it, and the real one can be behind a symlink. A worker in a worktree counts,
+because its project is still this one.
 
-**Se espera y se agrupa.** Un escuadrón termina en racimo. La primera petición
-abre una ventana de 30 s y lo que llegue dentro viaja con ella. Y nunca hay dos
-builds a la vez: lo que se pida mientras se construye se apunta y se hace una
-sola vez al acabar, porque dos builds sobre el mismo `dist/` son justo la
-carrera que `emptyOutDir: false` evita.
+**It waits and it groups.** A squad finishes in a cluster. The first request
+opens a 30 s window and whatever arrives within it travels along. And there are
+never two builds at once: whatever is requested while one is building is noted
+down and done once at the end, because two builds over the same `dist/` are
+exactly the race `emptyOutDir: false` avoids.
 
-**Un fallo no se repite.** El árbol es compartido y está sucio a propósito: el
-typecheck se pone rojo a menudo, y por trabajo de otro. Cuando eso pasa no se
-toca nada —la consola en pie sigue con su build bueno— y se avisa a CAPCOM, que
-es quien puede arreglarlo; al operador no se le interrumpe, sólo ve la píldora
-cuando hay algo que de verdad se puede aplicar. Y el mismo error no se cuenta
-dos veces: avisar en cada intento convierte el aviso en ruido y el ruido en
-silencio.
+**A failure does not repeat.** The tree is shared and dirty on purpose: the
+typecheck goes red often, and because of someone else's work. When that happens
+nothing is touched —the standing console keeps its good build— and CAPCOM is
+told, since it is the one who can fix it; the operator is not interrupted, he
+only sees the pill when there is something that can really be applied. And the
+same error is not counted twice: warning on every attempt turns the warning into
+noise and the noise into silence.
 
-`ORCA_AUTOPUBLISH=0` lo apaga y deja el publish manual de siempre. Un hub de
-pruebas no construye nunca.
+`ORCA_AUTOPUBLISH=0` turns it off and leaves the usual manual publish. A test hub
+never builds.
 
-## La asimetría, dicha en voz alta
+## The asymmetry, said out loud
 
-**Recargar actualiza la consola y nada más.** El hub y el collector cargan su
-código al arrancar y no lo vuelven a mirar, así que después de publicar puede
-quedar un bundle nuevo hablando con un proceso viejo — y el síntoma de eso (un
-comando que no hace nada, un campo que llega vacío) no se parece a la causa.
+**Reloading updates the console and nothing else.** The hub and the collector
+load their code at startup and never look at it again, so after publishing you
+can end up with a new bundle talking to an old process — and the symptom of that
+(a command that does nothing, a field that arrives empty) does not look like the
+cause.
 
-Por eso el hub se vigila a sí mismo (`src/hub/source-rev.ts`): toma la revisión
-de su código al arrancar, la vuelve a tomar cada 30 s y, si cambió, se lo dice a
-las consolas con el frame `server` (`src/shared/protocol.ts`). Ahí se enciende
-una segunda píldora, `SERVER CODE CHANGED · RESTART ORCA`, con un texto
-distinto porque la acción es distinta: ésta no se arregla con un clic, se
-arregla reiniciando ORCA.
+That is why the hub watches itself (`src/hub/source-rev.ts`): it takes its code's
+revision at startup, takes it again every 30 s and, if it changed, tells the
+consoles with the `server` frame (`src/shared/protocol.ts`). There a second pill
+lights up, `SERVER CODE CHANGED · RESTART ORCA`, with different text because the
+action is different: this one is not fixed with a click, it is fixed by
+restarting ORCA.
 
-### El clic que reinicia
+### The click that restarts
 
-Esa píldora es un botón cuando puede serlo. `npm run prod` pone
-`tools/supervise.mjs` delante del hub y del collector, y un proceso supervisado
-sabe pedirse el relevo: sale con el código 75 (`EX_TEMPFAIL`, «vuelve a
-intentarlo») y el supervisor lo relanza en la misma terminal, con los mismos
-logs y el mismo árbol de procesos. El contrato entero son dos piezas —una marca
-en el entorno y un código de salida— y vive en `src/shared/restart.ts`.
+That pill is a button when it can be one. `npm run prod` puts
+`tools/supervise.mjs` in front of the hub and the collector, and a supervised
+process knows how to ask to be relieved: it exits with code 75 (`EX_TEMPFAIL`,
+"try again") and the supervisor relaunches it in the same terminal, with the same
+logs and the same process tree. The whole contract is two pieces —a mark in the
+environment and an exit code— and it lives in `src/shared/restart.ts`.
 
-Lo que pasa al pulsar: el hub avisa a los collectors, les da medio segundo para
-que el frame salga por el cable, se apaga limpio y sale con 75. Cada collector
-decide por su cuenta —sin supervisor detrás lo ignora, porque un collector que
-se apaga y no vuelve deja su máquina fuera de la flota— y los agentes no se
-tocan: viven en tmux, no dentro de estos procesos, y siguen trabajando mientras
-los procesos vuelven.
+What happens when you press it: the hub warns the collectors, gives them half a
+second for the frame to make it out over the wire, shuts down cleanly and exits
+with 75. Each collector decides for itself —with no supervisor behind it, it
+ignores it, because a collector that shuts down and does not come back leaves its
+machine out of the fleet— and the agents are not touched: they live in tmux, not
+inside these processes, and they keep working while the processes come back.
 
-No hay ack, porque quien tendría que mandarlo es justo lo que se está muriendo.
-La confirmación es el enlace: cae, vuelve, y ahí la consola se recarga sola.
-Recargar ahí no rompe la doctrina, la cumple — el clic ES la autorización, y
-dejar la consola vieja hablando con el hub nuevo sería la única forma de que
-ese clic acabara peor de lo que empezó. Si el enlace ni se inmuta en 15 s, no
-pasó nada y el botón vuelve.
+There is no ack, because whoever would have to send it is precisely what is
+dying. The confirmation is the link: it drops, it comes back, and there the
+console reloads by itself. Reloading there does not break the doctrine, it
+honours it — the click IS the authorization, and leaving the old console talking
+to the new hub would be the only way for that click to end up worse than it
+started. If the link does not so much as flinch in 15 s, nothing happened and the
+button comes back.
 
-Sin supervisor —`npm start`, o el hub lanzado a mano— el frame `server` llega
-con `restartable: false`, la píldora se queda en el cartel de siempre y dice
-qué teclear. Ofrecer un botón que no puede funcionar es peor que no ofrecerlo:
-el operador cree que ya está hecho.
+With no supervisor —`npm start`, or the hub launched by hand— the `server` frame
+arrives with `restartable: false`, the pill stays as the usual notice and says
+what to type. Offering a button that cannot work is worse than not offering it:
+the operator thinks it is already done.
 
-Y un freno: un proceso que pide relevo tres veces sin llegar a vivir cinco
-segundos para el ciclo. Eso es un árbol roto reiniciándose contra código que no
-compila, y lo útil entonces es ver el error, no otro intento.
+And a brake: a process that asks to be relieved three times without managing to
+live five seconds ends the cycle. That is a broken tree restarting against code
+that does not compile, and what is useful then is seeing the error, not another
+attempt.
 
-Qué cuenta como código del servidor: todo `src/**/*.ts` menos `src/ui/`, que ya
-tiene su propia señal. `src/shared/` cuenta aunque lo comparta la consola —
-puede mover el protocolo, y equivocarse hacia «avisa de más» cuesta un vistazo.
-No se leen contenidos: ruta, tamaño y mtime bastan.
+What counts as server code: all of `src/**/*.ts` except `src/ui/`, which already
+has its own signal. `src/shared/` counts even though the console shares it — it
+can move the protocol, and erring towards "warns too much" costs a glance. No
+contents are read: path, size and mtime are enough.
 
-En desarrollo esto no se enciende nunca, y no por un `if`: bajo `tsx watch` el
-proceso se reinicia al guardar, así que su revisión de arranque vuelve a ser la
-del disco antes de que a nadie le dé tiempo a mirar.
+In development this never lights up, and not because of an `if`: under `tsx
+watch` the process restarts on save, so its startup revision is the disk's again
+before anyone has time to look.
 
-El aviso llega por las dos puertas de entrada de una consola: la del token en
-la query, que es la del navegador, y la del `hello`, que es la de todo lo demás.
-Cablearlo en una sola es un fallo que las pruebas por WebSocket no ven — entran
-por la del `hello` — mientras la consola de verdad no se entera de nada.
+The notice arrives through both of a console's entrances: the token in the query,
+which is the browser's, and the `hello`, which is everything else's. Wiring it in
+only one is a bug the WebSocket tests do not see — they come in through the
+`hello` one — while the real console never finds out about anything.
 
-## Qué sigue en desarrollo
+## What stays the same in development
 
-`npm run dev` no cambia: Vite en 4478, hub y collector bajo `tsx watch`, y el
-aviso de actualización instantáneo por el WebSocket del dev server. Lo que
-cambia es que ya no hace falta trabajar así para tener ORCA en pie.
+`npm run dev` does not change: Vite on 4478, hub and collector under `tsx watch`,
+and the instant update notice over the dev server's WebSocket. What changes is
+that you no longer have to work that way to have ORCA standing.
 
-## Pruebas
+## Tests
 
 ```
 npm test -- source-rev publish publisher restart serve update

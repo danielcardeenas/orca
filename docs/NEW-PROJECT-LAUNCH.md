@@ -1,8 +1,8 @@
-# Lanzar sobre una carpeta nueva
+# Launching on a new folder
 
-Lo que pasó el 2026-09-08, con los datos exactos. El operador pidió trabajo
-sobre `/Users/danielcardenas/projects/ventures`, recién creada. CAPCOM lanzó un
-squad de cinco. Los cinco arrancaron, pintaron el diálogo nativo de Claude Code
+What happened on 2026-09-08, with the exact data. The operator asked for work on
+`/Users/danielcardenas/projects/ventures`, just created. CAPCOM launched a squad
+of five. All five started, painted Claude Code's native dialog
 
 ```
 Quick safety check: Is this a project you created or one you trust?
@@ -11,105 +11,105 @@ Quick safety check: Is this a project you created or one you trust?
 Enter to confirm · Esc to cancel
 ```
 
-y ahí se quedaron veinticinco minutos. ORCA los contaba como `blocked` con la
-razón «waiting on its terminal: nothing has been painted for 20s with a turn
-open», que es verdad y no sirve para nada. El operador fue a buscarlos con
-`tmux ls` y obtuvo «no sessions», porque las sesiones de ORCA viven en su propio
-socket. Y el proyecto ni siquiera existía para el hub: hubo que sembrarlo
-lanzando `claude -p` dos veces a mano.
+and there they stayed for twenty-five minutes. ORCA counted them as `blocked`
+with the reason "waiting on its terminal: nothing has been painted for 20s with a
+turn open", which is true and useless. The operator went looking for them with
+`tmux ls` and got "no sessions", because ORCA's sessions live on their own
+socket. And the project did not even exist for the hub: it had to be seeded by
+running `claude -p` twice by hand.
 
-Cuatro fallos, todos de la misma familia: **ORCA sabía algo que el agente o el
-operador necesitaban, y no se lo dijo — o se lo dijo mal.**
-
----
-
-## 1 · La confianza, antes del spawn
-
-`src/collector/trust.ts`, llamado desde `CommandRunner.spawn` /
-`spawnPane` (`src/collector/commands.ts`).
-
-Lo medido contra Claude Code 2.1.263:
-
-- `--permission-mode bypassPermissions` **no** salta ese diálogo. La confianza
-  de la carpeta es anterior a los permisos de herramienta.
-- Mientras el diálogo está en pantalla el CLI **no crea** su directorio en
-  `~/.claude/projects` — con `--session-id` tampoco. Sin transcript no hay
-  deriver, y sin deriver ORCA no mira ese pane.
-- El estado vive en `~/.claude.json`, en
-  `projects["<ruta absoluta real>"].hasTrustDialogAccepted`. La clave es la
-  ruta REAL: en este fichero todo lo que está bajo `/tmp` aparece como
-  `/private/tmp/…`.
-
-### Qué se decidió sobre `~/.claude.json`, y por qué
-
-**ORCA escribe la entrada, justo antes de lanzar, sólo para la ruta exacta a la
-que va a lanzar.** El razonamiento, y el porqué del alcance tan estrecho:
-
-1. El diálogo pregunta «¿confías en esta carpeta?» a una pantalla que nadie
-   mira. En una flota autónoma la pregunta no se contesta: se cuelga.
-2. **La decisión ya está tomada, y antes.** Un operador —o CAPCOM en su
-   nombre— nombró esa ruta y pidió un agente ahí con permiso para leer, editar
-   y ejecutar. Conceder la confianza en ese mismo instante no añade ni un
-   gramo de poder sobre lo que el lanzamiento ya concede; sólo lo escribe donde
-   el CLI lo lee. La barrera que importa es quién eligió la ruta, y ésa está
-   intacta.
-3. El alcance es **exactamente** el del lanzamiento: la ruta a la que se lanza
-   —ni el padre ni los hermanos— y sólo después de pasar las guardas que ya
-   existían (`launchable`, `excludedWorkspace`, el rechazo del workspace de
-   CAPCOM). Un worktree cuenta como carpeta propia, porque para el CLI lo es.
-
-Y lo que **no** se hace:
-
-- No se crea el fichero si no existe: que no exista significa que Claude Code
-  nunca ha corrido en esta máquina, y su primer arranque escribe ahí su
-  onboarding. Adelantarse con un fichero de una sola clave es inventarse su
-  configuración, no contestar a su diálogo.
-- No se reescribe un fichero que no parsea.
-- No se degrada nada: si la entrada ya dice `true`, no hay escritura.
-- La escritura es atómica y **optimista**: temporal en el mismo directorio,
-  `fsync`, se relee el `mtime`+tamaño justo antes del `rename` y, si el fichero
-  cambió debajo, se reintenta desde cero. El fichero está vivo — otras sesiones
-  escriben su `lastCost` cada pocos segundos.
-- Se conserva el modo del original. El `preTrust` anterior (el de CAPCOM)
-  escribía `0644` fijo; sobre un `0600` eso era una apertura silenciosa de un
-  fichero que en algunas instalaciones lleva credenciales de OAuth. Corregido
-  al consolidar.
-
-### Opt-in, opt-out, y carpetas propias
-
-Se consideró hacerlo opt-in explícito y se descartó: el default «no conceder» es
-exactamente el fallo que se está arreglando, y un opt-in que hay que recordar es
-la misma clase de ritual que `orca-install`. Lo que sí hay es una salida
-honesta:
-
-- `ORCA_TRUST_SPAWNS=0` prohíbe la concesión. Con eso, un lanzamiento sobre una
-  carpeta sin confianza **se rechaza con el porqué y con qué hacer**, en vez de
-  congelarse esperando a nadie. Rechazar es seguro; colgarse no lo es.
-
-Tampoco se distingue «carpeta que ORCA creó» de «carpeta ajena», y a propósito:
-la única carpeta que ORCA crea sola es un worktree dentro de un proyecto que el
-operador ya nombró, y la distinción que de verdad importa —quién eligió la
-ruta— ya la hace el propio lanzamiento. Añadir una segunda categoría habría
-sido una regla más que explicar sin una decisión más que proteger.
-
-`preTrust` y `preTrustCodex` de `capcom.ts` siguen existiendo con la misma
-firma; `preTrust` ahora delega en `trust.ts`, así que hay una sola
-implementación y un solo sitio donde está escrito este razonamiento.
-
-Las pruebas nunca tocan el `~/.claude.json` real: `CommandDeps.trustFile` acepta
-una ruta o `false`, y bajo `ORCA_HARNESS` el default es no hacer nada.
+Four failures, all from the same family: **ORCA knew something the agent or the
+operator needed, and did not tell them — or told them badly.**
 
 ---
 
-## 2 · Cómo se ve el bloqueo cuando aun así ocurre
+## 1 · Trust, before the spawn
 
-Antes, un worker parado en un diálogo nativo salía —cuando salía— como:
+`src/collector/trust.ts`, called from `CommandRunner.spawn` / `spawnPane`
+(`src/collector/commands.ts`).
+
+What was measured against Claude Code 2.1.263:
+
+- `--permission-mode bypassPermissions` does **not** skip that dialog. Folder
+  trust comes before tool permissions.
+- While the dialog is on screen the CLI does **not create** its directory in
+  `~/.claude/projects` — not with `--session-id` either. With no transcript there
+  is no deriver, and with no deriver ORCA does not look at that pane.
+- The state lives in `~/.claude.json`, in
+  `projects["<real absolute path>"].hasTrustDialogAccepted`. The key is the REAL
+  path: in this file everything under `/tmp` appears as `/private/tmp/…`.
+
+### What was decided about `~/.claude.json`, and why
+
+**ORCA writes the entry, right before launching, only for the exact path it is
+going to launch on.** The reasoning, and why the scope is so narrow:
+
+1. The dialog asks "do you trust this folder?" of a screen nobody is watching. In
+   an autonomous fleet the question is not answered: it hangs.
+2. **The decision has already been made, and earlier.** An operator — or CAPCOM
+   on their behalf — named that path and asked for an agent there with permission
+   to read, edit and run. Granting the trust at that same instant does not add one
+   gram of power over what the launch already grants; it only writes it where the
+   CLI reads it. The barrier that matters is who chose the path, and that one is
+   intact.
+3. The scope is **exactly** that of the launch: the path being launched on —
+   neither the parent nor the siblings — and only after passing the guards that
+   already existed (`launchable`, `excludedWorkspace`, the refusal of CAPCOM's
+   workspace). A worktree counts as a folder of its own, because for the CLI it
+   is.
+
+And what is **not** done:
+
+- The file is not created if it does not exist: its absence means Claude Code has
+  never run on this machine, and its first startup writes its onboarding there.
+  Getting ahead of it with a single-key file is inventing its configuration, not
+  answering its dialog.
+- A file that does not parse is not rewritten.
+- Nothing is downgraded: if the entry already says `true`, there is no write.
+- The write is atomic and **optimistic**: a temp file in the same directory,
+  `fsync`, the `mtime`+size are re-read right before the `rename` and, if the file
+  changed underneath, it is retried from scratch. The file is alive — other
+  sessions write their `lastCost` every few seconds.
+- The original's mode is preserved. The previous `preTrust` (CAPCOM's) wrote a
+  fixed `0644`; over a `0600` that was a silent opening up of a file that in some
+  installations carries OAuth credentials. Fixed when consolidating.
+
+### Opt-in, opt-out, and folders of our own
+
+Making it explicitly opt-in was considered and discarded: the "do not grant"
+default is exactly the failure being fixed, and an opt-in you have to remember is
+the same class of ritual as `orca-install`. What there is instead is an honest
+way out:
+
+- `ORCA_TRUST_SPAWNS=0` forbids the grant. With that, a launch on an untrusted
+  folder **is rejected with the why and with what to do**, instead of freezing to
+  wait for nobody. Rejecting is safe; hanging is not.
+
+Nor is "a folder ORCA created" told apart from "someone else's folder", and on
+purpose: the only folder ORCA creates on its own is a worktree inside a project
+the operator already named, and the distinction that really matters — who chose
+the path — is already made by the launch itself. Adding a second category would
+have been one more rule to explain with no extra decision to protect.
+
+`preTrust` and `preTrustCodex` in `capcom.ts` still exist with the same
+signature; `preTrust` now delegates to `trust.ts`, so there is a single
+implementation and a single place where this reasoning is written down.
+
+The tests never touch the real `~/.claude.json`: `CommandDeps.trustFile` accepts
+a path or `false`, and under `ORCA_HARNESS` the default is to do nothing.
+
+---
+
+## 2 · How the block looks when it happens anyway
+
+Before, a worker stopped at a native dialog came out — when it came out at all —
+as:
 
 ```
 input · waiting on its terminal: nothing has been painted for 20s with a turn open
 ```
 
-Ahora sale como:
+Now it comes out as:
 
 ```
 input · native dialog waiting: "Quick safety check: Is this a project you created
@@ -117,138 +117,138 @@ or one you trust?" — nobody can answer it from ORCA; answer it in its terminal
 tmux -L orca attach -t =orca-<sessionId>
 ```
 
-Tres cosas cambiaron:
+Three things changed:
 
-- **`promptOn` ya reconocía el diálogo de confianza y ORCA no hacía nada con
-  él** (`if (prompt.kind === 'trust') continue;`). Ahora produce un bloqueo con
-  la pregunta leída de la pantalla. No hay escalación porque no hay tecla que
-  ORCA pueda mandar en nombre de nadie: la confianza no tiene alcance «una vez».
-- **El socket va en el comando.** `attachHint()` en `src/collector/tmux.ts` es
-  ahora la única fuente de «cómo se llega a un pane», y siempre lleva `-L orca`.
-  Un `tmux ls` a secas contesta «no server running». El brief de CAPCOM también
-  se lo dice, para que lo repita verbatim al operador.
-- **Panes sin sesión.** `readScreens` recorría derivers, y un pane atascado en
-  el diálogo no tiene transcript, luego no tiene deriver, luego era invisible.
-  `readOrphanScreens` barre los panes de ORCA que ningún agente reclama y
-  publica una línea de alerta por diálogo, una sola vez. La primera vez que
-  corrió en el sistema vivo encontró un superviviente del incidente: un pane
-  llevaba ocho horas parado en el diálogo de `ventures` sin que nada lo dijera.
-
----
-
-## 3 · El alta de proyectos
-
-Los proyectos se descubrían sólo desde los slugs de `~/.claude/projects`
-(`ProjectRegistry.ensureWork`), así que una carpeta sin sesión previa no existía
-para el hub. Ahora:
-
-- **`spawn_agent` y `launch_squad` aceptan una ruta absoluta** en `project_id`.
-  Si ORCA no la conoce, la da de alta en la máquina que la tiene y lanza, en la
-  misma llamada (`projectFor`, `src/agents/tools.ts`).
-- **`register_project`** es la puerta explícita, para cuando el operador dice
-  «añade este proyecto» y quiere su código antes de decidir nada.
-- Por debajo, un comando nuevo `project:register` (hub → collector). El
-  collector valida lo mismo que validaría un spawn —existe, es un directorio,
-  no es ruta de sistema, no es el workspace de CAPCOM ni un scratchpad—,
-  resuelve la ruta real y manda el snapshot **antes** de contestar, para que el
-  hub tenga el proyecto cuando llegue el ack.
-- El alta **se recuerda** en `~/.orca/projects.json` y se readopta al arrancar:
-  un proyecto que aún no tiene transcripts no se redescubre solo, y perderlo en
-  cada reinicio del collector sería devolver el ritual por la puerta de atrás.
-- Con más de una máquina conectada, una ruta no dice de quién es: se contesta
-  diciéndolo, en vez de adivinar.
-
-`refuseWorkspace` cortaba por la primera barra («`<máquina>/<slug>`»), lo que
-convertía `/Users/dan/x` en `Users/dan/x` y hacía que la guarda no reconociera
-nada. Corregido: una ruta absoluta se pasa entera.
+- **`promptOn` already recognized the trust dialog and ORCA did nothing with
+  it** (`if (prompt.kind === 'trust') continue;`). Now it produces a block with
+  the question read off the screen. There is no escalation because there is no key
+  ORCA can send on anyone's behalf: trust has no "just this once" scope.
+- **The socket goes in the command.** `attachHint()` in `src/collector/tmux.ts`
+  is now the only source of "how you reach a pane", and it always carries
+  `-L orca`. A bare `tmux ls` answers "no server running". CAPCOM's brief says so
+  too, so it repeats it verbatim to the operator.
+- **Panes with no session.** `readScreens` walked derivers, and a pane stuck in
+  the dialog has no transcript, hence no deriver, hence it was invisible.
+  `readOrphanScreens` sweeps the ORCA panes no agent claims and publishes one
+  alert line per dialog, exactly once. The first time it ran on the live system it
+  found a survivor of the incident: a pane had been stopped for eight hours at the
+  `ventures` dialog with nothing saying so.
 
 ---
 
-## 4 · Los comandos que el brief promete
+## 3 · Registering projects
 
-El pie que el collector pega al brief de todo miembro de escuadrón nombra
-`orca-tell`, `orca-read`, `orca-spawn` y `orca-recover`. **Ninguno estaba en el
-PATH del worker.** Viven como ficheros en `bin/*.mjs`, y `orca-install` los
-enlaza en `<proyecto>/.claude/bin/`, que no es un directorio que Claude Code
-ponga en el PATH de nadie. Medido sobre catorce agentes en dos escuadrones: al
-menos seis gastaron turnos enteros buscándolos (`which orca-tell`, `find
-~/.orca`, `npm ls -g`, rebuscando en `~/.claude/plugins`); uno murió sin
-escribir su entregable tras quince minutos investigando; varios cerraron su
-trabajo pidiendo perdón por no haber podido avisar a su líder — con lo que el
-líder tampoco se enteró de que habían terminado.
+Projects were only discovered from the slugs in `~/.claude/projects`
+(`ProjectRegistry.ensureWork`), so a folder with no previous session did not
+exist for the hub. Now:
 
-**Solución: el collector pone los comandos en el PATH de la sesión que lanza**
-(`src/collector/shims.ts`). Cada shim es un `sh` de dos líneas con la ruta
-absoluta del `.mjs` y el `node` de este collector, escritos bajo
+- **`spawn_agent` and `launch_squad` accept an absolute path** in `project_id`.
+  If ORCA does not know it, it registers it on the machine that has it and
+  launches, in the same call (`projectFor`, `src/agents/tools.ts`).
+- **`register_project`** is the explicit door, for when the operator says "add
+  this project" and wants its code before deciding anything.
+- Underneath, a new command `project:register` (hub → collector). The collector
+  validates the same things a spawn would validate — it exists, it is a directory,
+  it is not a system path, it is not CAPCOM's workspace nor a scratchpad —
+  resolves the real path and sends the snapshot **before** answering, so the hub
+  has the project by the time the ack arrives.
+- The registration **is remembered** in `~/.orca/projects.json` and re-adopted at
+  startup: a project that does not have transcripts yet is not rediscovered on its
+  own, and losing it on every collector restart would bring the ritual back in
+  through the back door.
+- With more than one machine connected, a path does not say whose it is: the
+  answer says so, instead of guessing.
+
+`refuseWorkspace` cut at the first slash ("`<machine>/<slug>`"), which turned
+`/Users/dan/x` into `Users/dan/x` and made the guard recognize nothing. Fixed: an
+absolute path is passed whole.
+
+---
+
+## 4 · The commands the brief promises
+
+The footer the collector attaches to the brief of every squad member names
+`orca-tell`, `orca-read`, `orca-spawn` and `orca-recover`. **None of them was on
+the worker's PATH.** They live as files in `bin/*.mjs`, and `orca-install` links
+them into `<project>/.claude/bin/`, which is not a directory Claude Code puts on
+anybody's PATH. Measured across fourteen agents in two squads: at least six spent
+whole turns looking for them (`which orca-tell`, `find ~/.orca`, `npm ls -g`,
+digging around `~/.claude/plugins`); one died without writing its deliverable
+after fifteen minutes of investigation; several closed their work apologizing for
+not having been able to notify their lead — which meant the lead did not find out
+they had finished either.
+
+**Solution: the collector puts the commands on the PATH of the session it
+launches** (`src/collector/shims.ts`). Each shim is a two-line `sh` script with
+the absolute path of the `.mjs` and this collector's `node`, written under
 `~/.orca/shims/`.
 
-Con una trampa que costó un intento entero: **tmux no pasa `PATH` por `-e`.**
-Medido contra tmux 3.7c, servidor recién arrancado:
+With a trap that cost a whole attempt: **tmux does not pass `PATH` through `-e`.**
+Measured against tmux 3.7c, freshly started server:
 
 ```
 tmux -L x new-session -d -e "PATH=/tmp/ZZZ:$PATH" -e ORCA_PROBE=yes \
   -- sh -c 'echo $PATH; echo $ORCA_PROBE'
-  → ORCA_PROBE=yes    llega
-  → PATH sin /tmp/ZZZ NO llega
+  → ORCA_PROBE=yes         arrives
+  → PATH without /tmp/ZZZ  does NOT arrive
 ```
 
-El proceso inicial de una sesión hereda el `PATH` del **servidor** de tmux, no
-el de la sesión; las demás variables sí viajan (`ORCA_PANE`, `ORCA_SPAWNED` y
-las keys llevaban llegando desde siempre). Así que el `PATH` se pasa donde tmux
-no lo puede reescribir: delante del argv, con `/usr/bin/env`, que exec-a en el
-sitio — el pane sigue siendo el CLI, con su mismo pid, y sigue sin haber shell
-por medio (`env` recibe un argv, no una línea). Sin `/usr/bin/env` no se toca
-nada y el worker arranca como antes.
+The initial process of a session inherits the `PATH` of the tmux **server**, not
+the session's; the other variables do travel (`ORCA_PANE`, `ORCA_SPAWNED` and the
+keys had been arriving all along). So the `PATH` is passed where tmux cannot
+rewrite it: in front of the argv, with `/usr/bin/env`, which execs in place — the
+pane is still the CLI, with the same pid, and there is still no shell in the
+middle (`env` receives an argv, not a line). Without `/usr/bin/env` nothing is
+touched and the worker starts as before.
 
-Se descartaron las otras dos salidas:
+The other two ways out were discarded:
 
-- *Quitar la promesa del brief* deja al miembro sin canal hacia su líder, que
-  es renunciar a lo que un escuadrón es.
-- *Escribir la ruta absoluta en el brief* funciona y se lee fatal, cambia en
-  cada instalación, y no ayuda al agente que escribe un script ni al operador
-  que copia una línea de la documentación.
+- *Removing the promise from the brief* leaves the member with no channel to its
+  lead, which is giving up on what a squad is.
+- *Writing the absolute path in the brief* works and reads terribly, changes with
+  every installation, and does not help the agent writing a script nor the
+  operator copying a line from the documentation.
 
-Se hace en el lanzamiento y no con un instalador porque el instalador es un paso
-manual, por proyecto, que ORCA nunca ejecuta.
+It is done at launch and not with an installer because the installer is a manual
+step, per project, that ORCA never runs.
 
-Un detalle deliberado: **al miembro de un escuadrón no se le da `orca-ask`**.
-El pie ya le decía que no lo usara; quitar la herramienta es más fiable que
-pedir que no se use. El líder y el agente suelto sí lo llevan: son la puerta al
-operador.
+One deliberate detail: **a squad member is not given `orca-ask`**. The footer
+already told it not to use it; taking the tool away is more reliable than asking
+for it not to be used. The lead and the standalone agent do carry it: they are the
+door to the operator.
 
-### La entrega es el archivo, no el mensaje
+### The deliverable is the file, not the message
 
-El pie del miembro ahora abre diciéndolo:
+The member's footer now opens by saying so:
 
 > Your deliverable is what you leave on disk in your working directory […] The
 > messages below are how you keep your lead informed — they are courtesy, never
 > the deliverable. If one fails, say so in one line in your final summary and
 > finish anyway.
 
-Y cierra diciendo que si un comando falta es un bug de ORCA, no algo que ir a
-buscar por `npm`, `~/.orca` o los directorios de plugins — que es literalmente
-lo que hicieron seis agentes.
+And it closes by saying that if a command is missing that is an ORCA bug, not
+something to go hunting for through `npm`, `~/.orca` or the plugin directories —
+which is literally what six agents did.
 
-### El líder se entera igual
+### The lead finds out anyway
 
-`wake.tellLead` (`src/hub/wake.ts`): cuando un miembro de escuadrón llega a
-`done` o `dead` **sin haber escrito a su líder**, el hub le manda al líder un
-`notice` (o un `warning` si murió) diciendo que hay entregable en su directorio
-de trabajo y que vaya a leerlo. No se manda si el miembro ya avisó — el aviso es
-el respaldo, no una copia — ni si el líder ya no está vivo, en cuyo caso CAPCOM
-se entera por su propio canal. El pie del líder lo anuncia, para que no lea el
-silencio de un miembro como «no hizo nada».
+`wake.tellLead` (`src/hub/wake.ts`): when a squad member reaches `done` or `dead`
+**without having written to its lead**, the hub sends the lead a `notice` (or a
+`warning` if it died) saying there is a deliverable in its working directory and
+to go read it. It is not sent if the member already reported — the notice is the
+backstop, not a copy — nor if the lead is no longer alive, in which case CAPCOM
+finds out through its own channel. The lead's footer announces it, so it does not
+read a member's silence as "it did nothing".
 
 ---
 
-## Demostración a mano
+## Demonstration by hand
 
-Sobre el sistema vivo (hub y collector corriendo desde este árbol), el
-2026-09-08:
+On the live system (hub and collector running from this tree), on 2026-09-08:
 
 ```
-$ mkdir /Users/danielcardenas/projects/orca-trust-demo     # carpeta virgen
-$ # sin entrada en ~/.claude.json, sin sesiones en ~/.claude/projects
+$ mkdir /Users/danielcardenas/projects/orca-trust-demo     # a virgin folder
+$ # no entry in ~/.claude.json, no sessions in ~/.claude/projects
 
 register_project {"path":"/Users/danielcardenas/projects/orca-trust-demo"}
   → OC is on the map · /Users/danielcardenas/projects/orca-trust-demo
@@ -262,12 +262,12 @@ $ cat /Users/danielcardenas/projects/orca-trust-demo/TRUST-DEMO.md
 launched by ORCA with no human at the keyboard
 ```
 
-Ninguna tecla humana entre el spawn y el archivo. La entrada de confianza
-apareció sola en `~/.claude.json` justo antes del lanzamiento.
+Not one human keystroke between the spawn and the file. The trust entry appeared
+on its own in `~/.claude.json` right before the launch.
 
-Y el segundo camino, forzando el caso que el primero evita — un pane lanzado
-**saltándose** el collector sobre una carpeta sin confianza. En el feed del hub,
-segundos después:
+And the second path, forcing the case the first one avoids — a pane launched
+**bypassing** the collector on an untrusted folder. In the hub's feed, seconds
+later:
 
 ```
 alert | ORCA | orca-d234a791-… no ha llegado a existir como sesión: está parado
@@ -276,13 +276,13 @@ project you created or one you trust?" — nobody can answer it from ORCA; answe
 it in its terminal: tmux -L orca attach -t =orca-d234a791-…
 ```
 
-En la misma barrida apareció, sin buscarlo, `orca-22645b3e-…`: uno de los cinco
-workers del incidente, ocho horas parado en el diálogo de `ventures`. Se dejó
-donde estaba — no es de esta entrega apagar agentes ajenos — pero por primera
-vez ORCA lo nombra.
+In the same sweep, without looking for it, `orca-22645b3e-…` showed up: one of
+the incident's five workers, eight hours stopped at the `ventures` dialog. It was
+left where it was — turning off other people's agents is not part of this
+delivery — but for the first time ORCA names it.
 
-Y el cuarto defecto, con un miembro de escuadrón de verdad sobre otra carpeta
-nueva. Su misión era `which orca-tell orca-read orca-ask` y mandar un mensaje:
+And the fourth defect, with a real squad member on another new folder. Its
+mission was `which orca-tell orca-read orca-ask` and to send a message:
 
 ```
 /Users/danielcardenas/.orca/shims/squad/orca-tell
@@ -293,22 +293,22 @@ sent: tell_mtrypun8tlnfor (notice → squad:shimdemo-01)
 (exit: 0)
 ```
 
-Los dos comandos que el brief le promete resuelven; `orca-ask`, que el brief le
-prohíbe, no existe para él. El primer intento de esta misma prueba dio «not
-found» en los tres y es lo que destapó lo del `PATH` en tmux.
+The two commands the brief promises it resolve; `orca-ask`, which the brief
+forbids it, does not exist for it. The first attempt at this same test gave "not
+found" for all three, and that is what uncovered the `PATH` business in tmux.
 
-Todo lo creado para las demostraciones se retiró: los panes, las carpetas, sus
-entradas en `~/.claude.json` y el `~/.orca/projects.json` de la prueba.
+Everything created for the demonstrations was removed: the panes, the folders,
+their entries in `~/.claude.json` and the test's `~/.orca/projects.json`.
 
 ---
 
-## Cobertura
+## Coverage
 
 ```
-npm test -- trust        el caso entero: confianza, diálogo, shims, alta
-npm test -- screen       el diálogo de confianza contra la pantalla real
-npm test -- capcom       preTrust delegado, y el brief nombra register_project
-npm test -- commands squads interrupt   los tres caminos de spawn
-npm test -- codex        el argv y el descubrimiento de rollouts
-npm test -- tmux         el spawn en un pane (PATH delante del argv)
+npm test -- trust        the whole case: trust, dialog, shims, registration
+npm test -- screen       the trust dialog against the real screen
+npm test -- capcom       preTrust delegated, and the brief names register_project
+npm test -- commands squads interrupt   the three spawn paths
+npm test -- codex        the argv and rollout discovery
+npm test -- tmux         the spawn in a pane (PATH in front of the argv)
 ```

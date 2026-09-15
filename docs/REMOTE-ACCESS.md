@@ -1,105 +1,110 @@
-# Acceso remoto
+# Remote access
 
-ORCA se alcanza desde otro dispositivo por **Tailscale**, no por un túnel
-público. Este documento dice por qué esa elección, qué cambió en el hub para
-soportarla y cómo se abre la consola desde un móvil.
+ORCA is reached from another device over **Tailscale**, not over a public
+tunnel. This document says why that choice was made, what changed in the hub to
+support it and how the console is opened from a phone.
 
-## Por qué Tailscale y no un túnel
+## Why Tailscale and not a tunnel
 
-La arquitectura invita al túnel: los collectors marcan hacia fuera y sólo el hub
-necesita un puerto, así que un `cloudflared` delante de `localhost:4479` bastaría
-para tener dominio y TLS sin abrir el router. El problema es lo que le hace al
-modelo de autenticación.
+The architecture invites a tunnel: collectors dial outward and only the hub
+needs a port, so a `cloudflared` in front of `localhost:4479` would be enough to
+get a domain and TLS without opening the router. The problem is what it does to
+the authentication model.
 
-El hub tiene una puerta trasera deliberada: sin `ORCA_TOKEN` configurado, acepta
-conexiones de loopback sin credencial, porque en una máquina de desarrollo
-«viene de 127.0.0.1» significa «lo escribió el dueño». Un proxy en la misma
-máquina rompe esa equivalencia: `cloudflared` conecta al hub desde 127.0.0.1, de
-modo que **todo internet llega como local**. Sin más defensas, poner un túnel
-delante publica `/mcp` —lanzar agentes, mandarles mensajes, matarlos— y
-`/api/file` —los repos, el scratchpad, `~/.orca`— sin un solo error en el log.
+The hub has a deliberate back door: with no `ORCA_TOKEN` configured, it accepts
+loopback connections without a credential, because on a development machine "it
+comes from 127.0.0.1" means "the owner typed it". A proxy on the same machine
+breaks that equivalence: `cloudflared` connects to the hub from 127.0.0.1, so
+**the entire internet arrives as local**. With no further defenses, putting a
+tunnel in front publishes `/mcp` — launching agents, messaging them, killing
+them — and `/api/file` — the repos, the scratchpad, `~/.orca` — without a single
+error in the log.
 
-Tailscale no tiene ese problema, y no por suerte: las conexiones llegan desde
-`100.x.x.x`, `isLoopback()` devuelve false y el hub exige token él solo. La
-diferencia que importa no es cuánto protege cada opción bien configurada, sino
-qué pasa cuando algo se olvida. Con la tailnet, un despiste no abre nada; con el
-túnel, un despiste lo abre todo.
+Tailscale does not have that problem, and not by luck: connections arrive from
+`100.x.x.x`, `isLoopback()` returns false and the hub demands a token all by
+itself. The difference that matters is not how much each option protects when
+configured well, but what happens when something is forgotten. With the tailnet,
+a slip opens nothing; with the tunnel, a slip opens everything.
 
-## Lo que cambió en el hub
+## What changed in the hub
 
-1. **La puerta local sólo existe si la puerta es local.** `createAuth()` recibe
-   la interfaz de escucha y `allowLoopbackAnonymous` exige, además de no tener
-   `ORCA_TOKEN` ni `ORCA_STRICT_AUTH`, que el hub escuche sólo en loopback.
-   Escuchando en `0.0.0.0` se pide token a todo el mundo, también a localhost.
-   Sin dato de host se asume expuesto: quien no dice dónde escucha no puede
-   pedir que se le suponga a salvo.
+1. **The local door only exists if the door is local.** `createAuth()` receives
+   the listening interface, and `allowLoopbackAnonymous` requires, on top of
+   having neither `ORCA_TOKEN` nor `ORCA_STRICT_AUTH`, that the hub listen only
+   on loopback. Listening on `0.0.0.0` means a token is asked of everyone,
+   localhost included. With no host information it is assumed to be exposed:
+   whoever does not say where they listen cannot ask to be presumed safe.
 
-2. **Una cabecera de proxy quita el pase de local.** `remoteOf()` mira
-   `cf-connecting-ip`, `x-real-ip` y `x-forwarded-for`. Si viene alguna, el otro
-   extremo del socket es un intermediario y no el cliente: con
-   `ORCA_TRUST_PROXY=1` el hub cree la dirección que declara, y sin ella la
-   petición deja de contar como local. Así, montar un túnel delante sin
-   configurarlo falla cerrado en vez de abrirse en silencio.
+2. **A proxy header revokes the local pass.** `remoteOf()` looks at
+   `cf-connecting-ip`, `x-real-ip` and `x-forwarded-for`. If any of them shows
+   up, the other end of the socket is an intermediary and not the client: with
+   `ORCA_TRUST_PROXY=1` the hub believes the address it declares, and without it
+   the request stops counting as local. That way, putting up a tunnel without
+   configuring it fails closed instead of opening up silently.
 
-3. **`/api/world`, `/api/traffic` y `/api/memory` piden token.** Eran públicos.
-   `traffic` es el contenido literal de lo que se dicen los agentes y `memory`
-   lo que el CEO ha ido guardando.
+3. **`/api/world`, `/api/traffic` and `/api/memory` require a token.** They were
+   public. `traffic` is the literal content of what the agents say to each other
+   and `memory` is what the CEO has been storing.
 
-4. **`/api/health` sin token responde la postura y nada más**: `ok`, `protocol`,
-   `harness`, `capcom` y el recuento de máquinas. Es lo que `hubPosture()` lee
-   para negarse a tocar un hub real —la protección que impide que el arnés
-   visual tumbe un CAPCOM de verdad—, así que tiene que salir sin credencial.
-   Lo que ya no sale sin token son hostnames, ids de máquina, proyectos y costes.
+4. **`/api/health` without a token answers the posture and nothing else**: `ok`,
+   `protocol`, `harness`, `capcom` and the machine count. It is what
+   `hubPosture()` reads in order to refuse to touch a real hub — the protection
+   that stops the visual harness from taking down a real CAPCOM — so it has to
+   come out without a credential. What no longer comes out without a token are
+   hostnames, machine ids, projects and costs.
 
-5. **El collector encuentra el token solo.** Mandaba `ORCA_TOKEN ?? ''` y vivía
-   de la puerta anónima; ahora usa `sharedToken()` (`src/shared/token.ts`), que
-   cae a `~/.orca/token` igual que ya hacían `bin/orca.mjs` y `bin/orca-recover.mjs`.
-   Sin esto, cerrar la puerta dejaba a la flota fuera de su propia máquina: viva
-   en tmux, invisible en la consola.
+5. **The collector finds the token on its own.** It used to send
+   `ORCA_TOKEN ?? ''` and live off the anonymous door; now it uses
+   `sharedToken()` (`src/shared/token.ts`), which falls back to `~/.orca/token`
+   just as `bin/orca.mjs` and `bin/orca-recover.mjs` already did. Without this,
+   closing the door left the fleet locked out of its own machine: alive in tmux,
+   invisible in the console.
 
-## Abrir la consola desde otro dispositivo
+## Opening the console from another device
 
-El hub escucha en `0.0.0.0` y sirve `dist/`, así que la consola construida se
-alcanza desde la tailnet sin configurar nada:
+The hub listens on `0.0.0.0` and serves `dist/`, so the built console is
+reachable from the tailnet with nothing to configure:
 
 ```
 http://<mac>.<tailnet>.ts.net:4479/?k=$(cat ~/.orca/token)
 ```
 
-El `?k=` sólo hace falta la primera vez: la consola lo guarda en `localStorage`.
+The `?k=` is only needed the first time: the console stores it in
+`localStorage`.
 
-Vite es otra cosa. Se queda en `127.0.0.1:4478` a propósito, y por eso desde el
-móvil no hay nada en ese puerto. Para mirar la consola **en desarrollo** desde
-otro dispositivo:
+Vite is another matter. It stays on `127.0.0.1:4478` on purpose, and that is why
+from a phone there is nothing on that port. To look at the console **in
+development** from another device:
 
 ```
-ORCA_UI_HOST=100.x.y.z npm run dev:ui     # sólo la tailnet
-ORCA_UI_HOST=0.0.0.0       npm run dev:ui     # también el wifi del bar
+ORCA_UI_HOST=100.x.y.z npm run dev:ui     # the tailnet only
+ORCA_UI_HOST=0.0.0.0       npm run dev:ui     # the café wifi too
 ```
 
-Vite no se reinicia al cambiar `vite.config.ts`: hay que relanzar `dev:ui`.
-`allowedHosts: ['.ts.net']` está puesto para que los nombres de MagicDNS no
-choquen con la protección de DNS rebinding, que devuelve una página en blanco y
-explica el motivo sólo en el terminal.
+Vite does not restart when `vite.config.ts` changes: you have to relaunch
+`dev:ui`. `allowedHosts: ['.ts.net']` is there so MagicDNS names do not collide
+with the DNS rebinding protection, which returns a blank page and explains why
+only in the terminal.
 
-## Si algún día hace falta un túnel
+## If a tunnel is ever needed
 
-Para abrir la consola en una máquina ajena —sin cliente de Tailscale— la opción
-es Cloudflare Tunnel **con Access delante**, nunca a secas: Access autentica
-antes de que la petición llegue al hub. Y con el túnel hay que decidir sobre
-`ORCA_TRUST_PROXY=1`: sin ella toda petición proxiada exige token, que es lo
-correcto; con ella el hub cree la IP declarada, y entonces la única defensa es
-que nadie más pueda hablar con ese puerto.
+To open the console on somebody else's machine — with no Tailscale client — the
+option is Cloudflare Tunnel **with Access in front**, never on its own: Access
+authenticates before the request reaches the hub. And with the tunnel you have
+to decide about `ORCA_TRUST_PROXY=1`: without it every proxied request demands a
+token, which is the right thing; with it the hub believes the declared IP, and
+then the only defense is that nobody else can talk to that port.
 
-## Pruebas
+## Tests
 
 ```
 npm test -- remote-access hub files
 ```
 
-`test/remote-access.test.ts` cubre la puerta según la interfaz de escucha, el
-fallo cerrado cuando no se declara host, que una IP de tailnet no cuenta como
-local y —levantando un hub con la puerta abierta— que una cabecera de proxy
-convierte un 200 en un 401. `test/hub.test.ts` cubre que `/api/world`,
-`/api/traffic` y `/api/memory` responden 401 sin token y que `/api/health` sin
-token conserva `harness` y `capcom` sin publicar la flota.
+`test/remote-access.test.ts` covers the door according to the listening
+interface, failing closed when no host is declared, that a tailnet IP does not
+count as local and — bringing up a hub with the door open — that a proxy header
+turns a 200 into a 401. `test/hub.test.ts` covers that `/api/world`,
+`/api/traffic` and `/api/memory` answer 401 without a token and that
+`/api/health` without a token keeps `harness` and `capcom` without publishing
+the fleet.

@@ -1,80 +1,82 @@
-# Retención en disco
+# On-disk retention
 
-ORCA separa la telemetría desechable de los datos de trabajo. La limpieza visual
-de FLEET no elimina archivos. No se borran los transcripts de Claude/Codex.
+ORCA separates disposable telemetry from working data. FLEET's visual cleanup
+does not delete files. Claude/Codex transcripts are never deleted.
 
-| Archivo | Política automática |
+| File | Automatic policy |
 | --- | --- |
-| `~/.orca/history.jsonl` | Hasta 24 horas, 6.000 snapshots y 250.000 entradas agente×snapshot en memoria. Archivo limitado a 32 MiB después de cada flush; compactación cada hora y al arrancar cuando hace falta. |
-| `~/.orca/hub/events/YYYY-MM-DD.jsonl` | 14 fechas UTC, incluida la actual. Máximo 8 MiB por archivo diario después de cada flush. |
-| `~/.orca/hub/overflow/YYYY-MM-DD.jsonl` | Misma política que eventos. |
-| `~/.orca/hub/tasks.json` | Estado durable de conversaciones por tarea; conserva los límites propios del TaskStore. No se borra por antigüedad. |
-| `~/.orca/hub/archived.jsonl` | Lápidas de agentes archivados a mano (`archive_agents`, ARCHIVE FINISHED, `orca archive`). Append-only; un `undo` posterior levanta la lápida. Al arrancar se lee la cola (2 MiB, hasta 5.000 lápidas vigentes). No se borra por antigüedad: vale mientras exista el transcript que el collector seguiría reenviando. |
-| `ceo.jsonl`, `escalations.jsonl`, memorias, configuración y resultados | Fuera de la eliminación de telemetría. No tienen un nuevo límite global impuesto por esta política. |
+| `~/.orca/history.jsonl` | Up to 24 hours, 6,000 snapshots and 250,000 agent×snapshot entries in memory. File capped at 32 MiB after every flush; compaction every hour and at startup when needed. |
+| `~/.orca/hub/events/YYYY-MM-DD.jsonl` | 14 UTC dates, including the current one. At most 8 MiB per daily file after every flush. |
+| `~/.orca/hub/overflow/YYYY-MM-DD.jsonl` | Same policy as events. |
+| `~/.orca/hub/tasks.json` | Durable state of per-task conversations; keeps the TaskStore's own limits. Not deleted by age. |
+| `~/.orca/hub/archived.jsonl` | Tombstones of agents archived by hand (`archive_agents`, ARCHIVE FINISHED, `orca archive`). Append-only; a later `undo` lifts the tombstone. At startup the tail is read (2 MiB, up to 5,000 live tombstones). Not deleted by age: it holds for as long as the transcript the collector would keep resending exists. |
+| `ceo.jsonl`, `escalations.jsonl`, memories, configuration and results | Outside telemetry deletion. They get no new global limit from this policy. |
 
-Los logs diarios se revisan al arrancar, al escribir y cada seis horas. Los
-archivos vencidos se eliminan; los archivos demasiado grandes conservan su cola
-reciente de registros completos, dejando espacio para nuevas entradas. El
-timeline se reemplaza atómicamente desde su anillo. Por el límite de tamaño puede
-haber menos de 24 horas disponibles tras reiniciar en una flota grande. Estos son
-techos de los archivos de telemetría tras el mantenimiento, no un límite global
-para todo `~/.orca`; durante el reemplazo existe además un archivo temporal.
+The daily logs are reviewed at startup, on write and every six hours. Expired
+files are deleted; files that are too large keep their recent tail of complete
+records, leaving room for new entries. The timeline is replaced atomically from
+its ring. Because of the size limit there may be less than 24 hours available
+after a restart on a large fleet. These are ceilings for the telemetry files
+after maintenance, not a global limit for all of `~/.orca`; during the
+replacement there is also a temporary file.
 
-Appends y compactaciones comparten una cola para evitar que un reemplazo borre
-escrituras recientes. Las lecturas de arranque leen una cola acotada directamente
-del archivo, sin cargar un JSONL entero antes de recortarlo. Las escrituras siguen
-agrupadas cada 500 ms; el timeline captura normalmente cada 20 segundos y agrupa
-marcas rápidas a intervalos mínimos de cinco segundos.
+Appends and compactions share a queue so that a replacement does not erase recent
+writes. Startup reads read a bounded tail straight from the file, without loading
+a whole JSONL before trimming it. Writes are still batched every 500 ms; the
+timeline normally captures every 20 seconds and groups rapid marks at minimum
+intervals of five seconds.
 
-## Archivar agentes terminados
+## Archiving finished agents
 
-Decisión (2026-09-06): **archivar con lápida, no borrar.** El hub no persiste
-agentes —los reconstruye del snapshot de cada collector, que reenvía también
-los `done`/`dead` mientras su transcript siga en disco—, así que "marcar como
-archivado y ocultar" no tenía dónde vivir: el registro se desaloja del mundo
-como en la retención de una hora y lo que se persiste es la lápida (`id`,
-callsign, proyecto, squad, estado, cuándo terminó, quién lo archivó). Con ella
-el mundo rechaza al agente cuando el collector lo vuelve a mandar terminado, y
-lo readmite —levantando la lápida— si vuelve vivo, porque una sesión reanudada
-es un agente. Nada se borra en disco: ni el transcript, ni el log de eventos,
-ni el timeline. Un padre terminado con hijos vivos no se archiva (se conserva
-el linaje, la misma regla que la retención). Los squads no tienen registro:
-uno cuyo último miembro se archiva desaparece solo, y la operación lo reporta
-como `squads_retired`.
+Decision (2026-09-06): **archive with a tombstone, do not delete.** The hub does
+not persist agents — it rebuilds them from each collector's snapshot, which also
+resends the `done`/`dead` ones while their transcript is still on disk — so "mark
+as archived and hide" had nowhere to live: the record is evicted from the world
+just as in the one-hour retention and what gets persisted is the tombstone (`id`,
+callsign, project, squad, state, when it finished, who archived it). With it the
+world rejects the agent when the collector sends it finished again, and readmits
+it — lifting the tombstone — if it comes back alive, because a resumed session is
+an agent. Nothing is deleted on disk: not the transcript, not the event log, not
+the timeline. A finished parent with live children is not archived (the lineage is
+preserved, the same rule as in retention). Squads have no record: one whose last
+member is archived disappears on its own, and the operation reports it as
+`squads_retired`.
 
-## Borrar transcripts (2026-09-07)
+## Deleting transcripts (2026-09-07)
 
-Archivar no libera espacio: retira de la vista y deja una lápida de unos pocos
-cientos de bytes. Lo que ocupa son los transcripts, que no son de ORCA —los
-escribe el CLI en `~/.claude/projects` y `~/.codex/sessions`— y son el registro
-de por qué el repositorio quedó como quedó.
+Archiving does not free space: it removes from view and leaves a tombstone of a
+few hundred bytes. What takes up room are the transcripts, which are not ORCA's —
+they are written by the CLI in `~/.claude/projects` and `~/.codex/sessions` — and
+they are the record of why the repository ended up as it did.
 
-`orca purge-transcripts` (herramienta `purge_transcripts`) los borra, y es lo
-único de toda la limpieza que no se deshace. Por eso son **dos pasos
-deliberados**: sólo alcanza a lo que ya se archivó, así que hay que retirarlo
-antes; y sin `--yes` cuenta y mide sin tocar nada. El collector, que es quien
-tiene los archivos, se niega a borrar el de una sesión viva o que no conozca, y
-nunca deriva una ruta de un id: la única que borra es la que ya tenía registrada
-para ese agente.
+`orca purge-transcripts` (the `purge_transcripts` tool) deletes them, and it is
+the only part of the whole cleanup that cannot be undone. That is why it takes
+**two deliberate steps**: it only reaches what has already been archived, so it
+has to be retired first; and without `--yes` it counts and measures without
+touching anything. The collector, which is the one that has the files, refuses to
+delete the transcript of a live session or one it does not know, and it never
+derives a path from an id: the only one it deletes is the one it already had on
+record for that agent.
 
-Borrado el archivo, su lápida se retira: ya no rechaza nada, porque nadie va a
-reenviar a ese agente. Esa es la **única** razón por la que una lápida se
-retira sin que el agente vuelva vivo. Se intentó una regla más ambiciosa —tirar
-la lápida cuando el collector deja de nombrar al agente— y es falsa: el collector
-recicla lo terminado a los pocos segundos y deja de reportarlo con el transcript
-intacto. Probada contra la instalación real, tiraba lápidas buenas y los agentes
-reaparecían, que es justo lo que la lápida evita.
+Once the file is deleted, its tombstone is retired: it no longer rejects
+anything, because nobody is going to resend that agent. That is the **only**
+reason a tombstone is retired without the agent coming back alive. A more
+ambitious rule was attempted — drop the tombstone when the collector stops naming
+the agent — and it is false: the collector recycles what has finished within
+seconds and stops reporting it with the transcript intact. Tested against the real
+installation, it dropped good tombstones and the agents reappeared, which is
+exactly what the tombstone prevents.
 
-Los parámetros están en `StoreOptions` (`retentionDays`, `maxDailyBytes`) y
+The parameters are in `StoreOptions` (`retentionDays`, `maxDailyBytes`) and
 `HistoryOptions` (`retentionMs`, `maxFileBytes`, `maxSnapshots`, `maxEntries`).
-Los valores anteriores son los predeterminados. No hay que ejecutar un comando
-manual para activar la limpieza con el hub actualizado.
+The values above are the defaults. No manual command needs to be run to turn on
+the cleanup with an updated hub.
 
-Medición del 2026-09-06: aproximadamente 13 MiB en `~/.orca`, unos 10 MiB del
-timeline, 1,6 MiB de eventos y 0,65 MiB de overflow. El volumen observado no era
-urgente; los límites previenen el crecimiento posterior. Las pruebas de
-`test/retention.test.ts` cubren eliminación por edad, límite de tamaño, conservación
-de conversaciones, lecturas parciales y appends simultáneos con compactación.
-`test/transcript-purge.test.ts` cubre el borrado y, sobre todo, lo que se niega a
-borrar; `test/archive.test.ts` cubre que el silencio del collector no retira una
-lápida y que el borrado sí.
+Measurement from 2026-09-06: roughly 13 MiB in `~/.orca`, about 10 MiB of
+timeline, 1.6 MiB of events and 0.65 MiB of overflow. The observed volume was not
+urgent; the limits prevent later growth. The tests in `test/retention.test.ts`
+cover deletion by age, the size limit, preservation of conversations, partial
+reads and simultaneous appends with compaction. `test/transcript-purge.test.ts`
+covers the deletion and, above all, what it refuses to delete;
+`test/archive.test.ts` covers that the collector's silence does not retire a
+tombstone and that the deletion does.

@@ -1,159 +1,159 @@
-# Presupuestos, descendencia y vitalidad
+# Budgets, descendants and liveness
 
-Qué mide ORCA cuando dice que un agente se está pasando, qué frena cuando un
-agente se multiplica, y cómo decide el hub que un agente sigue existiendo.
+What ORCA measures when it says an agent is going over, what it brakes when an
+agent multiplies, and how the hub decides an agent still exists.
 
-Los tres van juntos porque los tres fallaron a la vez, en la misma operación de
-tres horas con veinte agentes, y porque comparten mecanismo: contar consumo y
-actuar sobre él.
-
----
-
-## 1 · La unidad: uso, no dinero
-
-**Decisión: un techo se pone en TOKENS —entrada + salida + escritura de caché;
-la lectura de caché no cuenta— o en MINUTOS VISTOS TRABAJANDO. No hay techo en
-dólares** (desde el 2026-09-12; antes había uno, apagado). La regla de los
-tokens vive en una sola función, `ceilingTokens` (`src/shared/tokens.ts`), que
-usan todos los techos.
-
-### Por qué
-
-Esta flota se paga con **plan plano**, Claude incluido, y no se usan llamadas a
-la API. Los dólares que un CLI escribe en su transcript no corresponden a
-ningún cobro: son una estimación de algo que nadie paga. Un aviso en dinero
-pedía reaccionar a un número que no significaba nada, y encima lo pedía mal —
-ver §2.
-
-Hasta el 2026-09-11 el eje en dólares siguió en el modelo de datos, apagado
-detrás de `ORCA_BUDGET_MONEY`, por si un día hacía falta para un proyecto que
-consumiera API de pago. El 2026-09-12 se quitó del todo: un eje que nunca se
-evalúa es una segunda contabilidad esperando a discrepar de la primera, y
-mantenerlo obligaba a que `set_budget`, los avisos, `inspect_agent` y la
-consola siguieran hablando de dinero para decir que no contaba. Si algún día
-hace falta, el commit que lo quitó dice exactamente qué había.
-
-### Por qué esos tokens y no otros
-
-- **No sólo los de salida.** Un agente que lanza veinte subagentes escribe poco
-  y lee muchísimo. Un techo en tokens de salida habría hecho parecer barato al
-  agente del incidente: es exactamente la forma de lo que hay que frenar.
-- **No los de lectura de caché** (revertido el 2026-09-11). La primera versión
-  los contaba con este argumento: son la mayor parte del volumen de un agente
-  con contexto grande, y reenviar un contexto enorme en cada turno es como una
-  sesión larga quema cuota. En la práctica medían otra cosa: un CLI con un
-  prompt de sistema grande relee todo su prefijo cacheado en cada llamada, y
-  eso suma cientos de miles de tokens que no son trabajo nuevo. El revisor de
-  AUTOMEJORA cruzaba su techo de 400k en el primer minuto sin haber archivado
-  nada (AJ: 227.946 leídos de caché contra 12 de entrada y 2.657 de salida). Un
-  contexto que crece se sigue notando: lo que entra nuevo al contexto es
-  escritura de caché, y ésa sí cuenta.
-- **Sí los de escritura de caché.** En Claude son casi toda la entrada:
-  `input_tokens` sale en unidades porque el resto entra por
-  `cache_creation_input_tokens`. Sin ellos el techo de un agente de Claude no
-  mediría casi nada. En Codex la escritura ya viene dentro de la entrada.
-- **Entrada es lo que no salió de caché, en los dos CLI.** Claude ya lo reporta
-  así; Codex incluye lo cacheado en `input_tokens` y su adaptador lo resta.
-- **No los de razonamiento.** Vienen ya dentro de los de salida
-  (`output_tokens_details.thinking_tokens`); sumarlos sería contarlos dos veces.
-
-### Y son medidos, no estimados
-
-Las dos unidades lo son. Los tokens salen del transcript; los minutos, de haber
-visto al agente trabajando. No hay tarifa, no hay conjetura y por tanto no hay
-forma de que la cifra se quede corta, que era el segundo defecto — por eso
-también se fue el `≥` que llevaban las cifras estimadas.
-
-### Los techos de los muertos se van solos
-
-Un techo sobrevivía al agente que frenaba. El 2026-09-12 había **23 en el
-libro y ninguno alcanzaba a un agente vivo**: catorce de agentes archivados,
-nueve de agentes de los que ya no quedaba ni eso.
-
-`pruneOrphans` los recoge en cada barrido: un techo cuyo sujeto —agente,
-escuadrón o misión— no está en la flota se marca, y se borra si **sigue** sin
-estar diez minutos después. Hacen falta dos observaciones separadas en el
-tiempo, y ninguna cuenta con la flota vacía: un hub recién relevado la ve vacía
-hasta que el collector habla, y podar ahí desarmaría a la flota entera de una
-pasada. Si el sujeto reaparece —una sesión desarchivada, un escuadrón que
-vuelve a tener miembros— la marca se borra y el techo se queda.
-
-Lo que borra se dice en el log del hub, no a CAPCOM: es un hecho, no un aviso,
-y CAPCOM no puede hacer nada con él.
-
-### El tiempo
-
-`budget_min` mide **minutos trabajando**, no minutos desde el lanzamiento. El
-libro acumula tiempo sólo mientras ve al agente en `booting`, `thinking` o
-`working`, en su propia pasada; funciona igual con Claude, con Codex o con
-cualquier otro CLI porque no depende de que el runtime escriba una duración.
-
-Un agente en idle acumula cero. Ése era el aviso por reloj.
+The three go together because the three failed at the same time, in the same
+three-hour operation with twenty agents, and because they share a mechanism:
+counting consumption and acting on it.
 
 ---
 
-## 2 · El estimador que mentía, y por qué ya no está
+## 1 · The unit: usage, not money
 
-El hub reportaba ~$10 donde el journal registró $105,54, y $3,67 donde el real
-fue ~$23: entre 6 y 20 veces por debajo. Tres causas:
+**Decision: a ceiling is set in TOKENS — input + output + cache writes; cache
+reads do not count — or in MINUTES SEEN WORKING. There is no ceiling in
+dollars** (since 2026-09-12; before that there was one, turned off). The token
+rule lives in a single function, `ceilingTokens` (`src/shared/tokens.ts`), used
+by every ceiling.
 
-1. **No incluía a la descendencia.** El consumo de los subagentes `Task` de un
-   worker no se cargaba a nadie hasta el cierre. Ver §3, que sigue vigente.
-2. **Ignoraba la lectura de caché.** La estimación sumaba entrada y salida y
-   dejaba fuera el grueso del volumen.
-3. **Se presentaba como un total.** Un `~$10` invita a leerlo como la cifra.
+### Why
 
-Las tres se arreglaron, y aun arregladas la cifra seguía siendo una estimación
-de un plan plano: un número exacto de algo que nadie cobra. El 2026-09-12 se
-quitó el estimador entero, con su `ORCA_BUDGET_USD_PER_MTOK` y su ponderación
-de la caché a 0,1. La cifra que gobierna un aviso ya no es una estimación de
-nada.
+This fleet is paid for on a **flat plan**, Claude included, and no API calls are
+used. The dollars a CLI writes into its transcript do not correspond to any
+charge: they are an estimate of something nobody pays. An alert in money asked
+you to react to a number that meant nothing, and on top of that it asked wrong —
+see §2.
+
+Until 2026-09-11 the dollar axis stayed in the data model, turned off behind
+`ORCA_BUDGET_MONEY`, in case it was ever needed for a project consuming paid API.
+On 2026-09-12 it was removed entirely: an axis that is never evaluated is a
+second set of books waiting to disagree with the first, and keeping it forced
+`set_budget`, the alerts, `inspect_agent` and the console to keep talking about
+money just to say it did not count. If it is ever needed, the commit that removed
+it says exactly what was there.
+
+### Why those tokens and not others
+
+- **Not just output tokens.** An agent that launches twenty subagents writes
+  little and reads a huge amount. A ceiling in output tokens would have made the
+  agent in the incident look cheap: that is exactly the shape of what needs
+  braking.
+- **Not cache reads** (reverted on 2026-09-11). The first version counted them
+  with this argument: they are most of the volume of an agent with a large
+  context, and resending an enormous context on every turn is how a long session
+  burns quota. In practice they measured something else: a CLI with a large
+  system prompt re-reads its whole cached prefix on every call, and that adds up
+  to hundreds of thousands of tokens that are not new work. The SELF-IMPROVEMENT
+  reviewer crossed its 400k ceiling in the first minute without having filed
+  anything (AJ: 227,946 read from cache against 12 of input and 2,657 of output).
+  A growing context is still noticed: what newly enters the context is a cache
+  write, and that one does count.
+- **Yes to cache writes.** In Claude they are almost all of the input:
+  `input_tokens` comes out in single digits because the rest comes in through
+  `cache_creation_input_tokens`. Without them a Claude agent's ceiling would
+  measure almost nothing. In Codex the write already comes inside the input.
+- **Input is whatever did not come from cache, in both CLIs.** Claude already
+  reports it that way; Codex includes cached tokens in `input_tokens` and its
+  adapter subtracts them.
+- **Not reasoning tokens.** They already come inside the output ones
+  (`output_tokens_details.thinking_tokens`); adding them would count them twice.
+
+### And they are measured, not estimated
+
+Both units are. The tokens come from the transcript; the minutes, from having
+seen the agent working. There is no rate, there is no guess and therefore there
+is no way for the figure to come up short, which was the second defect — that is
+also why the `≥` the estimated figures carried is gone.
+
+### The ceilings of the dead clear themselves
+
+A ceiling outlived the agent it braked. On 2026-09-12 there were **23 in the
+ledger and none of them reached a live agent**: fourteen from archived agents,
+nine from agents of which not even that was left.
+
+`pruneOrphans` picks them up on every sweep: a ceiling whose subject — agent,
+squad or mission — is not in the fleet gets marked, and is deleted if it is
+**still** missing ten minutes later. Two observations separated in time are
+needed, and neither counts with an empty fleet: a freshly rotated hub sees it
+empty until the collector speaks, and pruning there would disarm the entire fleet
+in one pass. If the subject reappears — an unarchived session, a squad that has
+members again — the mark is cleared and the ceiling stays.
+
+What it deletes is said in the hub log, not to CAPCOM: it is a fact, not an
+alert, and CAPCOM can do nothing with it.
+
+### Time
+
+`budget_min` measures **minutes working**, not minutes since launch. The ledger
+accumulates time only while it sees the agent in `booting`, `thinking` or
+`working`, in its own pass; it works the same with Claude, with Codex or with any
+other CLI because it does not depend on the runtime writing a duration.
+
+An idle agent accumulates zero. That was the clock alert.
 
 ---
 
-## 3 · La descendencia
+## 2 · The estimator that lied, and why it is gone
 
-### Se cobra al ancestro, en la misma pasada
+The hub reported ~$10 where the journal recorded $105.54, and $3.67 where the
+real figure was ~$23: between 6 and 20 times too low. Three causes:
 
-Un subagente `Task` no tiene presupuesto propio: existe dentro del turno de su
-padre y lo que gasta se carga a su ancestro **en cada barrido**, no al cerrar.
-Ésa era la razón de que un lead llegara al 618 % de su techo antes del primer
-aviso.
+1. **It did not include descendants.** The consumption of a worker's `Task`
+   subagents was charged to nobody until close. See §3, which still stands.
+2. **It ignored cache reads.** The estimate added input and output and left out
+   the bulk of the volume.
+3. **It was presented as a total.** A `~$10` invites you to read it as the
+   figure.
 
-Un agente que ORCA lanzó como sesión completa **sí** es sujeto de presupuesto
-propio y **no** se carga a quien lo lanzó: para eso está el techo de escuadrón.
-La frontera es `Agent.subagent`, que ya distinguía las dos cosas.
+All three were fixed, and even fixed the figure was still an estimate on a flat
+plan: an exact number for something nobody charges. On 2026-09-12 the whole
+estimator was removed, with its `ORCA_BUDGET_USD_PER_MTOK` and its cache
+weighting of 0.1. The figure that governs an alert is no longer an estimate of
+anything.
 
-Los avisos lo dicen: `… · includes 24 live Task subagents`.
+---
 
-### El freno
+## 3 · Descendants
 
-| Variable | Por defecto | Qué es |
+### It is charged to the ancestor, in the same pass
+
+A `Task` subagent has no budget of its own: it exists inside its parent's turn
+and what it spends is charged to its ancestor **on every sweep**, not at close.
+That was the reason a lead reached 618 % of its ceiling before the first alert.
+
+An agent ORCA launched as a full session **is** a budget subject of its own and
+is **not** charged to whoever launched it: that is what the squad ceiling is for.
+The boundary is `Agent.subagent`, which already told the two apart.
+
+The alerts say so: `… · includes 24 live Task subagents`.
+
+### The brake
+
+| Variable | Default | What it is |
 |---|---|---|
-| `ORCA_MAX_DESCENDANTS` | `8` | Subagentes `Task` vivos bajo un agente, subárbol entero. |
-| `ORCA_MAX_AGENT_DEPTH` | `2` | Generaciones permitidas: hijos y nietos sí, bisnietos no. |
-| `ORCA_SWARM_ACTION` | `warn` | `stop` para además la sesión del ancestro. |
+| `ORCA_MAX_DESCENDANTS` | `8` | Live `Task` subagents under an agent, whole subtree. |
+| `ORCA_MAX_AGENT_DEPTH` | `2` | Generations allowed: children and grandchildren yes, great-grandchildren no. |
+| `ORCA_SWARM_ACTION` | `warn` | `stop` also stops the ancestor's session. |
 
-En el incidente: 4 hijos + 24 nietos = 28 vivos sobre un tope de 8. El aviso
-sale en el primer barrido en que se cruza.
+In the incident: 4 children + 24 grandchildren = 28 live against a cap of 8. The
+alert comes out on the first sweep where it is crossed.
 
-**Por qué `warn` por defecto.** El hub no puede matar un subagente `Task`
-nativo: no tiene sesión propia, no tiene pane, no hay nada que parar. Lo único
-parable es el ancestro, y pararlo es una decisión con coste. Así que por
-defecto se dice, con claridad y con las acciones que de verdad alcanzan a ese
-agente; `ORCA_SWARM_ACTION=stop` para el ancestro para quien quiera la
-guillotina.
+**Why `warn` by default.** The hub cannot kill a native `Task` subagent: it has
+no session of its own, it has no pane, there is nothing to stop. The only
+stoppable thing is the ancestor, and stopping it is a decision with a cost. So by
+default it says so, clearly and with the actions that actually reach that agent;
+`ORCA_SWARM_ACTION=stop` stops the ancestor for whoever wants the guillotine.
 
-> El arreglo de raíz —quitarle la herramienta `Task` a un worker en vez de
-> pedirle que no la use— vive en el `spawn` del collector y queda fuera de esta
-> entrega.
+> The root fix — taking the `Task` tool away from a worker instead of asking it
+> not to use it — lives in the collector's `spawn` and is outside this delivery.
 
-### CAPCOM ve el árbol
+### CAPCOM sees the tree
 
-`inspect_agent` mostraba `children: []` mientras corrían 24 nietos, porque
-`Agent.childIds` lo escribe el collector y llegaba vacío. Ahora el árbol se
-deriva de `parentId` sobre la flota entera — la misma fuente que usa el libro
-para cobrar, así que lo que se ve y lo que se cobra no pueden discrepar:
+`inspect_agent` showed `children: []` while 24 grandchildren were running,
+because `Agent.childIds` is written by the collector and arrived empty. Now the
+tree is derived from `parentId` over the whole fleet — the same source the ledger
+uses to charge, so what is seen and what is charged cannot disagree:
 
 ```json
 "lineage": {
@@ -166,161 +166,158 @@ para cobrar, así que lo que se ve y lo que se cobra no pueden discrepar:
 
 ---
 
-## 4 · Vitalidad: la muerte exige evidencia, la vida no
+## 4 · Liveness: death demands evidence, life does not
 
-Éste es el arreglo más importante de la entrega y el que más caro costó
-aprender.
+This is the most important fix in the delivery and the one that cost the most to
+learn.
 
-### El problema
+### The problem
 
-El collector sólo retira a un agente cuando su **transcript desaparece del
-disco**, y un transcript no desaparece porque se cierre el pane: queda ahí con
-el último estado derivado congelado. Un escuadrón parado con `stop_squad`
-seguía figurando en `working`, con su cría intacta, y desde ahí:
+The collector only retires an agent when its **transcript disappears from disk**,
+and a transcript does not disappear because the pane is closed: it stays there
+with the last derived state frozen. A squad stopped with `stop_squad` still
+showed up as `working`, with its brood intact, and from there:
 
-- disparaba `[BUDGET 100%]` en ráfaga — trece de golpe, todos por reloj;
-- disparaba `[SWARM CAP]` una y otra vez, con 25 subagentes que no existían;
-- y **no lo alcanzaba ninguna herramienta**: `archive_agents` sólo toca a los
-  terminados, `stop_agent` sólo a los background, `interrupt_agent` sólo a los
-  que tienen pane. Un agente podía quedarse en ese limbo para siempre.
+- it fired `[BUDGET 100%]` in bursts — thirteen at once, all of them on the
+  clock;
+- it fired `[SWARM CAP]` over and over, with 25 subagents that did not exist;
+- and **no tool reached it**: `archive_agents` only touches finished ones,
+  `stop_agent` only background ones, `interrupt_agent` only ones with a pane. An
+  agent could stay in that limbo forever.
 
-### El error caro, y por qué la regla es la que es
+### The expensive mistake, and why the rule is what it is
 
-La primera corrección infirió la muerte del silencio: quien decía estar
-`working` y llevaba veinte minutos sin escribir en su transcript se daba por
-ido. **Marcó muertos a siete agentes vivos en mitad de su turno.** Estaban
-razonando, o escribiendo un fichero de quinientas líneas — cosas que no dejan
-rastro durante un buen rato. El operador estuvo a punto de relanzar a cinco
-evaluadores y duplicar horas de trabajo y de consumo.
+The first correction inferred death from silence: anyone who claimed to be
+`working` and had gone twenty minutes without writing to its transcript was
+declared gone. **It marked seven live agents dead in the middle of their turn.**
+They were reasoning, or writing a five-hundred-line file — things that leave no
+trace for a good while. The operator came close to relaunching five evaluators
+and duplicating hours of work and of consumption.
 
-Los dos errores no valen lo mismo:
+The two errors do not cost the same:
 
-| Error | Coste |
+| Error | Cost |
 |---|---|
-| Dar por vivo a un muerto | Un aviso molesto. Se arregla retirándolo a mano. |
-| Dar por muerto a un vivo | Trabajo en curso tirado y consumo duplicado. |
+| Treating a dead agent as alive | An annoying alert. Fixed by retiring it by hand. |
+| Treating a live agent as dead | Work in progress thrown away and consumption duplicated. |
 
-**La asimetría está en el código, no en el criterio de quien lo lee.** El hub
-no concluye una muerte a partir de una ausencia de señal. Sólo tres cosas
-terminan a un agente, y las tres son alguien **afirmando** algo:
+**The asymmetry is in the code, not in the judgement of whoever reads it.** The
+hub does not conclude a death from an absence of signal. Only three things end an
+agent, and all three are someone **asserting** something:
 
-1. el collector dice que terminó (`done` / `dead`);
-2. alguien lo paró — `stop_agent`, `stop_squad`, `retire_agent`, o el propio
-   libro de presupuestos al despachar una parada;
-3. su máquina no está conectada, que es un hecho del hub y no una conjetura
-   sobre el agente.
+1. the collector says it finished (`done` / `dead`);
+2. someone stopped it — `stop_agent`, `stop_squad`, `retire_agent`, or the budget
+   ledger itself when it dispatches a stop;
+3. its machine is not connected, which is a fact about the hub and not a guess
+   about the agent.
 
-Y todas son **reversibles**: si el agente vuelve a hacer llamadas de
-herramienta o a cambiar líneas, se le levanta la losa en la pasada siguiente
-sin que nadie intervenga.
+And all of them are **reversible**: if the agent makes tool calls or changes lines
+again, the tombstone is lifted on the next pass with nobody intervening.
 
-### Un solo guardián
+### A single guardian
 
-`src/hub/liveness.ts` — `isLiveAgent()` — va delante de **toda** comprobación
-periódica. El libro de presupuestos y el freno de enjambre preguntan lo mismo,
-así que no pueden volver a discrepar. Un agente que no está vivo no cuenta como
-miembro, no consume, no dispara avisos, y su cría `Task` se va con él.
+`src/hub/liveness.ts` — `isLiveAgent()` — goes in front of **every** periodic
+check. The budget ledger and the swarm brake ask the same question, so they
+cannot disagree again. An agent that is not alive does not count as a member,
+does not consume, does not fire alerts, and its `Task` brood goes with it.
 
-### El consejo que dan los avisos es ejecutable
+### The advice the alerts give is executable
 
-`reachability()` responde, con los mismos predicados que aplican las
-herramientas de verdad, qué se puede hacer con un agente concreto. Los avisos
-sólo recomiendan lo que funciona:
+`reachability()` answers, with the same predicates the real tools apply, what can
+be done with a specific agent. The alerts only recommend what works:
 
-- con pane → `interrupt_agent` y `stop_agent`;
-- background direccionable, sin pane → `stop_agent`;
-- ni una cosa ni la otra → `retire_agent`, y se dice por qué es la única.
+- with a pane → `interrupt_agent` and `stop_agent`;
+- addressable background, no pane → `stop_agent`;
+- neither one nor the other → `retire_agent`, and it says why it is the only one.
 
-### Por qué archivar no bastaba: el fantasma resucitaba
+### Why archiving was not enough: the ghost came back
 
-B9 pasó por cuatro estados distintos en una tarde, siendo el mismo agente
-inexistente: vivo e intocable → `done` por la reconciliación → archivado con su
-escuadrón entero (nueve agentes) → **de vuelta en `idle`, con sus veinticinco
-subagentes fantasma y un `[SWARM CAP]` nuevo**.
+B9 went through four different states in one afternoon, being the same
+nonexistent agent: alive and untouchable → `done` through reconciliation →
+archived with its whole squad (nine agents) → **back in `idle`, with its
+twenty-five ghost subagents and a fresh `[SWARM CAP]`**.
 
-La causa: el collector redescubre las sesiones releyendo los transcripts de
-`~/.claude/projects`, y un transcript terminado se vuelve a derivar como
-`idle` — que es literalmente el estado «fin de turno» del CLI. El mundo tenía
-esta regla:
+The cause: the collector rediscovers sessions by re-reading the transcripts in
+`~/.claude/projects`, and a finished transcript is derived again as `idle` —
+which is literally the CLI's "end of turn" state. The world had this rule:
 
-> Si un archivado vuelve en un estado vivo, es que alguien reanudó la sesión:
-> se levanta la lápida.
+> If an archived agent comes back in a live state, someone must have resumed the
+> session: lift the tombstone.
 
-Que es falsa. Volver en `idle` no prueba nada; es lo que hace *cualquier*
-transcript al releerse. Así, archivar limpiaba la foto y no el mundo, y el
-guardián de vitalidad tampoco filtraba nada — el mundo decía `idle`, o sea
-vivo.
+Which is false. Coming back in `idle` proves nothing; it is what *any* transcript
+does when re-read. So archiving cleaned the picture and not the world, and the
+liveness guardian filtered nothing either — the world said `idle`, that is, alive.
 
-**La regla nueva: una lápida sólo se levanta con actividad POSTERIOR al
-archivado.** `updatedAt` del collector es la última actividad real del
-transcript, no la hora de la pasada, así que la comparación es exacta. Cierra
-las dos puertas: la de `agent:new` y la del patch que pedía un resync.
+**The new rule: a tombstone is only lifted by activity LATER than the
+archiving.** The collector's `updatedAt` is the transcript's last real activity,
+not the time of the pass, so the comparison is exact. It closes both doors: the
+`agent:new` one and the one for the patch that asked for a resync.
 
-Es la misma asimetría de §4: equivocarse rechazando a alguien que sí volvió es
-barato y reversible —el operador lo desarchiva desde la consola— y equivocarse
-readmitiéndolo es un fantasma inmortal.
+It is the same asymmetry as §4: being wrong by rejecting someone who really did
+come back is cheap and reversible — the operator unarchives it from the console —
+and being wrong by readmitting them is an immortal ghost.
 
-### La salida manual
+### The manual way out
 
-**`retire_agent(agent_id, reason)`** — y **`orca retire <K9> --reason "<por qué>"`**
-en el CLI, porque una sesión de CAPCOM negocia su lista de herramientas MCP al
-arrancar y una herramienta nacida después no existe para el mando en funciones
-hasta que reconecte. Un terminal siempre está.
+**`retire_agent(agent_id, reason)`** — and **`orca retire <K9> --reason "<why>"`**
+in the CLI, because a CAPCOM session negotiates its list of MCP tools at startup
+and a tool born afterwards does not exist for the acting command until it
+reconnects. A terminal is always there.
 
-Declara ido a un agente cuya sesión ya no existe, en un solo gesto y de forma
-durable:
+It declares gone an agent whose session no longer exists, in a single gesture and
+durably:
 
-1. lo marca `dead` con el motivo, que queda en el feed;
-2. **se lleva su cría `Task` con él** — un subagente no tiene sesión propia, y
-   además un padre con hijos «vivos» no se puede archivar, porque
-   `archiveCandidates` lo conserva para no romper el linaje;
-3. **los archiva a todos**, que es lo que persiste en disco y lo que impide que
-   el redescubrimiento los vuelva a dar de alta.
+1. it marks it `dead` with the reason, which stays in the feed;
+2. **it takes its `Task` brood with it** — a subagent has no session of its own,
+   and besides, a parent with "live" children cannot be archived, because
+   `archiveCandidates` keeps it around so as not to break the lineage;
+3. **it archives all of them**, which is what persists to disk and what stops
+   rediscovery from signing them up again.
 
-Marcarlo muerto y dejarlo en la flota no era una salida: la siguiente pasada
-del descubridor lo pisaba. La lápida sí aguanta, y sobrevive a un reinicio del
-hub.
+Marking it dead and leaving it in the fleet was not a way out: the discoverer's
+next pass overwrote it. The tombstone does hold, and it survives a hub restart.
 
-No mata nada en la máquina (no queda nada que matar) y no borra el transcript.
-Si la sesión resulta estar viva y vuelve a escribir, el hub levanta la lápida
-por su cuenta.
+It kills nothing on the machine (there is nothing left to kill) and it does not
+delete the transcript. If the session turns out to be alive and writes again, the
+hub lifts the tombstone on its own.
 
-### La regla general: un consejo tiene que ser invocable
+### The general rule: advice has to be invocable
 
-> **Toda acción que el hub recomiende en un aviso tiene que poder ejecutarla
-> quien recibe ese aviso.**
+> **Every action the hub recommends in an alert has to be executable by whoever
+> receives that alert.**
 
-Un mensaje que dice «usa `retire_agent`» dirigido a alguien que no tiene
-`retire_agent` no es un consejo: es una instrucción imposible de seguir, y
-cuesta más tiempo que no decir nada. En un solo día ORCA dio tres:
+A message saying "use `retire_agent`" aimed at someone who does not have
+`retire_agent` is not advice: it is an instruction impossible to follow, and it
+costs more time than saying nothing. In a single day ORCA gave three:
 
-| La instrucción | Por qué no se podía seguir |
+| The instruction | Why it could not be followed |
 |---|---|
-| `interrupt_agent` / `stop_agent` sobre un fantasma | Ni pane ni sesión background: ninguna de las dos alcanzaba. |
-| `tmux ls` | Sin `-L orca` mira otro servidor y no lista nada de la flota. |
-| `orca-tell …` | No está en el PATH de quien recibía el mensaje. |
-| `retire_agent` | Herramienta MCP nacida después de que la sesión de CAPCOM negociara su lista: no existe para él hasta reconectar. |
+| `interrupt_agent` / `stop_agent` on a ghost | Neither a pane nor a background session: neither one reached it. |
+| `tmux ls` | Without `-L orca` it looks at another server and lists nothing from the fleet. |
+| `orca-tell …` | It was not on the PATH of whoever received the message. |
+| `retire_agent` | An MCP tool born after the CAPCOM session negotiated its list: it does not exist for it until it reconnects. |
 
-De ahí dos consecuencias en el código, y no sólo en el criterio de quien
-escribe los mensajes:
+From that, two consequences in the code, and not only in the judgement of whoever
+writes the messages:
 
-1. **`reachability()`** decide qué se le puede hacer a un agente con los mismos
-   predicados que aplican las herramientas de verdad, y los avisos sólo
-   nombran lo que funciona para *ese* agente.
-2. **Toda salida existe también en el CLI.** Una sesión MCP negocia sus
-   herramientas al arrancar; un terminal siempre está. `retire_agent` tiene su
-   `orca retire <K9> --reason "<por qué>"`, y un rechazo imprime el motivo —
-   «ya está en done: archívalo con `archive_agents`» es la instrucción
-   siguiente, y tragársela deja al operador con un código de salida y nada más.
+1. **`reachability()`** decides what can be done to an agent with the same
+   predicates the real tools apply, and the alerts only name what works for *that*
+   agent.
+2. **Every way out also exists in the CLI.** An MCP session negotiates its tools
+   at startup; a terminal is always there. `retire_agent` has its
+   `orca retire <K9> --reason "<why>"`, and a rejection prints the reason —
+   "it is already done: archive it with `archive_agents`" is the next
+   instruction, and swallowing it leaves the operator with an exit code and
+   nothing else.
 
 ---
 
-## 5 · Los avisos en ráfaga son un suceso
+## 5 · Alerts in bursts are an event
 
-Trece `[BUDGET 100%]` seguidos, por el mismo motivo y en el mismo instante,
-taparon un informe que el operador estaba leyendo. El feed sigue llevando una
-entrada por aviso —es historia, y cada una cuelga de su agente— pero **a CAPCOM
-le llega un solo mensaje por pasada**:
+Thirteen `[BUDGET 100%]` in a row, for the same reason and at the same instant,
+buried a report the operator was reading. The feed still carries one entry per
+alert — it is history, and each one hangs off its agent — but **CAPCOM gets a
+single message per pass**:
 
 ```
 [BUDGET] 13 budget notices in one sweep — 2 stopped, 8 at 100%, 3 at 80%. Worst: 1C at 988%.
@@ -329,12 +326,12 @@ le llega un solo mensaje por pasada**:
 · …and 7 more, all of them in the console feed.
 ```
 
-Se ordena por severidad —paradas, enjambre, 100 %, 80 %— y se muestran las seis
-primeras completas.
+It is sorted by severity — stops, swarm, 100 %, 80 % — and the first six are
+shown in full.
 
 ---
 
-## 6 · Qué verá CAPCOM exactamente
+## 6 · What CAPCOM will see exactly
 
 ```
 [BUDGET 80%]  K9 · 8.5M of 10.0M tokens (85%)
@@ -351,50 +348,50 @@ primeras completas.
               exists. Raise the caps with ORCA_MAX_DESCENDANTS / ORCA_MAX_AGENT_DEPTH.
 ```
 
-Y lo que **ya no** verá: ni una línea sobre un agente en idle, terminado,
-parado o en una máquina no conectada.
+And what it will **no longer** see: not one line about an agent that is idle,
+finished, stopped or on a machine that is not connected.
 
 ---
 
-## 7 · El entorno, completo
+## 7 · The environment, in full
 
-| Variable | Por defecto | Qué hace |
+| Variable | Default | What it does |
 |---|---|---|
-| `ORCA_DEFAULT_BUDGET_TOKENS` | 23.000.000 | Techo en tokens para todo worker sin techo propio; CAPCOM queda excluido. Ausente, vacío o inválido usa el defecto. |
-| `ORCA_DEFAULT_BUDGET_MIN` | ninguno | Igual, en minutos **activos**. |
-| `ORCA_BUDGET_ACTION` | `stop` | Qué hace el 100 % sin progreso. `warn` sólo reporta. |
-| `ORCA_BUDGET_PROGRESS_MIN` | `3` | Minutos de silencio antes de contar como parado. |
-| `ORCA_MAX_DESCENDANTS` | `8` | Subagentes `Task` vivos bajo un agente. |
-| `ORCA_MAX_AGENT_DEPTH` | `2` | Generaciones de subagentes `Task`. |
-| `ORCA_SWARM_ACTION` | `warn` | `stop` para además la sesión del ancestro. |
+| `ORCA_DEFAULT_BUDGET_TOKENS` | 23,000,000 | Token ceiling for every worker without its own; CAPCOM is excluded. Absent, empty or invalid falls back to the default. |
+| `ORCA_DEFAULT_BUDGET_MIN` | none | The same, in **active** minutes. |
+| `ORCA_BUDGET_ACTION` | `stop` | What 100 % with no progress does. `warn` only reports. |
+| `ORCA_BUDGET_PROGRESS_MIN` | `3` | Minutes of silence before counting as stalled. |
+| `ORCA_MAX_DESCENDANTS` | `8` | Live `Task` subagents under an agent. |
+| `ORCA_MAX_AGENT_DEPTH` | `2` | Generations of `Task` subagents. |
+| `ORCA_SWARM_ACTION` | `warn` | `stop` also stops the ancestor's session. |
 
-Los techos por defecto siguen vacíos: cambiar la unidad no es lo mismo que
-encender un límite en toda la flota, y encenderlo es decisión del operador. Un
-punto de partida razonable para un worker de Claude con contexto grande está
-entre 15 y 30 millones de tokens.
+The default ceilings are still empty: changing the unit is not the same as
+turning on a limit across the whole fleet, and turning it on is the operator's
+decision. A reasonable starting point for a Claude worker with a large context is
+between 15 and 30 million tokens.
 
-El freno de descendencia **sí** viene con valores puestos: ahí no había nada, y
-la ausencia de freno fue lo más caro del incidente.
+The descendant brake **does** come with values set: there was nothing there, and
+the absence of a brake was the most expensive part of the incident.
 
 ---
 
-## Filtros que cubren esto
+## Filters that cover this
 
 ```
-npm test -- budgets        21 pruebas: unidad, umbrales, tiempo activo, idle, retiro,
-                           descendencia, freno, el dinero que ya no está, la poda
-                           de techos huérfanos, agrupado, hub
-npm test -- briefing       que el brief de CAPCOM nombre retire_agent y la unidad nueva
-npm test -- worker-recovery que un handoff no reinicia el consumo del agente
-npm test -- hub            el mundo, la reconciliación y el desalojo
-npm test -- archive        que un fantasma releído no resucite y que retire_agent
-                           se lleve a su cría y la archive con él
-npm test -- --changed      lo que alcance a lo que hayas tocado
+npm test -- budgets        21 tests: unit, thresholds, active time, idle, retirement,
+                           descendants, brake, the money that is gone, pruning
+                           orphan ceilings, grouping, hub
+npm test -- briefing       that CAPCOM's brief names retire_agent and the new unit
+npm test -- worker-recovery that a handoff does not reset an agent's consumption
+npm test -- hub            the world, reconciliation and eviction
+npm test -- archive        that a re-read ghost does not come back and that retire_agent
+                           takes its brood with it and archives it too
+npm test -- --changed      whatever reaches what you touched
 ```
 
-El CLI se comprueba a mano, que es como se usa:
+The CLI is checked by hand, which is how it is used:
 
 ```
 node bin/orca.mjs --help | grep retire
-node bin/orca.mjs retire <K9> --reason "<por qué>"
+node bin/orca.mjs retire <K9> --reason "<why>"
 ```

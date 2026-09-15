@@ -1,77 +1,79 @@
-# Retirar conversaciones de tarea
+# Retiring task conversations
 
-Una tarea creada no se podía quitar nunca. `TaskStore` tenía `create`, `message`,
-`assign` y `bindSquad`, y ningún camino de vuelta: el selector de la ventana de
-mando las mostraba todas para siempre, terminadas incluidas, y al llegar a cien
-`create` lanzaba `Task limit reached (100)` y el hub se quedaba sin poder crear
-tareas. No era una laguna de la interfaz; no existía la operación.
+Once a task was created it could never be removed. `TaskStore` had `create`,
+`message`, `assign` and `bindSquad`, and no way back: the command window's
+selector showed all of them forever, finished ones included, and on reaching a
+hundred `create` threw `Task limit reached (100)` and the hub was left unable to
+create tasks. It was not an interface gap; the operation did not exist.
 
-Ahora hay dos, deliberadamente distintas.
+Now there are two, deliberately different.
 
-## Archivar, que es lo normal
+## Archiving, which is the normal case
 
-`archivedAt` retira la tarea de la vista y no toca nada más. Conserva la
-conversación entera, sus agentes, su estado y su historia, y se deshace. Una
-tarea archivada:
+`archivedAt` takes the task out of view and touches nothing else. It keeps the
+whole conversation, its agents, its state and its history, and it can be undone.
+An archived task:
 
-- no sale en el selector de la ventana de mando ni en el panel de tareas del HUD;
-- no deja arco en el halo del puesto de mando;
-- no aparece en `list_tasks` ni en el checkpoint de continuidad de un CAPCOM nuevo;
-- no recoge resultados nuevos de sus workers (`observe` la salta) ni despierta a
-  CAPCOM cuando uno de ellos termina;
-- **no cuenta contra el tope de cien**, que es lo que desatasca el callejón.
+- does not show up in the command window's selector nor in the HUD's task panel;
+- leaves no arc in the command post's halo;
+- does not appear in `list_tasks` nor in a new CAPCOM's continuity checkpoint;
+- does not collect new results from its workers (`observe` skips it) and does not
+  wake CAPCOM when one of them finishes;
+- **does not count against the cap of a hundred**, which is what unblocks the dead
+  end.
 
-Volver es `restore`, y devuelve la tarea intacta.
+Coming back is `restore`, and it returns the task intact.
 
-## Purgar, que es lo definitivo
+## Purging, which is final
 
-`purge` borra la tarea de `tasks.json` sin vuelta atrás, y **exige que esté
-archivada**. Dos pasos a propósito: archivar es lo reversible y ya basta para
-recuperar el sitio, así que lo único que llega a la purga es lo que alguien
-decidió retirar y volvió a decidir borrar. El hub anuncia la baja con
-`{ t: 'task', task, purged: true }`; la consola quita la fila en vez de pintarla,
-y si era la conversación abierta vuelve a la general.
+`purge` deletes the task from `tasks.json` with no way back, and **requires it to
+be archived**. Two steps on purpose: archiving is the reversible one and is
+already enough to recover the slot, so the only thing that reaches the purge is
+what someone decided to retire and then decided again to delete. The hub announces
+the removal with `{ t: 'task', task, purged: true }`; the console removes the row
+instead of drawing it, and if it was the open conversation it goes back to the
+general one.
 
-## Cómo se pide
+## How you ask for it
 
-En la ventana de mando, **ARCHIVE**, junto a NEW TASK, aparece cuando hay una
-conversación de tarea abierta. Una tarea todavía activa pide confirmación —sus
-workers siguen ahí y su hilo es lo que los explica—; una terminada se va sin
-ceremonia.
+In the command window, **ARCHIVE**, next to NEW TASK, appears when a task
+conversation is open. A task that is still active asks for confirmation — its
+workers are still there and its thread is what explains them; a finished one goes
+without ceremony.
 
-Desde la barra:
+From the bar:
 
 ```text
-/tasks archive [task_id]     retira la abierta, o la que se nombre
-/tasks archived              lista las retiradas, con su id
-/tasks restore <task_id>     la devuelve
-/tasks purge <task_id>       borra, sólo si ya estaba archivada; pide confirmación
-/tasks finished              archiva de golpe todas las terminadas
+/tasks archive [task_id]     retires the open one, or the one you name
+/tasks archived              lists the retired ones, with their id
+/tasks restore <task_id>     brings it back
+/tasks purge <task_id>       deletes, only if it was already archived; asks to confirm
+/tasks finished              archives every finished one at once
 ```
 
-`/tasks finished` es el gesto de limpieza habitual: lo que se acumula sin que
-nadie lo mire son las `completed` y `failed`.
+`/tasks finished` is the usual cleanup gesture: what piles up without anyone
+looking at it are the `completed` and `failed` ones.
 
-`restore` y `purge` necesitan el id, y archivar deselecciona la conversación
-—seguir escribiendo en algo que ya no se ve no tendría sentido—, así que no hay
-ninguna abierta sobre la que actuar. Para eso está `/tasks archived`: lo
-retirado no sale en el selector, que es justo el punto, y sin ese listado su id
-no estaría en ninguna parte de la consola.
+`restore` and `purge` need the id, and archiving deselects the conversation —
+carrying on writing into something you can no longer see would make no sense — so
+there is no open one to act on. That is what `/tasks archived` is for: what has
+been retired does not show up in the selector, which is exactly the point, and
+without that listing its id would not be anywhere in the console.
 
-## Qué NO hace un New CAPCOM limpio
+## What a clean New CAPCOM does NOT do
 
-Nada de esto. `New CAPCOM → Clean context` limpia el contexto del CAPCOM —la
-sesión nueva no hereda conversación, checkpoint ni reglas— y ahí termina su
-alcance. Las tareas, la conversación del hub, las reglas persistidas y los
-workers siguen exactamente donde estaban.
+None of this. `New CAPCOM → Clean context` clears CAPCOM's context — the new
+session inherits no conversation, no checkpoint and no rules — and its scope ends
+there. The tasks, the hub conversation, the persisted rules and the workers stay
+exactly where they were.
 
-Es deliberado en ambos sentidos. Un reset de contexto no debe borrar el registro
-del hub por efecto colateral: ese registro es justamente lo que permite que la
-sesión sea desechable, y lo que un CAPCOM nuevo lee con `briefing` para saber
-qué se debe. Retirar tareas es una decisión aparte, y por eso se pide aparte.
-Ver [CAPCOM-NEW.md](CAPCOM-NEW.md) y [CAPCOM-ROTATION.md](CAPCOM-ROTATION.md).
+It is deliberate in both directions. A context reset must not erase the hub's
+record as a side effect: that record is precisely what makes the session
+disposable, and what a new CAPCOM reads with `briefing` to find out what is owed.
+Retiring tasks is a separate decision, and that is why it is asked for separately.
+See [CAPCOM-NEW.md](CAPCOM-NEW.md) and [CAPCOM-ROTATION.md](CAPCOM-ROTATION.md).
 
-## Verificación
+## Verification
 
 ```sh
 npm run typecheck
@@ -80,8 +82,8 @@ npm test -- command task-status
 npm test -- capcom-new provider-handoff
 ```
 
-Sin cubrir por pruebas: el botón ARCHIVE de la ventana de mando y el comando
-`/tasks` de la barra son DOM de la consola, y este repo no tiene arnés de DOM
-para el selector. La lógica que ambos invocan —archivar, restaurar, purgar, el
-tope, el filtrado de la vista y del listado— sí está cubierta, incluido el
-recorrido por WebSocket que usa la consola.
+Not covered by tests: the command window's ARCHIVE button and the bar's `/tasks`
+command are console DOM, and this repo has no DOM harness for the selector. The
+logic both of them invoke — archive, restore, purge, the cap, the filtering of the
+view and of the listing — is covered, including the WebSocket path the console
+uses.

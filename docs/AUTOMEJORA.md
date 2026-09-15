@@ -1,459 +1,460 @@
-# AUTOMEJORA — ORCA mirándose a sí misma
+# SELF-IMPROVEMENT — ORCA looking at itself
 
-> Informes de entrega: la sección en
-> [`AUTOMEJORA-ENTREGA.md`](AUTOMEJORA-ENTREGA.md), el agente revisor en
-> [`AUTOMEJORA-REVISOR.md`](AUTOMEJORA-REVISOR.md).
+> The model and the budgets of the reviewer are in
+> [`AUTOMEJORA-MODELO.md`](AUTOMEJORA-MODELO.md).
 
-Una sección aparte de la consola, con forma, color y aviso propios, en la que
-ORCA revisa **el instrumento** en vez de la flota: cómo se está usando la
-consola y CAPCOM, qué estorba, qué cuesta de más, y qué se podría hacer mejor.
-La revisión **propone**; lo que convierte una propuesta en trabajo es una
-decisión del operador.
+A separate section of the console, with its own shape, color and alert, where
+ORCA reviews **the instrument** instead of the fleet: how the console and CAPCOM
+are being used, what gets in the way, what costs more than it should, and what
+could be done better. The review **proposes**; what turns a proposal into work is
+a decision by the operator.
 
-## Por qué es una sección y no una ventana más
+## Why it is a section and not one more window
 
-Todo lo demás que hay en el campo habla de agentes. Una propuesta sobre la
-consola leída con el vestido del panel de misiones pasa por trabajo de un
-agente, y es exactamente el malentendido que hace que nadie la lea. Por eso la
-sección tiene:
+Everything else in the field talks about agents. A proposal about the console
+read in the clothes of the mission panel passes for an agent's work, and that is
+exactly the misunderstanding that makes nobody read it. So the section has:
 
-- **Color propio.** `--auto` (`#b47cff`), un violeta que no existe en ninguna
-  otra parte de ORCA. En este console el color es significado y todos los que
-  hay hablan de agentes: lima vivo, ámbar *te necesita ahora*, rojo brecha,
-  cian CAPCOM, azul esperando a otro. Ninguno podía prestarse sin mentir —
-  menos que ninguno el ámbar, que significa un agente PARADO esperando a una
-  persona, y una propuesta no para a nadie.
-- **Forma propia.** Fichas con el mordisco del tile en la esquina contraria
-  (arriba a la izquierda) y una barra en el borde izquierdo. La barra es
-  **continua** si la propuesta se apoya en mediciones y **discontinua** si es
-  una hipótesis: la textura dice de qué está hecha la idea antes que la
-  etiqueta, igual que la trama de un tile dice qué runtime corre dentro.
-- **Aviso propio, una sola vez.** Cuenta en la cabecera, punto en la esquina de
-  la ficha, un paso lateral de la sección y un sonido. Nada de eso vuelve a
-  ocurrir por la misma propuesta. Se apaga al ABRIR la ficha, que es cuando de
-  verdad se ha visto. Nada se abre solo: en ORCA lo único que puede reclamar a
-  un humano por su cuenta es un agente parado.
+- **Its own color.** `--auto` (`#b47cff`), a violet that exists nowhere else in
+  ORCA. In this console color is meaning, and every color there is talks about
+  agents: lime alive, amber *needs you now*, red breach, cyan CAPCOM, blue
+  waiting on someone else. None could be borrowed without lying — least of all
+  amber, which means an agent STOPPED waiting on a person, and a proposal stops
+  nobody.
+- **Its own shape.** Cards with the tile's bite on the opposite corner (top
+  left) and a bar on the left edge. The bar is **solid** if the proposal rests on
+  measurements and **dashed** if it is a hypothesis: the texture says what the
+  idea is made of before the label does, the same way a tile's pattern says which
+  runtime runs inside.
+- **Its own alert, exactly once.** A count in the header, a dot in the corner of
+  the card, a sideways step of the section and a sound. None of that happens
+  again for the same proposal. It goes quiet when the card is OPENED, which is
+  when it has really been seen. Nothing opens by itself: in ORCA the only thing
+  that can demand a human's attention on its own is a stopped agent.
 
-Vive arriba a la derecha bajo el mástil (`hud/improve.ts`), deja libre el
-rincón del radar y el panel de misiones, se pliega a su cabecera y el pliegue
-se recuerda. `⌥I` y `/improve` la despliegan y la traen a la vista.
+It lives top right under the mast (`hud/improve.ts`), leaves the radar corner and
+the mission panel free, folds into its header and the fold is remembered. `⌥I`
+and `/improve` unfold it and bring it into view.
 
-## Qué es una propuesta
+## What a proposal is
 
-En el orden en que un operador decide:
+In the order in which an operator decides:
 
 | | |
 |---|---|
-| resumen | Una o dos frases. Lo único que se lee sin abrir nada. |
-| motivación | `evidence`: cifras **medidas**, citadas como vinieron. Obligatorio en `kind: observed`. |
-| hipótesis | Lo que se está suponiendo. Obligatorio en `kind: hypothesis`. |
-| detalle | Lo largo, plegado. Accesible, no delante. |
-| pregunta | Lo que sólo el operador puede decidir, cuando cambiaría la propuesta. |
-| impacto / esfuerzo | Dos medidores de tres celdas, **sólo si hay fundamento**. |
+| summary | One or two sentences. The only thing you read without opening anything. |
+| motivation | `evidence`: **measured** figures, quoted as they came. Required in `kind: observed`. |
+| hypothesis | What is being assumed. Required in `kind: hypothesis`. |
+| detail | The long part, folded. Reachable, not in front of you. |
+| question | What only the operator can decide, when it would change the proposal. |
+| impact / effort | Two three-cell meters, **only if there is a basis for them**. |
 
-**La creatividad no está limitada a lo medible.** Una consola que sólo mejora
-lo que ya sabe contar no llega nunca a lo que todavía no hace, así que se piden
-explícitamente ideas que los datos no sostienen — capacidades nuevas, otra
-forma, una corazonada sobre qué confunde. Van marcadas `hypothesis` y con la
-suposición escrita. Lo que no se admite nunca es una medición inventada:
-`normalizeDraft` rechaza una propuesta `observed` sin cifras y una
-`hypothesis` sin hipótesis, con el motivo, para que CAPCOM lo corrija en el
-mismo turno. **`impact` y `effort` son opcionales a propósito**: el operador
-ordena por ellos, y una estimación inventada le hace ordenar mal.
+**Creativity is not limited to the measurable.** A console that only improves
+what it already knows how to count never reaches what it does not do yet, so
+ideas the data does not support are asked for explicitly — new capabilities,
+another shape, a hunch about what confuses people. They go marked `hypothesis`
+and with the assumption written down. What is never accepted is an invented
+measurement: `normalizeDraft` rejects an `observed` proposal with no figures and
+a `hypothesis` with no hypothesis, with the reason, so CAPCOM can fix it in the
+same turn. **`impact` and `effort` are optional on purpose**: the operator sorts
+by them, and an invented estimate makes them sort wrong.
 
-## Estados y acciones
+## States and actions
 
-`open` · `snoozed` (vuelve sola al vencer) · `dismissed` · `sent` · `completed` ·
-`archived`. Los dos últimos no los pone el operador desde el tablero: los pone
-la **misión** (ver [Lo que la misión le devuelve](#lo-que-la-misión-le-devuelve)).
+`open` · `snoozed` (comes back on its own when it expires) · `dismissed` ·
+`sent` · `completed` · `archived`. The last two are not set by the operator from
+the board: they are set by the **mission** (see
+[What the mission gives back](#what-the-mission-gives-back)).
 
-- **REPLY** — contesta en el hilo de la propuesta *y* le pega el turno a CAPCOM
-  con la respuesta, que contesta con `note_improvement`. La conversación entera
-  se conserva y viaja con la propuesta si acaba en misión.
-- **LATER · 3D** — pospone. Una semana entierra; un día no descansa.
-- **DISMISS** — descarta. Se **conserva**: es lo que impide que la siguiente
-  revisión la vuelva a proponer.
-- **REOPEN** — la devuelve. No para una que ya es misión (enviada, terminada
-  o archivada): una misión se reabre desde su ventana, no desde aquí.
-- **IMPLEMENT** (hasta el 2026-09-09, `SEND TO CAPCOM`) — lo único de la
-  sección que produce trabajo. Abre una misión normal titulada `AUTOMEJORA · …`
-  con la propuesta entera dentro (resumen, evidencia, hipótesis, detalle y la
-  conversación), deja la propuesta atada a ella (`missionId`, con `OPEN
-  MISSION` en su sitio), y **lanza un agente propio de ORCA como líder de esa
-  misión** sobre el repositorio de ORCA (`ImproveApi.implement`, con el brief
-  de `implementerBrief`: qué implementar, cómo se verifica aquí —`npm run
-  typecheck`, `npm test -- --changed`— y que su último mensaje es el informe).
-  El líder es **FORGE**, coordinador especializado por propuesta aprobada:
-  asigna, sigue, resuelve bloqueos operativos, verifica y consolida. **CAPCOM
-  conserva control final, decisiones de seguridad, cierre y publicación**.
-  FORGE usa los contratos existentes de misión y squad, sin estados propios.
-  Su aprobación queda como evento de sistema, no como pregunta pendiente a
-  CAPCOM. El squad se vincula antes del spawn. Se rechazan envíos repetidos,
-  ids inválidos o ya ocupados y propuestas descartadas o aún pospuestas.
-  Líder e hijos usan permisos `auto` para trabajo rutinario y escalan acciones
-  elevadas o ambiguas a CAPCOM; terminar un squad `forge-…` no dispara
-  el publicador automático. El detalle del flujo y sus límites está en
-  [FORGE](FORGE.md).
-  Si el agente no se puede lanzar —el repo de ORCA no es un proyecto de la
-  flota, o no hay máquina— la misión queda escrita con una línea de ORCA que
-  dice por qué, y la consola lo avisa; escribirle a esa misión va a CAPCOM,
-  porque no tiene líder.
+- **REPLY** — answers in the proposal's thread *and* hands CAPCOM the turn with
+  the answer, which it acknowledges with `note_improvement`. The whole
+  conversation is kept and travels with the proposal if it ends up as a mission.
+- **LATER · 3D** — postpones. A week buries it; a day is no rest.
+- **DISMISS** — discards it. It is **kept**: that is what stops the next review
+  from proposing it again.
+- **REOPEN** — brings it back. Not one that is already a mission (sent, finished
+  or archived): a mission is reopened from its own window, not from here.
+- **IMPLEMENT** (until 2026-09-09, `SEND TO CAPCOM`) — the only thing in the
+  section that produces work. It opens a normal mission titled `AUTOMEJORA · …`
+  with the whole proposal inside (summary, evidence, hypothesis, detail and the
+  conversation), leaves the proposal tied to it (`missionId`, with `OPEN MISSION`
+  in its place), and **launches an ORCA agent of its own as the lead of that
+  mission** on the ORCA repository (`ImproveApi.implement`, with the
+  `implementerBrief` brief: what to implement, how it is verified here —
+  `npm run typecheck`, `npm test -- --changed` — and that its last message is the
+  report). The lead is **FORGE**, a specialized coordinator per approved
+  proposal: it assigns, follows up, resolves operational blockers, verifies and
+  consolidates. **CAPCOM keeps final control, security decisions, closing and
+  publication**. FORGE uses the existing mission and squad contracts, with no
+  states of its own. Its approval is recorded as a system event, not as a
+  question left pending for CAPCOM. The squad is linked before the spawn. Repeat
+  sends, invalid or already-taken ids, and discarded or still-postponed proposals
+  are rejected. Lead and children use `auto` permissions for routine work and
+  escalate elevated or ambiguous actions to CAPCOM; finishing a `forge-…` squad
+  does not trigger the automatic publisher. The detail of the flow and its limits
+  is in [FORGE](FORGE.md).
+  If the agent cannot be launched — the ORCA repo is not a project on the fleet,
+  or there is no machine — the mission is written with a line from ORCA saying
+  why, and the console reports it; writing to that mission goes to CAPCOM,
+  because it has no lead.
 
-## Lo que la misión le devuelve
+## What the mission gives back
 
-Hasta el 2026-09-10 el enlace `missionId` era de ida: IMPLEMENT lo escribía y
-nadie volvía a mirarlo. Una misión que CAPCOM cerraba con `report_mission`
-dejaba la propuesta en `sent` para siempre, y una que el operador archivaba
-desde su ventana dejaba en el tablero una fila viva de un trabajo que el panel
-de misiones ya no enseñaba: dos paneles diciendo cosas distintas del mismo
-hecho, y trabajo terminado que parecía pendiente.
+Until 2026-09-10 the `missionId` link was one-way: IMPLEMENT wrote it and nobody
+looked at it again. A mission CAPCOM closed with `report_mission` left the
+proposal in `sent` forever, and one the operator archived from its window left a
+live row on the board for work the mission panel no longer showed: two panels
+saying different things about the same fact, and finished work that looked
+pending.
 
-Ahora la propuesta copia lo que su misión dice, con una sola regla
-(`linkedStatus` en `shared/improve.ts`):
+Now the proposal copies what its mission says, with a single rule
+(`linkedStatus` in `shared/improve.ts`):
 
-| La misión está | La propuesta pasa a |
+| The mission is | The proposal goes to |
 | --- | --- |
-| `active` o `failed`, sin archivar | `sent` |
-| `completed`, sin archivar | `completed` |
-| archivada, acabara como acabara | `archived` |
+| `active` or `failed`, not archived | `sent` |
+| `completed`, not archived | `completed` |
+| archived, however it ended | `archived` |
 
-Y en las dos direcciones: reabrir la misión (escribirle) la devuelve a `sent`,
-desarchivarla la devuelve a lo que diga su estado. Cada cambio deja una línea
-`system` en la conversación de la propuesta (`Mission completed.`, `Mission
-archived: …`, `Mission restored from the archive.`, `Mission reopened.`), que
-es donde el operador lee qué pasó.
+And in both directions: reopening the mission (writing to it) returns it to
+`sent`, unarchiving it returns it to whatever its state says. Every change leaves
+a `system` line in the proposal's conversation (`Mission completed.`, `Mission
+archived: …`, `Mission restored from the archive.`, `Mission reopened.`), which
+is where the operator reads what happened.
 
-Dónde ocurre: `ImproveStore.syncMission`, llamado desde el `changed` del
-`MissionStore` en el hub —el mismo punto que publica la misión a las consolas—
-y `syncMissions` una vez al arrancar, para lo que les pasó a las misiones
-mientras el hub no estaba (o antes de que supiera contarlo: así se pusieron al
-día las dos propuestas huérfanas que motivaron esto). Sólo toca propuestas
-enlazadas a esa misión y ya en estado de misión: una descartada no resucita
-porque alguien escriba en la misión, y una `failed` sigue en `sent`, porque
-sigue siendo una misión abierta en el otro panel.
+Where it happens: `ImproveStore.syncMission`, called from the `MissionStore`'s
+`changed` in the hub — the same point that publishes the mission to the consoles
+— and `syncMissions` once at startup, for whatever happened to missions while the
+hub was down (or before it knew how to count it: that is how the two orphan
+proposals that motivated this caught up). It only touches proposals linked to
+that mission and already in a mission state: a discarded one does not come back
+to life because someone writes in the mission, and a `failed` one stays in `sent`,
+because it is still an open mission in the other panel.
 
-En el tablero, una `completed` sigue llevando la marca de misión (la barra lima
-y OPEN MISSION) y dice `DONE` en la fila; una `archived` no se enseña, ni
-desplegando las cerradas, que es lo que evita dos versiones del mismo trabajo.
-`list_improvements` las devuelve si se le pide `status: completed | archived`.
+On the board, a `completed` one still carries the mission mark (the lime bar and
+OPEN MISSION) and says `DONE` in the row; an `archived` one is not shown, not
+even by unfolding the closed ones, which is what avoids two versions of the same
+work. `list_improvements` returns them if asked for
+`status: completed | archived`.
 
-## Deduplicación
+## Deduplication
 
-Cada propuesta tiene una **clave** de idea. La elige quien reporta —se le pide
-reutilizar la de una propuesta abierta— y si no, sale del título normalizado.
-`findDuplicate` mira primero por clave y luego por título normalizado, y mira
-**todas** las propuestas, descartadas incluidas: descartar algo y que vuelva a
-la mañana siguiente es la forma más rápida de que nadie mire la sección. Una
-repetida sube `raised`, refresca evidencia e impacto/esfuerzo, **no cambia el
-estado** y **no vuelve a avisar**.
+Every proposal has an idea **key**. Whoever reports picks it — they are asked to
+reuse the one from an open proposal — and failing that it comes from the
+normalized title. `findDuplicate` looks first by key and then by normalized
+title, and it looks at **all** proposals, discarded ones included: discarding
+something and having it come back the next morning is the fastest way to make
+nobody look at the section. A repeat raises `raised`, refreshes evidence and
+impact/effort, **does not change the state** and **does not alert again**.
 
-## El agente revisor
+## The reviewer agent
 
-**Cada revisión es un agente temporal, no un turno de CAPCOM.** ORCA lo lanza
-por el camino normal de spawn: aparece en el campo, tiene callsign, estado,
-coste y ventana, hace su trabajo, archiva y termina.
+**Every review is a temporary agent, not a CAPCOM turn.** ORCA launches it
+through the normal spawn path: it shows up in the field, it has a callsign, a
+state, a cost and a window, it does its work, it files and it ends.
 
-La diferencia no es de implementación, es de lo que el operador puede ver y
-hacer. Un turno de CAPCOM es invisible mientras dura —no se sabe si está
-pensando, cuánto lleva, cuánto ha gastado ni cómo pararlo— y compite por el
-contexto del mando con todo lo demás que la flota le está pidiendo. Un agente
-se mira, se vuela hasta él, se abre su ventana, se le pone presupuesto y se le
-para. Y cuando falla, falla como falla un agente: visiblemente.
+The difference is not one of implementation, it is one of what the operator can
+see and do. A CAPCOM turn is invisible while it runs — you cannot tell whether it
+is thinking, how long it has been going, how much it has spent or how to stop it
+— and it competes for the command session's context with everything else the
+fleet is asking of it. An agent can be watched, flown to, opened in its own
+window, given a budget and stopped. And when it fails, it fails the way an agent
+fails: visibly.
 
-**Cómo se lanza.** `spawn` con `parentId: null` (no es de nadie; colgarlo de
-CAPCOM lo metería en el despertador y costaría un turno por revisión, que es lo
-que esta arquitectura vino a quitar), `worktree: false` (no va a escribir), y
-`review: true`, que es lo que le cambia dos cosas **en la máquina**:
+**How it is launched.** `spawn` with `parentId: null` (it belongs to nobody;
+hanging it off CAPCOM would put it in the waker and cost a turn per review, which
+is what this architecture came to remove), `worktree: false` (it is not going to
+write), and `review: true`, which changes two things **on the machine**:
 
-- le pone `orca-improve` en el PATH, su único canal para archivar;
-- le **quita** las herramientas de edición (`--disallowedTools Edit Write
-  NotebookEdit MultiEdit`). Es una capacidad retirada, no una instrucción: un
-  modelo atascado usa la salida que ve.
+- it puts `orca-improve` on its PATH, its only channel for filing;
+- it **takes away** the editing tools (`--disallowedTools Edit Write
+  NotebookEdit MultiEdit`). That is a withdrawn capability, not an instruction: a
+  stuck model uses whatever way out it can see.
 
-**Dónde corre.** En el repositorio de ORCA, que es lo que va a leer. Se
-encuentra solo (`ORCA_ROOT`, la raíz del propio código) entre los proyectos de
-la flota; `ORCA_IMPROVE_PROJECT` lo nombra por id, código, nombre o ruta. Sin
-ninguno de los dos no se lanza nada y el panel dice por qué.
+**Where it runs.** In the ORCA repository, which is what it is going to read. It
+finds it on its own (`ORCA_ROOT`, the root of ORCA's own code) among the fleet's
+projects; `ORCA_IMPROVE_PROJECT` names it by id, code, name or path. Without
+either of the two, nothing is launched and the panel says why.
 
-**Su identidad en el campo.** Runtime 8 en el shader: **línea violeta
-permanente** y **sigilo violeta**, igual que CAPCOM lleva la suya cian. Es una
-IDENTIDAD, no un estado: el color del cuerpo y la banda del borde izquierdo
-siguen diciendo lo que le pasa de verdad, así que un revisor bloqueado se ve
-ámbar dentro de un marco violeta y uno muerto se ve rojo. La consola sabe quién
-es revisor leyendo el TABLERO (`reviewerIds`), que ya viaja entero y guarda las
-últimas 40 revisiones: no hizo falta un `role` nuevo por el collector, el hub y
-el protocolo para decir lo que esto ya dice.
+**Its identity in the field.** Runtime 8 in the shader: **permanent violet line**
+and **violet wake**, the same way CAPCOM carries its cyan one. It is an IDENTITY,
+not a state: the body color and the left-edge band still say what is actually
+happening to it, so a blocked reviewer looks amber inside a violet frame and a
+dead one looks red. The console knows who is a reviewer by reading the BOARD
+(`reviewerIds`), which already travels whole and keeps the last 40 reviews: no
+new `role` had to go through the collector, the hub and the protocol to say what
+this already says.
 
-**Estados de una revisión**, y ninguno es «desconocido»:
+**States of a review**, and none of them is "unknown":
 
 | | |
 |---|---|
-| `launching` | se pidió el spawn; todavía no hay agente que nombrar |
-| `running` | el agente existe y está en ello |
-| `reported` | archivó propuestas — **el único final que cuenta como revisión hecha** |
-| `ended` | el agente terminó **sin** archivar nada |
-| `failed` | el spawn falló, o el agente murió |
-| `cancelled` | el operador la paró |
-| `expired` | 45 minutos sin cerrarse de ninguna otra forma |
-| `overbudget` | cruzó su techo de tokens y ORCA lo paró |
+| `launching` | the spawn was requested; there is no agent to name yet |
+| `running` | the agent exists and is on it |
+| `reported` | it filed proposals — **the only ending that counts as a review done** |
+| `ended` | the agent finished **without** filing anything |
+| `failed` | the spawn failed, or the agent died |
+| `cancelled` | the operator stopped it |
+| `expired` | 45 minutes without closing in any other way |
+| `overbudget` | it crossed its token ceiling and ORCA stopped it |
 
-`ended` y `reported` son distintos a propósito: un agente que termina no
-demuestra que haya propuesto nada, y decir «revisión completada» cuando no llegó
-ni una línea sería la clase de resultado falso que hace inútil un panel que
-corre solo. Lo que cierra una revisión es `endedAt`; archivar **no** la cierra,
-porque el brief le dice al revisor que corrija lo rechazado y lo vuelva a
-mandar, y mientras tanto sigue gastando.
+`ended` and `reported` are different on purpose: an agent that finishes does not
+prove it proposed anything, and saying "review completed" when not a single line
+arrived would be the kind of false result that makes a self-running panel
+useless. What closes a review is `endedAt`; filing does **not** close it, because
+the brief tells the reviewer to fix what was rejected and send it again, and
+meanwhile it keeps spending.
 
-**Una y sólo una.** El sitio se reserva ANTES de pedir el spawn
-(`beginReview` deja la revisión en `launching`), así que dos ticks no pueden
-lanzar dos revisores aunque el spawn tarde. Y **no hay bucle posible**: lo que
-dispara una revisión son los contadores de la consola y de CAPCOM, que un
-revisor no toca.
+**One and only one.** The slot is reserved BEFORE asking for the spawn
+(`beginReview` leaves the review in `launching`), so two ticks cannot launch two
+reviewers even if the spawn is slow. And **no loop is possible**: what triggers a
+review are the console and CAPCOM counters, which a reviewer does not touch.
 
-**Nada se queda colgado, y nada se queda vivo.** Un barrido cada 20 s y al
-arrancar cierra lo que ya no puede terminar bien: pasó el reloj de pared (y
-entonces también se PARA al agente), el hub se reinició y el agente ya no está
-en el mundo, o terminó y el evento se perdió.
+**Nothing hangs, and nothing stays alive.** A sweep every 20 s and at startup
+closes whatever can no longer end well: the wall clock ran out (and then the
+agent is also STOPPED), the hub restarted and the agent is no longer in the
+world, or it ended and the event was lost.
 
-Y cierra también lo que **terminó sin decirlo**. Medido en la primera revisión
-real: un agente de Claude Code **no termina solo** — acaba su turno, pasa a
-`idle` y espera otro prompt que nadie le va a mandar. Un revisor `idle` durante
-`REVIEWER_IDLE_MS` (un minuto, el mismo asentamiento que usa `wake.ts`, porque
-un CLI pasa por `idle` entre dos herramientas) se da por terminado: se cierra la
-revisión —`reported` si archivó, `ended` si no— **y se para al agente**. Sin
-esto, un revisor que ya había entregado seguía siendo una sesión viva hasta el
-reloj de pared: el «agente permanente» que esta sección promete no dejar.
+And it also closes what **ended without saying so**. Measured in the first real
+review: a Claude Code agent **does not end by itself** — it finishes its turn,
+goes `idle` and waits for another prompt nobody is going to send it. A reviewer
+that is `idle` for `REVIEWER_IDLE_MS` (one minute, the same settling time
+`wake.ts` uses, because a CLI passes through `idle` between two tools) is treated
+as finished: the review is closed — `reported` if it filed, `ended` if not — **and
+the agent is stopped**. Without this, a reviewer that had already delivered
+stayed a live session until the wall clock: the "permanent agent" this section
+promises not to leave behind.
 
-**Decidir cómo acabó ≠ soltar el sitio.** `outcomeAt` es lo primero —se pasó
-del techo, se le acabó el reloj, el operador la paró, archivó y se quedó
-quieta—; `endedAt` es lo segundo, y **sólo lo pone la confirmación de que el
-agente se fue**: terminal, o fuera del mundo. **No hay ningún plazo que suelte
-el sitio.** Si el `stop` falla se reintenta acotado (`STOP_ATTEMPTS` = 5, con
-espera 20 s · 40 s · 80 s · 160 s · 320 s) y agotarlos tampoco lo suelta: la
-sección se queda bloqueada **y lo dice**, con los intentos y desde cuándo. Un
-bloqueo visible es un problema que alguien puede mirar; dos revisores a la vez,
-no. Reintentar un `stop` no le da turnos a nadie: no hay bucle de gasto.
+**Deciding how it ended ≠ releasing the slot.** `outcomeAt` comes first — it went
+over the ceiling, its clock ran out, the operator stopped it, it filed and went
+quiet; `endedAt` comes second, and is **only set by confirmation that the agent
+is gone**: terminal, or out of the world. **There is no deadline that releases
+the slot.** If the `stop` fails it is retried with a bound (`STOP_ATTEMPTS` = 5,
+with waits of 20 s · 40 s · 80 s · 160 s · 320 s) and exhausting them does not
+release it either: the section stays blocked **and says so**, with the attempts
+and since when. A visible block is a problem someone can look at; two reviewers at
+once is not. Retrying a `stop` gives nobody turns: there is no spending loop.
 
-**Presupuesto.** Ver §«Lo que cuesta».
+**Budget.** See §"What it costs".
 
-**El tablero llega y se vuelve a pedir.** La sección lo pide al montar **y en
-cada reconexión** —un hub reiniciado no empuja nada— con reintento acotado
-(700 ms · 1,5 s · 3 s · 6 s · 12 s) y sólo mientras hay enlace. Sin enlace no
-gasta intentos: espera al evento. Lo que no se pudo traer se DICE (`COULD NOT
-READ THE BOARD`, con `TRY AGAIN`; `NO LINK · SHOWING THE LAST BOARD`), y lo que
-ya se sabía no se borra. Leer el tablero es `improve:get` y nunca lanza una
-revisión.
+**The board arrives and is asked for again.** The section asks for it at mount
+**and on every reconnect** — a restarted hub pushes nothing — with a bounded
+retry (700 ms · 1.5 s · 3 s · 6 s · 12 s) and only while there is a link. With no
+link it burns no attempts: it waits for the event. What could not be fetched is
+SAID (`COULD NOT READ THE BOARD`, with `TRY AGAIN`; `NO LINK · SHOWING THE LAST
+BOARD`), and what was already known is not erased. Reading the board is
+`improve:get` and never launches a review.
 
-**En la consola.** Mientras hay revisión en vuelo, la sección enseña una fila
-con el punto de su estado real, el callsign (pulsable: vuela la cámara y abre
-su ventana), la palabra de su estado, cuánto lleva, cuánto ha gastado de cuánto,
-y `STOP`. Una propuesta abierta dice `PROPOSED BY <callsign>` con el mismo
-camino de vuelta. En un teléfono la fila entra en la hoja de la barra de
-secciones y es **el único** camino hasta el revisor: no hay `⌥I` ni ventana que
-abrir a mano.
+**In the console.** While a review is in flight, the section shows a row with the
+dot for its real state, the callsign (clickable: flies the camera and opens its
+window), the word for its state, how long it has been going, how much it has
+spent out of how much, and `STOP`. An open proposal says `PROPOSED BY <callsign>`
+with the same way back. On a phone the row goes into the section-bar sheet and is
+**the only** way to the reviewer: there is no `⌥I` and no window to open by hand.
 
-## Lo que cuesta
+## What it costs
 
-Dos ejes, y **no se deducen el uno del otro**:
+Two axes, and **neither follows from the other**:
 
-- `perDay` (4 de fábrica) limita cuántas revisiones **automáticas** ocurren en
-  24 h. No ata a la ejecución manual, y no debe: el operador pulsa REVIEW NOW
-  cuando quiere.
-- `budgetTokens` (400.000 de fábrica) es el techo de **cada** revisión.
+- `perDay` (4 out of the box) limits how many **automatic** reviews happen in
+  24 h. It does not bind manual runs, and it should not: the operator presses
+  REVIEW NOW whenever they want.
+- `budgetTokens` (400,000 out of the box) is the ceiling for **each** review.
 
-Un techo diario repartido entre revisiones sería un presupuesto que encoge
-según la hora del día, y una revisión lanzada a última hora no puede valer menos
-que la de por la mañana.
+A daily ceiling split across reviews would be a budget that shrinks with the time
+of day, and a review launched late in the day cannot be worth less than the one
+in the morning.
 
-### El techo es un FRENO, no un muro
+### The ceiling is a BRAKE, not a wall
 
-**Multiplicar los dos no da un techo de gasto diario, y decir que sí lo da sería
-mentir.** Medido en la primera revisión real (`rev_mtschaq0u83g1or2`,
-2026-09-08): el revisor cruzó los 400k en menos de un minuto y llegó a marcar
-1,1M antes de que nadie lo parara. Tres razones, y ninguna se arregla subiendo
-el número:
+**Multiplying the two does not give a daily spending ceiling, and saying it does
+would be a lie.** Measured in the first real review (`rev_mtschaq0u83g1or2`,
+2026-09-08): the reviewer crossed 400k in under a minute and got as far as 1.1M
+before anyone stopped it. Three reasons, and none of them is fixed by raising the
+number:
 
-1. **La medida llega tarde y da saltos.** El consumo se deriva del transcript
-   que el collector relee; en esa misma sesión la cifra pasó por 201k, 1.116.804
-   y 622.319 antes de asentarse en el cierre. Nadie frena en un punto que
-   todavía no ha visto.
-2. **Frenar es mandar un comando.** El `stop` viaja al collector y puede tardar
-   o fallar.
-3. **Una llamada a un modelo no se parte por la mitad.** Un solo turno con
-   mucho contexto ya gasta más que el resto de la pasada.
+1. **The measurement arrives late and jumps around.** Consumption is derived from
+   the transcript the collector re-reads; in that same session the figure went
+   through 201k, 1,116,804 and 622,319 before settling at the close. Nobody
+   brakes at a point they have not seen yet.
+2. **Braking means sending a command.** The `stop` travels to the collector and
+   can be slow or fail.
+3. **A model call cannot be cut in half.** A single turn with a lot of context
+   already spends more than the rest of the pass.
 
-Lo que **sí** garantiza ORCA: mira el consumo del revisor en cada tic (20 s) **y
-en cada cambio de estado suyo**, que es cuando su gasto acaba de moverse; en
-cuanto lo ve por encima del techo, **lo para y cierra la revisión como
-`overbudget`**, con las cifras en la nota. El panel enseña `STOPPED OVER BUDGET`.
+What ORCA **does** guarantee: it looks at the reviewer's consumption on every
+tick (20 s) **and on every state change of its own**, which is when its spend has
+just moved; as soon as it sees it over the ceiling, **it stops it and closes the
+review as `overbudget`**, with the figures in the note. The panel shows `STOPPED
+OVER BUDGET`.
 
-El techo se aplica además con el **libro de presupuestos del hub**
-(`budgets.set({kind:'agent', ref})`, o `setPendingByShortId` mientras la sesión
-no ha aparecido), para que el revisor se vea y se frene como cualquier otro
-agente. Ese libro es también un freno por muestreo, no un muro: por eso la
-sección tiene el suyo encima y no delega la cuenta.
+The ceiling is also enforced through the **hub's budget ledger**
+(`budgets.set({kind:'agent', ref})`, or `setPendingByShortId` while the session
+has not appeared yet), so the reviewer is seen and braked like any other agent.
+That ledger is also a sampling brake, not a wall: which is why the section keeps
+its own on top and does not delegate the count.
 
-En **tokens** y no en dólares porque el eje del dinero está apagado salvo
-`ORCA_BUDGET_MONEY=1`, y un presupuesto que casi nunca se evalúa no es un
-presupuesto. `SETUP` lo cambia en cinco pasos (100k · 200k · 400k · 800k · 2M) y
-`ORCA_IMPROVE_BUDGET_TOKENS` fija el inicial.
+In **tokens** and not in dollars because the money axis is off unless
+`ORCA_BUDGET_MONEY=1`, and a budget that is almost never evaluated is not a
+budget. `SETUP` changes it in five steps (100k · 200k · 400k · 800k · 2M) and
+`ORCA_IMPROVE_BUDGET_TOKENS` sets the initial value.
 
-## Cuándo se revisa
+## When it reviews
 
-Un tic cada minuto que sólo lee memoria y sale por la primera condición que
-falla. Se pide un turno de CAPCOM únicamente cuando pasan las cinco, y el panel
-enseña cuál falta (`dueForReview`):
+A tick every minute that only reads memory and exits at the first condition that
+fails. A CAPCOM turn is requested only when all five pass, and the panel shows
+which one is missing (`dueForReview`):
 
-| Condición | Lo que dice el panel |
+| Condition | What the panel says |
 |---|---|
-| no pausada | `PAUSED BY THE OPERATOR` |
-| ninguna revisión en vuelo | `A REVIEW IS IN FLIGHT · 12m AGO` |
-| hay sesión CAPCOM | `NO CAPCOM SESSION TO ASK` |
-| ha pasado `everyMin` (6h) | `NEXT IN 3h` |
-| bajo el tope diario (4) | `4 REVIEWS IN 24H · AT THE DAILY CEILING` |
-| hay `minSignal` (40) gestos nuevos | `WAITING FOR SIGNAL · 12/40` |
-| CAPCOM no está en mitad de un turno | `CAPCOM IS MID-TURN` |
+| not paused | `PAUSED BY THE OPERATOR` |
+| no review in flight | `A REVIEW IS IN FLIGHT · 12m AGO` |
+| there is a CAPCOM session | `NO CAPCOM SESSION TO ASK` |
+| `everyMin` (6h) has passed | `NEXT IN 3h` |
+| under the daily cap (4) | `4 REVIEWS IN 24H · AT THE DAILY CEILING` |
+| there are `minSignal` (40) new gestures | `WAITING FOR SIGNAL · 12/40` |
+| CAPCOM is not mid-turn | `CAPCOM IS MID-TURN` |
 
-`REVIEW NOW` se salta el reloj, la señal y el tope —el operador ya decidió— pero
-no un CAPCOM vivo, que no es una preferencia. `SETUP` cambia los tres límites y
-`PAUSE` para la sección entera; todo se guarda. `ORCA_IMPROVE=0` es el
-interruptor duro (ni reloj ni ejecución manual);
-`ORCA_IMPROVE_EVERY_MIN`, `ORCA_IMPROVE_PER_DAY`, `ORCA_IMPROVE_MIN_SIGNAL` y
-`ORCA_IMPROVE_PAUSED` son sólo los valores iniciales.
+`REVIEW NOW` skips the clock, the signal and the cap — the operator already
+decided — but not a live CAPCOM, which is not a preference. `SETUP` changes the
+three limits and `PAUSE` stops the whole section; everything is saved.
+`ORCA_IMPROVE=0` is the hard switch (no clock and no manual run);
+`ORCA_IMPROVE_EVERY_MIN`, `ORCA_IMPROVE_PER_DAY`, `ORCA_IMPROVE_MIN_SIGNAL` and
+`ORCA_IMPROVE_PAUSED` are only the initial values.
 
-Una revisión pedida queda `pending` y **caduca a los 45 minutos**: sin eso, la
-primera que se pierde —CAPCOM rota, muere, o no llama a la herramienta— apagaría
-la sección para siempre.
+A requested review stays `pending` and **expires after 45 minutes**: without
+that, the first one that gets lost — CAPCOM rotates, dies, or does not call the
+tool — would turn the section off forever.
 
-**Por qué a CAPCOM y no a un worker.** CAPCOM ya tiene delante lo que hay que
-revisar: la flota, el diario, las misiones y las herramientas. Un worker
-costaría una sesión entera, un worktree y un arranque en frío para acabar
-leyendo lo mismo.
+**Why CAPCOM and not a worker.** CAPCOM already has in front of it what needs
+reviewing: the fleet, the journal, the missions and the tools. A worker would
+cost a whole session, a worktree and a cold start just to end up reading the same
+thing.
 
-## Telemetría
+## Telemetry
 
-Mínima, existente y sin contenido. Dos fuentes, ninguna nueva:
+Minimal, existing and without content. Two sources, neither of them new:
 
-- **El diario** (`hub/journal.ts`, `stats()` de 24h): lanzamientos por origen,
-  done/dead, coste total y medio, duración media, escalaciones —quién las
-  contestó y cuánto esperaron—, rotaciones de CAPCOM, aterrizajes, y lo mismo
-  por proyecto usando su **código** (`AX`).
-- **Contadores de uso** (`UsageMeter`): `mcp:<tool>` cada vez que CAPCOM llama
-  una herramienta, `ui:<frame>` cada vez que la consola pide algo al hub, y
-  `gesture:<familia>:<detalle>` cada vez que el operador **hace** algo en la
-  interfaz que al hub no le pide nada: abre una ventana (`win:agent`,
-  `win:terminal`, `win:gallery`…), despliega una sección (`hud:sheet-improve`,
-  `hud:missions-unfold`), usa un atajo (`key:alt-c`, `key:f`) o vuela la
-  cámara (`fly:agent`, `fly:point`). Un **nombre y una cuenta**, nunca los
-  argumentos: ni qué agente, ni qué archivo. Es lo que enseña qué se usa de
-  verdad y qué no se encuentra.
+- **The journal** (`hub/journal.ts`, 24h `stats()`): launches by origin,
+  done/dead, total and average cost, average duration, escalations — who answered
+  them and how long they waited — CAPCOM rotations, landings, and the same per
+  project using its **code** (`AX`).
+- **Usage counters** (`UsageMeter`): `mcp:<tool>` every time CAPCOM calls a tool,
+  `ui:<frame>` every time the console asks the hub for something, and
+  `gesture:<family>:<detail>` every time the operator **does** something in the
+  interface that asks the hub for nothing: opens a window (`win:agent`,
+  `win:terminal`, `win:gallery`…), unfolds a section (`hud:sheet-improve`,
+  `hud:missions-unfold`), uses a shortcut (`key:alt-c`, `key:f`) or flies the
+  camera (`fly:agent`, `fly:point`). A **name and a count**, never the arguments:
+  not which agent, not which file. It is what shows what actually gets used and
+  what nobody can find.
 
-  Los gestos se acumulan en la consola y salen en lotes cada 15 s (o antes,
-  con 50 acumulados) en una trama `gestures` sin ack (`src/ui/gestures.ts`).
-  Las familias son una **lista cerrada** (`win`, `hud`, `key`, `fly`) y cada
-  una tiene un techo de 24 nombres distintos; lo que pasa del techo se funde
-  en `<familia>:other`, para que un cliente con un fallo no llene los 200
-  contadores del tablero y deje fuera a las herramientas de CAPCOM
-  (`src/shared/gestures.ts`). El informe del revisor los enseña en tres
-  líneas: los más tocados, el total por familia (con los ceros) y **qué
-  clases de ventana no se abrieron ni una vez** en la ventana de 24 h.
+  Gestures accumulate in the console and go out in batches every 15 s (or sooner,
+  with 50 accumulated) in a `gestures` frame with no ack (`src/ui/gestures.ts`).
+  The families are a **closed list** (`win`, `hud`, `key`, `fly`) and each one has
+  a ceiling of 24 distinct names; anything over the ceiling is merged into
+  `<family>:other`, so a buggy client cannot fill the board's 200 counters and
+  crowd out CAPCOM's tools (`src/shared/gestures.ts`). The reviewer's report shows
+  them in three lines: the most touched, the total per family (with the zeros) and
+  **which window classes were not opened even once** in the 24 h window.
 
-Lo que **no** entra en un informe: rutas, briefs, transcripciones, preguntas o
-respuestas de nadie, y ningún secreto. Además todo lo que escribe CAPCOM pasa
-por `redact` antes de tocar el disco, que es un cinturón sobre los tirantes: no
-debería dispararse nunca, pero un token pegado en una propuesta se quedaría en
-disco y saldría por el protocolo a cualquier consola conectada.
+What does **not** go into a report: paths, briefs, transcripts, anyone's
+questions or answers, and no secrets. On top of that, everything CAPCOM writes
+goes through `redact` before touching disk, which is a belt over the braces: it
+should never fire, but a token pasted into a proposal would stay on disk and go
+out over the protocol to any connected console.
 
-Dos acumuladores del mismo hecho, porque responden a preguntas distintas:
-`usage` es la ventana que se le enseña a la revisión, `signal` es lo ocurrido
-**desde** la última y es lo que decide si vale la pena pedir otra. `signal` se
-pone a cero al PEDIR la revisión, no al recibirla.
+Two accumulators of the same fact, because they answer different questions:
+`usage` is the window shown to the review, `signal` is what has happened **since**
+the last one and is what decides whether it is worth asking for another. `signal`
+is zeroed when the review is REQUESTED, not when it comes back.
 
-## El canal del revisor
+## The reviewer's channel
 
-Un agente no tiene socket ni token del hub: tiene un sistema de ficheros. Así
-que archivar es dejar un fichero, igual que `orca-tell` y que una escalación.
+An agent has no socket and no hub token: it has a filesystem. So filing means
+leaving a file, same as `orca-tell` and as an escalation.
 
 ```
 orca-improve report --review <review_id> --file proposals.json
 ```
 
-1. `bin/orca-improve.mjs` escribe `<proyecto>/.orca/improve/<id>.json` con
-   escribir-y-renombrar, y espera.
-2. `ImproveDropWatcher` (`collector/improve-drop.ts`) lo recoge, valida forma y
-   tamaño, **borra el fichero** y lo sube como `improve:report` con un
-   `reportId`. La RUTA no viaja: se queda indexada en el collector, así que un
-   hub comprometido no puede elegir dónde se escribe un fichero.
-3. El hub comprueba **quién** reporta —sólo el agente de la revisión en vuelo, o
-   uno cuyo short id coincida— archiva, y contesta `improve:ack` con el mismo
+1. `bin/orca-improve.mjs` writes `<project>/.orca/improve/<id>.json` with
+   write-and-rename, and waits.
+2. `ImproveDropWatcher` (`collector/improve-drop.ts`) picks it up, validates shape
+   and size, **deletes the file** and uploads it as `improve:report` with a
+   `reportId`. The PATH does not travel: it stays indexed in the collector, so a
+   compromised hub cannot choose where a file gets written.
+3. The hub checks **who** is reporting — only the agent of the in-flight review,
+   or one whose short id matches — files, and answers `improve:ack` with the same
    `reportId`.
-4. El collector escribe `<id>.ack.json` y `orca-improve` lo imprime: cuántas
-   entraron, cuántas se fundieron, y **el motivo exacto de cada rechazo**. Un
-   motivo es algo que el revisor puede corregir y volver a mandar en el mismo
-   turno.
+4. The collector writes `<id>.ack.json` and `orca-improve` prints it: how many
+   came in, how many were merged, and **the exact reason for each rejection**. A
+   reason is something the reviewer can fix and send again in the same turn.
 
-El recibo vuelve siempre, también cuando se rechaza entero: un informe que se
-pierde en silencio se lleva por delante la revisión sin que nadie se entere.
+The receipt always comes back, including when the whole thing is rejected: a
+report that gets lost in silence takes the review down with it without anyone
+finding out.
 
-## Herramientas de CAPCOM
+## CAPCOM's tools
 
-Quien revisa es el agente, no CAPCOM. Lo que le queda a CAPCOM es el tablero:
+The one who reviews is the agent, not CAPCOM. What is left for CAPCOM is the
+board:
 
-- `list_improvements(status, limit)` — claves, estados, cuáles son ya misiones y
-  qué contestó el operador.
-- `note_improvement(proposal_id, text)` — contestar al operador en un hilo,
-  cuando respondió a una pregunta de una propuesta.
-- `report_improvements(review_id, proposals[])` — sigue publicada y hace lo
-  mismo que `orca-improve`, con la misma validación. La usa un CAPCOM que quiera
-  archivar algo por su cuenta; el camino normal es el revisor.
+- `list_improvements(status, limit)` — keys, states, which ones are already
+  missions and what the operator answered.
+- `note_improvement(proposal_id, text)` — answer the operator in a thread, when
+  they responded to a question on a proposal.
+- `report_improvements(review_id, proposals[])` — still published and does the
+  same thing as `orca-improve`, with the same validation. It is used by a CAPCOM
+  that wants to file something on its own; the normal path is the reviewer.
 
-Las tres viven en `agents/tools-improve.ts`, salen por el mismo servidor MCP
-que el resto (`/mcp`) y están nombradas en el brief de CAPCOM
-(`collector/briefs.ts`), que es lo que la prueba `capcom` exige.
+The three live in `agents/tools-improve.ts`, go out over the same MCP server as
+the rest (`/mcp`) and are named in CAPCOM's brief (`collector/briefs.ts`), which
+is what the `capcom` test requires.
 
-## Dónde vive
+## Where it lives
 
 | | |
 |---|---|
-| `src/shared/improve.ts` | tipos, validación, deduplicación, `dueForReview`, el prompt y el traspaso a misión |
-| `src/hub/improve.ts` | `UsageMeter`, `ImproveStore` (disco), `buildDigest`, el reloj y el ciclo de vida del revisor |
-| `src/shared/gestures.ts` | el vocabulario de gestos: familias, techos, validación del lote, agregado por familia |
-| `src/ui/gestures.ts` | el contador de la consola: acumula gestos y los manda en lotes |
-| `bin/orca-improve.mjs` | el CLI con el que archiva el revisor |
-| `src/collector/improve-drop.ts` | el buzón `<proyecto>/.orca/improve/` |
-| `src/collector/shims.ts` | el tercer juego de comandos: el del revisor |
-| `src/agents/tools-improve.ts` | las tres herramientas MCP |
-| `src/hub/autonomy.ts` | pieza F, montada junto a wake/verify/journal |
-| `src/hub/server.ts` | `improve:get/run/act/seen/send/config`, el push `t:'improve'`, los contadores |
-| `src/ui/hud/improve.ts` | la sección |
-| `src/ui/styles/improve.css` | su color y su forma |
+| `src/shared/improve.ts` | types, validation, deduplication, `dueForReview`, the prompt and the handover to a mission |
+| `src/hub/improve.ts` | `UsageMeter`, `ImproveStore` (disk), `buildDigest`, the clock and the reviewer's lifecycle |
+| `src/shared/gestures.ts` | the gesture vocabulary: families, ceilings, batch validation, aggregation by family |
+| `src/ui/gestures.ts` | the console's counter: accumulates gestures and sends them in batches |
+| `bin/orca-improve.mjs` | the CLI the reviewer files with |
+| `src/collector/improve-drop.ts` | the `<project>/.orca/improve/` mailbox |
+| `src/collector/shims.ts` | the third set of commands: the reviewer's |
+| `src/agents/tools-improve.ts` | the three MCP tools |
+| `src/hub/autonomy.ts` | piece F, mounted next to wake/verify/journal |
+| `src/hub/server.ts` | `improve:get/run/act/seen/send/config`, the `t:'improve'` push, the counters |
+| `src/ui/hud/improve.ts` | the section |
+| `src/ui/styles/improve.css` | its color and its shape |
 
-Estado en `~/.orca/hub/improve/improve.json`, escrito con temporal-y-renombrado
-como `missions.json`. Si el directorio no se puede escribir, la sección sigue en
-memoria y **lo dice** en su línea de estado (`NOT SAVING · DECISIONS WILL BE
-LOST ON RESTART`): una sección que acepta decisiones y las pierde en silencio es
-peor que una que no existe.
+State in `~/.orca/hub/improve/improve.json`, written with temp-and-rename like
+`missions.json`. If the directory cannot be written, the section keeps going in
+memory and **says so** in its status line (`NOT SAVING · DECISIONS WILL BE LOST
+ON RESTART`): a section that accepts decisions and loses them in silence is worse
+than one that does not exist.
 
-## Verificación
+## Verification
 
 ```
-npm test -- improve gestures        las suites de la sección y la de gestos
-npx tsx test/hud-improve.shots.ts   la sección, fotografiada contra la consola
+npm test -- improve gestures        the section's suites and the gestures one
+npx tsx test/hud-improve.shots.ts   the section, photographed against the console
 ```
 
-`improve` cubre cuatro suites: `AUTOMEJORA` (las piezas, con reloj falso),
-`AUTOMEJORA · hub` (hub real por el socket de la consola), `AUTOMEJORA · agente
-revisor` (el recorrido entero contra una máquina real al otro lado del cable:
-lanzar, verse, reportar, terminar, fallar, cancelar) y `AUTOMEJORA ·
-orca-improve` (el CLI de verdad como subproceso contra el vigilante de verdad).
+`improve` covers four suites: `AUTOMEJORA` (the pieces, with a fake clock),
+`AUTOMEJORA · hub` (a real hub over the console socket), `AUTOMEJORA · agente
+revisor` (the whole path against a real machine on the other side of the wire:
+launch, be seen, report, finish, fail, cancel) and `AUTOMEJORA · orca-improve`
+(the real CLI as a subprocess against the real watcher).
 
-`hud-improve.shots.ts` escribe `test/shots/hud-improve*.png` y comprueba en el
-navegador el color propio, el sigilo pintado, la barra continua contra la
-discontinua, el orden abiertas-antes-que-cerradas, los medidores sólo cuando hay
-fundamento, la cuenta de novedades, evidencia contra hipótesis al abrir, las
-acciones, que una enviada enseñe su misión y no un SEND, que una terminada
-diga DONE y conserve la marca de misión mientras la archivada no está ni
-detrás del pliegue, la geometría contra mástil, reloj, panel de misiones y
-radar, y el pliegue. Se corre solo: `npx tsx test/hud-improve.shots.ts`.
+`hud-improve.shots.ts` writes `test/shots/hud-improve*.png` and checks in the
+browser the section's own color, the painted wake, the solid bar against the
+dashed one, the open-before-closed order, the meters only when there is a basis
+for them, the count of new items, evidence against hypothesis on opening, the
+actions, that a sent one shows its mission and not a SEND, that a finished one
+says DONE and keeps the mission mark while the archived one is not there even
+behind the fold, the geometry against the mast, the clock, the mission panel and
+the radar, and the fold. It runs on its own: `npx tsx test/hud-improve.shots.ts`.
 
-Filtros de cobertura de FORGE: `forge`, `improve`, `missions`, `mission-stall`, `wake`, `spawns`, `publisher`.
+FORGE coverage filters: `forge`, `improve`, `missions`, `mission-stall`, `wake`, `spawns`, `publisher`.

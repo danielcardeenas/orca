@@ -1,169 +1,171 @@
-# Higiene — lo que ORCA dejó atrás en procesos
+# Hygiene — what ORCA left behind in processes
 
-**Misión:** `mission_mtskpgjhmnn5sbqp`
-**Estado:** implementado y verificado, incluida una corrida real contra la
-máquina del operador. **Sin commit** (§8).
+**Mission:** `mission_mtskpgjhmnn5sbqp`
+**Status:** implemented and verified, including a real run against the
+operator's machine. **Not committed** (§8).
 
-El canal de mensajes trunca, así que el informe íntegro es éste.
+The message channel truncates, so this is the full report.
 
 ---
 
-## 1. Qué cubría ya el repositorio
+## 1. What the repository already covered
 
-Antes de escribir nada, lo que había:
+Before writing anything, what was there:
 
-| Ya existía | Qué hacía | Qué NO cubría |
+| Already existed | What it did | What it did NOT cover |
 |---|---|---|
-| `HygieneSampler` (`collector/hygiene.ts`) | Disco por categoría, volúmenes, CPU/memoria, crecimiento, y **candidatos** de disco. Mide procesos, pero **sólo los que ya conoce**: este collector y los agentes con pid en su liveness. | No descubre procesos. No sabe nada de Vite, ni de puertos, ni de entrypoints colgados. **No borra ni termina nada** — la primera entrega de higiene observa y previsualiza, y lo dice. |
-| `hub/harness.ts` + `purge_harness` | **La única capacidad de matar procesos que había.** Reconoce tres programas del arnés y sólo los que apuntan a ESTE hub. | Sólo el arnés. Un Vite o un hub colgados no los ve. |
-| `hub/liveness.ts` (`isLiveAgent`, `ghostReason`) | La doctrina: **la muerte exige evidencia positiva; la vida es el valor por defecto**. Permite al hub dar por terminado a un agente con un motivo. | Razona sobre el mundo del hub, no sobre los procesos de la máquina. |
-| `shared/archive.ts` + `agents:archive` | Archiva agentes terminados, **ignorando a los vivos**, por ids o por filtro. | Hay que saber a quién archivar: nada detectaba al fantasma. |
-| `transcripts:purge`, `stop`, `remove` | Borrar transcripts, parar una sesión, retirar una terminada. | Todas piden que alguien sepa ya qué está de más. |
-| Ventana HYGIENE | Informe de disco + `SAMPLE NOW`. | Ninguna acción. |
+| `HygieneSampler` (`collector/hygiene.ts`) | Disk by category, volumes, CPU/memory, growth, and disk **candidates**. It measures processes, but **only the ones it already knows**: this collector and the agents with a pid in its liveness. | It does not discover processes. It knows nothing about Vite, or ports, or hung entrypoints. **It deletes and kills nothing** — the first hygiene delivery observes and previews, and says so. |
+| `hub/harness.ts` + `purge_harness` | **The only process-killing capability there was.** It recognizes three harness programs and only the ones pointing at THIS hub. | Only the harness. A hung Vite or hub is invisible to it. |
+| `hub/liveness.ts` (`isLiveAgent`, `ghostReason`) | The doctrine: **death demands positive evidence; life is the default**. It lets the hub call an agent finished, with a reason. | It reasons about the hub's world, not about the machine's processes. |
+| `shared/archive.ts` + `agents:archive` | Archives finished agents, **ignoring the live ones**, by ids or by filter. | You have to know who to archive: nothing detected the ghost. |
+| `transcripts:purge`, `stop`, `remove` | Delete transcripts, stop a session, retire a finished one. | All of them require somebody to already know what is surplus. |
+| HYGIENE window | Disk report + `SAMPLE NOW`. | No action. |
 
-**En una línea:** ORCA medía muy bien el disco y no miraba los procesos; podía
-matar exactamente tres programas del arnés; y sabía archivar agentes que
-alguien le nombrara, sin nada que los nombrara.
+**In one line:** ORCA measured disk very well and did not look at processes; it
+could kill exactly three harness programs; and it knew how to archive agents
+somebody named for it, with nothing to name them.
 
-## 2. Qué se ha añadido
+## 2. What has been added
 
-Una segunda mitad de la higiene: lo que ORCA cuesta en **procesos y puertos**.
-Viaja en el mismo informe, por el mismo frame, en el mismo panel y en el mismo
-reloj lento.
+A second half of hygiene: what ORCA costs in **processes and ports**. It
+travels in the same report, over the same frame, in the same panel and on the
+same slow clock.
 
-Cuatro clases de resto:
+Four classes of stray:
 
 | | |
 |---|---|
-| `vite` | Un servidor de desarrollo **de este repositorio**, identificado por su **cwd** |
-| `orca` | Un entrypoint de ORCA (`src/orca.ts`, `src/hub/server.ts`, `src/collector/index.ts`) |
-| `pane` | Un pane de tmux cuyo programa ya salió, o cuyo pid no existe |
-| `agent` | Un agente que sigue en el registro con evidencia positiva de que su proceso no está |
+| `vite` | A dev server **of this repository**, identified by its **cwd** |
+| `orca` | An ORCA entrypoint (`src/orca.ts`, `src/hub/server.ts`, `src/collector/index.ts`) |
+| `pane` | A tmux pane whose program has already exited, or whose pid does not exist |
+| `agent` | An agent still in the registry with positive evidence that its process is gone |
 
-## 3. La regla, y por qué no basta con menos
+## 3. The rule, and why less will not do
 
-**Matar exige evidencia positiva de orfandad; no matar es el valor por
-defecto.** Es la asimetría de `hub/liveness.ts` aplicada a procesos: dejar vivo
-un resto cuesta memoria y un puerto; matar uno vivo cuesta el trabajo de
-alguien — y aquí «alguien» puede ser el servidor de desarrollo que el operador
-tiene delante.
+**Killing demands positive evidence of orphanhood; not killing is the
+default.** It is the asymmetry of `hub/liveness.ts` applied to processes:
+leaving a stray alive costs memory and a port; killing a live one costs
+somebody's work — and here "somebody" may be the dev server the operator has in
+front of them.
 
-**Nada de esto basta por sí solo**, y ninguno entra en la decisión: llevar
-mucho rato arriba · estar ocioso · no aparecer en un latido · tener un puerto
-abierto. Hay una prueba que lo fija (`being old, idle or holding a port is not
-evidence of anything`).
+**None of this is enough on its own**, and none of it enters the decision:
+having been up a long time · being idle · not showing up in a heartbeat ·
+holding an open port. There is a test that pins it down (`being old, idle or
+holding a port is not evidence of anything`).
 
-Se exigen **tres hechos comprobables a la vez**:
+**Three checkable facts are required at once**:
 
-1. **Es nuestro.** Para un Vite, su **cwd** es este repositorio — nunca el
-   nombre del programa. Hay un Vite en cada proyecto de la máquina, y
-   `pkill vite` es exactamente lo que este módulo existe para no hacer. Un
-   `vite.config.ts` abierto en un editor tampoco cuenta: se reconoce la **ruta
-   dentro de `node_modules`**, no la palabra.
-2. **ORCA lo lanzó y su dueño se fue** — un **lease** (§3bis). No «no tiene
-   padre»: eso no es prueba de nada.
-3. **Sigue siendo el mismo.** Pid **y hora de arranque** se comprueban otra vez
-   con una lectura de `ps` **nueva** justo antes de terminarlo — y con ellos el
-   lease y las protecciones. Un pid se reutiliza; matar por un pid leído hace
-   un minuto es matar a un desconocido.
+1. **It is ours.** For a Vite, its **cwd** is this repository — never the
+   program's name. There is a Vite in every project on the machine, and
+   `pkill vite` is exactly what this module exists in order not to do. A
+   `vite.config.ts` open in an editor does not count either: what is recognized
+   is the **path inside `node_modules`**, not the word.
+2. **ORCA launched it and its owner is gone** — a **lease** (§3bis). Not "it
+   has no parent": that proves nothing.
+3. **It is still the same one.** Pid **and start time** are checked again with
+   a **fresh** `ps` read right before killing it — and with them the lease and
+   the protections. A pid gets reused; killing by a pid read a minute ago is
+   killing a stranger.
 
-### 3bis. Por qué `ppid === 1` NO es abandono, y qué lo sustituye
+### 3bis. Why `ppid === 1` is NOT abandonment, and what replaces it
 
-La primera versión de esta entrega daba por abandonado a un proceso porque
-estaba reparentado a init. **Es falso.** `nohup npm run dev &`, `setsid`,
-`disown` y cualquier arranque deliberadamente desatendido dejan exactamente esa
-firma en un proceso **perfectamente sano**, que puede estar sirviendo otra
-consola en otro puerto. Ofrecer terminarlo era ofrecer matar el servidor de
-alguien, y la única protección que había era el puerto de la consola propia.
+The first version of this delivery took a process for abandoned because it had
+been reparented to init. **That is false.** `nohup npm run dev &`, `setsid`,
+`disown` and any deliberately unattended start leave exactly that signature on a
+**perfectly healthy** process, which may be serving another console on another
+port. Offering to kill it was offering to kill somebody's server, and the only
+protection there was was one's own console's port.
 
-No se arregla adivinando mejor: **no se puede saber si un proceso desconocido
-sobra**. Se arregla invirtiendo la pregunta.
+It is not fixed by guessing better: **you cannot know whether an unknown
+process is surplus**. It is fixed by inverting the question.
 
-**El lease** (`src/shared/lease.ts`). Quien lanza algo lo apunta en
-`~/.orca/leases/<id>.json`: qué se lanzó (pid **y** hora de arranque), desde
-dónde, qué puertos sirve, y **quién lo lanzó**. Lo renueva mientras vive y lo
-borra al salir limpiamente. Un lease sin borrar cuyo dueño ya no está **es** la
-evidencia: significa que quien lo lanzó se fue de mala manera, que es
-exactamente cuando quedan restos.
+**The lease** (`src/shared/lease.ts`). Whoever launches something records it in
+`~/.orca/leases/<id>.json`: what was launched (pid **and** start time), from
+where, which ports it serves, and **who launched it**. It renews it while it
+lives and deletes it on a clean exit. An undeleted lease whose owner is no
+longer around **is** the evidence: it means whoever launched it went away badly,
+which is exactly when strays get left behind.
 
-La regla queda así:
+The rule ends up like this:
 
-| situación | veredicto |
+| situation | verdict |
 |---|---|
-| sin lease | **`ambiguous`**. «ORCA no lanzó esto, así que no puede saber si sobra. Correr sin padre es lo que dejan `nohup`, `setsid` y `disown`.» |
-| lease renovado hace poco | **`protected`** |
-| lease caducado pero el dueño sigue vivo (pid + hora) | **`protected`** |
-| lease caducado **y** dueño ido | **`orphan`** — el único caso con botón |
+| no lease | **`ambiguous`**. "ORCA did not launch this, so it cannot know whether it is surplus. Running with no parent is what `nohup`, `setsid` and `disown` leave behind." |
+| lease renewed recently | **`protected`** |
+| lease expired but the owner is still alive (pid + time) | **`protected`** |
+| lease expired **and** owner gone | **`orphan`** — the only case with a button |
 
-**La consecuencia, dicha en voz alta:** un Vite que alguien arrancó a mano, con
-o sin `nohup`, **no es terminable desde aquí nunca**. Sólo lo es lo que ORCA
-lanzó ella misma. Es menos capacidad y es la correcta.
+**The consequence, said out loud:** a Vite somebody started by hand, with or
+without `nohup`, **can never be killed from here**. Only what ORCA launched
+itself can be. It is less capability and it is the right one.
 
-**Quién escribe leases.** `tools/lease.mjs` envuelve un proceso y lo anota;
-`npm run dev:ui` pasa ya por él, así que el Vite de `npm run dev` queda
-recogible. Lo que se arranque fuera de ahí no lleva lease, y por tanto no se
-ofrece. El intervalo de renovación está duplicado en ese fichero por ser JS
-suelto, y hay una prueba que sostiene las dos copias.
+**Who writes leases.** `tools/lease.mjs` wraps a process and records it;
+`npm run dev:ui` already goes through it, so the Vite from `npm run dev` is
+collectable. Anything started outside of that carries no lease, and therefore is
+not offered. The renewal interval is duplicated in that file because it is loose
+JS, and there is a test that holds the two copies together.
 
-**Otras consolas del mismo proyecto.** Se protege el **conjunto** de puertos en
-los que hay una consola sirviendo ahora —el de este ORCA y el de todo lease
-vivo—, no sólo el propio. Mirar únicamente el de uno mismo dejaba la consola
-del vecino en la lista de lo matable.
+**Other consoles of the same project.** What is protected is the **set** of
+ports where a console is serving right now — this ORCA's and that of every live
+lease — not just one's own. Looking only at one's own left the neighbor's
+console on the killable list.
 
-**Al limpiar se revalida todo, no sólo el pid**: identidad (pid + hora), que el
-lease siga caducado y sin dueño, y que el proceso no haya empezado a servir una
-consola. Cualquiera de las tres lo devuelve a intocable, con el motivo.
+**On cleaning, everything is revalidated, not just the pid**: identity (pid +
+time), that the lease is still expired and ownerless, and that the process has
+not started serving a console. Any of the three returns it to untouchable, with
+the reason.
 
-Tres veredictos, y los tres se enseñan:
+Three verdicts, and all three are shown:
 
-- **`orphan`** — cumple las tres. Lleva botón.
-- **`ambiguous`** — es nuestro pero algo no encaja: cwd ilegible, padre vivo,
-  sin hora de arranque, **o sin lease de ORCA**. **Se enseña y no se toca**, y
-  el panel dice qué es lo que ORCA no puede saber en vez de fingir un
-  diagnóstico.
-- **`protected`** — reconocido y dejado en paz, **con el motivo**: el hub, el
-  collector, ORCA misma, el Vite que sirve esta consola, el Vite de otro
-  proyecto. Se listan a propósito: un panel que sólo enseña lo que va a matar
-  no deja comprobar por qué lo demás se salvó, y esa comprobación es el único
-  control real sobre una operación que termina procesos.
+- **`orphan`** — it meets all three. It carries a button.
+- **`ambiguous`** — it is ours but something does not add up: unreadable cwd,
+  live parent, no start time, **or no ORCA lease**. **Shown and not touched**,
+  and the panel says what it is that ORCA cannot know instead of faking a
+  diagnosis.
+- **`protected`** — recognized and left alone, **with the reason**: the hub, the
+  collector, ORCA itself, the Vite serving this console, another project's Vite.
+  They are listed on purpose: a panel that only shows what it is going to kill
+  gives you no way to check why everything else was spared, and that check is
+  the only real control over an operation that kills processes.
 
-**Qué se protege explícitamente:** este proceso y su padre · el hub y el
-collector · CAPCOM y todo agente vivo (sus pids entran como intocables) · el
-Vite del puerto de esta consola · cualquier cwd fuera del repositorio · otras
-máquinas (un resto sólo existe en una, y el comando lleva su `machineId`).
+**What is explicitly protected:** this process and its parent · the hub and the
+collector · CAPCOM and every live agent (their pids go in as untouchable) · the
+Vite on this console's port · any cwd outside the repository · other machines (a
+stray only exists on one, and the command carries its `machineId`).
 
-**El agente fantasma se RETIRA, no se mata.** No hay proceso que matar, y
-fingirlo sería la única forma de hacer esto mal. La acción va por el flujo que
-ya existía: `agents:archive` con sus ids, que ignora a los vivos por su cuenta.
+**A ghost agent is RETIRED, not killed.** There is no process to kill, and
+pretending otherwise would be the one way to get this wrong. The action goes
+through the flow that already existed: `agents:archive` with their ids, which
+ignores the live ones on its own.
 
-## 4. Terminar, con educación y sin mentir
+## 4. Killing, politely and without lying
 
-`SIGTERM` → espera 4 s → `SIGKILL` sólo si sigue ahí. Un Vite cierra su puerto
-y sus watchers con `SIGTERM`; matarlo en seco deja a veces el socket ocupado,
-que es justo el recurso que se quería liberar. Cada resultado dice lo que pasó
-de verdad: `stopped` (con la señal que hizo falta) · `refused` (no pasó la
-revalidación, con el motivo) · `gone` (ya no estaba: **no se finge** haberlo
-matado) · `failed` · `retired`.
+`SIGTERM` → wait 4 s → `SIGKILL` only if it is still there. A Vite closes its
+port and its watchers on `SIGTERM`; killing it outright sometimes leaves the
+socket held, which is precisely the resource you wanted to free. Every result
+says what actually happened: `stopped` (with the signal it took) · `refused` (it
+did not pass revalidation, with the reason) · `gone` (it was not there any more:
+killing it **is not faked**) · `failed` · `retired`.
 
-`dryRun` hace todas las comprobaciones y no manda ninguna señal.
+`dryRun` does all the checks and sends no signal.
 
-## 5. Automatización: ninguna, a propósito
+## 5. Automation: none, on purpose
 
-La política existente de higiene es explícita: *«this release observes and
-previews»*, y `PROTECTED` existe para que nada recuperable sea candidato. Nada
-en esta entrega termina un proceso por su cuenta: **el botón es la acción**. No
-he añadido un `autoclean` ni una variable de entorno que lo encienda, porque
-extender una política de «no borra nada» a «mata procesos solo» no es una
-decisión que corresponda a esta entrega.
+The existing hygiene policy is explicit: *"this release observes and
+previews"*, and `PROTECTED` exists so that nothing recoverable becomes a
+candidate. Nothing in this delivery kills a process on its own: **the button is
+the action**. I have not added an `autoclean` or an environment variable to turn
+it on, because extending a policy of "deletes nothing" to "kills processes by
+itself" is not a decision that belongs to this delivery.
 
-## 6. La corrida real, y lo que rompió
+## 6. The real run, and what it broke
 
-Contra el hub y el collector vivos del operador, con una sonda desechable: un
-`node` de dos líneas en `~/projects/orca/.orca/strays-probe/node_modules/.bin/vite`,
-lanzado por un shell que se va —así queda huérfano de verdad, no simulado— con
-su cwd dentro del repositorio.
+Against the operator's live hub and collector, with a disposable probe: a
+two-line `node` at `~/projects/orca/.orca/strays-probe/node_modules/.bin/vite`,
+launched by a shell that then leaves — so it is genuinely orphaned, not
+simulated — with its cwd inside the repository.
 
-**Resultado:**
+**Result:**
 
 ```
 sonda plantada: pid 21658 (cwd ~/projects/orca/.orca/strays-probe)
@@ -179,149 +181,155 @@ no ofrecidos (y por tanto intactos): 5
   vite · :4478                  pid=62458  → sigue vivo
 ```
 
-El Vite real del operador salió `protected` con el motivo *«this is the console
-you are looking at»*, y los dos collectors con *«this is ORCA itself»*.
+The operator's real Vite came out `protected` with the reason *"this is the
+console you are looking at"*, and the two collectors with *"this is ORCA
+itself"*.
 
-### Lo que la corrida rompió, y está arreglado
+### What the run broke, and is fixed
 
-**27 agentes vivos marcados como fantasmas.** La primera versión daba por
-fantasma a un agente `thinking` que el CLI no lista y que no tiene pid ni pane.
-Contra la flota real eso fueron **27 agentes, todos vivos**, y por dos razones
-que son la misma:
+**27 live agents marked as ghosts.** The first version took a `thinking` agent
+for a ghost when the CLI does not list it and it has neither pid nor pane.
+Against the real fleet that was **27 agents, all alive**, for two reasons that
+are the same reason:
 
-1. `pid === null` significa **«ORCA nunca supo su pid»** —lo normal en una
-   sesión `--bg`— y no «su proceso no existe». Tratar la ausencia de dato como
-   prueba de muerte es exactamente el error que `hub/liveness.ts` documenta.
-2. Un collector **recién arrancado** no ha mirado la liveness de nadie: su mapa
-   está vacío y toda la flota parece muerta. Y el collector se reinicia con
-   cada edición bajo `tsx watch`.
+1. `pid === null` means **"ORCA never knew its pid"** — the norm in a `--bg`
+   session — and not "its process does not exist". Treating a missing datum as
+   proof of death is exactly the mistake `hub/liveness.ts` documents.
+2. A **freshly started** collector has not looked at anybody's liveness: its map
+   is empty and the whole fleet looks dead. And the collector restarts on every
+   edit under `tsx watch`.
 
-Arreglado: un fantasma exige ahora **evidencia positiva** — un pid **conocido**
-que no está en `ps`, o un pane que dijo tener y que no está en el servidor de
-tmux — y no se afirma nada hasta que la liveness se ha mirado al menos una vez
-(`livenessReady`). Tras el arreglo, la misma máquina: **0 fantasmas**, 9 restos
-listados, ninguno ofrecido para terminar.
+Fixed: a ghost now demands **positive evidence** — a **known** pid that is not
+in `ps`, or a pane it claimed to have that is not in the tmux server — and
+nothing is asserted until liveness has been looked at at least once
+(`livenessReady`). After the fix, on the same machine: **0 ghosts**, 9 strays
+listed, none offered for killing.
 
-**Segundo hallazgo:** `sanitizeReport` del hub reconstruye el informe campo a
-campo, así que descartaba `strays` en silencio. Ahora los valida como todo lo
-demás —y con más cuidado, porque cada fila acaba en un botón que mata algo—:
-un `verdict` desconocido no puede convertirse en `orphan` por descuido, y una
-ruta absoluta no cruza porque lleva el nombre del operador.
+**Second finding:** the hub's `sanitizeReport` rebuilds the report field by
+field, so it was dropping `strays` silently. Now it validates them like
+everything else — and more carefully, because every row ends in a button that
+kills something: an unknown `verdict` cannot turn into `orphan` through
+carelessness, and an absolute path does not cross because it carries the
+operator's name.
 
-**Tercero:** en macOS `/var` es un enlace a `/private/var`, y `lsof` devuelve
-siempre la ruta real. Sin resolver enlaces, el cwd de un proceso y la raíz que
-se le compara son dos cadenas distintas para el mismo directorio: el detector
-no habría encontrado nada, **en silencio**. Salió en la suite contra procesos
-reales, no leyendo el código.
+**Third:** on macOS `/var` is a link to `/private/var`, and `lsof` always
+returns the real path. Without resolving links, a process's cwd and the root it
+is compared against are two different strings for the same directory: the
+detector would have found nothing, **silently**. It came out in the suite
+against real processes, not from reading the code.
 
-## 7. Pruebas
+## 7. Tests
 
-**`npm run typecheck`** — limpio. **`npm test -- --changed` → 909/909**, 0 fallos.
+**`npm run typecheck`** — clean. **`npm test -- --changed` → 909/909**, 0
+failures.
 
-**`npm test -- strays` → 32/32**, en dos suites.
+**`npm test -- strays` → 32/32**, in two suites.
 
-`strays · what ORCA left behind` (22, con la salida de `ps` escrita a mano):
-`ps` se lee a números · un Vite se reconoce por su ruta y no por la palabra
-(`vim vite.config.ts` y `vitest` no cuentan) · los entrypoints se reconocen y
-`test/*` se deja a su propia herramienta · un Vite de este repo reparentado es
-huérfano · **un Vite de otro proyecto nunca es nuestro** · sin cwd legible es
-ambiguo · con padre vivo es ambiguo · **ORCA nunca se ofrece a sí misma, ni a
-su padre, ni a un agente** · el Vite de esta consola está protegido por su
-puerto · sin hora de arranque no hay objetivo · **viejo, ocioso y con puerto
-abierto sigue sin ser nada** · el resto de la máquina es invisible · los
-huérfanos van primero · un pid reciclado se rechaza, y cuatro segundos de
-deriva de reloj no son un reciclaje · **un Vite `nohup` de este mismo repo en
-un puerto alterno NUNCA se ofrece** · un entrypoint de ORCA recibe la misma
-prudencia que un Vite · **otra consola viva del mismo proyecto está protegida**,
-no sólo el puerto propio · un lease fresco protege · un dueño que volvió
-protege · un lease para un pid reciclado no autoriza nada · el intervalo de
-renovación del escritor de leases y el del contrato coinciden.
+`strays · what ORCA left behind` (22, with hand-written `ps` output):
+`ps` is read into numbers · a Vite is recognized by its path and not by the word
+(`vim vite.config.ts` and `vitest` do not count) · the entrypoints are
+recognized and `test/*` is left to its own tool · a reparented Vite from this
+repo is an orphan · **another project's Vite is never ours** · with no readable
+cwd it is ambiguous · with a live parent it is ambiguous · **ORCA never offers
+itself, nor its parent, nor an agent** · this console's Vite is protected by its
+port · with no start time there is no target · **old, idle and holding an open
+port is still not anything** · the rest of the machine is invisible · the
+orphans go first · a recycled pid is rejected, and four seconds of clock drift
+is not a recycling · **a `nohup` Vite from this very repo on an alternate port
+is NEVER offered** · an ORCA entrypoint gets the same caution as a Vite ·
+**another live console of the same project is protected**, not just one's own
+port · a fresh lease protects · an owner that came back protects · a lease for a
+recycled pid authorizes nothing · the lease writer's renewal interval and the
+contract's match.
 
-`strays · against real processes` (10, **procesos de verdad y desechables**,
-todo bajo un directorio temporal que hace de repositorio, así que la flota real
-queda fuera de alcance **por construcción**): **sólo el que tiene lease con el dueño muerto se ofrece**: el que tiene padre
-vivo, el `nohup` sin lease y el de otro proyecto, no —y el dueño muerto es un
-proceso que existió de verdad y terminó, no un número inventado— · limpiar lo termina de verdad, y
-el `dryRun` lo deja vivo · uno que ignora `SIGTERM` se escala a `SIGKILL` y se
-dice · **un pid que murió entre el escaneo y el clic no se mata a ciegas** ·
-**un pid reciclado se rechaza y el proceso sigue vivo** · limpiar algo que el
-escaneo no ofreció se rechaza · **un agente callado no es un fantasma** · un
-collector que no ha mirado no declara a nadie · un fantasma de verdad se retira
-sin tocar ningún proceso · nada fuera del sandbox es objetivo.
+`strays · against real processes` (10, **real and disposable processes**, all
+under a temporary directory standing in for the repository, so the real fleet is
+out of reach **by construction**): **only the one with a lease whose owner is
+dead is offered**: the one with a live parent, the lease-less `nohup` and the
+one from another project, no — and the dead owner is a process that really
+existed and ended, not an invented number — · cleaning really does kill it, and
+`dryRun` leaves it alive · one that ignores `SIGTERM` is escalated to `SIGKILL`
+and it says so · **a pid that died between the scan and the click is not killed
+blindly** · **a recycled pid is rejected and the process stays alive** ·
+cleaning something the scan did not offer is refused · **a quiet agent is not a
+ghost** · a collector that has not looked declares nobody · a real ghost is
+retired without touching any process · nothing outside the sandbox is a target.
 
-**`npx tsx test/hyg-strays.shots.ts`** — pasa. Comprueba en el navegador que se
-ven las tres clases con su marca, que **sólo lo huérfano lleva botón**, que
-`CLEAN n` cuenta sólo huérfanos, que la evidencia se abre y se lee, que lo
-protegido dice por qué, que el orden pone lo decidible arriba y que el informe
-de disco conserva su sitio.
+**`npx tsx test/hyg-strays.shots.ts`** — passes. It checks in the browser that
+the three classes are visible with their mark, that **only the orphan carries a
+button**, that `CLEAN n` counts orphans only, that the evidence opens and reads,
+that the protected ones say why, that the ordering puts the decidable at the
+top, and that the disk report keeps its place.
 
-## 8. Archivos
+## 8. Files
 
-**Sin commit**, en el árbol compartido con Q8.
+**Not committed**, in the tree shared with Q8.
 
-**Nuevos (7):** `src/shared/lease.ts` (el contrato del lease) ·
-`src/shared/strays.ts` (reglas puras) · `src/collector/strays.ts` (lecturas de
-máquina y terminación) · `tools/lease.mjs` (el escritor) ·
-`src/ui/styles/strays.css` · `test/strays.test.ts` · `test/strays-live.test.ts` ·
+**New (7):** `src/shared/lease.ts` (the lease contract) ·
+`src/shared/strays.ts` (pure rules) · `src/collector/strays.ts` (machine reads
+and killing) · `tools/lease.mjs` (the writer) · `src/ui/styles/strays.css` ·
+`test/strays.test.ts` · `test/strays-live.test.ts` ·
 `test/hyg-strays.shots.ts`.
 
-**Tocados, aditivo:** `shared/hygiene.ts` (`strays?` en el informe) ·
-`shared/protocol.ts` (`strays:clean`) · `hub/hygiene.ts` (validación) ·
-`hub/server.ts` (ruta por máquina, resumen, allowlist) ·
-`collector/{index,commands}.ts` · `ui/windows/kinds/hygiene.ts` (**un bloque
-nuevo al final del cuerpo**; no se tocó el encabezado, ni el resumen, ni
-`SAMPLE NOW`, ni la leyenda, ni `machineBlock()`, ni `paint()`) ·
-`ui/main.ts` (una línea de import) · `package.json` (`dev:ui` pasa por el
-escritor de leases) · `test/visual.ts` (dos ganchos).
+**Touched, additive:** `shared/hygiene.ts` (`strays?` in the report) ·
+`shared/protocol.ts` (`strays:clean`) · `hub/hygiene.ts` (validation) ·
+`hub/server.ts` (per-machine route, summary, allowlist) ·
+`collector/{index,commands}.ts` · `ui/windows/kinds/hygiene.ts` (**one new block
+at the end of the body**; the header was not touched, nor the summary, nor
+`SAMPLE NOW`, nor the legend, nor `machineBlock()`, nor `paint()`) ·
+`ui/main.ts` (one import line) · `package.json` (`dev:ui` goes through the lease
+writer) · `test/visual.ts` (two hooks).
 
-**Coordinación con Q8:** avisé antes de tocar `hygiene.ts`; contestó que no lo
-tiene abierto y que adelante. **No se tocó** `window.css`, `hud.css`,
-`sections.ts`, `missions.ts`, `mission-status.ts`, `windows/kinds/mission.ts`
-ni `controls.ts`. Los estilos nuevos van en hoja propia por eso mismo.
+**Coordination with Q8:** I gave notice before touching `hygiene.ts`; he replied
+that he does not have it open and to go ahead. **Not touched:** `window.css`,
+`hud.css`, `sections.ts`, `missions.ts`, `mission-status.ts`,
+`windows/kinds/mission.ts` or `controls.ts`. The new styles go in their own
+sheet for exactly that reason.
 
-## 9. Activación
+## 9. Activation
 
-- **Activo en cuanto el collector arranca**: el escaneo va con la muestra de
-  higiene, en su reloj de diez minutos, y con `SAMPLE NOW`.
-- **No hace nada por su cuenta.** La sección aparece sólo si hay algo que
-  enseñar, y el botón es del operador.
-- Sin `lsof` (o en Windows) el cwd no se puede leer y **todo sale ambiguo**:
-  degrada a no ofrecer nada, que es el lado correcto.
+- **Active as soon as the collector starts**: the scan rides with the hygiene
+  sample, on its ten-minute clock, and with `SAMPLE NOW`.
+- **It does nothing on its own.** The section appears only if there is something
+  to show, and the button belongs to the operator.
+- Without `lsof` (or on Windows) the cwd cannot be read and **everything comes
+  out ambiguous**: it degrades to offering nothing, which is the right side.
 
-## 10. Límites
+## 10. Limits
 
-1. **macOS y Linux.** En Windows `readProcs` devuelve vacío y no hay restos.
-2. **El cwd depende de `lsof` en macOS.** Sin él, todo Vite es ambiguo. No hay
-   una segunda vía «aproximada» a propósito: lo que no se puede identificar no
-   se toca.
-3. **Sólo se recoge lo que ORCA lanzó.** Un Vite arrancado a mano, con o sin
-   `nohup`, nunca será terminable desde aquí — y un resto anterior a esta
-   entrega tampoco, porque no tiene lease. Es deliberado: la alternativa era
-   adivinar la intención de un proceso desconocido, y no se puede.
-4. **No hay cota de tiempo entre revalidar y matar.** Se lee `ps` y se manda la
-   señal en el mismo instante, pero un proceso puede morir y su pid reutilizarse
-   en esa ventana. Es una carrera de microsegundos y no se puede cerrar sin
-   `pidfd`, que no existe en macOS; queda dicho.
-5. **Los agentes fantasma dependen de que ORCA conociera un pid o un pane.** Un
-   `--bg` cuyo pid nunca se supo y sin pane no se puede declarar muerto — y eso
-   es deliberado tras lo de §6.
-6. **No se automatiza nada** (§5).
-7. La corrida real terminó **una** sonda desechable. No se ha terminado ningún
-   proceso real del operador, y el escaneo sobre su máquina no encontró
-   huérfanos que ofrecer.
-8. **La corrida productiva del §6 se hizo con la regla vieja** (`ppid === 1`
-   bastaba). No se ha repetido: el arreglo está cubierto por fixtures contra
-   **procesos reales** —incluido un `nohup` legítimo del mismo repo en puerto
-   alterno, excluido, y un proceso con dueño muerto de verdad, elegible— y
-   repetirla habría vuelto a terminar procesos en la máquina del operador sin
-   añadir nada que esas pruebas no digan ya.
+1. **macOS and Linux.** On Windows `readProcs` returns empty and there are no
+   strays.
+2. **The cwd depends on `lsof` on macOS.** Without it, every Vite is ambiguous.
+   There is deliberately no second, "approximate" path: what cannot be
+   identified is not touched.
+3. **Only what ORCA launched is collected.** A Vite started by hand, with or
+   without `nohup`, will never be killable from here — and neither will a stray
+   from before this delivery, because it has no lease. It is deliberate: the
+   alternative was guessing an unknown process's intent, and you cannot.
+4. **There is no time bound between revalidating and killing.** `ps` is read and
+   the signal is sent in the same instant, but a process can die and its pid be
+   reused in that window. It is a microsecond race and it cannot be closed
+   without `pidfd`, which does not exist on macOS; it is said here.
+5. **Ghost agents depend on ORCA having known a pid or a pane.** A `--bg` whose
+   pid was never known and with no pane cannot be declared dead — and that is
+   deliberate after what happened in §6.
+6. **Nothing is automated** (§5).
+7. The real run killed **one** disposable probe. No real process of the
+   operator's has been killed, and the scan on his machine found no orphans to
+   offer.
+8. **The production run in §6 was done with the old rule** (`ppid === 1` was
+   enough). It has not been repeated: the fix is covered by fixtures against
+   **real processes** — including a legitimate `nohup` from the same repo on an
+   alternate port, excluded, and a process with a genuinely dead owner, eligible
+   — and repeating it would have killed processes on the operator's machine
+   again without adding anything those tests do not already say.
 
-## 11. Cómo verificarlo
+## 11. How to verify it
 
 ```
 npm run typecheck
-npm test -- strays                  las dos suites (26)
-npx tsx test/hyg-strays.shots.ts    la sección, fotografiada
+npm test -- strays                  both suites (26)
+npx tsx test/hyg-strays.shots.ts    the section, photographed
 ```
 
-Filtros que cubren esta entrega: `strays`, `hygiene`, `collector`.
+Filters that cover this delivery: `strays`, `hygiene`, `collector`.

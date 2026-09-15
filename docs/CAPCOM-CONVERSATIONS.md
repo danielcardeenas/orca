@@ -1,128 +1,132 @@
-# Conversaciones de CAPCOM
+# CAPCOM conversations
 
-CAPCOM mantiene un coordinador y ofrece conversaciones por tarea. En su ventana,
-**NEW TASK** crea una conversación; el selector permite volver a las anteriores.
-El primer mensaje pone el título. **GENERAL · FLEET** conserva la vista global.
-Cada tarea muestra sus mensajes, estado y agentes, con accesos al agente, su
-ubicación y su terminal. Las preguntas pendientes de esos agentes enlazan al
-panel de respuesta existente.
+CAPCOM keeps one coordinator and offers per-task conversations. In its window,
+**NEW TASK** creates a conversation; the selector lets you go back to earlier
+ones. The first message sets the title. **GENERAL · FLEET** keeps the global
+view. Each task shows its messages, status and agents, with links to the agent,
+its location and its terminal. Pending questions from those agents link to the
+existing answer panel.
 
-El hub persiste las tareas en `tasks.json` dentro de su directorio de datos,
-mediante reemplazo atómico. Al conectar entrega el historial con el mundo y
-publica cambios por WebSocket. La selección se conserva en el navegador. Se
-retienen hasta 100 tareas, 100 mensajes por tarea y 8.000 caracteres por mensaje;
-no es un archivo ilimitado de transcripciones.
+The hub persists tasks in `tasks.json` inside its data directory, using atomic
+replacement. On connect it delivers the history along with the world and
+publishes changes over WebSocket. The selection is kept in the browser. Up to
+100 tasks, 100 messages per task and 8,000 characters per message are retained;
+it is not an unlimited transcript archive.
 
-Cada envío incluye un `taskId` explícito. CAPCOM recibe el ID y contexto reciente,
-y responde mediante `report_task`, indicando `active`, `completed` o `failed`.
-`spawn_agent` y `launch_squad` aceptan `task_id` para asociar los trabajadores.
-Una etiqueta de squad permite asociar también sesiones Codex cuyo ID llega después
-del acuse de lanzamiento. Los descendientes se incorporan por parentesco.
-Los resultados observados de agentes asignados se guardan una vez por texto y se
-notifican a CAPCOM agrupando actualizaciones próximas. Un resultado observado no
-marca automáticamente la tarea como terminada: CAPCOM debe confirmar el cierre.
+Every send includes an explicit `taskId`. CAPCOM receives the ID and recent
+context, and replies via `report_task`, indicating `active`, `completed` or
+`failed`. `spawn_agent` and `launch_squad` accept `task_id` to associate the
+workers. A squad label also allows associating Codex sessions whose ID arrives
+after the launch acknowledgement. Descendants are taken in by parentage.
+Observed results from assigned agents are stored once per text and reported to
+CAPCOM, grouping nearby updates. An observed result does not automatically mark
+the task as finished: CAPCOM has to confirm the close.
 
-CAPCOM no necesita recordar las tareas: las lee del hub. `list_tasks` (filtros
-`status` y `only_pending`) devuelve cada conversación con su estado, sus agentes
-con indicativo y estado, la fecha del último mensaje y si hay un mensaje humano
-sin respuesta o resultados de trabajadores sin reportar; `inspect_task` devuelve
-una tarea completa con lo que falta por responder. La regla es posicional: todo
-lo que hay después del último mensaje de CAPCOM en la tarea está pendiente.
-`briefing` resume la flota entera en una llamada —bloqueados, tareas en deuda,
-trabajadores terminados sin reportar, squads sin miembros vivos, proyectos con
-actividad, últimas reglas— y es lo primero que llama una sesión nueva o recién
-compactada. Cuando la sesión CAPCOM se recicla (ver README, "It is recycled
-before it forgets"), el hub retiene los mensajes de tarea hasta que aparece la
-sesión nueva y se los entrega entonces; si no vuelve en tres minutos, la tarea
-recibe un mensaje de sistema `Delivery failed`.
+CAPCOM does not need to remember the tasks: it reads them from the hub.
+`list_tasks` (filters `status` and `only_pending`) returns each conversation
+with its status, its agents with callsign and state, the date of the last
+message and whether there is an unanswered human message or unreported worker
+results; `inspect_task` returns a full task with what is left to answer. The
+rule is positional: everything after CAPCOM's last message in the task is
+pending. `briefing` summarizes the whole fleet in one call — blocked agents,
+tasks in debt, finished workers not reported, squads with no live members,
+projects with activity, latest rules — and it is the first thing a new or
+just-compacted session calls. When the CAPCOM session is recycled (see the
+README, "It is recycled before it forgets"), the hub holds the task messages
+until the new session appears and delivers them then; if it does not come back
+within three minutes, the task receives a `Delivery failed` system message.
 
-Las conversaciones comparten el proceso y contexto interno de CAPCOM. Hay
-separación explícita del historial y enrutamiento, pero no aislamiento de sesiones
-ni ejecución simultánea independiente del coordinador. El prompt proporciona las
-últimas ocho intervenciones (hasta 2.000 caracteres cada una). Las respuestas de
-texto libre del terminal siguen en GENERAL; para aparecer en una tarea se debe
-usar `report_task`. Las preguntas directas de CAPCOM mediante `ask_human` siguen
-usando el panel global de interrupciones.
+The conversations share CAPCOM's process and internal context. There is
+explicit separation of history and routing, but no session isolation and no
+independent simultaneous execution of the coordinator. The prompt provides the
+last eight interventions (up to 2,000 characters each). Free-text replies from
+the terminal stay in GENERAL; to appear in a task you have to use `report_task`.
+CAPCOM's direct questions through `ask_human` still use the global interrupt
+panel.
 
-El acuse del collector confirma la entrega al mecanismo de entrada, no que el
-modelo haya consumido el mensaje. Un fallo aparece en el recibo; el mensaje queda
-guardado. Los avisos de resultados no tienen reintentos persistentes tras reinicio;
-el resultado sí permanece en la conversación.
+The collector's acknowledgement confirms delivery to the input mechanism, not
+that the model consumed the message. A failure shows up in the receipt; the
+message stays stored. Result notices have no persistent retries after a restart;
+the result itself does stay in the conversation.
 
-Para usar los cambios se necesita el hub actualizado y una sesión CAPCOM que
-haya cargado el catálogo MCP nuevo (`report_task`). Una sesión previa puede
-necesitar reconectar su MCP o reiniciarse. No se reinician sesiones de trabajo
-activas como parte de la instalación del cambio.
+To use these changes you need the updated hub and a CAPCOM session that has
+loaded the new MCP catalog (`report_task`). An earlier session may need to
+reconnect its MCP or be restarted. Active work sessions are not restarted as
+part of installing the change.
 
-Validación: `test/tasks.test.ts` comprueba persistencia, atribución de respuestas
-tardías, descendientes, squads diferidos, reconexión y aviso de resultados.
-La comprobación con Playwright usa una conexión simulada en escritorio y móvil:
-crea dos conversaciones, verifica separación de respuestas y restaura la selección.
+Validation: `test/tasks.test.ts` checks persistence, attribution of late
+replies, descendants, deferred squads, reconnection and result notices.
+The Playwright check uses a simulated connection on desktop and mobile: it
+creates two conversations, verifies the separation of replies and restores the
+selection.
 
-## La ventana: TALK, WORK y EVENTS
+## The window: TALK, WORK and EVENTS
 
-La ventana de CAPCOM tiene tres pestañas. **TALK** es la conversación; **WORK**
-lista los agentes que CAPCOM tiene en marcha (o los asignados a la tarea) con
-acceso al agente, a su posición en el campo y a su terminal; **EVENTS** reúne el
-tráfico que CAPCOM envía a la flota y la telemetría sobre él, que antes se
-intercalaban con la conversación. Debajo de la conversación hay una línea de
-estado con lo que CAPCOM hace ahora mismo: estado, herramienta en uso, velocidad
-y coste, más TERM y FLY. Los pedidos rápidos ocupan una sola fila desplazable.
+CAPCOM's window has three tabs. **TALK** is the conversation; **WORK** lists the
+agents CAPCOM has running (or those assigned to the task) with access to the
+agent, to its position in the field and to its terminal; **EVENTS** gathers the
+traffic CAPCOM sends to the fleet and the telemetry about it, which used to be
+interleaved with the conversation. Below the conversation there is a status line
+with what CAPCOM is doing right now: state, tool in use, speed and cost, plus
+TERM and FLY. Quick requests take up a single scrollable row.
 
-En GENERAL, TALK muestra el transcript real de la sesión CAPCOM. El collector
-emite tramas `talk` con cada bloque que el CLI escribe en su JSONL: el prompt
-completo, los bloques de pensamiento, cada llamada a herramienta con su detalle,
-el resultado recortado a 600 caracteres y la respuesta íntegra. El hub las
-apila por agente (`world.talk[agentId]`), deduplica por id, conserva 300 bloques
-y no las persiste: el transcript en disco ya es la copia de verdad y el collector
-relee su cola al arrancar. Sólo se emiten para la sesión con `role: 'capcom'`.
+In GENERAL, TALK shows the CAPCOM session's real transcript. The collector emits
+`talk` frames for each block the CLI writes into its JSONL: the full prompt, the
+thinking blocks, each tool call with its detail, the result trimmed to 600
+characters and the complete reply. The hub stacks them by agent
+(`world.talk[agentId]`), deduplicates by id, keeps 300 blocks and does not
+persist them: the transcript on disk is already the real copy and the collector
+re-reads its queue on startup. They are only emitted for the session with
+`role: 'capcom'`.
 
-La consola agrupa los bloques en intercambios: tu línea y, debajo, todo lo que
-CAPCOM hizo hasta parar. Los pasos (pensamiento, herramientas) son filas plegadas
-que se abren para ver lo que devolvieron. Un prompt `[ORCA TASK …]` aparece como
-enlace a esa tarea, y un `[ESCALATION …]` como pregunta de la flota con acceso a
-la interrupción si sigue abierta. Mientras CAPCOM trabaja se añade una fila viva
-con los glifos (pensando) o la herramienta en curso. El eco local de un envío se
-muestra como tu mensaje con su recibo hasta que el prompt aparece en el transcript.
+The console groups the blocks into exchanges: your line and, below it,
+everything CAPCOM did until it stopped. The steps (thinking, tools) are
+collapsed rows that open to show what they returned. An `[ORCA TASK …]` prompt
+appears as a link to that task, and an `[ESCALATION …]` as a question from the
+fleet with access to the interrupt if it is still open. While CAPCOM works a
+live row is added with the glyphs (thinking) or the tool in progress. The local
+echo of a send is shown as your message with its receipt until the prompt
+appears in the transcript.
 
-Granularidad: el CLI escribe cada bloque en su JSONL al completarse, así que
-por esa vía la respuesta llega párrafo a párrafo y el pensamiento al cerrarse. Un
-pensamiento redactado por el CLI aparece como paso vacío.
+Granularity: the CLI writes each block into its JSONL as it completes, so along
+that path the reply arrives paragraph by paragraph and the thinking on closing.
+A thought redacted by the CLI appears as an empty step.
 
-Texto en vivo: cuando CAPCOM vive en un pane de tmux, el collector mantiene un
-cliente de control de tmux (`tmux -C attach`) sobre ese pane. Cada vez que el pane
-pinta, tmux emite `%output` y el collector lee la pantalla con un debounce de
-100 ms (nunca más seguido que cada 80 ms), sólo mientras el estado es `thinking`
-o `working`. De la pantalla extrae el bloque `⏺` que el CLI está pintando, sólo si
-hay un spinner de turno abierto y el bloque es texto (no una tool). El cliente de
-control no afecta al tamaño del pane; si cae o no está disponible, el collector
-sondea cada 400 ms hasta relanzarlo. En reposo no se lee nada.
+Live text: when CAPCOM lives in a tmux pane, the collector keeps a tmux control
+client (`tmux -C attach`) on that pane. Every time the pane paints, tmux emits
+`%output` and the collector reads the screen with a 100 ms debounce (never more
+often than every 80 ms), only while the state is `thinking` or `working`. From
+the screen it extracts the `⏺` block the CLI is painting, only if there is an
+open turn spinner and the block is text (not a tool). The control client does
+not affect the pane's size; if it drops or is unavailable, the collector polls
+every 400 ms until it relaunches it. At rest nothing is read.
 
-La TUI de Claude Code usa la pantalla alterna: `capture-pane` sólo devuelve la
-ventana visible. Si el bloque en curso es más alto que el pane, su `⏺` queda
-fuera por arriba y el spinner por abajo; el collector devuelve entonces la cola
-visible con `…` delante, y detecta que el turno sigue abierto por el `esc to
-interrupt` de la barra de estado. La caja de entrada pinta `❯` con espacio duro
-(U+00A0) y puede contener un borrador del operador; ambos se toleran. Medido en
-94 frames de una respuesta larga (2.1.263, 104x27): texto en 75, y los 22 nulos
-corresponden al arranque del turno, antes del primer bloque, y al cierre. Lo manda como `talk:live` (`world.talkLive`), la
-ventana lo muestra como fila «typing» con cursor, y en cuanto el bloque completo
-llega por el transcript la fila desaparece y el párrafo definitivo la sustituye.
-Es lo que la TUI pintó (sin asteriscos de markdown, con su propio ajuste de
-línea), no lo que dijo la API; no se persiste. Sin pane no hay texto en vivo.
+Claude Code's TUI uses the alternate screen: `capture-pane` only returns the
+visible window. If the block in progress is taller than the pane, its `⏺` falls
+off the top and the spinner off the bottom; the collector then returns the
+visible tail with a leading `…`, and detects that the turn is still open from
+the status bar's `esc to interrupt`. The input box paints `❯` with a hard space
+(U+00A0) and may contain a draft from the operator; both are tolerated. Measured
+over 94 frames of a long reply (2.1.263, 104x27): text in 75, and the 22 null
+ones correspond to the start of the turn, before the first block, and to the
+close. It is sent as `talk:live` (`world.talkLive`), the window shows it as a
+"typing" row with a cursor, and as soon as the complete block arrives through
+the transcript the row disappears and the final paragraph replaces it. It is
+what the TUI painted (no markdown asterisks, with its own line wrapping), not
+what the API said; it is not persisted. With no pane there is no live text.
 
-Orden: el hub y la consola funden los bloques con la misma regla
-(`src/shared/talk.ts`): deduplicar por id y ordenar por tiempo de forma estable.
-Hace falta porque una reposición tras reiniciar el hub entrega bloques antiguos
-después de los nuevos. El estado pasa a `thinking` en cuanto el prompt aparece en
-el transcript, antes del primer bloque de respuesta, con un tope de diez minutos
-sin respuesta tras el cual vuelve a `idle`. Un collector anterior
-a este cambio no envía `talk`; la ventana lo indica en el estado vacío y hay que
-reiniciarlo. Las conversaciones de tarea siguen mostrando los mensajes publicados
-con `report_task`, con la misma fila viva y línea de estado.
+Ordering: the hub and the console merge the blocks with the same rule
+(`src/shared/talk.ts`): deduplicate by id and sort by time, stably. It is needed
+because a replay after restarting the hub delivers old blocks after new ones.
+The state moves to `thinking` as soon as the prompt appears in the transcript,
+before the first reply block, with a ten-minute cap without a reply after which
+it goes back to `idle`. A collector older than this change does not send `talk`;
+the window says so in its empty state and it has to be restarted. Task
+conversations still show the messages published with `report_task`, with the
+same live row and status line.
 
-Validación: `test/talk.test.ts` cubre la derivación desde líneas del transcript,
-la sanitización, deduplicación, orden y límite en el hub, el plegado en
-intercambios, la clasificación de prompts envueltos, el eco local, el estado
-`thinking` tras un prompt, la lectura del bloque en curso desde la pantalla y el
-texto en vivo en el hub.
+Validation: `test/talk.test.ts` covers derivation from transcript lines,
+sanitization, deduplication, ordering and the hub's limit, folding into
+exchanges, classification of wrapped prompts, the local echo, the `thinking`
+state after a prompt, reading the block in progress from the screen and the live
+text in the hub.

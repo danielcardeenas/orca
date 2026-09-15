@@ -1,106 +1,109 @@
-# La conversación de CAPCOM
+# CAPCOM's conversation
 
-Dos cosas de la ventana de CAPCOM: en qué orden se lee un hilo, y cómo se pasa
-de una conversación a otra. Eran dos molestias distintas con la misma raíz —la
-ventana enseñaba lo que tenía, en el orden en que lo tenía, sin decidir nada— y
-se arreglan aquí.
+Two things about the CAPCOM window: the order in which a thread reads, and how
+you move from one conversation to another. They were two different annoyances
+with the same root — the window showed what it had, in the order it had it,
+deciding nothing — and they are fixed here.
 
-## El orden del hilo
+## The order of the thread
 
-El transcript nunca estuvo desordenado. `mergeTalk` ordena por hora y `foldTalk`
-respeta lo que recibe. Lo que se salía de sitio era el **eco local**: la copia de
-tu línea que la consola pinta en cuanto la manda, con `DELIVERED · 0.1s` debajo,
-mientras el transcript del CLI todavía no la ha confirmado.
+The transcript was never out of order. `mergeTalk` sorts by time and `foldTalk`
+respects what it receives. What was out of place was the **local echo**: the
+copy of your line that the console paints as soon as it sends it, with
+`DELIVERED · 0.1s` underneath, while the CLI's transcript has not confirmed it
+yet.
 
-Dos fallos, los dos en `src/ui/windows/kinds/ceo.ts` y `src/ui/windows/talk.ts`:
+Two bugs, both in `src/ui/windows/kinds/ceo.ts` and `src/ui/windows/talk.ts`:
 
-**Se pintaban al final.** El hilo era `groups` y después `echoes`, en dos pasadas.
-Daba igual cuándo escribiste: el eco iba debajo de todo. Ahora las dos fuentes se
-mezclan por hora (`timeOrdered`), y un eco se sienta en el minuto en que lo
-escribiste, no al pie de lo que CAPCOM haya dicho desde entonces. Vale igual para
-la vista general y para la de una misión.
+**They were painted at the end.** The thread was `groups` and then `echoes`, in
+two passes. It made no difference when you typed: the echo went below
+everything. Now the two sources are merged by time (`timeOrdered`), and an echo
+sits at the minute you typed it, not at the foot of whatever CAPCOM has said
+since. It holds the same for the general view and for a mission's.
 
-**Un eco podía no apagarse nunca.** `echoLanded` compara texto exacto, y el texto
-no siempre vuelve igual: el hub envuelve algunos prompts y el CLI junta lo que
-tenía en cola. Un eco que no se reconoce se queda encendido para siempre.
-`pendingEchoes` añade una segunda regla: la entrada del CLI es una fila, así que
-si algo que dijiste **después** ya está en el transcript, lo de antes ya pasó por
-ahí y su eco sobra.
+**An echo could stay lit forever.** `echoLanded` compares exact text, and the text
+does not always come back the same: the hub wraps some prompts and the CLI joins
+whatever it had queued. An echo that is not recognized stays lit forever.
+`pendingEchoes` adds a second rule: the CLI's input is a queue, so if something
+you said **later** is already in the transcript, what came before went through
+as well and its echo is surplus.
 
-La regla es deliberadamente estrecha. No vale «cualquier prompt más nuevo»: un
-mensaje tuyo en cola se escribe cuando le toca, y un prompt ajeno posterior —una
-escalación que el hub relaya, el brief de arranque— borraría tu eco justo
-mientras espera. La comparación es sólo contra tus propios envíos.
+The rule is deliberately narrow. "Any newer prompt" will not do: a message of
+yours in the queue gets written when its turn comes, and a later prompt from
+somebody else — an escalation the hub relays, the startup brief — would clear
+your echo precisely while it is waiting. The comparison is only against your own
+sends.
 
-## La navegación entre misiones
+## Navigating between missions
 
-Estaba partida en dos sitios y ninguno tenía lo que decide a dónde ir. El
-desplegable de la ventana daba título y estado, y había que abrirlo para saber
-qué existía; el panel del HUD sí tenía fase, movimiento y tripulación, pero está
-arriba a la derecha, se pliega, y cualquier ventana lo tapa.
+It was split across two places and neither had what decides where to go. The
+window's dropdown gave title and status, and you had to open it to know what
+existed; the HUD panel did have phase, movement and crew, but it is up in the
+top right, it folds, and any window covers it.
 
-### La cinta
+### The ribbon
 
-> **2026-09-08.** La cinta dejó de ser un selector de vista y pasó a ser una
-> puerta: cada misión tiene su propia ventana (`kinds/mission.ts`), así que
-> pulsar una pestaña la abre o la trae al frente en vez de cambiar la ventana de
-> CAPCOM por su conversación. Con ello desaparecen de aquí la pestaña GENERAL
-> —CAPCOM ya no es más que su propia sesión—, el botón ARCHIVE, que se fue a la
-> ventana de la misión, y el scroll recordado por conversación, que ahora es el
-> de cada ventana. Lo que sigue vale igual: el punto, el orden y el pliegue bajo
-> `MORE`. Ver [MISSIONS.md](MISSIONS.md), «Cómo se navega».
+> **2026-09-08.** The ribbon stopped being a view selector and became a door:
+> each mission has its own window (`kinds/mission.ts`), so clicking a tab opens
+> it or brings it to the front instead of swapping CAPCOM's window for that
+> conversation. With that, the GENERAL tab disappears from here — CAPCOM is
+> nothing more than its own session now — along with the ARCHIVE button, which
+> moved to the mission window, and the per-conversation remembered scroll, which
+> is now each window's. What follows still holds: the dot, the order and the
+> fold under `MORE`. See [MISSIONS.md](MISSIONS.md), "How you navigate".
 
-El desplegable es ahora una fila de pestañas siempre visible: las misiones
-abiertas, un clic cada una, con un punto que lleva la fase y el tiempo desde el
-último movimiento. Lo terminado se pliega bajo `MORE`, que es el `pick` de antes
-con lo que ya no se navega.
+The dropdown is now an always-visible row of tabs: the open missions, one click
+each, with a dot that carries the phase and the time since the last movement.
+What is finished folds under `MORE`, which is the old `pick` holding what you no
+longer navigate.
 
-El punto sale de `missionRows`, el mismo cálculo que pinta el panel del HUD, así
-que la ventana y el panel no pueden discrepar:
+The dot comes from `missionRows`, the same computation that paints the HUD
+panel, so the window and the panel cannot disagree:
 
-| punto | fase | qué dice |
+| dot | phase | what it says |
 | --- | --- | --- |
-| lima | `progress` | hay tripulación viva en ello |
-| ámbar | `waiting` | CAPCOM dijo la última palabra y nadie trabaja: **te toca** |
-| azul | `queued` | está con CAPCOM, todavía sin respuesta |
-| apagado / rojo | `completed` / `failed` | terminada |
+| lime | `progress` | there is live crew on it |
+| amber | `waiting` | CAPCOM had the last word and nobody is working: **you are up** |
+| blue | `queued` | it is with CAPCOM, still no answer |
+| off / red | `completed` / `failed` | finished |
 
-El orden es el de apertura, no el de movimiento (`railSplit`, en
-`src/ui/hud/mission-status.ts`). Es la diferencia con el panel del HUD, y es a
-propósito: una pestaña que se mueve sola es una pestaña que se pulsa mal. La
-cinta crece por la derecha y nada cambia de sitio bajo el cursor mientras la
-flota trabaja. La única excepción a «lo terminado se pliega» es la conversación
-abierta, que siempre se ve: una cinta que no dice dónde estás no es navegación.
+The order is the order they were opened in, not the order of movement
+(`railSplit`, in `src/ui/hud/mission-status.ts`). That is the difference from
+the HUD panel, and it is on purpose: a tab that moves on its own is a tab you
+click wrong. The ribbon grows to the right and nothing changes place under the
+cursor while the fleet works. The only exception to "what is finished folds" is
+the open conversation, which is always visible: a ribbon that does not say where
+you are is not navigation.
 
-### La mirilla
+### The peephole
 
-En GENERAL, una misión aparecía como un chip con la frase «ábrela para leer el
-intercambio». Un callejón: para saber de qué iba había que cambiar de vista.
+In GENERAL, a mission appeared as a chip with the phrase "open it to read the
+exchange". A dead end: to know what it was about you had to switch views.
 
-El prompt que recibe CAPCOM no sirve para enseñarlo —el hub le adjunta el
-contexto entero de la misión y ocupa una pantalla—, pero la conversación de la
-misión sí. `missionGlimpse` (`src/shared/missions.ts`, junto a `missionDebt`)
-saca las dos líneas que explican el prompt: la que lo provocó y la primera
-respuesta de CAPCOM que vino después.
+The prompt CAPCOM receives is no good for showing — the hub attaches the whole
+context of the mission to it and it fills a screen — but the mission's
+conversation is. `missionGlimpse` (`src/shared/missions.ts`, next to
+`missionDebt`) pulls out the two lines that explain the prompt: the one that
+triggered it and the first answer from CAPCOM that came after.
 
-Lo que lo provoca no es forzosamente tuyo. A una misión se entra también porque
-un worker reportó algo y el hub despertó a CAPCOM con ello; esa línea explica el
-prompt igual de bien, así que la mirilla acepta cualquier rol menos CAPCOM, que
-es quien contesta. Con la regla anterior —sólo `human`— cinco de los once grupos
-de misión de una sesión real se quedaban sin nada que enseñar.
+What triggers it is not necessarily yours. You also get into a mission because a
+worker reported something and the hub woke CAPCOM with it; that line explains
+the prompt just as well, so the peephole accepts any role except CAPCOM, which
+is the one that answers. With the previous rule — `human` only — five of the
+eleven mission groups in a real session were left with nothing to show.
 
-La línea es la **más cercana** al momento, no la última que quepa: el hub guarda
-el mensaje y luego lo despacha, y quien fecha el prompt es el CLI cuando lo
-escribe, siempre un poco después. Sin esa precisión, dos prompts de la misma
-misión enseñarían los dos la línea más nueva.
+The line is the one **closest** to the moment, not the last one that fits: the
+hub stores the message and then dispatches it, and the one that dates the prompt
+is the CLI when it writes it, always a little later. Without that precision, two
+prompts from the same mission would both show the newest line.
 
-### El sitio donde lo dejaste
+### Where you left off
 
-Cada conversación recuerda su scroll. Volver a una misión te devuelve donde
-estabas, en vez de al fondo. Sobrevive al cambio de pestaña, no a la recarga:
-es un scroll, no un estado.
+Every conversation remembers its scroll. Coming back to a mission returns you to
+where you were, instead of to the bottom. It survives a tab change, not a
+reload: it is a scroll, not state.
 
-## Validación
+## Validation
 
 ```
 npm test -- talk missions mission-status capcom-window drafts
@@ -108,14 +111,16 @@ npm test -- --changed                  775/775
 npm run typecheck
 ```
 
-`test/talk.test.ts` cubre el eco adelantado por el transcript —y el caso
-inverso, el que sigue en cola y no debe borrarse— y el orden por hora de las dos
-fuentes. `test/mission-status.test.ts` cubre que la cinta conserva el orden de
-apertura pase lo que pase con la flota, y que lo terminado se pliega salvo la
-conversación abierta. `test/missions.test.ts` cubre la mirilla: la línea correcta
-para cada prompt, la respuesta que le sigue, el caso sin respuesta todavía y el
-prompt que provocó un worker en vez del operador.
+`test/talk.test.ts` covers the echo overtaken by the transcript — and the
+reverse case, the one still in the queue that must not be cleared — and the
+ordering of the two sources by time. `test/mission-status.test.ts` covers that
+the ribbon keeps the opening order whatever happens to the fleet, and that what
+is finished folds except for the open conversation. `test/missions.test.ts`
+covers the peephole: the right line for each prompt, the answer that follows it,
+the case with no answer yet, and the prompt triggered by a worker instead of by
+the operator.
 
-Comprobado además contra la consola viva (Playwright sobre `localhost:4478`, la
-flota real): la cinta con GENERAL y tres misiones de las tres fases, el cambio de
-pestaña, y once de once grupos de misión con mirilla donde antes había seis.
+Also checked against the live console (Playwright on `localhost:4478`, the real
+fleet): the ribbon with GENERAL and three missions from the three phases,
+switching tabs, and eleven out of eleven mission groups with a peephole where
+there used to be six.

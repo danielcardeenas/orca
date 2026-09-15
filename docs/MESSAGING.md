@@ -1,205 +1,209 @@
-# El canal agente → agente
+# The agent → agent channel
 
-Hermano de `docs/ESCALATION.md`, y con la misma forma por la misma razón: un
-agente de Claude Code no tiene socket hacia sus pares. Tiene un filesystem. Así
-que hablar con otro agente es dejar un archivo y esperar a que el collector lo
-recoja.
+Sibling of `docs/ESCALATION.md`, and with the same shape for the same reason: a
+Claude Code agent has no socket to its peers. It has a filesystem. So talking to
+another agent means leaving a file and waiting for the collector to pick it up.
 
 ```
-<project>/.orca/out/<id>.json          el agente manda algo
-<project>/.orca/in/<id>.json           lo que le llega a él (lo escribe ORCA)
-<project>/.orca/in/<id>.read           marca de leído (la escribe el agente)
-<project>/.orca/in/<id>.answer.json    la respuesta a un `ask` suyo
+<project>/.orca/out/<id>.json          the agent sends something
+<project>/.orca/in/<id>.json           what reaches it (written by ORCA)
+<project>/.orca/in/<id>.read           read mark (written by the agent)
+<project>/.orca/in/<id>.answer.json    the answer to an `ask` of its own
 ```
 
-El collector vigila `.orca/out/` en cada proyecto que conoce (`fs.watch` + poll
-de 1s), convierte cada archivo en un `AgentMessage` del contrato y lo emite al
-hub como `{t:'message'}`. **El hub decide a quién llega**: la entrega baja como
-`{k:'deliver', agentId, message}` y el collector la escribe en el `.orca/in/`
-del proyecto de ese agente. Una respuesta baja como `{k:'reply', messageId,
-answer, fromAgentId}`.
+The collector watches `.orca/out/` in every project it knows (`fs.watch` + a 1s
+poll), turns each file into a contract `AgentMessage` and emits it to the hub as
+`{t:'message'}`. **The hub decides who it reaches**: the delivery comes down as
+`{k:'deliver', agentId, message}` and the collector writes it into the
+`.orca/in/` of that agent's project. An answer comes down as `{k:'reply',
+messageId, answer, fromAgentId}`.
 
-El CEO es el router a propósito. Veinte agentes con línea directa entre ellos
-son veinte agentes interrumpiéndose; enrutado, un mensaje puede retenerse hasta
-que su destinatario esté entre turnos, fusionarse con otros, o contestarse sin
-despertar a nadie.
+The CEO is the router on purpose. Twenty agents with a direct line between them
+are twenty agents interrupting each other; routed, a message can be held until
+its recipient is between turns, merged with others, or answered without waking
+anybody.
 
-Este documento **es** el contrato del lado del agente. La forma que viaja por
-el cable vive en `src/shared/types.ts` (`AgentMessage`) y no se toca desde aquí.
+This document **is** the contract on the agent's side. The shape that travels on
+the wire lives in `src/shared/types.ts` (`AgentMessage`) and is not touched from
+here.
 
 ---
 
-## 1. Mandar
+## 1. Sending
 
-El agente escribe un JSON en `<project>/.orca/out/<id>.json`. El `<id>` lo elige
-él: cualquier nombre de archivo válido que no empiece por `.` y no termine en
-`.answer`. En la práctica se usa `orca-tell`, que lo hace bien solo.
+The agent writes a JSON at `<project>/.orca/out/<id>.json`. It chooses the
+`<id>` itself: any valid filename that does not start with `.` and does not end
+in `.answer`. In practice you use `orca-tell`, which gets it right on its own.
 
 ```jsonc
 {
-  // OBLIGATORIO. Qué clase de mensaje es. Ver §2: la diferencia importa.
+  // REQUIRED. What class of message this is. See §2: the difference matters.
   "kind": "notice" | "ask" | "handoff" | "warning",
 
-  // Opcional. Cuatro formas y nada más:
-  //   "K9"              un callsign concreto        → scope 'agent'
-  //   "project:dijosi"  todos los de ese proyecto   → scope 'project'
-  //   "squad:audit-01"  todos los de ese escuadrón  → scope 'squad'
-  //   "fleet" | null    todo el mundo               → scope 'fleet'
+  // Optional. Four forms and nothing else:
+  //   "K9"              one specific callsign       → scope 'agent'
+  //   "project:dijosi"  everyone in that project    → scope 'project'
+  //   "squad:audit-01"  everyone in that squad      → scope 'squad'
+  //   "fleet" | null    everybody                   → scope 'fleet'
   "to": "K9",
 
-  // OBLIGATORIO. Una línea. Es lo que se pinta sobre una arista del mapa, así
-  // que tiene que entenderse sin abrir nada. Máx. 300 caracteres; se recorta.
+  // REQUIRED. One line. It is what gets painted on an edge of the map, so it
+  // has to be understandable without opening anything. Max 300 chars; clipped.
   "subject": "El endpoint /v1/charges devuelve 402 en sandbox",
 
-  // Opcional, multilínea. El detalle. Máx. 8000 caracteres; se recorta.
+  // Optional, multiline. The detail. Max 8000 characters; clipped.
   "body": "Desde el deploy de las 14:40.\nLa key de sandbox caducó.",
 
-  // Opcional. Archivos de los que va esto, para que la consola pueda señalar
-  // algo concreto. Máx. 20; se recorta.
+  // Optional. Files this is about, so the console can point at something
+  // concrete. Max 20; clipped.
   "files": ["src/api/charges.ts"],
 
-  // Opcional pero MUY recomendado: tu sessionId. Sin esto el collector se lo
-  // atribuye al agente más recientemente activo del proyecto, que con varios
-  // agentes en el mismo repo puede equivocarse.
+  // Optional but STRONGLY recommended: your sessionId. Without it the collector
+  // attributes the message to the project's most recently active agent, which
+  // with several agents in the same repo can get it wrong.
   "agentId": "78b357fe-4480-419f-bd99-7b5d7980e7fd",
 
-  // Opcional. Minutos tras los cuales el mensaje se retira solo.
-  // Un `notice` sin esto caduca a las 6h. Un `ask` sin esto NO caduca nunca.
+  // Optional. Minutes after which the message withdraws itself.
+  // A `notice` without this expires in 6h. An `ask` without this NEVER expires.
   "ttlMinutes": 120
 }
 ```
 
-Reglas que el agente debe respetar:
+Rules the agent has to respect:
 
-- **`kind` y `subject` son obligatorios.** Un archivo sin ellos, o con un `kind`
-  inventado, se descarta con un warning en el log y **se borra**: no se reintenta
-  eternamente algo que nunca va a ser válido.
-- **Escribe atómicamente.** `<id>.json.tmp` y renombra. El collector reintenta al
-  siguiente tick si lee un JSON a medias, pero un rename es gratis.
-- **`mkdir -p` la carpeta.** El collector NO crea `.orca/out/`. No queremos que un
-  daemon de observación escriba dentro de los repos del usuario sin que nadie se
-  lo pida. El primer mensaje la crea el agente.
-- **Un mensaje por archivo.**
-- **Añade `.orca/` a `.gitignore`.**
+- **`kind` and `subject` are required.** A file without them, or with an
+  invented `kind`, is discarded with a warning in the log and **deleted**:
+  something that is never going to be valid is not retried forever.
+- **Write atomically.** `<id>.json.tmp` and rename. The collector retries on the
+  next tick if it reads a half-written JSON, but a rename is free.
+- **`mkdir -p` the folder.** The collector does NOT create `.orca/out/`. We do
+  not want an observation daemon writing inside the user's repos without anybody
+  asking it to. The agent creates it with its first message.
+- **One message per file.**
+- **Add `.orca/` to `.gitignore`.**
 
-El collector **borra** el archivo de salida al emitirlo. El registro ya lo tiene
-el hub; dejarlo ahí sólo produciría duplicados en el siguiente arranque.
+The collector **deletes** the outbound file once it has emitted it. The hub
+already has the record; leaving it there would only produce duplicates on the
+next start.
 
-## 2. Los cuatro `kind`, y por qué la diferencia importa
+## 2. The four `kind`s, and why the difference matters
 
-| kind | significa | ¿bloquea? |
+| kind | means | blocks? |
 |------|-----------|-----------|
-| `notice` | "Me he enterado de esto." A alguien puede servirle; nadie debe actuar. | no |
-| `ask` | "Necesito esto de ti." | **sí, a QUIEN LO MANDA** |
-| `handoff` | "Esto pasa a ser tuyo." Trabajo que cambia de manos, con contexto. | no |
-| `warning` | "Cuidado." Algo con lo que el destinatario está a punto de chocar. | no |
+| `notice` | "I found this out." It may be useful to somebody; nobody has to act. | no |
+| `ask` | "I need this from you." | **yes, WHOEVER SENDS IT** |
+| `handoff` | "This is yours now." Work changing hands, with context. | no |
+| `warning` | "Careful." Something the recipient is about to collide with. | no |
 
-Un `ask` sin responder pone a su emisor en
-`block = {kind:'peer', messageId, waitingOn, since}`, y eso es lo que dibuja las
-cadenas de espera de la consola: A espera a B, que espera a C. Es la única
-razón por la que este canal merece existir en lugar de un archivo compartido.
+An unanswered `ask` puts its sender into
+`block = {kind:'peer', messageId, waitingOn, since}`, and that is what draws the
+console's wait chains: A waits on B, which waits on C. It is the only reason
+this channel deserves to exist instead of a shared file.
 
-Un `notice` **no bloquea a nadie**, y eso también es deliberado: si bloqueara,
-nadie mandaría notices, y el canal se moriría de silencio.
+A `notice` **blocks nobody**, and that is deliberate too: if it blocked, nobody
+would send notices, and the channel would die of silence.
 
-Usa `ask` sólo cuando de verdad no puedes seguir. Para todo lo que simplemente
-quieres dejar por escrito, `notice`.
+Use `ask` only when you really cannot go on. For everything you simply want on
+the record, `notice`.
 
-## 3. Enrutado, y el degradado
+## 3. Routing, and the downgrade
 
-`to` se resuelve así:
+`to` resolves like this:
 
-- Un **callsign** (`"K9"`) contra los agentes que ORCA está mirando ahora mismo.
-  Prefiere uno no terminado: las etiquetas se reciclan cuando un agente muere.
-- `project:<nombre>` contra el nombre, el código o el slug del proyecto, y en una
-  segunda pasada por coincidencia parcial (`dijosi` encuentra `dijosi-workers-…`).
-- `squad:<nombre>` contra la etiqueta `squad` que llevan puesta los agentes. Ver
-  §3b.
-- `fleet`, `*`, `null` o ausente: toda la flota.
+- A **callsign** (`"K9"`) against the agents ORCA is looking at right now. It
+  prefers an unfinished one: labels get recycled when an agent dies.
+- `project:<name>` against the project's name, code or slug, and on a second
+  pass by partial match (`dijosi` finds `dijosi-workers-…`).
+- `squad:<name>` against the `squad` label the agents are wearing. See §3b.
+- `fleet`, `*`, `null` or absent: the whole fleet.
 
-**Si el destinatario no existe, el mensaje NO se tira.** Sale igual, degradado a
-`scope: 'project'` sobre el proyecto del emisor, y el subject lo dice:
+**If the recipient does not exist, the message is NOT thrown away.** It goes out
+anyway, downgraded to `scope: 'project'` over the sender's project, and the
+subject says so:
 
 ```
 [no encontré a QQ] ¿Ya migraste la tabla de sesiones?
 ```
 
-Un aviso mal dirigido se ignora en dos segundos. Uno que nunca se emitió cuesta
-una tarde de depuración, porque no deja ni una línea de log en ningún sitio.
+A misdirected notice is ignored in two seconds. One that was never emitted costs
+an afternoon of debugging, because it does not leave a single log line anywhere.
 
-## 3b. Escuadrones
+## 3b. Squads
 
-Un **escuadrón** es un grupo de agentes con un líder: la etiqueta `squad` que
-lleva puesta un `Agent`, más el `lead: true` de uno de ellos. No hay tabla de
-escuadrones ni nada que crear o borrar — un escuadrón es, literalmente, quien
-lleva la etiqueta ahora mismo, y `squadsOf()` (en `src/shared/squads.ts`) lo
-deriva de los agentes. El que muere sale solo.
+A **squad** is a group of agents with a lead: the `squad` label an `Agent`
+wears, plus `lead: true` on one of them. There is no squad table and nothing to
+create or delete — a squad is, literally, whoever is wearing the label right
+now, and `squadsOf()` (in `src/shared/squads.ts`) derives it from the agents.
+Whoever dies drops out by themselves.
 
-La etiqueta la pone el `spawn` que creó al agente (`Command.spawn` acepta
-`squad` y `lead`) y el collector la persiste junto a `mission` en
-`~/.orca/lineage.json`, así que sobrevive a un reinicio. **No se hereda**: un
-subagente `Task` de un miembro trabaja *para su padre*, no para el escuadrón.
+The label is set by the `spawn` that created the agent (`Command.spawn` accepts
+`squad` and `lead`) and the collector persists it next to `mission` in
+`~/.orca/lineage.json`, so it survives a restart. **It is not inherited**: a
+member's `Task` subagent works *for its parent*, not for the squad.
 
-Nombres válidos: letras, dígitos, `-` y `_`, empezando por letra o dígito, hasta
-32 caracteres (`audit-01`, `payments_migration`). Cualquier otra cosa no es un
-escuadrón y se descarta.
+Valid names: letters, digits, `-` and `_`, starting with a letter or digit, up
+to 32 characters (`audit-01`, `payments_migration`). Anything else is not a
+squad and is discarded.
 
 ```bash
 orca-tell "Informe a las 18:00, una línea cada uno" --to squad:audit-01 --kind handoff
 ```
 
-Sale como `scope: 'squad'` con `toSquad: "audit-01"`, y el **hub** —el único que
-ve la flota entera— lo entrega a todos los agentes con esa etiqueta, estén en la
-máquina que estén. Al emisor nunca se le devuelve el suyo.
+It goes out as `scope: 'squad'` with `toSquad: "audit-01"`, and the **hub** —
+the only one that sees the whole fleet — delivers it to every agent with that
+label, whatever machine they are on. The sender never gets its own back.
 
-Una diferencia deliberada con el resto del enrutado: un escuadrón vacío **no
-degrada a difusión**. Un `project:` que no existe se convierte en un aviso al
-proyecto del emisor, porque ahí hay gente a la que probablemente le sirva; un
-`squad:` que no existe no se le manda a nadie, porque despertar a veinte agentes
-ajenos por un typo es peor que no entregarlo. El hub lo dice en el feed:
+One deliberate difference from the rest of the routing: an empty squad **does
+not downgrade to a broadcast**. A `project:` that does not exist turns into a
+notice to the sender's project, because there are people there it will probably
+be useful to; a `squad:` that does not exist is sent to nobody, because waking
+twenty unrelated agents over a typo is worse than not delivering it. The hub
+says so in the feed:
 
 ```
 K9: "Informe a las 18:00" sin entregar — nadie en el escuadrón audit-01
 ```
 
-### Lo que el líder y los miembros saben
+### What the lead and the members know
 
-El collector le pega al prompt un pie corto en el momento del spawn — el texto
-vive en `src/collector/briefs.ts`:
+The collector sticks a short footer onto the prompt at spawn time — the text
+lives in `src/collector/briefs.ts`:
 
-- **líder**: sus miembros le llegan como hijos y le reportan a él; reparte con
-  `orca-tell --to <callsign>` o `--to squad:<nombre>`; consolida; y sólo usa
-  `orca-ask` cuando nadie del escuadrón puede seguir.
-- **miembro**: a qué escuadrón pertenece, quién es su líder, que reporta con
-  `orca-tell --to <líder>`, y que **no** usa `orca-ask` — el humano es del líder.
+- **lead**: its members arrive as children and report to it; it hands out work
+  with `orca-tell --to <callsign>` or `--to squad:<name>`; it consolidates; and
+  it only uses `orca-ask` when nobody in the squad can go on.
+- **member**: which squad it belongs to, who its lead is, that it reports with
+  `orca-tell --to <lead>`, and that it does **not** use `orca-ask` — the human
+  belongs to the lead.
 
-Sin ese pie un miembro atascado escala a la persona, que es exactamente lo que
-un escuadrón existe para evitar.
+Without that footer a stuck member escalates to the person, which is exactly
+what a squad exists to avoid.
 
-## 3c. Pedir otro agente
+## 3c. Asking for another agent
 
-El mismo canal, otro payload: un agente que necesita otro par de manos escribe
-`<project>/.orca/spawn/<id>.json` con `{ mission, squad?, model?, agentId }`
-(`orca-spawn "<brief>"`) y el collector contesta en `<id>.ack.json` con
-`{ ok, agentId, callsign, shortId, squad, parentId }` o `{ ok:false, reason }`.
+The same channel, a different payload: an agent that needs another pair of hands
+writes `<project>/.orca/spawn/<id>.json` with
+`{ mission, squad?, model?, agentId }` (`orca-spawn "<brief>"`) and the
+collector answers in `<id>.ack.json` with
+`{ ok, agentId, callsign, shortId, squad, parentId }` or `{ ok:false, reason }`.
 
-Lo que decide el collector, nunca el archivo: el hijo es hijo de quien pidió,
-entra en el escuadrón de quien pidió (un `squad` en el archivo sólo cuenta si
-el que pide no está en ninguno), y nunca es líder. Topes: 8 hijos vivos por
-agente, 13 agentes por escuadrón. Un brief de menos de 20 caracteres se rechaza
-antes de lanzar nada. El código vive en `src/collector/spawns.ts`.
+What the collector decides, never the file: the child is the child of whoever
+asked, joins the squad of whoever asked (a `squad` in the file only counts if
+the asker is not in one), and is never a lead. Caps: 8 live children per agent,
+13 agents per squad. A brief shorter than 20 characters is rejected before
+anything is launched. The code lives in `src/collector/spawns.ts`.
 
-## 4. Recibir
+## 4. Receiving
 
-El collector escribe en `<project>/.orca/in/<id>.json`, donde `<id>` es el id
-que el mensaje tiene en el protocolo (`msg_…`):
+The collector writes at `<project>/.orca/in/<id>.json`, where `<id>` is the id
+the message has in the protocol (`msg_…`):
 
 ```jsonc
 {
   "id": "msg_c27a8e9c5dd2b6a1",
   "kind": "ask",
   "scope": "agent",                   // agent | project | squad | fleet
-  "from": "Z1",                       // callsign de quien lo manda
+  "from": "Z1",                       // callsign of whoever sends it
   "fromAgentId": "78b357fe-…",
   "fromProjectId": "…",
   "subject": "¿Ya migraste la tabla de sesiones?",
@@ -207,45 +211,46 @@ que el mensaje tiene en el protocolo (`msg_…`):
   "files": [],
   "at": 1788563552553,
   "expiresAt": null,
-  "replyTo": "msg_c27a8e9c5dd2b6a1"   // presente sólo en un `ask`: contéstalo
+  "replyTo": "msg_c27a8e9c5dd2b6a1"   // present only on an `ask`: answer it
 }
 ```
 
-Se lee con `orca-read`, que además escribe `<id>.read` junto a cada mensaje que
-imprime. Esa marca es lo que el collector vigila para llenar `readBy` en la
-consola, así que no la borres a mano.
+You read it with `orca-read`, which also writes `<id>.read` next to every
+message it prints. That mark is what the collector watches in order to fill
+`readBy` in the console, so do not delete it by hand.
 
-## 5. Responder un `ask`
+## 5. Answering an `ask`
 
-Dos caminos, y los dos cierran el mismo bloqueo:
+Two paths, and both close the same block:
 
-**Desde la consola / el CEO.** El hub baja `{k:'reply', messageId, answer,
-fromAgentId}`.
+**From the console / the CEO.** The hub sends down `{k:'reply', messageId,
+answer, fromAgentId}`.
 
-**Desde otro agente**, sin pasar por nadie: se escribe en el *mismo* buzón de
-salida un archivo con `replyTo`.
+**From another agent**, without going through anybody: write a file with
+`replyTo` into the *same* outbound mailbox.
 
 ```jsonc
 { "replyTo": "msg_c27a8e9c5dd2b6a1", "answer": "Sí, la migré anoche",
-  "agentId": "<tu sessionId>" }
+  "agentId": "<your sessionId>" }
 ```
 
-o, lo que es lo mismo:
+or, which is the same thing:
 
 ```bash
 orca-tell --reply msg_c27a8e9c5dd2b6a1 "Sí, la migré anoche"
 ```
 
-En ambos casos el collector escribe **dos** cosas en el buzón del que preguntó:
+In both cases the collector writes **two** things into the mailbox of whoever
+asked:
 
-- `<su nombre local>.answer.json` — el nombre que él conoce, que es lo que
-  `orca-tell --wait` está esperando;
-- `<msgId>.json` con `kind: "notice"` y `subject: "re: …"` — para que la
-  respuesta también salga en un `orca-read` de quien ya siguió con otra cosa.
-  Si ese archivo tenía marca `.read`, se borra: el contenido cambió, así que el
-  mensaje vuelve a ser nuevo.
+- `<its local name>.answer.json` — the name it knows, which is what
+  `orca-tell --wait` is waiting for;
+- `<msgId>.json` with `kind: "notice"` and `subject: "re: …"` — so that the
+  answer also shows up in an `orca-read` for someone who has already moved on to
+  something else. If that file had a `.read` mark, it is deleted: the content
+  changed, so the message is new again.
 
-El `.answer.json` tiene esta forma:
+The `.answer.json` has this shape:
 
 ```jsonc
 {
@@ -254,89 +259,92 @@ El `.answer.json` tiene esta forma:
   "subject": "¿Ya migraste la tabla de sesiones?",
   "answer": "Sí, la migré anoche",
   "at": 1788563590478,
-  "answeredBy": "<sessionId de quien contestó>",
+  "answeredBy": "<sessionId of whoever answered>",
   "answeredByCallsign": "K9"
 }
 ```
 
-## 6. Esperar
+## 6. Waiting
 
 ```bash
 orca-tell "¿Ya migraste la tabla de sesiones?" --to T1 --kind ask --wait
 ```
 
-Bloquea hasta que aparezca el `.answer.json`, imprime la respuesta en stdout y
-sale con 0. Con `--timeout <min>` (por defecto 60) sale con 3 si nadie contestó.
-Igual que `orca-ask --wait`, y por la misma razón: un agente que espera tiene que
-poder decir "me rindo, sigo con una suposición" en vez de colgarse.
+It blocks until the `.answer.json` shows up, prints the answer on stdout and
+exits with 0. With `--timeout <min>` (60 by default) it exits with 3 if nobody
+answered. Same as `orca-ask --wait`, and for the same reason: an agent that
+waits has to be able to say "I give up, I will go on with an assumption"
+instead of hanging.
 
-Mientras el `ask` está abierto, su emisor aparece en la consola como `blocked`
-con `block.kind = "peer"`.
+While the `ask` is open, its sender shows up in the console as `blocked` with
+`block.kind = "peer"`.
 
 ## 7. Ids
 
-El id del protocolo **no** es el nombre del archivo:
+The protocol's id is **not** the file's name:
 
 ```
-msg_<sha1(ruta absoluta + " " + hora de creación)[0..16]>
+msg_<sha1(absolute path + " " + creation time)[0..16]>
 ```
 
-Lleva la hora dentro, a diferencia del de una escalación, porque el archivo de
-salida se borra al recogerlo: un agente que reusa `out/1.json` para su segundo
-mensaje tiene que producir un id distinto, o el hub creería que el primero
-cambió de opinión.
+It carries the time inside, unlike an escalation's, because the outbound file is
+deleted once it is picked up: an agent that reuses `out/1.json` for its second
+message has to produce a different id, or the hub would think the first one had
+changed its mind.
 
-## 8. Colisiones de archivo
+## 8. File collisions
 
-No es parte de este buzón y no requiere que el agente haga nada — está aquí
-porque es la otra mitad de "dos agentes trabajando cerca".
+It is not part of this mailbox and requires nothing of the agent — it is here
+because it is the other half of "two agents working close together".
 
-El collector ya lee los transcripts, y Claude Code escribe una línea
-`file-history-delta` **antes de cada escritura** (nunca antes de una lectura).
-Dos agentes vivos que escriben el mismo archivo dentro de 15 minutos
-(`ORCA_COLLISION_WINDOW_MS`) producen una `Collision`, que sale como
-`{t:'collision'}` y se retira con `{t:'collision:clear'}` cuando deja de ser
-cierta.
+The collector already reads the transcripts, and Claude Code writes a
+`file-history-delta` line **before every write** (never before a read). Two live
+agents writing the same file within 15 minutes
+(`ORCA_COLLISION_WINDOW_MS`) produce a `Collision`, which goes out as
+`{t:'collision'}` and is withdrawn with `{t:'collision:clear'}` when it stops
+being true.
 
-Lo que **no** cuenta:
+What does **not** count:
 
-- Sesiones terminadas (`done`, `dead`).
-- Lecturas. Que dos agentes lean el mismo archivo es normal y sano.
-- Lockfiles, `node_modules/`, `dist/`, `.git/`, `*.log` y todo lo que cuelgue de
-  `.orca/`.
-- Un agente y **su propio linaje**. Un subagente edita *por* su padre y comparte
-  worktree por diseño; avisar de eso sería avisar de que el producto funciona.
-  Dos hermanos del mismo padre **sí** cuentan: son dos escritores independientes,
-  que es el caso clásico que esto existe para cazar.
+- Finished sessions (`done`, `dead`).
+- Reads. Two agents reading the same file is normal and healthy.
+- Lockfiles, `node_modules/`, `dist/`, `.git/`, `*.log` and everything hanging
+  off `.orca/`.
+- An agent and **its own lineage**. A subagent edits *on behalf of* its parent
+  and shares a worktree by design; warning about that would be warning that the
+  product works. Two siblings of the same parent **do** count: they are two
+  independent writers, which is the classic case this exists to catch.
 
-Detalle medido, no supuesto: el `backupTime` de un `file-history-snapshot` es la
-hora del snapshot, no la de cada escritura — Claude Code re-sella el conjunto
-entero cuando entra un archivo nuevo (18 archivos, 3 marcas de tiempo, en un
-transcript real). Por eso sólo un `file-history-delta` puede abrir una colisión;
-el snapshot vale para saber qué archivos están en el conjunto de edición del
-agente y nada más.
+A measured detail, not an assumed one: the `backupTime` of a
+`file-history-snapshot` is the snapshot's time, not that of each write — Claude
+Code re-stamps the whole set when a new file comes in (18 files, 3 timestamps,
+in a real transcript). That is why only a `file-history-delta` can open a
+collision; the snapshot is good for knowing which files are in the agent's edit
+set and nothing more.
 
-## 9. Lo que este canal NO es
+## 9. What this channel is NOT
 
-- **No es un chat.** Un mensaje, y como mucho una respuesta. Para conversar está
-  el CEO.
-- **No transporta secretos.** Si necesitas una credencial, pídesela al humano por
-  `orca-ask`; llegará como variable de entorno, sin pasar por un archivo del repo.
-- **No garantiza atención.** Un `notice` puede no leerlo nadie nunca. Si necesitas
-  que alguien actúe, es un `ask`, y entonces tú pagas el precio de esperarlo.
+- **It is not a chat.** One message, and at most one answer. For conversation
+  there is the CEO.
+- **It does not carry secrets.** If you need a credential, ask the human for it
+  through `orca-ask`; it will arrive as an environment variable, without going
+  through a file in the repo.
+- **It does not guarantee attention.** A `notice` may never be read by anybody.
+  If you need somebody to act, it is an `ask`, and then you pay the price of
+  waiting for it.
 
-## 10. Ejemplo mínimo, de punta a punta
+## 10. Minimal example, end to end
 
 ```bash
-# A avisa a K9 de algo con lo que va a chocar.
+# A warns K9 about something it is about to collide with.
 orca-tell "El endpoint /v1/charges devuelve 402 en sandbox" \
   --to K9 --kind warning --file src/api/charges.ts
 
-# A pregunta algo que lo bloquea, y espera.
+# A asks something that blocks it, and waits.
 ANSWER=$(orca-tell "¿Ya migraste la tabla de sesiones?" --to T1 --kind ask --wait)
 echo "T1 dijo: $ANSWER"
 
-# K9, entre turnos, mira su buzón y contesta lo que le toca.
+# K9, between turns, checks its mailbox and answers what is its to answer.
 orca-read
 orca-tell --reply msg_c27a8e9c5dd2b6a1 "Sí, anoche. La vieja ya no se usa."
 ```

@@ -1,490 +1,502 @@
-# Peticiones al contrato (`src/shared/`)
+# Requests to the contract (`src/shared/`)
 
-Cosas que el hub necesitó y que el contrato no dice, o dice a medias. **Nada de
-esto se ha cambiado en `types.ts` ni `protocol.ts`** — el hub se acomodó a lo
-que hay. Aquí queda anotado para decidirlo en frío.
+Things the hub needed that the contract does not say, or only half-says.
+**None of this has been changed in `types.ts` or `protocol.ts`** — the hub
+adapted to what is there. It is written down here so it can be decided with a
+cool head.
 
-Escrito por el agente del hub. Formato: qué falta · qué hice mientras tanto.
+Written by the hub agent. Format: what is missing · what I did in the meantime.
 
 ---
 
-## 1. `rev`: contador de mutaciones vs. secuencia de frames  ⟵ el importante
+## 1. `rev`: mutation counter vs. frame sequence  ⟵ the important one
 
-`WorldState.rev` "se incrementa en cada mutación" y a la vez el protocolo dice
-que en `{t:'patch', rev}` **rev debe ser exactamente el anterior + 1**. Las dos
-cosas no pueden ser el mismo número: el bus colapsa una ráfaga de 30 mutaciones
-en un solo frame, así que ese frame tendría que ser `rev+30` y la consola
-detectaría un hueco y pediría resync sin parar.
+`WorldState.rev` "is incremented on every mutation" and at the same time the
+protocol says that in `{t:'patch', rev}` **rev must be exactly the previous one
++ 1**. Those two cannot be the same number: the bus collapses a burst of 30
+mutations into a single frame, so that frame would have to be `rev+30` and the
+console would detect a gap and ask for resync nonstop.
 
-**Mientras tanto:**
-- `World.state.rev` cuenta mutaciones (+1 exacto por cada una). Es lo que
-  reporta `/api/health` como `rev`.
-- `PatchBus.rev` es la secuencia de publicación: +1 por frame emitido, sin
-  huecos jamás.
-- El `{t:'world'}` que recibe una consola va sellado con `PatchBus.rev`, así que
-  desde el punto de vista de la consola el contrato se cumple al pie de la letra:
-  mundo en rev N, luego N+1, N+2…
-- `/api/world` devuelve la misma vista que ve una consola (rev de publicación).
+**In the meantime:**
+- `World.state.rev` counts mutations (exactly +1 for each one). It is what
+  `/api/health` reports as `rev`.
+- `PatchBus.rev` is the publication sequence: +1 per emitted frame, never a gap.
+- The `{t:'world'}` a console receives is stamped with `PatchBus.rev`, so from
+  the console's point of view the contract is met to the letter: world at rev
+  N, then N+1, N+2…
+- `/api/world` returns the same view a console sees (publication rev).
 
-**Petición:** o bien decir en `protocol.ts` que el `rev` del cable es una
-secuencia de frames, o añadir a `WorldState` un campo aparte (`mutations`) y
-dejar `rev` para el cable. Lo segundo es más honesto.
+**Request:** either say in `protocol.ts` that the wire's `rev` is a frame
+sequence, or add a separate field to `WorldState` (`mutations`) and leave `rev`
+for the wire. The second is more honest.
 
-## 2. Códigos de cierre de WebSocket
+## 2. WebSocket close codes
 
-El protocolo no define ninguno. El hub usa (y la consola debería reconocer):
+The protocol defines none. The hub uses (and the console should recognize):
 
-| código | significado |
+| code | meaning |
 |--------|-------------|
-| `4001` | token ausente o inválido |
-| `4002` | versión de protocolo incompatible |
-| `4003` | `hello` ausente o malformado |
-| `4009` | otra conexión reclamó esa `machineId` (reconexión); no reintentar en bucle |
+| `4001` | token missing or invalid |
+| `4002` | incompatible protocol version |
+| `4003` | `hello` missing or malformed |
+| `4009` | another connection claimed that `machineId` (reconnection); do not retry in a loop |
 
-**Petición:** llevarlos a `protocol.ts` como constantes.
+**Request:** move them into `protocol.ts` as constants.
 
-## 3. `escalation:answer` y `ceo:say` no llevan id de correlación
+## 3. `escalation:answer` and `ceo:say` carry no correlation id
 
-`ClientFrame` sólo permite acuse (`{t:'ack', cmdId}`) para `{t:'cmd'}`. Cuando
-el humano responde una escalación desde la consola no hay forma de decirle
-"llegó" o "la máquina está caída y no pude entregarla".
+`ClientFrame` only allows an acknowledgement (`{t:'ack', cmdId}`) for
+`{t:'cmd'}`. When the human answers an escalation from the console there is no
+way to tell them "it arrived" or "the machine is down and I could not deliver
+it".
 
-**Mientras tanto:** el hub aplica la respuesta al mundo (la consola lo ve por el
-patch de la escalación) y por debajo emite un `{k:'answer'}` al collector con un
-`cmdId` propio; el ack de ese comando se enruta a la consola que lo pidió, así
-que llega igual, pero con un id que la consola no reconoce.
+**In the meantime:** the hub applies the answer to the world (the console sees
+it through the escalation's patch) and underneath emits a `{k:'answer'}` to the
+collector with a `cmdId` of its own; that command's ack is routed to the
+console that asked for it, so it does arrive, but with an id the console does
+not recognize.
 
-**Petición:** `{ t:'escalation:answer'; id; answer; rememberAs; cmdId?: string }`.
+**Request:** `{ t:'escalation:answer'; id; answer; rememberAs; cmdId?: string }`.
 
-## 4. Clave de un `KeyDescriptor`
+## 4. A `KeyDescriptor`'s key
 
-`{o:'key', id}` necesita un id y `KeyDescriptor` no tiene campo `id`; tiene
+`{o:'key', id}` needs an id and `KeyDescriptor` has no `id` field; it has
 `name` + `projectId`.
 
-**Mientras tanto:** el hub indexa por `` `${projectId}/${name}` ``. Está en
-`world.ts`; la consola tiene que usar la misma convención.
+**In the meantime:** the hub indexes by `` `${projectId}/${name}` ``. It is in
+`world.ts`; the console has to use the same convention.
 
-**Petición:** o un `id` en `KeyDescriptor`, o dejar la convención escrita en
+**Request:** either an `id` on `KeyDescriptor`, or write the convention down in
 `types.ts`.
 
-## 5. El feed sólo sabe crecer
+## 5. The feed only knows how to grow
 
-`{o:'feed', v: FeedItem[]}` es un append. El hub recorta su copia a 500 (lo que
-se cae va al log persistente), pero no hay ninguna op que le diga a la consola
-"recorta". Si una consola lleva horas abierta, acumula todo.
+`{o:'feed', v: FeedItem[]}` is an append. The hub trims its copy to 500 (what
+falls off goes to the persistent log), but there is no op that tells the console
+"trim". A console that has been open for hours accumulates everything.
 
-**Mientras tanto:** el hub nunca manda más de 500 items en un frame y la consola
-debe recortar por su cuenta a `MAX_FEED = 500`.
+**In the meantime:** the hub never sends more than 500 items in a frame and the
+console has to trim on its own to `MAX_FEED = 500`.
 
-**Petición:** `{o:'feed', v, replace?: boolean}` o un `{o:'feed:trim', keep:n}`.
+**Request:** `{o:'feed', v, replace?: boolean}` or a `{o:'feed:trim', keep:n}`.
 
-## 6. No hay op para `ceo.awaitingHuman` ni para los mensajes
+## 6. There is no op for `ceo.awaitingHuman`, nor for the messages
 
-`PatchOp` tiene `ceo:thinking` pero no `ceo:awaiting`. Y los mensajes viajan por
-`{t:'ceo:message'}`, que no participa de la numeración de `rev`: una consola que
-se reconecta y pide resync recupera los mensajes dentro del `{t:'world'}`, pero
-un mensaje emitido justo entre el snapshot y el primer patch podría duplicarse.
+`PatchOp` has `ceo:thinking` but not `ceo:awaiting`. And messages travel via
+`{t:'ceo:message'}`, which takes no part in the `rev` numbering: a console that
+reconnects and asks for resync recovers the messages inside the `{t:'world'}`,
+but a message emitted right between the snapshot and the first patch could be
+duplicated.
 
-**Mientras tanto:** los `CeoMessage` llevan `id`; la consola debe deduplicar.
+**In the meantime:** `CeoMessage`s carry an `id`; the console has to
+deduplicate.
 
-**Petición:** `{o:'ceo:awaiting', v:boolean}` y decir en el protocolo que los
-mensajes del CEO se deduplican por `id`.
+**Request:** `{o:'ceo:awaiting', v:boolean}` and say in the protocol that the
+CEO's messages are deduplicated by `id`.
 
-## 7. `snapshot` no distingue "no hay agentes" de "no los miré"
+## 7. `snapshot` does not distinguish "there are no agents" from "I did not look at them"
 
-Si un collector manda un `snapshot` con `agents: []` el hub asume que todo lo que
-no aparece murió (los marca `dead`, sin borrarlos). Es la interpretación segura,
-pero un collector con un bug de lectura de disco puede matar una flota entera en
-la vista.
+If a collector sends a `snapshot` with `agents: []` the hub assumes everything
+that does not appear has died (it marks them `dead`, without deleting them). It
+is the safe interpretation, but a collector with a disk-reading bug can kill a
+whole fleet in the view.
 
-**Petición:** un `partial?: boolean` en el frame `snapshot`, o un
+**Request:** a `partial?: boolean` on the `snapshot` frame, or a
 `{t:'snapshot:begin'|'snapshot:end'}`.
 
-## 8. Métricas parciales en `{t:'agent', patch}`
+## 8. Partial metrics in `{t:'agent', patch}`
 
-`Partial<Agent>` implica que `metrics`, si viene, viene entero. En la práctica un
-collector manda sólo los contadores que cambiaron.
+`Partial<Agent>` implies that `metrics`, if it comes, comes whole. In practice a
+collector sends only the counters that changed.
 
-**Mientras tanto:** el hub **funde** `metrics` en vez de reemplazarlo, así que un
-patch con `{metrics:{tokensPerSec:40}}` no borra `costUSD`. Es lo que querrías,
-pero conviene que esté escrito.
+**In the meantime:** the hub **merges** `metrics` instead of replacing it, so a
+patch with `{metrics:{tokensPerSec:40}}` does not wipe `costUSD`. It is what you
+would want, but it had better be written down.
 
-**Petición:** declarar `metrics?: Partial<AgentMetrics>` en el frame `agent`.
+**Request:** declare `metrics?: Partial<AgentMetrics>` on the `agent` frame.
 
-## 9. Respuestas a escalaciones de máquinas caídas
+## 9. Answers to escalations from downed machines
 
-Si el humano responde una escalación cuya máquina está offline, el hub la marca
-`answered`, la persiste y la recuerda, pero el agente nunca se entera (y para
-entonces está en `dead`). No hay nada en el contrato para "respuesta pendiente de
-entrega".
+If the human answers an escalation whose machine is offline, the hub marks it
+`answered`, persists it and remembers it, but the agent never finds out (and by
+then it is `dead`). There is nothing in the contract for "answer pending
+delivery".
 
-**Mientras tanto:** el ack a la consola sale `ok:false` con
-`"máquina no conectada"`, pero la escalación ya figura como respondida.
+**In the meantime:** the ack to the console comes back `ok:false` with
+`"máquina no conectada"`, but the escalation already shows as answered.
 
-**Petición:** un estado `answered_undelivered`, o que el collector pida al
-reconectar las respuestas que se perdió.
+**Request:** an `answered_undelivered` state, or have the collector ask, on
+reconnect, for the answers it missed.
 
 ---
 
-# Peticiones del collector
+# Collector requests
 
-Escrito por el agente del collector, contra Claude Code **2.1.260** en macOS.
-Mismas reglas: `types.ts` y `protocol.ts` no se tocaron; el collector se acomodó.
+Written by the collector agent, against Claude Code **2.1.260** on macOS. Same
+rules: `types.ts` and `protocol.ts` were not touched; the collector adapted.
 
-## 10. `Command.permit` no es implementable hoy  ⟵ el importante
+## 10. `Command.permit` cannot be implemented today  ⟵ the important one
 
-`{k:'permit', agentId, allow, scope}` promete contestar un prompt de permisos.
-Claude Code 2.1.260 **no expone ninguna forma de hacerlo desde fuera del
-proceso**: no hay subcomando (`claude --help` lista `agents`, `attach`, `logs`,
-`rm`, `stop`, `respawn`, `auth`, `mcp`… y nada más), no hay archivo de control en
-`~/.claude/jobs/<id>/`, y el prompt vive en el TTY de la sesión.
+`{k:'permit', agentId, allow, scope}` promises to answer a permission prompt.
+Claude Code 2.1.260 **exposes no way to do that from outside the process**:
+there is no subcommand (`claude --help` lists `agents`, `attach`, `logs`, `rm`,
+`stop`, `respawn`, `auth`, `mcp`… and nothing else), there is no control file in
+`~/.claude/jobs/<id>/`, and the prompt lives in the session's TTY.
 
-Peor: el bloqueo por permisos ni siquiera se puede *detectar* directamente. El
-transcript no escribe una línea "estoy pidiendo permiso"; sólo se ve un
-`tool_use` cuyo `tool_result` no llega nunca.
+Worse: a permission block cannot even be *detected* directly. The transcript
+does not write an "I am asking for permission" line; all you see is a `tool_use`
+whose `tool_result` never arrives.
 
-**Mientras tanto:**
-- El collector infiere `block.kind = 'permission'` heurísticamente: un `tool_use`
-  pendiente >90s, en una tool con guardia (`Bash`, `Edit`, `Write`, `Task`…), y
-  con `permissionMode` fuera de `{auto, acceptEdits, bypassPermissions, plan}`.
-  Es un buen indicio, no un hecho. Un `Bash` legítimamente lento en modo manual
-  se marcará como bloqueado.
-- `permit` responde **`ok:false`** con un detalle que dice qué hacer
-  (`claude attach`, o relanzar con `--permission-mode`). Fallar explícito es
-  mejor que fingir que se hizo algo.
+**In the meantime:**
+- The collector infers `block.kind = 'permission'` heuristically: a `tool_use`
+  pending >90s, on a guarded tool (`Bash`, `Edit`, `Write`, `Task`…), and with
+  `permissionMode` outside `{auto, acceptEdits, bypassPermissions, plan}`. It is
+  a good hint, not a fact. A legitimately slow `Bash` in manual mode will be
+  marked as blocked.
+- `permit` answers **`ok:false`** with a detail saying what to do
+  (`claude attach`, or relaunch with `--permission-mode`). Failing explicitly is
+  better than pretending something was done.
 
-**Petición:** o quitar `permit` del contrato hasta que el CLI lo soporte, o
-declararlo `best-effort` para que la consola no ofrezca un botón que miente.
+**Request:** either drop `permit` from the contract until the CLI supports it,
+or declare it `best-effort` so the console does not offer a button that lies.
 
-## 11. `Agent.block` no puede llevar las opciones que el agente ya ofreció
+## 11. `Agent.block` cannot carry the options the agent already offered
 
-Cuando un agente llama a la tool `AskUserQuestion` — que es literalmente "le
-estoy preguntando al humano" — el transcript trae la estructura completa:
+When an agent calls the `AskUserQuestion` tool — which is literally "I am asking
+the human" — the transcript brings the whole structure:
 
 ```jsonc
 {"questions":[{"question":"…","header":"Credencial","multiSelect":false,
   "options":[{"label":"Exportar CLOUDFLARE_API_TOKEN","description":"…"}]}]}
 ```
 
-`Agent['block']` sólo tiene `{kind, summary, escalationId?, since}`. Las opciones,
-que son exactamente lo que la consola querría pintar como respuestas de una
-pulsación, no caben. `Escalation` sí las tiene, pero una `AskUserQuestion` no es
-una escalación de ORCA: nadie escribió un archivo en `.orca/ask/`, y el collector
-tampoco puede responderla (ver #10).
+`Agent['block']` only has `{kind, summary, escalationId?, since}`. The options,
+which are exactly what the console would want to paint as one-tap answers, do
+not fit. `Escalation` does have them, but an `AskUserQuestion` is not an ORCA
+escalation: nobody wrote a file in `.orca/ask/`, and the collector cannot answer
+it either (see #10).
 
-**Mientras tanto:** el collector pone la primera pregunta en `block.summary` y
-tira las opciones. La consola sabe *qué* pregunta y no *qué puede contestar*.
+**In the meantime:** the collector puts the first question in `block.summary`
+and throws the options away. The console knows *what* is being asked and not
+*what it can answer*.
 
-**Petición:** `block.options?: string[]`, o permitir sintetizar una `Escalation`
-de sólo lectura (`status: 'pending'`, sin canal de respuesta).
+**Request:** `block.options?: string[]`, or allow synthesizing a read-only
+`Escalation` (`status: 'pending'`, with no answer channel).
 
-## 12. Un `Agent` no dice dónde vive
+## 12. An `Agent` does not say where it lives
 
-No hay `cwd`, `transcriptPath` ni `sessionId` crudo en `Agent`. El `id` que
-inventa el collector para un subagente es `<session-uuid>#<agentId>`, así que ni
-siquiera se puede reconstruir el sessionId con un split fiable desde la consola.
+There is no `cwd`, no `transcriptPath` and no raw `sessionId` on `Agent`. The
+`id` the collector invents for a subagent is `<session-uuid>#<agentId>`, so not
+even the sessionId can be reconstructed with a reliable split from the console.
 
-Duele en tres sitios: la consola no puede ofrecer "abrir el transcript", no puede
-mostrar el comando de `claude attach` (para eso está `shortId`, pero sólo existe
-en sesiones background), y el hub no puede deduplicar un agente que aparece desde
-dos collectors por un directorio compartido.
+It hurts in three places: the console cannot offer "open the transcript", it
+cannot show the `claude attach` command (that is what `shortId` is for, but it
+only exists on background sessions), and the hub cannot deduplicate an agent
+that shows up from two collectors because of a shared directory.
 
-**Mientras tanto:** `id` es `<sessionId>` para una sesión raíz y
-`<sessionId>#<agentId>` para un subagente. Documentado aquí y en ningún otro
-lado, que es exactamente el problema.
+**In the meantime:** `id` is `<sessionId>` for a root session and
+`<sessionId>#<agentId>` for a subagent. Documented here and nowhere else, which
+is exactly the problem.
 
-**Petición:** `sessionId: string` y `transcriptPath: string` en `Agent`.
+**Request:** `sessionId: string` and `transcriptPath: string` on `Agent`.
 
-## 13. `AgentMetrics.turns` y `.toolCalls` no pueden ser totales de la sesión
+## 13. `AgentMetrics.turns` and `.toolCalls` cannot be session totals
 
-En esta máquina hay 2.8GB de transcripts y archivos de hasta 83MB. Contar los
-turnos históricos exige parsear el archivo entero, y hacerlo con 539 sesiones al
-arrancar es inviable. El collector lee la **cola** (hasta 4MB) y sigue en vivo.
+On this machine there are 2.8GB of transcripts and files of up to 83MB. Counting
+the historical turns requires parsing the whole file, and doing that for 539
+sessions at startup is unworkable. The collector reads the **tail** (up to 4MB)
+and follows live.
 
-Consecuencia: `turns` y `toolCalls` son *"observados desde que el collector se
-enganchó"*, no totales. Para una sesión nueva coinciden; para una de 55 días, no.
-`costUSD`, `inputTokens`, `outputTokens`, `linesAdded/Removed`, `apiDurationMs` y
-`toolDurationMs` **sí** son totales, porque Claude Code los escribe ya agregados
-en una línea `cost-state`.
+Consequence: `turns` and `toolCalls` are *"observed since the collector hooked
+in"*, not totals. For a new session they match; for a 55-day-old one, they do
+not. `costUSD`, `inputTokens`, `outputTokens`, `linesAdded/Removed`,
+`apiDurationMs` and `toolDurationMs` **are** totals, because Claude Code writes
+them already aggregated on a `cost-state` line.
 
-**Mientras tanto:** el collector rescata el último `cost-state` con una búsqueda
-del marcador hacia atrás a nivel de bytes (sin parsear), lo que da métricas de
-costo exactas. Verificado: la suma de los 539 agentes da $5663.80, idéntico a un
-barrido independiente del corpus. Pero `turns`/`toolCalls` siguen siendo parciales.
+**In the meantime:** the collector rescues the last `cost-state` with a
+byte-level backwards search for the marker (no parsing), which gives exact cost
+metrics. Verified: the sum over the 539 agents is $5663.80, identical to an
+independent sweep of the corpus. But `turns`/`toolCalls` are still partial.
 
-**Petición:** partir el tipo en `metrics` (total, autoritativo) y
-`observed: {turns, toolCalls}` — o un `metricsPartial: boolean`.
+**Request:** split the type into `metrics` (total, authoritative) and
+`observed: {turns, toolCalls}` — or a `metricsPartial: boolean`.
 
-Nota relacionada: **sólo 120 de 539 transcripts tienen `cost-state`**. Claude
-Code lo escribe al final de la sesión, así que un agente vivo reporta
-`costUSD: 0` legítimamente. No es un bug del collector; conviene que la consola
-no pinte "$0.00" como si fuera un dato.
+Related note: **only 120 of 539 transcripts have `cost-state`**. Claude Code
+writes it at the end of the session, so a live agent legitimately reports
+`costUSD: 0`. It is not a collector bug; the console had better not paint
+"$0.00" as if it were data.
 
-## 14. No hay forma de distinguir sesión raíz / subagente / agente de workflow
+## 14. There is no way to tell a root session from a subagent from a workflow agent
 
-`Agent.background` distingue background de interactivo, y `depth > 0` implica que
-alguien lo lanzó. Pero en disco hay tres cosas distintas:
+`Agent.background` distinguishes background from interactive, and `depth > 0`
+implies somebody launched it. But on disk there are three different things:
 
 ```
-<slug>/<session>.jsonl                                    sesión raíz
-<slug>/<session>/subagents/agent-<id>.jsonl               subagente (tool Task)
-<slug>/<session>/subagents/workflows/<wf>/agent-<id>.jsonl agente de workflow
+<slug>/<session>.jsonl                                    root session
+<slug>/<session>/subagents/agent-<id>.jsonl               subagent (Task tool)
+<slug>/<session>/subagents/workflows/<wf>/agent-<id>.jsonl workflow agent
 ```
 
-Un agente de workflow tiene `depth > 0` igual que un subagente normal, pero
-pertenece a una ejecución de workflow que la consola querría agrupar. El
-collector conoce el `workflowId` y no tiene dónde ponerlo.
+A workflow agent has `depth > 0` just like an ordinary subagent, but it belongs
+to a workflow run that the console would want to group. The collector knows the
+`workflowId` and has nowhere to put it.
 
-**Mientras tanto:** el `workflowId` se queda dentro del collector. Los agentes de
-workflow se ven como subagentes cualesquiera.
+**In the meantime:** the `workflowId` stays inside the collector. Workflow
+agents look like any other subagent.
 
-**Petición:** `kind: 'session' | 'subagent' | 'workflow'` y `workflowId?: string`.
+**Request:** `kind: 'session' | 'subagent' | 'workflow'` and
+`workflowId?: string`.
 
-## 15. `Machine.load.memPct` no significa lo mismo en macOS
+## 15. `Machine.load.memPct` does not mean the same thing on macOS
 
-`1 - freemem/totalmem` da **99.9%** en un Mac sano: macOS mantiene casi toda la
-RAM ocupada con caché y memoria comprimida. Reportado tal cual, la barra de
-memoria de la consola está siempre en rojo y no informa de nada.
+`1 - freemem/totalmem` gives **99.9%** on a healthy Mac: macOS keeps almost all
+RAM occupied with cache and compressed memory. Reported as is, the console's
+memory bar is always red and tells you nothing.
 
-**Mientras tanto:** el collector reporta el número honesto. `cpuPct` sí es útil
-(se calcula por delta entre dos muestras de `os.cpus()`, y por eso el primer
-frame lo manda `null`).
+**In the meantime:** the collector reports the honest number. `cpuPct` is
+useful (it is computed as a delta between two `os.cpus()` samples, which is why
+the first frame sends it as `null`).
 
-**Petición:** definir `memPct` como "presión de memoria" y dejar que cada
-plataforma la calcule a su manera, o añadir `memPressure: 'normal'|'warn'|'crit'`.
+**Request:** define `memPct` as "memory pressure" and let each platform compute
+it its own way, or add `memPressure: 'normal'|'warn'|'crit'`.
 
-## 16. `Command.spawn` no cubre lo que el CLI ya sabe hacer
+## 16. `Command.spawn` does not cover what the CLI already knows how to do
 
-`claude` acepta `--effort <low|medium|high|xhigh|max>`, `--agent <nombre>`,
-`--add-dir`, `--allowedTools` y `--name`. `Command.spawn` sólo lleva `model` y
-`permissionMode`. `--effort` en particular es la palanca de costo/calidad más
-directa que existe y no se puede pedir desde la consola.
+`claude` accepts `--effort <low|medium|high|xhigh|max>`, `--agent <name>`,
+`--add-dir`, `--allowedTools` and `--name`. `Command.spawn` only carries `model`
+and `permissionMode`. `--effort` in particular is the most direct cost/quality
+lever there is, and it cannot be asked for from the console.
 
-**Mientras tanto:** el collector usa `mission` como `--name` (para que
-`claude agents` muestre algo legible) y ignora el resto.
+**In the meantime:** the collector uses `mission` as `--name` (so that
+`claude agents` shows something readable) and ignores the rest.
 
-**Petición:** `effort?: 'low'|'medium'|'high'|'xhigh'|'max'` y `agent?: string`
-en `Command.spawn`.
+**Request:** `effort?: 'low'|'medium'|'high'|'xhigh'|'max'` and `agent?: string`
+on `Command.spawn`.
 
-## 17. `permissionMode` del contrato ≠ el del CLI
+## 17. The contract's `permissionMode` ≠ the CLI's
 
-`Command.spawn.permissionMode` admite `'auto' | 'acceptEdits' | 'plan' | 'manual'`.
-El CLI acepta esos cuatro **más** `bypassPermissions` y `dontAsk`.
+`Command.spawn.permissionMode` accepts `'auto' | 'acceptEdits' | 'plan' | 'manual'`.
+The CLI accepts those four **plus** `bypassPermissions` and `dontAsk`.
 
-**Mientras tanto:** el collector valida contra el conjunto del CLI (los seis) y
-rechaza cualquier otra cosa antes de construir el argv. Un valor del contrato
-siempre pasa; los dos extra son inalcanzables desde la consola.
+**In the meantime:** the collector validates against the CLI's set (all six) and
+rejects anything else before building the argv. A contract value always passes;
+the two extras are unreachable from the console.
 
-**Petición:** alinear el union con el CLI.
+**Request:** align the union with the CLI.
 
-## 18. `AgentMessage` no dice de qué máquina viene
+## 18. `AgentMessage` does not say which machine it comes from
 
-Un mensaje se enruta entre máquinas, pero no lleva `machineId` — a diferencia de
-`Escalation` y `Collision`, que sí. El hub necesita saberlo para dos cosas:
-rechazar a un collector que habla en nombre de un agente ajeno, y saber a qué
-collector bajar el `{k:'reply'}`.
+A message is routed between machines, but carries no `machineId` — unlike
+`Escalation` and `Collision`, which do. The hub needs to know it for two things:
+rejecting a collector that speaks on behalf of somebody else's agent, and
+knowing which collector to push the `{k:'reply'}` down to.
 
-**Mientras tanto:** el hub lo deduce del `Agent` del emisor
-(`agents[fromAgentId].machineId`). Funciona salvo en una ventana estrecha: si el
-mensaje llega **antes** que el `agent:new` de su emisor, no hay a quién comparar
-y el frame se acepta sin poder verificar la propiedad. Con snapshot al conectar
-esa ventana es de milisegundos, pero existe.
+**In the meantime:** the hub deduces it from the sender's `Agent`
+(`agents[fromAgentId].machineId`). It works except in a narrow window: if the
+message arrives **before** its sender's `agent:new`, there is nothing to compare
+against and the frame is accepted without being able to verify ownership. With a
+snapshot on connect that window is milliseconds, but it exists.
 
-**Petición:** `machineId: string` en `AgentMessage`, como en todo lo demás que
-viaja por el cable.
+**Request:** `machineId: string` on `AgentMessage`, like everything else that
+travels on the wire.
 
-## 19. Una colisión no registra quién la resolvió ni con qué criterio
+## 19. A collision does not record who resolved it, or on what grounds
 
-`Collision.acknowledged` es un booleano. Cuando el CEO decide quién se queda con
-el archivo (`resolve_collision`), esa decisión —qué agente sigue, cuál se
-aparta, por qué— no cabe en ningún sitio: sólo queda el aviso que se le manda al
-que se aparta, que vive en `messages` y caduca en una hora.
+`Collision.acknowledged` is a boolean. When the CEO decides who keeps the file
+(`resolve_collision`), that decision — which agent continues, which one steps
+aside, why — does not fit anywhere: all that is left is the notice sent to the
+one that steps aside, which lives in `messages` and expires in an hour.
 
-**Mientras tanto:** la decisión queda en el log append-only del hub
-(`collision:new` + el `message:relay` del aviso) y la colisión sólo se marca
-`acknowledged`. La consola no puede mostrar "K9 se queda con api.ts (decidió el
-CEO)".
+**In the meantime:** the decision stays in the hub's append-only log
+(`collision:new` + the notice's `message:relay`) and the collision is only
+marked `acknowledged`. The console cannot show "K9 keeps api.ts (the CEO
+decided)".
 
-**Petición:** `resolvedBy?: 'human' | 'ceo'`, `keepAgentId?: string` y
-`reason?: string` en `Collision`.
+**Request:** `resolvedBy?: 'human' | 'ceo'`, `keepAgentId?: string` and
+`reason?: string` on `Collision`.
 
-## 20. La consola puede contestar un mensaje pero no mandar uno
+## 20. The console can answer a message but cannot send one
 
-`ClientFrame` tiene `{t:'collision:ack'}` y puede emitir `{k:'reply'}` dentro de
-un `{t:'cmd'}`, pero no hay forma de que el operador mande un mensaje a un
-agente o a un proyecto desde la consola: `{k:'deliver'}` exige un `AgentMessage`
-ya construido, con id, y la consola no debería estar inventando ids del mundo.
+`ClientFrame` has `{t:'collision:ack'}` and can emit `{k:'reply'}` inside a
+`{t:'cmd'}`, but there is no way for the operator to send a message to an agent
+or to a project from the console: `{k:'deliver'}` demands an already-built
+`AgentMessage`, with an id, and the console should not be inventing world ids.
 
-**Mientras tanto:** sólo el CEO puede originar tráfico, vía `Hub.relayMessage`,
-que construye el `AgentMessage` dentro del hub (emisor `'ceo'`, callsign `CEO`) y
-lo enruta. Desde la consola el operador lo pide hablando con el CEO.
+**In the meantime:** only the CEO can originate traffic, via
+`Hub.relayMessage`, which builds the `AgentMessage` inside the hub (sender
+`'ceo'`, callsign `CEO`) and routes it. From the console the operator asks for
+it by talking to the CEO.
 
-**Petición:** `{ t:'message:send'; kind; scope; toAgentId?; toProjectId?; subject;
-body? }` en `ClientFrame`, y que el hub le ponga el id.
+**Request:** `{ t:'message:send'; kind; scope; toAgentId?; toProjectId?; subject;
+body? }` on `ClientFrame`, and let the hub assign the id.
 
-## 21. `{t:'collision:ack'}` y `{k:'reply'}` no tienen acuse propio
+## 21. `{t:'collision:ack'}` and `{k:'reply'}` have no acknowledgement of their own
 
-Mismo problema que el punto 3, en el canal nuevo: cuando la consola reconoce una
-colisión no recibe confirmación, y cuando manda un `reply` el ack que le vuelve
-lleva un `cmdId` que ella no generó (el hub abre un comando propio hacia el
-collector del que preguntó).
+Same problem as point 3, in the new channel: when the console acknowledges a
+collision it gets no confirmation, and when it sends a `reply` the ack that
+comes back carries a `cmdId` it did not generate (the hub opens a command of its
+own toward the collector of whoever asked).
 
-**Mientras tanto:** el mundo cambia y la consola lo ve por el `PatchOp`
-correspondiente (`{o:'collision'}`, `{o:'message'}`), que es suficiente para
-pintar pero no para decir "no pude entregarlo, la máquina está caída".
+**In the meantime:** the world changes and the console sees it through the
+corresponding `PatchOp` (`{o:'collision'}`, `{o:'message'}`), which is enough to
+paint but not enough to say "I could not deliver it, the machine is down".
 
-**Petición:** `cmdId?: string` opcional en los frames de consola que provocan un
-comando de máquina.
+**Request:** an optional `cmdId?: string` on the console frames that trigger a
+machine command.
 
 ---
 
-# Peticiones del canal agente ↔ agente
+# Requests from the agent ↔ agent channel
 
-Escrito por el agente del canal de mensajes y colisiones. Mismas reglas:
-`types.ts` y `protocol.ts` no se tocaron. El contrato completo del lado del
-agente está en `docs/MESSAGING.md`.
+Written by the agent of the messages and collisions channel. Same rules:
+`types.ts` and `protocol.ts` were not touched. The full contract on the agent's
+side is in `docs/MESSAGING.md`.
 
-## 18. No hay forma de RETIRAR un mensaje  ⟵ el importante
+## 18. There is no way to WITHDRAW a message  ⟵ the important one
 
-Una escalación se puede retirar (`{t:'escalation:withdraw', id, reason}`). Un
-mensaje no: `CollectorFrame` sólo tiene `{t:'message'}`. Pero un mensaje sí se
-muere de tres maneras:
+An escalation can be withdrawn (`{t:'escalation:withdraw', id, reason}`). A
+message cannot: `CollectorFrame` only has `{t:'message'}`. But a message does
+die in three ways:
 
-- un `notice` pasa su `expiresAt`;
-- un `ask` sin responder cuyo **emisor desapareció del disco** — ya no bloquea a
-  nadie porque no queda nadie a quien bloquear;
-- un `ask` con `ttlMinutes` que vence.
+- a `notice` passes its `expiresAt`;
+- an unanswered `ask` whose **sender disappeared from disk** — it no longer
+  blocks anyone because there is nobody left to block;
+- an `ask` with a `ttlMinutes` that expires.
 
-Sin frame de retirada, el hub sigue enseñando en el mapa una arista que el
-collector ya olvidó, y el `block.kind='peer'` desaparece del agente sin que el
-mensaje que lo causaba desaparezca con él. Las dos mitades del mismo hecho
-viajan por caminos distintos.
+Without a withdraw frame, the hub keeps showing an edge on the map that the
+collector has already forgotten, and `block.kind='peer'` disappears from the
+agent without the message that caused it disappearing with it. The two halves of
+the same fact travel by different paths.
 
-**Mientras tanto:** el collector deja de contarlo en su `blocks()` (así que el
-agente sale de `blocked` por el patch normal) y simplemente deja de reenviarlo en
-el snapshot. El hub debe caducar por su cuenta usando `expiresAt`, y para el caso
-del emisor muerto no tiene ninguna señal.
+**In the meantime:** the collector stops counting it in its `blocks()` (so the
+agent leaves `blocked` through the normal patch) and simply stops resending it
+in the snapshot. The hub has to expire it on its own using `expiresAt`, and for
+the dead-sender case it has no signal at all.
 
-**Petición:** `{t:'message:withdraw', machineId, id, reason}`, exactamente como
-el de escalaciones. Es el mismo problema y merece la misma solución.
+**Request:** `{t:'message:withdraw', machineId, id, reason}`, exactly like the
+escalation one. It is the same problem and deserves the same solution.
 
-## 19. `AgentMessage` no dice de qué máquina viene
+## 19. `AgentMessage` does not say which machine it comes from
 
-`Escalation` tiene `machineId`. `Collision` tiene `machineId`. `AgentMessage` no.
-El frame `{t:'message', machineId, message}` lo lleva fuera, pero en cuanto el
-hub lo guarda en `WorldState.messages` esa información se pierde, y `{k:'reply',
-messageId, …}` no dice a qué collector bajar.
+`Escalation` has `machineId`. `Collision` has `machineId`. `AgentMessage` does
+not. The frame `{t:'message', machineId, message}` carries it on the outside,
+but as soon as the hub stores it in `WorldState.messages` that information is
+lost, and `{k:'reply', messageId, …}` does not say which collector to push down
+to.
 
-**Mientras tanto:** el hub tiene que recordar por su cuenta qué máquina emitió
-cada mensaje (o buscar por `fromProjectId`, que sí lleva el machineId dentro por
-la convención `<machineId>/<slug>` de `ProjectRegistry.idForSlug`). Esa
-convención no está escrita en `types.ts`, que es el mismo problema que la #4.
+**In the meantime:** the hub has to remember on its own which machine emitted
+each message (or look it up by `fromProjectId`, which does carry the machineId
+inside by the `<machineId>/<slug>` convention of `ProjectRegistry.idForSlug`).
+That convention is not written in `types.ts`, which is the same problem as #4.
 
-**Petición:** `machineId: string` en `AgentMessage`.
+**Request:** `machineId: string` on `AgentMessage`.
 
-## 20. El payload del buzón de salida necesitaba un `replyTo`
+## 20. The outbound mailbox payload needed a `replyTo`
 
-El diseño original del buzón `.orca/out/` sólo contempla mensajes nuevos. Con
-eso, un `ask` sólo puede cerrarse desde la consola: dos agentes en la misma
-máquina no pueden terminar una conversación entre ellos, aunque los dos estén
-mirando el mismo filesystem.
+The original design of the `.orca/out/` mailbox only contemplates new messages.
+With that, an `ask` can only be closed from the console: two agents on the same
+machine cannot finish a conversation between themselves, even though both are
+looking at the same filesystem.
 
-**Mientras tanto:** un archivo de salida con `{replyTo, answer, agentId}` se
-enruta como respuesta en vez de como mensaje nuevo, y `orca-tell --reply <id>`
-lo escribe. Está documentado en `docs/MESSAGING.md` §5. No toca `protocol.ts`
-—es forma en disco, no forma de cable— pero el CEO y la skill del agente
-dependen de ello.
+**In the meantime:** an outbound file with `{replyTo, answer, agentId}` is
+routed as an answer instead of as a new message, and `orca-tell --reply <id>`
+writes it. It is documented in `docs/MESSAGING.md` §5. It does not touch
+`protocol.ts` — it is an on-disk shape, not a wire shape — but the CEO and the
+agent's skill depend on it.
 
-**Petición:** ninguna al contrato; sólo que `docs/MESSAGING.md` se considere
-normativo igual que `docs/ESCALATION.md`.
+**Request:** none to the contract; only that `docs/MESSAGING.md` be considered
+normative just like `docs/ESCALATION.md`.
 
-## 21. `AgentMessage.readBy` no puede completarse para un scope amplio
+## 21. `AgentMessage.readBy` cannot be filled in for a broad scope
 
-`readBy: string[]` funciona para un mensaje `scope:'agent'`: se entrega en un
-buzón, aparece un `<id>.read`, se sabe quién. Para `scope:'project'` o `'fleet'`
-el mensaje se entrega en N buzones y la marca de leído no dice **cuál** de los
-agentes de ese proyecto la escribió — el archivo lo escribe el CLI, no ORCA, y
-un proyecto puede tener cinco sesiones compartiendo directorio.
+`readBy: string[]` works for a `scope:'agent'` message: it is delivered into one
+mailbox, an `<id>.read` appears, you know who. For `scope:'project'` or
+`'fleet'` the message is delivered into N mailboxes and the read mark does not
+say **which** of that project's agents wrote it — the file is written by the
+CLI, not by ORCA, and a project can have five sessions sharing a directory.
 
-**Mientras tanto:** `readBy` sólo se llena para entregas dirigidas a un agente
-concreto. Para las demás se queda vacío, que es honesto: mejor no saber que
-afirmar algo falso.
+**In the meantime:** `readBy` is only filled in for deliveries addressed to a
+specific agent. For the rest it stays empty, which is honest: better not to know
+than to assert something false.
 
-**Petición:** o declarar `readBy` como "sólo significativo con scope 'agent'", o
-que la marca de leído lleve el sessionId dentro y el contrato lo diga.
+**Request:** either declare `readBy` as "only meaningful with scope 'agent'", or
+have the read mark carry the sessionId inside and have the contract say so.
 
-## 22. `Collision.acknowledged` no tiene camino de vuelta al collector
+## 22. `Collision.acknowledged` has no path back to the collector
 
-La consola manda `{t:'collision:ack', id}` al hub, y `Collision.acknowledged`
-existe en el tipo. Pero no hay `Command` que le diga al collector "esta ya la
-vieron": el collector la seguirá re-emitiendo cada vez que el `lastSeen` se
-mueva de forma perceptible, y el hub tendrá que re-aplicar el ack a cada
-re-emisión.
+The console sends `{t:'collision:ack', id}` to the hub, and
+`Collision.acknowledged` exists on the type. But there is no `Command` telling
+the collector "this one has been seen": the collector will keep re-emitting it
+every time `lastSeen` moves perceptibly, and the hub will have to re-apply the
+ack on every re-emission.
 
-**Mientras tanto:** el collector emite siempre `acknowledged: false` — es el
-único valor que puede afirmar con verdad, porque el reconocimiento es un hecho
-de la consola, no de la máquina. El hub debe preservar su propio `acknowledged`
-al fusionar una re-emisión.
+**In the meantime:** the collector always emits `acknowledged: false` — it is
+the only value it can truthfully assert, because the acknowledgement is a fact
+about the console, not about the machine. The hub has to preserve its own
+`acknowledged` when merging a re-emission.
 
-**Petición:** decirlo en `types.ts` (`acknowledged` lo posee el hub, el collector
-siempre manda false), o añadir `{k:'collision:ack', id}` a `Command`.
+**Request:** say it in `types.ts` (`acknowledged` is owned by the hub, the
+collector always sends false), or add `{k:'collision:ack', id}` to `Command`.
 
-## 23. `block.waitingOn` no tiene forma definida
+## 23. `block.waitingOn` has no defined shape
 
-`Agent.block.waitingOn?: string` no dice si es un `agentId`, un callsign, o algo
-más. Un `ask` a un proyecto o a la flota además no señala a nadie en concreto.
+`Agent.block.waitingOn?: string` does not say whether it is an `agentId`, a
+callsign, or something else. And an `ask` to a project or to the fleet does not
+point at anybody in particular.
 
-**Mientras tanto:** el collector pone el `agentId` cuando el scope es `'agent'`,
-`project:<projectId>` cuando es de proyecto y `fleet` cuando es de flota. La
-consola tiene que saber desambiguar por el prefijo.
+**In the meantime:** the collector puts the `agentId` when the scope is
+`'agent'`, `project:<projectId>` when it is a project's and `fleet` when it is
+the fleet's. The console has to know how to disambiguate by the prefix.
 
-**Petición:** `waitingOn?: { kind: 'agent'|'project'|'fleet'; id: string | null }`,
-o dejar la convención del prefijo escrita en `types.ts`.
+**Request:** `waitingOn?: { kind: 'agent'|'project'|'fleet'; id: string | null }`,
+or write the prefix convention down in `types.ts`.
 
-## 24. `claude --bg --resume` no continúa la sesión: la muda
+## 24. `claude --bg --resume` does not continue the session: it moves it
 
-Medido contra Claude Code **2.1.261**, y es la petición al CLI que más pesa en
-CAPCOM.
+Measured against Claude Code **2.1.261**, and it is the request to the CLI that
+weighs most on CAPCOM.
 
-`claude --bg --resume <sessionId> "<texto>"` **no** continúa esa sesión bajo su
-id. Arrastra la conversación entera —turnos previos incluidos, verificado
-leyendo el `.jsonl` resultante— a una sesión **nueva**, con un `sessionId` y un
-short id nuevos, y la vieja queda terminada. El `--help` lo insinúa ("starts a
-copy and says so when the session is already running"), pero también ocurre
-después de `claude stop <id>`, que es justo el caso que la ayuda de `stop`
-sugiere que sí continuaría en su sitio.
+`claude --bg --resume <sessionId> "<text>"` does **not** continue that session
+under its id. It drags the whole conversation — previous turns included,
+verified by reading the resulting `.jsonl` — into a **new** session, with a new
+`sessionId` and a new short id, and the old one is left finished. The `--help`
+hints at it ("starts a copy and says so when the session is already running"),
+but it also happens after `claude stop <id>`, which is exactly the case that
+`stop`'s help suggests would continue in place.
 
-Para un agente de trabajo eso sólo ensucia el linaje. Para CAPCOM es fatal: el
-mando de la flota se identifica por `Agent.role === 'capcom'`, ese rol vive en
-`~/.orca/lineage.json` indexado por short id, y el primer mensaje del humano
-dejaría el rol pegado a una sesión ya muerta. El hub buscaría un CAPCOM vivo, no
-lo encontraría, y el collector lanzaría un segundo CAPCOM encima del que acababa
-de contestar — uno nuevo por cada frase que escribiera la persona.
+For a working agent that just dirties the lineage. For CAPCOM it is fatal: the
+fleet's command is identified by `Agent.role === 'capcom'`, that role lives in
+`~/.orca/lineage.json` indexed by short id, and the human's first message would
+leave the role stuck to an already-dead session. The hub would look for a live
+CAPCOM, would not find one, and the collector would launch a second CAPCOM on
+top of the one that had just answered — a new one for every sentence the person
+typed.
 
-**Mientras tanto:** `CommandRunner.say`/`resume` detectan que el destinatario es
-CAPCOM (`CapcomChannel.owns`), leen el short id que imprime el CLI y mudan el rol
-con `adopt()`. Además, `CapcomSession.check()` no declara muerta una sesión
-recién adoptada durante `CAPCOM_GRACE_MS` (60 s): `claude agents --json` tarda
-en listarla, y sin esa ventana el vigilante lanzaría el duplicado igualmente.
+**In the meantime:** `CommandRunner.say`/`resume` detect that the recipient is
+CAPCOM (`CapcomChannel.owns`), read the short id the CLI prints and move the
+role with `adopt()`. On top of that, `CapcomSession.check()` does not declare a
+freshly adopted session dead during `CAPCOM_GRACE_MS` (60 s): `claude agents
+--json` takes a while to list it, and without that window the watchdog would
+launch the duplicate anyway.
 
-**Resuelto para los agentes de trabajo (2026-09-05):** ya no se lanzan con
-`--bg`. Viven en un pane de tmux como sesión interactiva normal, con
-`--session-id <uuid>` elegido por ORCA; `say` es un paste con bracketed paste
-en su prompt, y `resume` es `claude --resume <id>` interactivo, que sí conserva
-el id. Ver `src/collector/tmux.ts` y el README, "Terminals". CAPCOM sigue en
-`--bg` con el `adopt()` de arriba, porque sus tools van en el argv y el rol se
-identifica por short id; mudarlo a un pane es el siguiente paso natural.
+**Resolved for working agents (2026-09-05):** they are no longer launched with
+`--bg`. They live in a tmux pane as a normal interactive session, with a
+`--session-id <uuid>` chosen by ORCA; `say` is a bracketed paste into their
+prompt, and `resume` is an interactive `claude --resume <id>`, which does keep
+the id. See `src/collector/tmux.ts` and the README, "Terminals". CAPCOM is still
+on `--bg` with the `adopt()` above, because its tools go in the argv and the
+role is identified by short id; moving it to a pane is the natural next step.
 
-**Petición al CLI (sigue en pie para `--bg`):** que `--resume <id>` bajo `--bg`
-conserve el `sessionId`, o que imprima explícitamente `resumed <viejo> as
-<nuevo>` en un formato estable. Hoy hay que deducirlo del último token
-hexadecimal de la salida.
+**Request to the CLI (still standing for `--bg`):** that `--resume <id>` under
+`--bg` keep the `sessionId`, or that it explicitly print `resumed <old> as
+<new>` in a stable format. Today you have to deduce it from the last hexadecimal
+token of the output.
 
-## 25. `permissions.allow` de un settings de proyecto se ignora sin confianza
+## 25. A project settings' `permissions.allow` is ignored without trust
 
-También 2.1.261. Un directorio recién creado por ORCA (`~/.orca/capcom/`) no está
-en la lista de workspaces de confianza, y entonces el CLI descarta las entradas
-de `permissions.allow` de su `.claude/settings.json`, diciéndolo en la salida:
+Also 2.1.261. A directory freshly created by ORCA (`~/.orca/capcom/`) is not in
+the list of trusted workspaces, and so the CLI discards the `permissions.allow`
+entries from its `.claude/settings.json`, saying so in the output:
 
 ```
 Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace
@@ -492,29 +504,30 @@ has not been trusted. Run Claude Code interactively here once and accept the
 trust dialog, or set projects[...].hasTrustDialogAccepted: true in ~/.claude.json
 ```
 
-Una sesión `--bg` no tiene a nadie que acepte ese diálogo, así que el settings
-que ORCA escribe sería un permiso que no aplica nunca — y CAPCOM se quedaría
-parado en el primer prompt de permisos de una tool MCP, que es indistinguible de
-una flota tranquila.
+A `--bg` session has nobody to accept that dialog, so the settings ORCA writes
+would be a permission that never applies — and CAPCOM would stall at the first
+permission prompt from an MCP tool, which is indistinguishable from a quiet
+fleet.
 
-`enableAllProjectMcpServers: true` del mismo archivo **sí** se respeta: el
-servidor `orca` de `.mcp.json` se conectó sin aprobación en la primera prueba.
-Sólo los permisos pasan por la puerta de confianza.
+`enableAllProjectMcpServers: true` from the same file **is** respected: the
+`orca` server from `.mcp.json` connected without approval on the first test.
+Only permissions go through the trust gate.
 
-**Mientras tanto:** los permisos viajan en el argv, que no pasa por esa puerta —
-`--allowedTools mcp__orca --disallowedTools Bash Edit Write NotebookEdit`— junto
-con `--mcp-config <dir>/.mcp.json --strict-mcp-config`, que además evita heredar
-los servidores MCP del usuario (dos de ellos pedían autenticación y le costaban
-una vuelta a CAPCOM descubrirlo). El `settings.json` se sigue escribiendo, pero
-sólo para que un humano que abra `~/.orca/capcom` a mano vea la misma postura.
+**In the meantime:** permissions travel in the argv, which does not go through
+that gate — `--allowedTools mcp__orca --disallowedTools Bash Edit Write
+NotebookEdit` — together with `--mcp-config <dir>/.mcp.json
+--strict-mcp-config`, which also avoids inheriting the user's MCP servers (two
+of them were asking for authentication and cost CAPCOM a round to find that
+out). The `settings.json` is still written, but only so that a human who opens
+`~/.orca/capcom` by hand sees the same posture.
 
-**Ojo con el orden del argv:** `--allowedTools`, `--disallowedTools`,
-`--mcp-config` y `--tools` son **variádicas** — se comen todo lo que venga
-detrás hasta el siguiente `-`. Con `--bg` el prompt es posicional, así que una
-variádica delante del prompt se lo traga y la sesión arranca sin instrucción
-ninguna. En `capcom.ts` cada variádica va seguida de otra opción y el prompt
-siempre al final; hay un test que lo comprueba.
+**Careful with argv order:** `--allowedTools`, `--disallowedTools`,
+`--mcp-config` and `--tools` are **variadic** — they eat everything that comes
+after them up to the next `-`. With `--bg` the prompt is positional, so a
+variadic in front of the prompt swallows it and the session starts with no
+instruction at all. In `capcom.ts` every variadic is followed by another option
+and the prompt always goes last; there is a test that checks it.
 
-**Petición al CLI:** que `--settings <ruta explícita>` no herede la puerta de
-confianza del workspace (el humano ya nombró el archivo), o una forma
-no-interactiva de confiar en un directorio.
+**Request to the CLI:** that `--settings <explicit path>` not inherit the
+workspace's trust gate (the human already named the file), or a non-interactive
+way to trust a directory.

@@ -1,81 +1,85 @@
-# Temporales en el visor de archivos
+# Temporaries in the file viewer
 
-Verificación local: 2026-09-06, usuario del hub UID 501. Se inspeccionaron
-nombres y metadatos, sin abrir contenidos de temporales existentes.
+Local verification: 2026-09-06, hub user UID 501. Names and metadata were
+inspected, without opening the contents of any existing temporaries.
 
-## Rutas cubiertas
+## Paths covered
 
-- `/private/tmp/claude-501` existe, pertenece a UID 501 y tiene modo 0700.
-  `/tmp/claude-501` es su alias real mediante `/tmp -> /private/tmp`.
-- `$TMPDIR/claude-501` se admite cuando exista como directorio del usuario
-  del hub y no sea un symlink. El TMPDIR observado es
-  `/var/folders/z0/hnljtxdx78jchvhd9srjfsdw0000gn/T/`, cuya forma canónica es
+- `/private/tmp/claude-501` exists, belongs to UID 501 and has mode 0700.
+  `/tmp/claude-501` is its real alias through `/tmp -> /private/tmp`.
+- `$TMPDIR/claude-501` is accepted when it exists as a directory belonging to
+  the hub user and is not a symlink. The observed TMPDIR is
+  `/var/folders/z0/hnljtxdx78jchvhd9srjfsdw0000gn/T/`, whose canonical form is
   `/private/var/folders/z0/hnljtxdx78jchvhd9srjfsdw0000gn/T/`.
-  No se encontró `claude-501` allí durante la inspección.
-- Las raíces autorizadas admiten su ruta declarada, su `realpath` y sus aliases
-  macOS `/tmp` y `/var` sólo cuando se comprueba que resuelven a la misma raíz.
-- Los proyectos y las raíces explícitas de `ORCA_FILE_ROOTS` siguen disponibles.
-  Una entrada puede ser un archivo concreto: no autoriza sus hermanos.
+  No `claude-501` was found there during the inspection.
+- The authorized roots accept their declared path, their `realpath` and their
+  macOS `/tmp` and `/var` aliases, only when they are verified to resolve to the
+  same root.
+- Projects and the explicit roots from `ORCA_FILE_ROOTS` remain available. An
+  entry can be one specific file: it does not authorize its siblings.
 
-No se añadió otra raíz automática: la inspección no lo justificó.
-`/private/temp` no existe y no se inventa como alias. El directorio
-`/private/tmp/claude-mcp-browser-bridge-danielcardenas` y los directorios
-`com.anthropic.claudefordesktop.ShipIt.*` del TMPDIR no se incorporan.
+No other automatic root was added: the inspection did not justify one.
+`/private/temp` does not exist and is not invented as an alias. The
+`/private/tmp/claude-mcp-browser-bridge-danielcardenas` directory and the
+`com.anthropic.claudefordesktop.ShipIt.*` directories in TMPDIR are not taken
+in.
 
-## Límites
+## Limits
 
-No se aceptan como raíces `/private`, `/var`, `/private/var`, `/tmp`,
-`/private/tmp`, `/private/temp`, `/var/tmp`, `/private/var/tmp`, el TMPDIR
-completo ni los contenedores de `/var/folders` y `/private/var/folders`.
-La misma validación se aplica después de resolver symlinks en las raíces.
+Not accepted as roots: `/private`, `/var`, `/private/var`, `/tmp`,
+`/private/tmp`, `/private/temp`, `/var/tmp`, `/private/var/tmp`, the whole
+TMPDIR, or the containers under `/var/folders` and `/private/var/folders`.
+The same validation is applied after resolving symlinks in the roots.
 
-Se exige contención por `realpath`, archivo regular y propiedad del usuario
-del hub tanto en la raíz existente como en el archivo (en sistemas con UID).
-Se rechazan scratchpads `claude-<otro UID>`, symlinks escapados, directorios,
-FIFO y demás archivos especiales. Se conserva el límite de 16 MiB.
+Containment by `realpath`, a regular file and ownership by the hub user are
+required, both on the existing root and on the file (on systems with UIDs).
+`claude-<another UID>` scratchpads, escaping symlinks, directories, FIFOs and
+other special files are rejected. The 16 MiB limit is kept.
 
-Se excluyen nombres privados conocidos antes y después de `realpath`:
+Known private names are excluded before and after `realpath`:
 `.ssh`, `.aws`, `.azure`, `.config`, `.gnupg`, `.kube`, `.claude`, `.codex`,
 `.docker`, `.git`, `.env*`, `.npmrc`, `.netrc`, `.pypirc`, `.claude.json`,
-`credentials`, `secret`/`secrets` con sus extensiones, claves SSH conocidas,
-archivos PEM/KEY/P12/PFX/keychain, `.orca/token`, `.orca/config*` y `/etc`
-incluido su alias `/private/etc`. Esta política también afecta a proyectos
-y autorizaciones explícitas. No inspecciona contenidos ni detecta secretos
-renombrados arbitrariamente: sólo se deben autorizar artefactos revisados.
+`credentials`, `secret`/`secrets` with their extensions, known SSH keys,
+PEM/KEY/P12/PFX/keychain files, `.orca/token`, `.orca/config*` and `/etc`,
+including its `/private/etc` alias. This policy also applies to projects and to
+explicit authorizations. It does not inspect contents and does not detect
+arbitrarily renamed secrets: only reviewed artifacts should be authorized.
 
-El HTML y SVG conservan CSP `sandbox`; el transporte conserva `nosniff`,
-`no-store`, HEAD y rangos para media. No se modificaron el linkificador ni el visor.
+HTML and SVG keep the `sandbox` CSP; the transport keeps `nosniff`, `no-store`,
+HEAD and ranges for media. Neither the linkifier nor the viewer was modified.
 
-## Activación
+## Activation
 
-1. Incorporar estos cambios en el siguiente arranque autorizado del hub.
-   Esta tarea no reinició el hub ni el collector real.
-2. Mantener `ORCA_STRICT_AUTH=1` o un `ORCA_TOKEN` configurado, y conectar la
-   consola con ese token. El endpoint conserva la política de autenticación
-   existente: sin ambas variables, el modo desarrollo permite loopback sin token.
-3. Las raíces scratchpad propias se comprueban en cada petición, sin agregar
-   configuración. Para un artefacto suelto revisado, configurar por ejemplo
-   `ORCA_FILE_ROOTS=/private/tmp/entrega-revisada.png`, o una subcarpeta concreta
-   revisada, en el entorno del próximo arranque. No autorizar el padre temporal.
-   Las entradas se separan con `:`; preservar las autorizaciones previas pertinentes.
-4. Abrir la ruta linkificada en la consola autenticada.
+1. Pick these changes up on the hub's next authorized start. This task did not
+   restart the real hub or the real collector.
+2. Keep `ORCA_STRICT_AUTH=1` or a configured `ORCA_TOKEN`, and connect the
+   console with that token. The endpoint keeps the existing authentication
+   policy: without either variable, development mode allows loopback with no
+   token.
+3. Your own scratchpad roots are checked on every request, with no configuration
+   to add. For a single reviewed artifact, set for example
+   `ORCA_FILE_ROOTS=/private/tmp/entrega-revisada.png`, or one specific reviewed
+   subfolder, in the environment of the next start. Do not authorize the
+   temporary parent. Entries are separated with `:`; preserve the relevant
+   previous authorizations.
+4. Open the linkified path in the authenticated console.
 
-## Evidencia reproducible
+## Reproducible evidence
 
 ```sh
 ORCA_HOME=$(mktemp -d /tmp/orca-task02-hub-XXXXXX) npm test -- files
 ```
 
-Resultado: **34/34**. Hub de prueba en loopback y puerto libre, token sintético,
-almacenamiento del hub separado por `ORCA_HOME` y fixtures con nombres únicos.
-Incluye rutas declaradas/canónicas, alias inverso real de macOS, scratchpad
-TMPDIR, autorización de archivo único, texto, PNG, HTML/CSP, HEAD, audio/vídeo
-por Range, 401 sin token/incorrecto, 403 de rutas privadas/escapes/otro usuario,
-404 de FIFO/directorio/ausente y 413 por tamaño.
-Media usa bytes sintéticos para verificar el contrato HTTP; no acredita
-decodificación audiovisual ni una revisión visual en navegador.
-No se borran fixtures ni archivos preexistentes.
+Result: **34/34**. Test hub on loopback and a free port, synthetic token, hub
+storage separated by `ORCA_HOME`, and fixtures with unique names. It covers
+declared/canonical paths, macOS's real reverse alias, the TMPDIR scratchpad,
+single-file authorization, text, PNG, HTML/CSP, HEAD, audio/video by Range, 401
+with no token or a wrong one, 403 for private paths/escapes/another user, 404
+for FIFO/directory/missing, and 413 for size.
+Media uses synthetic bytes to verify the HTTP contract; it does not attest to
+audiovisual decoding or to a visual review in a browser.
+No fixtures or pre-existing files are deleted.
 
-`npm run typecheck`: **correcto en la comprobación final**. Una pasada anterior
-encontró errores de higiene en edición compartida (`estimated`/`Confidence`),
-comunicados al equipo y ya ausentes al cerrar la tarea.
+`npm run typecheck`: **clean on the final check**. An earlier pass found hygiene
+errors from shared editing (`estimated`/`Confidence`), reported to the team and
+already gone by the time the task closed.

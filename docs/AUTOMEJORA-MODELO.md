@@ -1,25 +1,23 @@
-# AUTOMEJORA — elegir modelo y presupuesto para el revisor
+# SELF-IMPROVEMENT — choosing model and budget for the reviewer
 
-**Misión:** `mission_mttiklauzji25qa6`
-**Sobre:** `mission_mts6tjnbar7u0ngy` (la sección) y `mission_mtsaf4fnjtrh9j5j`
-(el agente revisor)
-**Estado:** implementado y verificado; **corregido tras la revisión de entrega**
-—dos fallos reales, §2 y §3, con las pruebas que los cazan en §6—. **Sin
-commit** (§8).
+**Mission:** `mission_mttiklauzji25qa6`
+**On:** `mission_mts6tjnbar7u0ngy` (the section) and `mission_mtsaf4fnjtrh9j5j`
+(the reviewer agent)
+**Status:** implemented and verified; **corrected after the delivery review**
+—two real bugs, §2 and §3, with the tests that catch them in §6—. **Not
+committed** (§8).
 
-Documentos previos: [AUTOMEJORA.md](AUTOMEJORA.md) (referencia de la sección),
-[AUTOMEJORA-ENTREGA.md](AUTOMEJORA-ENTREGA.md) y
-[AUTOMEJORA-REVISOR.md](AUTOMEJORA-REVISOR.md) (el agente revisor).
+Reference for the section: [AUTOMEJORA.md](AUTOMEJORA.md).
 
-**§1–§6** son lo que se ha construido y cómo está probado. **§7** es la
-segunda pregunta —qué modelos usar—: la recomendación la da CAPCOM, y aquí sólo
-queda lo que ORCA puede comprobar por sí misma y cómo medirlo.
+**§1–§6** are what has been built and how it is tested. **§7** is the second
+question —which models to use—: the recommendation comes from CAPCOM, and what
+is left here is only what ORCA can check for itself and how to measure it.
 
 ---
 
-## 1. Qué se puede elegir ahora
+## 1. What can be chosen now
 
-En `SETUP` de la sección AUTOMEJORA hay dos filas nuevas y una casilla:
+In the SELF-IMPROVEMENT section's `SETUP` there are two new rows and a box:
 
 ```
 EVERY 6H [CHANGE] · MAX PER DAY 4 [CHANGE] · MIN SIGNAL 40 [CHANGE]
@@ -29,149 +27,149 @@ NEXT REVIEWER · claude/opus · 400K TOKENS = INPUT + OUTPUT + CACHE WRITES
 · CACHE READS NOT COUNTED · A BRAKE, NOT A HARD CEILING: IT CAN OVERSHOOT BEFORE ORCA SEES IT
 ```
 
-- **RUNTIME** — `claude` o `codex`. La primera opción es `INHERIT · <lo que
-  resuelva el entorno>`: quien no elige, sigue al entorno, como antes.
-- **MODEL** — el catálogo del runtime elegido. La primera opción es
-  `INHERIT · <modelo>` o `INHERIT · THE CLI DECIDES` cuando el entorno no fija
-  ninguno.
-- **REVIEWER BUDGET** — `CHANGE` recorre los presets
-  (100K · 200K · 400K · 800K · 2M) y la casilla admite cualquier valor.
+- **RUNTIME** — `claude` or `codex`. The first option is `INHERIT · <whatever
+  the environment resolves>`: whoever does not choose follows the environment,
+  as before.
+- **MODEL** — the catalogue of the chosen runtime. The first option is
+  `INHERIT · <model>` or `INHERIT · THE CLI DECIDES` when the environment pins
+  none.
+- **REVIEWER BUDGET** — `CHANGE` cycles through the presets
+  (100K · 200K · 400K · 800K · 2M) and the box accepts any value.
 
-La línea de abajo no es decoración: dice **qué revisor va a nacer el próximo**,
-de dónde sale cada mitad (`runtime from the operator, model from the
-environment`), y qué significa el número. Sin ella la elección sería una
-pregunta abierta cada vez que alguien mira el panel.
+The line below is not decoration: it says **which reviewer will be born next**,
+where each half comes from (`runtime from the operator, model from the
+environment`), and what the number means. Without it the choice would be an open
+question every time someone looks at the panel.
 
-El catálogo no es una lista escrita a mano. Es `providerModels()` —el mismo que
-usa el traspaso de proveedor (`src/collector/provider-handoff.ts:14`)—: alias
-de Claude Code y el caché local de Codex, con su marca de `installed`. Si Codex
-no está instalado, sus modelos siguen listándose pero marcados, y si su caché
-no existe no se inventa ninguno. El selector es `pick()` de
-`src/ui/controls.ts`, el de Q8, sin tocarlo: mismo teclado, mismo diálogo en
-móvil, mismos estilos.
+The catalogue is not a hand-written list. It is `providerModels()` —the same one
+the provider handoff uses (`src/collector/provider-handoff.ts:14`)—: Claude Code
+aliases and Codex's local cache, with their `installed` mark. If Codex is not
+installed, its models are still listed but marked, and if its cache does not
+exist none are invented. The selector is `pick()` from `src/ui/controls.ts`, Q8's
+one, untouched: same keyboard, same dialog on mobile, same styles.
 
-## 2. Qué se guarda y a qué se aplica
+## 2. What is saved and what it applies to
 
-`ImproveState` gana dos campos, `runtime` y `model`, ambos `string | null`.
-`null` significa **heredar**, que no es lo mismo que «claude»: si mañana el
-entorno cambia, quien no eligió se mueve con él y quien eligió no.
+`ImproveState` gains two fields, `runtime` and `model`, both `string | null`.
+`null` means **inherit**, which is not the same as "claude": if the environment
+changes tomorrow, whoever did not choose moves with it and whoever chose does
+not.
 
-Se aplica a **las revisiones futuras**, manuales y periódicas por igual: el
-lanzador pregunta `choiceNow()` justo antes de construir el `spawn`, y el
-`Command` lleva siempre `runtime` y, si hay modelo aplicable, `model`.
+It applies to **future reviews**, manual and periodic alike: the launcher asks
+`choiceNow()` right before building the `spawn`, and the `Command` always carries
+`runtime` and, if there is an applicable model, `model`.
 
-«Aplicable» es la palabra corregida. `ORCA_IMPROVE_MODEL` es el modelo de
-`ORCA_IMPROVE_RUNTIME`, no un modelo universal: `effectiveChoice` sólo lo
-hereda cuando el runtime efectivo es el del entorno. Con entorno `claude/opus`
-y el operador eligiendo `codex`, el próximo revisor es `codex` **sin modelo**
-—decide el CLI—, no `codex/opus`. En la otra dirección igual, y al volver a
-heredar el modelo del entorno vuelve.
+"Applicable" is the corrected word. `ORCA_IMPROVE_MODEL` is the model of
+`ORCA_IMPROVE_RUNTIME`, not a universal model: `effectiveChoice` only inherits it
+when the effective runtime is the environment's. With a `claude/opus`
+environment and the operator choosing `codex`, the next reviewer is `codex`
+**with no model** —the CLI decides—, not `codex/opus`. The same in the other
+direction, and going back to inherit brings the environment's model back.
 
-> **Esto también estuvo mal.** La primera versión heredaba `env.model` bajo
-> cualquier runtime, así que la limpieza del panel no servía de nada: el modelo
-> del entorno se colaba igual en el payload del spawn. Corregido en
-> `effectiveChoice` (`src/shared/improve.ts`), con pruebas que miran **el
-> `Command` del spawn**, manual y automático, no sólo los campos del store.
+> **This was wrong too.** The first version inherited `env.model` under any
+> runtime, so clearing it from the panel did nothing: the environment's model
+> slipped into the spawn payload anyway. Fixed in `effectiveChoice`
+> (`src/shared/improve.ts`), with tests that look at **the spawn's `Command`**,
+> manual and automatic, not just at the store's fields.
 
-Se aplica **a la siguiente**, no a la de ahora. `beginReview()`
-(`src/hub/improve.ts:264`) **sella** en el registro de la revisión el runtime,
-el modelo y el presupuesto con los que nació. Cambiar el SETUP mientras un
-revisor está vivo no reescribe su historia ni le mueve el techo: el consumo se
-compara contra `r.budgetTokens`, el de la revisión, y sólo cae al estado global
-cuando la revisión es anterior a que existiera el campo
-(`src/hub/improve.ts:807`). Por eso la tabla de revisiones puede decir, un mes
-después, con qué corrió cada una.
+It applies **to the next one**, not to the current one. `beginReview()`
+(`src/hub/improve.ts:264`) **seals** into the review's record the runtime, the
+model and the budget it was born with. Changing SETUP while a reviewer is alive
+does not rewrite its history or move its ceiling: consumption is compared against
+`r.budgetTokens`, the review's own, and only falls back to the global state when
+the review predates the field's existence (`src/hub/improve.ts:807`). That is why
+the review table can say, a month later, what each one ran with.
 
-**Migrar no pierde nada.** Al cargar el archivo, un `budgetTokens` ausente toma
-el valor por defecto y un `runtime`/`model` ausente queda en `null` —heredar—,
-que es exactamente el comportamiento anterior a esta entrega
-(`src/hub/improve.ts:171-176`). No hay reescritura del fichero al arrancar.
+**Migrating loses nothing.** When loading the file, a missing `budgetTokens`
+takes the default value and a missing `runtime`/`model` stays `null` —inherit—,
+which is exactly the behaviour before this delivery
+(`src/hub/improve.ts:171-176`). The file is not rewritten at startup.
 
-## 3. El presupuesto: qué cuenta y qué no promete
+## 3. The budget: what it counts and what it does not promise
 
-`400K TOKENS = INPUT + OUTPUT + CACHE WRITES · CACHE READS NOT COUNTED`. Es la
-suma que ORCA lee del contador del agente, la misma que ve `BudgetBook`
-(`ceilingTokens`, `src/shared/tokens.ts`); no es «tokens de respuesta» ni
-«contexto». Hasta el 2026-09-11 la lectura de caché contaba, y un revisor
-cruzaba los 400K en su primer minuto: ver `docs/ENTREGA-AUTOMEJORA-TECHO-Y-VENTANA-2026-09-11.md`.
+`400K TOKENS = INPUT + OUTPUT + CACHE WRITES · CACHE READS NOT COUNTED`. It is
+the sum ORCA reads from the agent's counter, the same one `BudgetBook` sees
+(`ceilingTokens`, `src/shared/tokens.ts`); it is not "response tokens" or
+"context". Until 2026-09-11 cache reads counted, and a reviewer crossed 400K in
+its first minute.
 
-Y es **un freno, no un techo**. El texto de la UI lo dice con esas palabras
-porque la corrida real de `rev_mtschaq0u83g1or2` lo demostró: 570.858 tokens
-sobre un presupuesto de 400K (143%), y lecturas no monótonas por el camino.
-ORCA muestrea, y entre dos muestras un turno de modelo entero puede
-completarse; `stop` es una orden, no un interruptor. §7 de
-[AUTOMEJORA-REVISOR.md](AUTOMEJORA-REVISOR.md) tiene el detalle. Elegir 2M no
-es «gastar como mucho 2M»: es «avisar y frenar alrededor de 2M».
+And it is **a brake, not a ceiling**. The UI text says so in those words because
+the real run of `rev_mtschaq0u83g1or2` proved it: 570,858 tokens against a budget
+of 400K (143%), and non-monotonic readings along the way. ORCA samples, and
+between two samples a whole model turn can complete; `stop` is an order, not a
+switch.
+Choosing 2M is not "spend at most 2M": it is "warn and brake somewhere around
+2M".
 
-Rango aceptado: **20.000 – 20.000.000**. Lo valida el servidor, no el
-navegador: `setConfig()` recorta el número al rango
-(`src/hub/improve.ts:211`) y devuelve el valor efectivo, que el panel compara
-con lo pedido y avisa si no coincide. Un `curl` al hub con `budgetTokens:
-1e12` obtiene 20M, no un revisor sin freno.
+Accepted range: **20,000 – 20,000,000**. The server validates it, not the
+browser: `setConfig()` clamps the number to the range
+(`src/hub/improve.ts:211`) and returns the effective value, which the panel
+compares with what was asked and flags if they do not match. A `curl` to the hub
+with `budgetTokens: 1e12` gets 20M, not a reviewer with no brake.
 
-La elección de runtime/modelo **no se recorta, se rechaza**: un número fuera de
-rango se parece a un cero de más, pero un runtime que ORCA no sabe lanzar no se
-parece a nada válido, y aceptarlo a medias dejaría un SETUP que promete algo
-que no ocurrirá. `validateChoice()` (`src/shared/improve.ts:534`) devuelve el
-error y el hub lo manda tal cual en el `ack`.
+The runtime/model choice **is not clamped, it is rejected**: a number out of
+range looks like one zero too many, but a runtime ORCA does not know how to
+launch does not look like anything valid, and half-accepting it would leave a
+SETUP promising something that will not happen. `validateChoice()`
+(`src/shared/improve.ts:534`) returns the error and the hub sends it through in
+the `ack` as it is.
 
-Cambiar de runtime **limpia el modelo**, y lo hace el servidor. Un alias de
-Claude Code no existe en el catálogo de Codex, y quedarse con él dejaría un
-`spawn` con una pareja imposible que sólo se descubriría al fallar el
-lanzamiento.
+Changing runtime **clears the model**, and the server does it. A Claude Code
+alias does not exist in Codex's catalogue, and keeping it would leave a `spawn`
+with an impossible pairing that would only be discovered when the launch failed.
 
-La regla exacta, porque el matiz importa: `setConfig` compara el runtime
-**efectivo** antes y después del parche —`data.runtime ?? entorno`, no
-`data.runtime` a secas— y si se movió, y el mismo parche no trae modelo, lo
-pone a `null`. Un modelo explícito en el mismo parche gana: elegir CLI y
-modelo a la vez es una decisión, no dos. Y volver a *heredar* sólo borra el
-modelo si el entorno corre otro CLI; si corre el mismo, no ha cambiado nada y
-no se tira nada.
+The exact rule, because the nuance matters: `setConfig` compares the
+**effective** runtime before and after the patch —`data.runtime ?? environment`,
+not plain `data.runtime`— and if it moved, and the same patch brings no model, it
+sets it to `null`. An explicit model in the same patch wins: choosing CLI and
+model at once is one decision, not two. And going back to *inherit* only clears
+the model if the environment runs a different CLI; if it runs the same one,
+nothing has changed and nothing is thrown away.
 
-> **Esto estuvo mal hasta la revisión de la entrega.** La primera versión sólo
-> limpiaba el modelo desde el panel: un `improve:config` con `{runtime:
-> 'codex'}` y nada más dejaba guardado `codex/opus`, y este documento afirmaba
-> que el servidor lo garantizaba cuando no era cierto. Corregido en
-> `src/hub/improve.ts:setConfig`, con prueba unitaria y por wire (§6), y el
-> panel ya no manda la limpieza: manda sólo el runtime, y la regla vive en un
-> solo sitio.
+> **This was wrong until the delivery review.** The first version only cleared
+> the model from the panel: an `improve:config` with `{runtime: 'codex'}` and
+> nothing else left `codex/opus` saved, and this document claimed the server
+> guaranteed it when that was not true. Fixed in
+> `src/hub/improve.ts:setConfig`, with a unit test and a wire test (§6), and the
+> panel no longer sends the clear: it sends only the runtime, and the rule lives
+> in one place.
 
-## 4. Lo que sigue siendo igual
+## 4. What stays the same
 
-- El revisor **sigue sin implementar**. La restricción vive en su brief y en el
-  hueco único de revisión, no en el modelo elegido; cambiar de modelo no le da
-  permisos nuevos. (Con un matiz honesto sobre Codex en §8.)
-- Las **propuestas siguen aprobándose aparte**, una a una, con su misión
-  enlazada. Elegir modelo no aprueba nada.
-- El hueco sigue siendo **uno**, con la semántica de exclusión corregida en la
-  entrega anterior: `outcomeAt` es el resultado, `endedAt` es el hueco, y el
-  hueco sólo se libera con muerte confirmada.
+- The reviewer **still does not implement**. The restriction lives in its brief
+  and in the single review slot, not in the chosen model; changing model gives it
+  no new permissions. (With an honest caveat about Codex in §8.)
+- **Proposals are still approved separately**, one by one, with their linked
+  mission. Choosing a model approves nothing.
+- The slot is still **one**, with the exclusion semantics corrected in the
+  previous delivery: `outcomeAt` is the result, `endedAt` is the slot, and the
+  slot is only released on confirmed death.
 
-## 5. Archivos
+## 5. Files
 
-Nuevos (míos, íntegros):
+New (mine, in full):
 
-| Archivo | Qué aporta a esta entrega |
+| File | What it contributes to this delivery |
 |---|---|
-| `src/shared/improve.ts` | `REVIEW_RUNTIMES`, `MODEL_ID`, `BUDGET_MIN/MAX`, `validateChoice()`, `effectiveChoice()`; `runtime`/`model` en `ImproveState` y en `ImproveReview` |
-| `src/hub/improve.ts` | `choiceNow()`, sellado en `beginReview()`, `setConfig()` con recorte y rechazo, `ImproveApi.choice()`/`project()`, carga tolerante |
-| `src/ui/hud/improve.ts` | fila `RUNTIME`/`MODEL` con `pick()`, presets + casilla de presupuesto, línea de efectivo |
+| `src/shared/improve.ts` | `REVIEW_RUNTIMES`, `MODEL_ID`, `BUDGET_MIN/MAX`, `validateChoice()`, `effectiveChoice()`; `runtime`/`model` in `ImproveState` and in `ImproveReview` |
+| `src/hub/improve.ts` | `choiceNow()`, sealing in `beginReview()`, `setConfig()` with clamping and rejection, `ImproveApi.choice()`/`project()`, tolerant loading |
+| `src/ui/hud/improve.ts` | `RUNTIME`/`MODEL` row with `pick()`, presets + budget box, effective line |
 | `src/ui/styles/improve.css` | `.improve__field`, `.improve__pick`, `.improve__custom`, `.improve__num`, `.improve__note` |
-| `test/improve.test.ts`, `test/improve-hub.test.ts`, `test/improve-panel.test.ts`, `test/hud-improve.shots.ts` | validación, limpieza al cambiar de runtime, herencia por runtime, payload del spawn, sellado, migración, y la sección fotografiada |
+| `test/improve.test.ts`, `test/improve-hub.test.ts`, `test/improve-panel.test.ts`, `test/hud-improve.shots.ts` | validation, clearing on runtime change, inheritance per runtime, spawn payload, sealing, migration, and the section photographed |
 
-Compartidos, sólo añadiendo (sin tocar lo ajeno):
+Shared, additions only (nothing of anyone else's touched):
 
-- `src/shared/protocol.ts` — `runtime`/`model` en el parche de `improve:config`
-  y en el estado que viaja; `models:list` ya existía.
-- `src/hub/server.ts` — el `case 'improve:config'` (mío, de la primera entrega)
-  delega en `setConfig` y devuelve su error en el `ack` en vez de tragárselo,
-  que es lo que hace visible un runtime inválido en el panel.
-- `test/fake-collector.ts` — `models:list` responde catálogo sintético.
+- `src/shared/protocol.ts` — `runtime`/`model` in the `improve:config` patch and
+  in the state that travels; `models:list` already existed.
+- `src/hub/server.ts` — the `case 'improve:config'` (mine, from the first
+  delivery) delegates to `setConfig` and returns its error in the `ack` instead of
+  swallowing it, which is what makes an invalid runtime visible in the panel.
+- `test/fake-collector.ts` — `models:list` answers with a synthetic catalogue.
 
-## 6. Pruebas, con su código de salida
+## 6. Tests, with their exit codes
 
-Cada comando por separado, sin tubería que esconda un fallo, y con el log
-guardado. Los logs están en el scratchpad de la sesión,
+Each command separately, with no pipe to hide a failure, and with the log saved.
+The logs are in the session's scratchpad,
 `/private/tmp/claude-501/-Users-danielcardenas-projects-orca/23b3c87c-63d2-4310-bc27-ac8b93e7083a/scratchpad/`:
 
 ```
@@ -197,23 +195,23 @@ fold, reviewer row and phone passed.
 SHOTS_EXIT=0
 ```
 
-**Los dos `--changed` son deliberados y los dos van aquí.** El primero falló:
-cuatro suites no cargaron con
+**Both `--changed` runs are deliberate and both go here.** The first one failed:
+four suites did not load, with
 `The requested module '../shared/restart.ts' does not provide an export named
-'exitForRestart'`. `src/shared/restart.ts` **no es mío** —ninguno de mis
-ficheros lo importa— y **sí exporta** `exitForRestart` (línea 51); su marca de
-tiempo es de la misma hora de la corrida. Fue una carrera con otro agente
-escribiendo ese fichero mientras el arnés lo leía, no un fallo de esta entrega:
-la corrida siguiente, sobre el mismo árbol, da 1011/1011 y `CHANGED_EXIT=0`.
-Lo dejo escrito con su código de salida en vez de enseñar sólo el verde.
+'exitForRestart'`. `src/shared/restart.ts` **is not mine** —none of my files
+import it— and it **does export** `exitForRestart` (line 51); its timestamp is
+from the same hour as the run. It was a race with another agent writing that file
+while the harness was reading it, not a failure of this delivery: the next run,
+over the same tree, gives 1011/1011 and `CHANGED_EXIT=0`. I am writing it down
+with its exit code instead of showing only the green.
 
-### Que las pruebas nuevas cazan los fallos que arreglan
+### That the new tests catch the bugs they fix
 
-Una prueba que pasa con el código roto no prueba nada. Revertí las dos
-correcciones sobre el árbol corregido y volví a correr:
+A test that passes with the code broken proves nothing. I reverted both fixes on
+top of the corrected tree and ran again:
 
 ```
-$ npx tsx test/run.ts improve; echo "REGRESS_EXIT=$?"        (fixes revertidos)
+$ npx tsx test/run.ts improve; echo "REGRESS_EXIT=$?"        (fixes reverted)
 FAIL no codex/opus: an alias of one CLI is not a model of the other
 FAIL inheriting the same CLI is not a change; inheriting another one is
 FAIL ORCA_IMPROVE_MODEL belongs to ORCA_IMPROVE_RUNTIME, not to every CLI
@@ -222,140 +220,143 @@ FAIL the clock and the button build the same payload
 84/89 passed, 5 failed
 REGRESS_EXIT=1
 
-$ npx tsx test/run.ts improve-hub; echo "WIRE_REGRESS_EXIT=$?"  (fix 1 revertido)
+$ npx tsx test/run.ts improve-hub; echo "WIRE_REGRESS_EXIT=$?"  (fix 1 reverted)
 FAIL the ack says what stuck, and what stuck is launchable
 11/12 passed, 1 failed
 WIRE_REGRESS_EXIT=1
 ```
 
-Luego restauré los ficheros corregidos desde su copia y volví a correr en verde
-(los números de arriba). Las dos pruebas que **no** fallan al revertir son
-guardas de regresión sobre comportamiento que ya era correcto —parche conjunto
-y re-elegir el mismo runtime—, y están a propósito.
+Then I restored the corrected files from their copy and ran green again (the
+numbers above). The two tests that do **not** fail on revert are regression
+guards over behaviour that was already correct —a joint patch and re-choosing the
+same runtime— and they are there on purpose.
 
-### Qué cubre cada prueba nueva
+### What each new test covers
 
-En `test/improve.test.ts` (7 nuevas):
+In `test/improve.test.ts` (7 new):
 
-| Prueba | Qué fija |
+| Test | What it pins down |
 |---|---|
-| `changing runtime alone clears the model, and the spawn proves it` | fallo 1: `{runtime:'codex'}` a secas sobre `claude/opus` deja `codex` sin modelo, **y el `Command` del spawn no lleva `model`** |
-| `a runtime and a model chosen in the same breath both survive` | el modelo explícito del mismo parche gana |
-| `re-choosing the runtime already in force keeps the model` | no se tira nada cuando nada cambia |
-| `going back to inherited clears the model only if the effective runtime moves` | volver a heredar: se conserva si el entorno corre el mismo CLI, se limpia si corre otro |
-| `the environment model is not inherited under another CLI, in either direction` | fallo 2, **las dos direcciones**, comprobado sobre el payload del spawn manual |
-| `letting the runtime go back to inherited brings the environment model back` | fallo 2, vuelta a heredar |
-| `the automatic clock inherits no foreign model either` | el mismo caso por el **reloj**, no sólo por el botón |
+| `changing runtime alone clears the model, and the spawn proves it` | bug 1: a bare `{runtime:'codex'}` over `claude/opus` leaves `codex` with no model, **and the spawn's `Command` carries no `model`** |
+| `a runtime and a model chosen in the same breath both survive` | the explicit model in the same patch wins |
+| `re-choosing the runtime already in force keeps the model` | nothing is thrown away when nothing changes |
+| `going back to inherited clears the model only if the effective runtime moves` | going back to inherit: kept if the environment runs the same CLI, cleared if it runs another |
+| `the environment model is not inherited under another CLI, in either direction` | bug 2, **both directions**, checked against the manual spawn's payload |
+| `letting the runtime go back to inherited brings the environment model back` | bug 2, back to inherit |
+| `the automatic clock inherits no foreign model either` | the same case via the **clock**, not just via the button |
 
-En `test/improve-hub.test.ts` (1 nueva, por wire con hub real y socket real):
-`over the wire, changing runtime alone leaves no model from the other CLI` —
-manda `improve:config` con sólo `{runtime}`, exactamente lo que manda el panel,
-y comprueba el `ack` y el estado del hub; después un parche conjunto y comprueba
-que el modelo explícito sobrevive.
+In `test/improve-hub.test.ts` (1 new, over the wire with a real hub and a real
+socket): `over the wire, changing runtime alone leaves no model from the other
+CLI` — it sends `improve:config` with only `{runtime}`, exactly what the panel
+sends, and checks the `ack` and the hub's state; then a joint patch, and it checks
+that the explicit model survives.
 
-**No se lanzó ninguna revisión real**, como pedía la misión.
+**No real review was launched**, as the mission asked.
 
-## 7. Qué modelos elegir
+## 7. Which models to choose
 
-**La recomendación de modelos la da CAPCOM.** Este documento no la sustituye ni
-la duplica: aquí sólo está lo que la propia ORCA puede comprobar, que es qué se
-puede elegir en esta máquina y cómo medir el resultado.
+**The model recommendation comes from CAPCOM.** This document neither replaces
+nor duplicates it: here there is only what ORCA itself can check, which is what
+can be chosen on this machine and how to measure the result.
 
-**He retirado la comparación de modelos que traía la primera versión de este
-informe.** Contenía precios y equivalencias de versión que no puedo citar desde
-el repositorio, y argumentos del tipo «más ventana de contexto luego mejores
-propuestas» que no son una implicación: la ventana dice qué cabe, no qué se
-acierta. Presentar eso junto a una entrega verificada le daba el mismo peso que
-al resto, y no lo tiene.
+**I have removed the model comparison the first version of this report
+carried.** It contained prices and version equivalences I cannot cite from the
+repository, and arguments of the form "more context window therefore better
+proposals" that are not an implication: the window says what fits, not what gets
+it right. Presenting that alongside a verified delivery gave it the same weight
+as the rest, and it does not have it.
 
-### 7.1 Qué ofrece esta máquina
+### 7.1 What this machine offers
 
-El catálogo no es una lista escrita a mano: es `providerModels()`
-(`src/collector/provider-handoff.ts:14`), leído de la máquina donde correrá el
-revisor y con la marca `installed` de cada CLI.
+The catalogue is not a hand-written list: it is `providerModels()`
+(`src/collector/provider-handoff.ts:14`), read from the machine where the
+reviewer will run and with each CLI's `installed` mark.
 
-- **`claude`** — los alias de Claude Code: `opus`, `fable`, `sonnet`, `haiku`.
-  Son alias: ORCA escribe el alias y el CLI resuelve la versión.
-- **`codex`** — lo que haya en `~/.codex/models_cache.json` con visibilidad de
-  lista. Si el caché falta, la lista sale corta y no se inventa nada.
+- **`claude`** — Claude Code's aliases: `opus`, `fable`, `sonnet`, `haiku`. They
+  are aliases: ORCA writes the alias and the CLI resolves the version.
+- **`codex`** — whatever is in `~/.codex/models_cache.json` with list
+  visibility. If the cache is missing, the list comes out short and nothing is
+  invented.
 
-### 7.2 Cómo decidirlo con datos y no con opinión
+### 7.2 How to decide it with data and not with opinion
 
-Esto es lo que la entrega aporta a la pregunta, y es lo único que aporta: la
-elección ahora queda **sellada por revisión**, así que se puede comparar en
-lugar de argumentar.
+This is what the delivery contributes to the question, and it is all it
+contributes: the choice is now **sealed per review**, so it can be compared
+instead of argued about.
 
-1. Fijar un runtime/modelo y dejar correr dos o tres revisiones periódicas.
-2. Cambiar al candidato y dejar correr las mismas.
-3. Comparar en la tabla de revisiones, que guarda por revisión el runtime, el
-   modelo, el presupuesto sellado, los tokens leídos y los contadores
-   `filed` / `merged` / `rejected`.
+1. Pin a runtime/model and let two or three periodic reviews run.
+2. Switch to the candidate and let the same number run.
+3. Compare in the review table, which keeps per review the runtime, the model,
+   the sealed budget, the tokens read and the `filed` / `merged` / `rejected`
+   counters.
 
-La cifra que decide **no es tokens por revisión**: es **propuestas aceptadas por
-revisión** —y, siendo duros, propuestas que acabaron en una misión que se
-cerró—. Un modelo barato que hay que releer dos veces no sale barato.
+The figure that decides is **not tokens per review**: it is **accepted proposals
+per review** —and, to be strict about it, proposals that ended in a mission that
+was closed—. A cheap model you have to re-read twice does not come out cheap.
 
-### 7.3 Lo único que he medido
+### 7.3 The only thing I have measured
 
-Una revisión real, `rev_mtschaq0u83g1or2`, con el modelo por defecto: cinco
-propuestas genuinas y 570.858 tokens sobre un presupuesto de 400K (143%). Es
-una muestra de una: sirve para afirmar que el freno se sobrepasa —eso está en
-§3 y en el texto de la UI— y no sirve para comparar modelos. **No he lanzado
-ninguna revisión para esta entrega**, como pedía la misión.
+One real review, `rev_mtschaq0u83g1or2`, with the default model: five genuine
+proposals and 570,858 tokens against a budget of 400K (143%). It is a sample of
+one: it is enough to state that the brake gets overshot —that is in §3 and in the
+UI text— and it is not enough to compare models. **I have not launched any review
+for this delivery**, as the mission asked.
 
-## 8. Límites, dicho claro
+## 8. Limits, stated plainly
 
-1. **El presupuesto es un freno muestreado.** Sigue pudiendo sobrepasarse, con
-   cualquier modelo, y con los de turno largo más. No es un techo duro y la UI
-   no lo llama así.
-2. **ORCA cuenta tokens, no dinero.** No hay conversión a dólares en ninguna
-   parte, ni una tabla de precios en el producto: comparar coste entre modelos
-   es algo que hoy hay que hacer fuera de ORCA.
-3. **El alias no fija la versión.** `opus` es lo que Claude Code resuelva ese
-   día. Lo que la revisión sella es el alias elegido, no un identificador de
-   versión; si hace falta trazabilidad exacta de versión, hoy no la hay —y es
-   otra razón para no escribir equivalencias de versión en un informe.
-4. **El modelo guardado no recuerda para qué runtime se eligió.** La limpieza
-   se decide **al guardar** (§3). Si después cambia `ORCA_IMPROVE_RUNTIME` en
-   el entorno mientras el operador tiene el runtime heredado y un modelo
-   fijado, ese modelo viaja al CLI nuevo. Es raro —requiere reiniciar el hub
-   con otro entorno— y degrada a lo documentado: el spawn falla con el mensaje
-   del CLI, que es quien sabe qué modelos tiene. Cerrarlo del todo pide guardar
-   la pareja modelo↔runtime, que no está en esta entrega.
-5. **`effort` y `thinking` no se eligen desde ORCA.** El revisor nace por el
-   CLI, y ORCA le pasa runtime y modelo, no la profundidad de razonamiento.
-   Esa palanca —que en modelos actuales pesa tanto como el modelo— queda fuera
-   de esta entrega.
-6. **En `codex`, el «no implementes» es una instrucción, no una jaula.** Desde
-   la decisión de permisos de 2026-09-07, ORCA lanza Codex con
-   `--dangerously-bypass-approvals-and-sandbox` salvo que `ORCA_CODEX_APPROVALS=1`
-   (`src/collector/commands.ts:1490`). Un revisor Codex **podría** escribir en
-   el repositorio si decidiera desobedecer su brief; uno de Claude Code, en la
-   configuración de esta máquina, también depende de su brief. Es un hecho a
-   tener delante al elegir runtime, no una recomendación.
-7. **El catálogo de Codex sale de un caché local.** Si el caché falta o está
-   viejo, la lista sale corta o desfasada; ORCA no inventa modelos para
-   rellenar.
-8. **Sin commit.** El repositorio está compartido y sucio con trabajo de otros
-   agentes; no he commiteado, revertido ni tocado nada ajeno. El `typecheck` de
-   §6 recorre el árbol entero, incluidos ficheros ajenos, y pasa: el fallo que
-   avisé en `src/hub/push.ts` lo ha arreglado su dueño.
-9. **Un solo implementador, sin subagentes**, como pedía la misión.
+1. **The budget is a sampled brake.** It can still be overshot, with any model,
+   and more so with the long-turn ones. It is not a hard ceiling and the UI does
+   not call it one.
+2. **ORCA counts tokens, not money.** There is no conversion to dollars anywhere,
+   nor a price table in the product: comparing cost between models is something
+   that today has to be done outside ORCA.
+3. **The alias does not pin the version.** `opus` is whatever Claude Code
+   resolves that day. What the review seals is the chosen alias, not a version
+   identifier; if exact version traceability is needed, today there is none —and
+   that is another reason not to write version equivalences into a report.
+4. **The saved model does not remember which runtime it was chosen for.** The
+   clearing is decided **on save** (§3). If `ORCA_IMPROVE_RUNTIME` later changes
+   in the environment while the operator has the runtime inherited and a model
+   pinned, that model travels to the new CLI. It is rare —it requires restarting
+   the hub with a different environment— and it degrades to what is documented:
+   the spawn fails with the CLI's message, and the CLI is the one that knows
+   which models it has. Closing it completely calls for storing the
+   model↔runtime pairing, which is not in this delivery.
+5. **`effort` and `thinking` are not chosen from ORCA.** The reviewer is born by
+   the CLI, and ORCA passes it runtime and model, not reasoning depth. That lever
+   —which on current models weighs as much as the model— is outside this
+   delivery.
+6. **On `codex`, "do not implement" is an instruction, not a cage.** Since the
+   permissions decision of 2026-09-07, ORCA launches Codex with
+   `--dangerously-bypass-approvals-and-sandbox` unless `ORCA_CODEX_APPROVALS=1`
+   (`src/collector/commands.ts:1490`). A Codex reviewer **could** write to the
+   repository if it decided to disobey its brief; a Claude Code one, in this
+   machine's configuration, also depends on its brief. It is a fact to keep in
+   front of you when choosing a runtime, not a recommendation.
+7. **Codex's catalogue comes from a local cache.** If the cache is missing or
+   stale, the list comes out short or out of date; ORCA does not invent models to
+   fill it in.
+8. **No commit.** The repository is shared and dirty with other agents' work; I
+   have not committed, reverted or touched anything of anyone else's. The
+   `typecheck` in §6 walks the whole tree, other people's files included, and it
+   passes: the failure I flagged in `src/hub/push.ts` has been fixed by its
+   owner.
+9. **A single implementer, no subagents**, as the mission asked.
 
-## 9. El diff de esta corrección
+## 9. The diff of this correction
 
-La auditoría vio «0 archivos atribuidos» porque los ficheros de esta sección son
-**nuevos y sin trackear**: `git diff` no enseña nada de ellos, y lo último que
-el verificador vio ejecutarse fue un `cat` de este informe. Así que aquí está el
-cambio, entero, en vez de una marca de «tests passed» que no prueba nada.
+The audit saw "0 files attributed" because this section's files are **new and
+untracked**: `git diff` shows nothing of them, and the last thing the verifier
+saw run was a `cat` of this report. So here is the change, whole, instead of a
+"tests passed" badge that proves nothing.
 
-Ficheros nuevos de la sección, todos míos (líneas): `src/shared/improve.ts`
+New files in the section, all mine (lines): `src/shared/improve.ts`
 1085 · `src/hub/improve.ts` 1151 · `src/ui/hud/improve.ts` 907 ·
 `src/ui/styles/improve.css` 429 · `src/agents/tools-improve.ts` 185 ·
-`src/collector/improve-drop.ts` 203 · `bin/orca-improve.mjs` 166 · pruebas
-`test/improve*.ts` y `test/hud-improve.shots.ts`.
+`src/collector/improve-drop.ts` 203 · `bin/orca-improve.mjs` 166 · tests
+`test/improve*.ts` and `test/hud-improve.shots.ts`.
 
-El diff de **esta ronda de corrección**, que es lo que hay que revisar:
+The diff of **this round of corrections**, which is what needs reviewing:
 
 ```diff
 ### src/shared/improve.ts
@@ -485,16 +486,16 @@ El diff de **esta ronda de corrección**, que es lo que hay que revisar:
      const effModel = state.model ?? (state.runtime && state.runtime !== choice?.runtime ? null : choice?.model ?? null);
 ```
 
-Más, en las pruebas: 7 casos nuevos en `test/improve.test.ts` y 1 por wire en
-`test/improve-hub.test.ts`, descritos uno a uno en §6.
+More, in the tests: 7 new cases in `test/improve.test.ts` and 1 over the wire in
+`test/improve-hub.test.ts`, described one by one in §6.
 
-## 10. Cómo verificarlo
+## 10. How to verify it
 
 ```
 npm run typecheck
-npm test -- improve                 las cinco suites (90)
+npm test -- improve                 the five suites (90)
 npm test -- --changed               1011
-npx tsx test/hud-improve.shots.ts   la sección, con la fila de modelo
+npx tsx test/hud-improve.shots.ts   the section, with the model row
 ```
 
-Filtros que cubren esta entrega: `improve`, `commands`, `autonomy`.
+Filters that cover this delivery: `improve`, `commands`, `autonomy`.

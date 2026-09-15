@@ -1,166 +1,169 @@
-# El canal agente → humano
+# The agent → human channel
 
-Un agente de Claude Code no tiene socket hacia ORCA. Tiene un filesystem. Por eso
-el canal para pedirle algo a un humano es un buzón de archivos dentro del propio
-proyecto, y no una API.
+A Claude Code agent has no socket to ORCA. It has a filesystem. That is why the
+channel for asking a human something is a mailbox of files inside the project
+itself, and not an API.
 
 ```
-<project>/.orca/ask/<id>.json            el agente pregunta
-<project>/.orca/ask/<id>.answer.json     ORCA responde; el agente hace polling
+<project>/.orca/ask/<id>.json            the agent asks
+<project>/.orca/ask/<id>.answer.json     ORCA answers; the agent polls
 ```
 
-El collector vigila esa carpeta en cada proyecto que conoce (`fs.watch` + poll de
-1s), convierte cada pregunta en un `Escalation` del contrato y la emite al hub
-como `{t:'escalation'}`. La respuesta viaja de vuelta por el comando
+The collector watches that folder in every project it knows about (`fs.watch` +
+a 1s poll), turns each question into an `Escalation` from the contract and emits
+it to the hub as `{t:'escalation'}`. The answer travels back through the command
 `{k:'answer', escalationId, answer, rememberAs}`.
 
-Este documento **es** el contrato. El runtime del CEO y la skill del agente
-dependen de él; cambiarlo sin cambiar los tres lados rompe el canal.
+This document **is** the contract. The CEO runtime and the agent skill depend on
+it; changing it without changing all three sides breaks the channel.
 
 ---
 
-## 1. Preguntar
+## 1. Asking
 
-El agente escribe un JSON en `<project>/.orca/ask/<id>.json`. El `<id>` lo elige
-el agente: cualquier cosa que sea un nombre de archivo válido y no termine en
-`.answer` (un uuid, un timestamp, un slug de la pregunta).
+The agent writes a JSON file to `<project>/.orca/ask/<id>.json`. The `<id>` is
+chosen by the agent: anything that is a valid filename and does not end in
+`.answer` (a uuid, a timestamp, a slug of the question).
 
 ```jsonc
 {
-  // OBLIGATORIO. Una sola pregunta, en una línea. Es lo que verá el humano
-  // en la interrupción de la consola, así que tiene que poder contestarse
-  // sin abrir nada más.
-  "question": "¿Uso Stripe o Mercado Pago para el piloto?",
+  // REQUIRED. One single question, on one line. It is what the human will see
+  // in the console's interrupt, so it has to be answerable without opening
+  // anything else.
+  "question": "Do I use Stripe or Mercado Pago for the pilot?",
 
-  // Opcional. Contexto para que el humano conteste rápido y bien.
-  // Va debajo de la pregunta en la consola. Puede ser multilínea.
-  "context": "El cliente factura en MXN y ya tiene cuenta de Mercado Pago.\nStripe cobra 3.6% + IVA aquí.",
+  // Optional. Context so the human can answer fast and well.
+  // It goes below the question in the console. It can be multiline.
+  "context": "The client invoices in MXN and already has a Mercado Pago account.\nStripe charges 3.6% + VAT here.",
 
-  // Opcional. Respuestas sugeridas, máximo 12. La consola las pinta como
-  // botones de una sola pulsación. Cortas: son etiquetas, no párrafos.
-  "options": ["Stripe", "Mercado Pago", "Los dos, detrás de una interfaz"],
+  // Optional. Suggested answers, 12 maximum. The console paints them as
+  // one-press buttons. Keep them short: they are labels, not paragraphs.
+  "options": ["Stripe", "Mercado Pago", "Both, behind one interface"],
 
-  // Opcional, default false. true = el humano SÓLO puede elegir una opción.
-  // Sólo tiene efecto si `options` no está vacío. Úsalo cuando texto libre
-  // no te sirva de nada (una decisión binaria, un enum).
+  // Optional, default false. true = the human can ONLY pick an option.
+  // It only has an effect if `options` is not empty. Use it when free text
+  // is of no use to you (a binary decision, an enum).
   "optionsOnly": false,
 
-  // Opcional, default "normal". "low" | "normal" | "blocking".
-  // "blocking" significa: no puedo avanzar en NADA sin esto.
+  // Optional, default "normal". "low" | "normal" | "blocking".
+  // "blocking" means: I cannot move forward on ANYTHING without this.
   "urgency": "blocking",
 
-  // Opcional pero MUY recomendado. El sessionId de quien pregunta, para que
-  // la consola sepa a qué agente pertenece la interrupción. Sin esto el
-  // collector se la atribuye al agente más recientemente activo del proyecto,
-  // que con varios agentes en el mismo repo puede equivocarse.
+  // Optional but STRONGLY recommended. The sessionId of whoever is asking, so
+  // the console knows which agent the interrupt belongs to. Without it the
+  // collector attributes it to the project's most recently active agent,
+  // which with several agents in the same repo can get it wrong.
   "agentId": "78b357fe-4480-419f-bd99-7b5d7980e7fd",
 
-  // Opcional. Minutos tras los cuales la pregunta se retira sola.
-  // Úsalo si vas a morir esperando; evita interrupciones zombi en la consola.
+  // Optional. Minutes after which the question withdraws itself.
+  // Use it if you are going to die waiting; it avoids zombie interrupts in
+  // the console.
   "ttlMinutes": 120
 }
 ```
 
-Reglas que el agente debe respetar:
+Rules the agent has to respect:
 
-- **`question` es obligatorio.** Un archivo sin él se ignora (y se registra un
-  warning). Nada más lo es.
-- **Escribe atómicamente.** Escribe en `<id>.json.tmp` y renombra a `<id>.json`.
-  El collector reintenta cada segundo si lee un JSON a medias, pero un rename es
-  gratis y elimina la carrera.
-- **`mkdir -p` la carpeta.** El collector NO crea `.orca/ask/` — no queremos que
-  un daemon de observación escriba dentro de los repos del usuario sin que nadie
-  se lo pida. La primera pregunta la crea el agente.
-- **Una pregunta por archivo.** Si necesitas tres respuestas, escribe tres
-  archivos; se muestran como tres interrupciones y se responden por separado.
-- **Añade `.orca/` a `.gitignore`.** Es estado local, no código del proyecto.
+- **`question` is required.** A file without it is ignored (and a warning is
+  logged). Nothing else is.
+- **Write atomically.** Write to `<id>.json.tmp` and rename to `<id>.json`. The
+  collector retries every second if it reads a half-written JSON, but a rename
+  is free and removes the race.
+- **`mkdir -p` the folder.** The collector does NOT create `.orca/ask/` — we do
+  not want an observation daemon writing inside the user's repos without anyone
+  asking it to. The first question is what creates it.
+- **One question per file.** If you need three answers, write three files; they
+  show up as three interrupts and are answered separately.
+- **Add `.orca/` to `.gitignore`.** It is local state, not project code.
 
-## 2. Esperar
+## 2. Waiting
 
-El agente hace polling de `<project>/.orca/ask/<id>.answer.json`. Un patrón que
-funciona dentro de una sesión de Claude Code:
+The agent polls `<project>/.orca/ask/<id>.answer.json`. A pattern that works
+inside a Claude Code session:
 
 ```bash
-for i in $(seq 1 600); do            # 10 minutos a 1Hz
+for i in $(seq 1 600); do            # 10 minutes at 1Hz
   [ -f .orca/ask/pago.answer.json ] && cat .orca/ask/pago.answer.json && break
   sleep 1
 done
 ```
 
-Mientras la pregunta está abierta el agente aparece en la consola como
-`blocked` con `block.kind = "question"` y `block.escalationId` apuntando a la
-escalación. Es el único estado del que la escena 3D tiene permiso de gritar.
+While the question is open the agent appears in the console as `blocked` with
+`block.kind = "question"` and `block.escalationId` pointing at the escalation.
+It is the only state the 3D scene is allowed to shout about.
 
-## 3. La respuesta
+## 3. The answer
 
-Cuando el humano (o el CEO) contesta, el collector escribe:
+When the human (or the CEO) answers, the collector writes:
 
 ```jsonc
 {
-  "answer": "Mercado Pago",              // lo que dijo el humano, texto libre
+  "answer": "Mercado Pago",              // what the human said, free text
   "at": 1788539532517,                   // epoch ms
   "answeredBy": "human",                 // "human" | "ceo"
-  "rememberAs": "pasarela preferida",    // null, o el nombre bajo el que el
-                                         // humano quiere que se recuerde esto
-  "id": "pago"                           // el <id> del archivo original
+  "rememberAs": "preferred gateway",     // null, or the name the human wants
+                                         // this remembered under
+  "id": "pago"                           // the <id> of the original file
 }
 ```
 
-...y **borra** `<id>.json`. Ese es el orden, y es deliberado: si el collector
-muere entre las dos operaciones, el agente ya tiene su respuesta y la pregunta se
-re-emitiría a lo sumo una vez. Al revés se perdería la respuesta.
+...and it **deletes** `<id>.json`. That is the order, and it is deliberate: if
+the collector dies between the two operations, the agent already has its answer
+and the question would be re-emitted at most once. The other way round the
+answer would be lost.
 
-La respuesta también se escribe atómicamente (`.tmp` + rename), así que el agente
-nunca puede leer un JSON incompleto.
+The answer is also written atomically (`.tmp` + rename), so the agent can never
+read an incomplete JSON.
 
-## 4. Retirarse
+## 4. Withdrawing
 
-Si el agente resuelve la duda solo, **borra su propio `<id>.json`**. El collector
-lo detecta en el siguiente barrido y emite
-`{t:'escalation:withdraw', id, reason}`, la interrupción desaparece de la consola
-y el agente vuelve a su estado normal. No dejes preguntas abiertas que ya no te
-importan: cada una es una interrupción a un humano.
+If the agent resolves the doubt on its own, it **deletes its own `<id>.json`**.
+The collector detects it on the next sweep and emits
+`{t:'escalation:withdraw', id, reason}`, the interrupt disappears from the
+console and the agent goes back to its normal state. Do not leave open questions
+you no longer care about: each one is an interrupt to a human.
 
-Lo mismo pasa solo cuando vence `ttlMinutes`.
+The same happens on its own when `ttlMinutes` expires.
 
 ## 5. Ids
 
-El id que viaja por el protocolo **no** es el nombre del archivo. El collector
-deriva uno estable y global:
+The id that travels over the protocol is **not** the filename. The collector
+derives a stable, global one:
 
 ```
-esc_<sha1(ruta absoluta del archivo)[0..16]>
+esc_<sha1(absolute file path)[0..16]>
 ```
 
-Es estable entre reinicios del collector (el mismo archivo produce siempre el
-mismo id) y no colisiona entre proyectos que casualmente tengan un `ask/1.json`
-cada uno. El agente no necesita conocerlo: le basta su propio nombre de archivo.
+It is stable across collector restarts (the same file always produces the same
+id) and it does not collide between projects that happen to have an `ask/1.json`
+each. The agent does not need to know it: its own filename is enough.
 
-## 6. Lo que este canal NO es
+## 6. What this channel is NOT
 
-- **No es un chat.** Una pregunta, una respuesta, se acabó. Para conversar está
-  el CEO.
-- **No responde prompts de permisos de Claude Code.** Eso es otra cosa
-  (`block.kind = "permission"`), y hoy el CLI no expone forma de contestarlos
-  desde fuera del proceso — ver `docs/CONTRACT-REQUESTS.md`.
-- **No transporta secretos.** Si necesitas una credencial, pídele al humano que
-  la guarde con `key:set`; llegará al agente como variable de entorno la próxima
-  vez que ORCA lo lance, sin pasar nunca por un archivo del repo.
+- **It is not a chat.** One question, one answer, done. For a conversation there
+  is the CEO.
+- **It does not answer Claude Code's permission prompts.** That is another thing
+  (`block.kind = "permission"`), and today the CLI exposes no way to answer them
+  from outside the process — see `docs/CONTRACT-REQUESTS.md`.
+- **It does not carry secrets.** If you need a credential, ask the human to
+  store it with `key:set`; it will reach the agent as an environment variable
+  the next time ORCA launches it, without ever passing through a file in the
+  repo.
 
-## 7. Ejemplo mínimo, de punta a punta
+## 7. Minimal example, end to end
 
 ```bash
-# El agente pregunta.
+# The agent asks.
 mkdir -p .orca/ask
 cat > .orca/ask/q1.json.tmp <<'JSON'
-{"question":"¿Despliego a producción o me quedo en staging?",
- "options":["Producción","Staging"],"optionsOnly":true,
+{"question":"Do I deploy to production or stay on staging?",
+ "options":["Production","Staging"],"optionsOnly":true,
  "urgency":"blocking","agentId":"'"$CLAUDE_SESSION_ID"'"}
 JSON
 mv .orca/ask/q1.json.tmp .orca/ask/q1.json
 
-# El agente espera.
+# The agent waits.
 while [ ! -f .orca/ask/q1.answer.json ]; do sleep 1; done
 ANSWER=$(python3 -c "import json;print(json.load(open('.orca/ask/q1.answer.json'))['answer'])")
-echo "el humano dijo: $ANSWER"
+echo "the human said: $ANSWER"
 ```

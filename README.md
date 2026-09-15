@@ -6,8 +6,8 @@
 
 **A containment console for fleets of coding agents.**
 
-Watch every agent you run, on every machine, in one field.<br>
-Command them all through one voice.<br>
+Run dozens of agents at once, on any machine, from any provider, in one field.<br>
+Talk to all of them. Let them talk to each other, and spawn more.<br>
 Then ask it to change itself, and watch it do it.
 
 <br>
@@ -71,6 +71,19 @@ per machine                    │               browser · phone
 ```
 
 A laptop behind NAT and a VPS behind a firewall are equal citizens. Nothing needs an open port but the hub.
+
+---
+
+## Many agents, at the same time
+
+ORCA is a user interface for **concurrent** work: not one agent you wait on, but a fleet you converse with while it runs.
+
+- **Every conversation is open at once.** Each agent has its own thread, and the ones that need you are queued so you can answer in order, with `Tab` jumping to the next one. Nothing blocks while you read something else.
+- **Providers mix on the same field.** A Claude Code lead can have Codex members and a Grok reviewer. A tile's stripe tells you which is which; everything else, from budgets to terminals to messages, is the same for all of them.
+- **One line reaches anyone.** `@K9` to an agent, `@LZ` to a project, `@audit-01` to a squad, nothing to CAPCOM. Reply to a blocked agent from its window, from the queue, from the shell or from your phone.
+- **Agents talk to each other.** A worker can ask a peer, hand off to a squad, warn the fleet or escalate to a human, through a mailbox any CLI can write to. CAPCOM routes it, so twenty agents do not interrupt each other twenty times.
+- **Agents create agents.** A lead spawns members, members spawn helpers, and the lineage is drawn as pipes so you always see who made whom. A squad or a whole fleet preset launches from one line.
+- **Work lasts longer than a session.** A mission is a thread that keeps its agents, its messages and its state across days, across CAPCOM being recycled and across the hub restarting. Hosted agents live in tmux and survive ORCA itself. Budgets, history and the journal are there for the morning after.
 
 ---
 

@@ -62,7 +62,7 @@ ORCA reads what those agents already write to disk and turns it into a single li
 
 And ORCA is one of the projects on its own field. It reviews how it is being used, proposes what to change, and, once you say yes, sends a squad to rewrite itself while the fleet keeps running.
 
-Three processes, every connection outbound:
+Three processes, and one machine is enough:
 
 ```
 collector ──(ws, outbound)──▶  hub  ◀──(ws)──  console
@@ -70,7 +70,7 @@ per machine                    │               browser · phone
    └── CAPCOM ──(MCP/http)─────┘
 ```
 
-A laptop behind NAT and a VPS behind a firewall are equal citizens. Nothing needs an open port but the hub.
+On a laptop, all three run together with `npm run dev`. Want a second machine, a VPS or a container in the fleet? Start a collector there and point it at the hub. It dials out, so nothing anywhere needs an open port, and a laptop behind NAT is as good a citizen as a server.
 
 ---
 
@@ -165,7 +165,23 @@ orca stop squad:audit --reason "wrong branch"
 orca journal --stats --since 7d
 ```
 
-The console installs as an app on a phone, with push notifications when an agent blocks. Put the hub behind a Tailscale or Cloudflare tunnel and every collector dials out to it. Your laptop never accepts a connection.
+The console installs as an app on a phone, with push notifications when an agent blocks. Reaching it from outside takes nothing you do not already have:
+
+<table>
+<tr>
+<td align="center" width="80">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/readme/icons/tailscale-dark.svg">
+<img src="docs/readme/icons/tailscale-light.svg" alt="Tailscale" height="32">
+</picture>
+</td>
+<td><b>On your tailnet.</b> If Tailscale is on the machine, the hub publishes itself over https at boot, with a real certificate and only to your devices. Nothing to remember after a reboot. Open the console on your phone from the other side of the world.</td>
+</tr>
+<tr>
+<td></td>
+<td><b>Without it.</b> On the LAN it is a URL. Behind any tunnel it is the same URL. Set a token before you expose it, and the hub refuses everything else.</td>
+</tr>
+</table>
 
 ---
 

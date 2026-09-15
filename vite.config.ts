@@ -30,7 +30,7 @@ const HUB_PORT = Number(process.env['ORCA_PORT'] ?? PORTS.hub);
  * el de siempre.
  *
  *   ORCA_UI_HOST=0.0.0.0             toda interfaz
- *   ORCA_UI_HOST=100.85.28.114       sólo la tailnet, que es lo que se quiere
+ *   ORCA_UI_HOST=100.64.10.20       sólo la tailnet, que es lo que se quiere
  *
  * Vite no se reinicia solo al cambiar este archivo (ver updateSignal abajo):
  * relanza `npm run dev:ui` después de tocarlo.
@@ -91,7 +91,7 @@ export default defineConfig({
     host: UI_HOST,
     /*
      * MagicDNS names. Vite 6 rejects a Host header it does not know (DNS
-     * rebinding), which turns `http://personal-mac-m4.tailnet.ts.net:4478`
+     * rebinding), which turns `http://my-mac.tailnet.ts.net:4478`
      * into a blank page with the reason buried in the terminal. Numeric IPs
      * are allowed already; this adds the names Tailscale hands out.
      */

@@ -68,7 +68,7 @@ export default {
     test('la tailnet no es loopback', () => (
       // La IP que reparte Tailscale. Si esto se colara como local, el hub
       // trataría a cualquier dispositivo de la tailnet como al dueño.
-      eq('100.x', bindsLocalOnly('100.85.28.114'), false)
+      eq('100.x', bindsLocalOnly('100.64.10.20'), false)
     )),
 
     test('una cabecera de proxy quita el pase de local', async () => {

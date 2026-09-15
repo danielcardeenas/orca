@@ -73,7 +73,7 @@ móvil no hay nada en ese puerto. Para mirar la consola **en desarrollo** desde
 otro dispositivo:
 
 ```
-ORCA_UI_HOST=100.85.28.114 npm run dev:ui     # sólo la tailnet
+ORCA_UI_HOST=100.x.y.z npm run dev:ui     # sólo la tailnet
 ORCA_UI_HOST=0.0.0.0       npm run dev:ui     # también el wifi del bar
 ```
 

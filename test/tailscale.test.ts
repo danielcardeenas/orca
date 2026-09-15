@@ -13,7 +13,7 @@ import { ensure, inspect, type ServeStatus } from '../src/hub/tailscale.ts';
 import { eq, ok, test, type TestModule } from './harness.ts';
 
 const PORT = 4479;
-const HOST = 'personal-mac-m4.tail7bfa77.ts.net';
+const HOST = 'my-mac.tailnet.ts.net';
 
 const running = JSON.stringify({ BackendState: 'Running', Self: { DNSName: `${HOST}.` } });
 const serving = (proxy: string) => JSON.stringify({ Web: { [`${HOST}:443`]: { Handlers: { '/': { Proxy: proxy } } } } });

@@ -133,7 +133,7 @@ tailnet.` —de ahí que el código imprima el motivo tal cual y añada dónde s
 activa—, y el segundo, sin tocar el código, funcionó. Quedó servido:
 
 ```
-https://personal-mac-m4.tail7bfa77.ts.net/  →  proxy http://127.0.0.1:4479
+https://<mac>.<tailnet>.ts.net/  →  proxy http://127.0.0.1:4479
 ```
 
 Comprobado de punta a punta contra esa url con el build que sirve el hub:
@@ -154,7 +154,7 @@ vive en el `localStorage` del origen desde la primera visita con `?k=`
 (`net/client.ts`). La consecuencia práctica es el orden de los pasos:
 
 1. En el teléfono, abrir **una vez**
-   `https://personal-mac-m4.tail7bfa77.ts.net/?k=<token>` — el de `~/.orca/token`.
+   `https://<mac>.<tailnet>.ts.net/?k=<token>` — el de `~/.orca/token`.
 2. Cuando la consola arranque (o sea: cuando el handshake cierre), instalar:
    Chrome → menú → **Instalar app**. iOS Safari → compartir → **Añadir a inicio**.
 

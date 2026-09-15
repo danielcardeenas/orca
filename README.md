@@ -2,7 +2,12 @@
 
 <br>
 
-# ORCA
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/readme/wordmark-dark.svg">
+<img src="docs/readme/wordmark-light.svg" alt="ORCA" width="216">
+</picture>
+
+<br><br>
 
 **A containment console for fleets of coding agents.**
 

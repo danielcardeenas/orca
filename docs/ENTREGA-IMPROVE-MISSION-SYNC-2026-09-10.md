@@ -1,70 +1,74 @@
-# AUTOMEJORA · la misión le devuelve su estado a la propuesta
+# SELF-IMPROVEMENT · the mission returns its status to the proposal
 
-Misión: `mission-07`.
+Mission: `mission-07`.
 
-## El bug, con evidencia
+## The bug, with evidence
 
-Dos propuestas del tablero seguían en `sent` cuando su misión ya estaba
-`completed` y archivada desde las 09:30Z del 2026-09-10:
+Two proposals on the board were still stuck at `sent` when their mission was
+already `completed` and archived as of 09:30Z on 2026-09-10:
 
-| Propuesta | Misión | Misión decía | Propuesta decía |
+| Proposal | Mission | Mission said | Proposal said |
 | --- | --- | --- | --- |
-| `imp_mtsckduj0xbfxnkh` (`console-usage-instrumentation`) | `mission_mtv3t4fi4vnpin1p` | `completed` + `archivedAt` | `sent`, sin notas |
-| `imp_mttxv0wedohmhlen` (`active-mission-without-working-agent`) | `mission_mttxzjrueupaaqnu` | `completed` + `archivedAt` | `sent`, sin notas |
+| `imp_mtsckduj0xbfxnkh` (`console-usage-instrumentation`) | `mission_mtv3t4fi4vnpin1p` | `completed` + `archivedAt` | `sent`, no notes |
+| `imp_mttxv0wedohmhlen` (`active-mission-without-working-agent`) | `mission_mttxzjrueupaaqnu` | `completed` + `archivedAt` | `sent`, no notes |
 
-Causa: el enlace `missionId` era de ida. `dispatchForge` escribía `act: 'sent'`
-y nadie escuchaba después el `changed` del `MissionStore`. Cerrar (CAPCOM,
-`update_mission`/`report_mission`) y archivar (consola, `mission:archive`)
-cambiaban la misión y nada más.
+Cause: the `missionId` link was one-way. `dispatchForge` wrote `act: 'sent'`
+and nothing afterward listened for the `MissionStore`'s `changed` event.
+Closing (CAPCOM, `update_mission`/`report_mission`) and archiving (console,
+`mission:archive`) changed the mission and nothing else.
 
-## Lo que cambia
+## What changes
 
-- `src/shared/improve.ts`: `ImproveStatus` gana `completed` y `archived`;
-  `MISSION_STATUSES`; `linkedStatus(mission)` es la única regla (archivada gana a
-  terminada; `failed` sigue en `sent`); `sortProposals` hunde terminadas y deja
-  las archivadas al final.
-- `src/hub/improve.ts`: `ImproveStore.syncMission` (por misión, en las dos
-  direcciones, con nota `system` en el hilo) y `syncMissions` (barrido de
-  arranque, una sola escritura). `reopen` se niega para cualquier propuesta con
-  misión, no sólo `sent`. La poda y `improveCounts` conocen los estados nuevos.
-- `src/hub/server.ts`: el `changed` del `MissionStore` llama a `syncMission`
-  (salvo purga); al arrancar, `syncMissions(missions.all())` con una línea de log
-  si movió algo.
-- `src/agents/tools-improve.ts`: `list_improvements` documenta los estados
-  nuevos en `status`.
-- `src/ui/hud/improve.ts` y `src/ui/styles/improve.css`: la fila de una
-  terminada dice `DONE · <cuándo>` y se atenúa como las cerradas; la marca de
-  misión (barra lima) pasa a la clase `is-mission`, que lleva toda propuesta con
-  `missionId` —enviada o terminada— así que el destacado de «convertida en
-  misión» no cambia. Las archivadas no se enseñan, ni detrás del pliegue.
+- `src/shared/improve.ts`: `ImproveStatus` gains `completed` and `archived`;
+  `MISSION_STATUSES`; `linkedStatus(mission)` is the single rule (archived
+  beats completed; `failed` stays `sent`); `sortProposals` sinks completed
+  ones and puts archived ones at the very end.
+- `src/hub/improve.ts`: `ImproveStore.syncMission` (per mission, in both
+  directions, with a `system` note in the thread) and `syncMissions` (a
+  startup sweep, a single write). `reopen` is now refused for any proposal
+  with a mission, not just `sent` ones. Pruning and `improveCounts` know
+  about the new statuses.
+- `src/hub/server.ts`: the `MissionStore`'s `changed` event calls
+  `syncMission` (except on purge); on startup, `syncMissions(missions.all())`
+  runs with a log line if it moved anything.
+- `src/agents/tools-improve.ts`: `list_improvements` documents the new
+  statuses in `status`.
+- `src/ui/hud/improve.ts` and `src/ui/styles/improve.css`: a completed row
+  reads `DONE · <when>` and dims like closed ones; the mission mark (lime
+  bar) moves to the `is-mission` class, which now covers any proposal with a
+  `missionId` — sent or completed — so the "turned into a mission" highlight
+  does not change. Archived ones are not shown, not even behind the fold.
 
-No se toca `report_improvements`, ni `dispatchForge`, ni el criterio de qué
-lleva la marca de misión.
+`report_improvements`, `dispatchForge`, and the criterion for which proposals
+carry the mission mark are untouched.
 
-## Verificación
+## Verification
 
-- `npm run typecheck`: limpio.
-- `npm test -- --changed`: 956/956. El aviso `sin suite que los cubra` lista
-  archivos de otras misiones del árbol y, de esta, `src/ui/hud/improve.ts` e
-  `improve.css`, que cubre el arnés visual de abajo.
-- `npm test -- improve`: 96/96 (`AUTOMEJORA`) y 14/14 (`AUTOMEJORA · hub`), con
-  las pruebas nuevas: sent → completed → archived → completed → sent con sus
-  cuatro notas y persistidas; barrido de arranque que sólo mueve la enlazada y
-  respeta una misión purgada; regla y orden; por el socket, cerrar y archivar
-  la misión llegan a la propuesta y se empujan a la consola; y un hub que
-  arranca con una misión cerrada y archivada en disco archiva su propuesta.
-- `npx tsx test/hud-improve.shots.ts`: pasa, con fixtures nuevos (terminada y
-  archivada) y aserciones de `DONE`, `is-mission`, OPEN MISSION sin IMPLEMENT ni
-  REOPEN, y la archivada ausente al desplegar.
-- Los dos casos reales: sobre una copia de `~/.orca/hub`, `syncMissions` los
-  deja en `archived` con la nota `Mission archived: it leaves the board with
-  it.` y un segundo barrido no mueve nada. El hub del operador se reinició a las
-  17:52:33 (no desde esta misión) ya con este código, y su barrido de arranque
-  dejó las dos propuestas reales en `archived` a las 17:52:34 con esa misma
-  nota; coincide con el panel de misiones, donde ninguna de las dos es visible.
+- `npm run typecheck`: clean.
+- `npm test -- --changed`: 956/956. The `no suite covers this` warning lists
+  files from other missions in the tree and, from this one,
+  `src/ui/hud/improve.ts` and `improve.css`, which the visual harness below
+  covers.
+- `npm test -- improve`: 96/96 (`AUTOMEJORA`) and 14/14 (`AUTOMEJORA · hub`),
+  with new tests: sent → completed → archived → completed → sent with its
+  four notes, persisted; a startup sweep that only moves the linked one and
+  respects a purged mission; the rule and its ordering; over the socket,
+  closing and archiving the mission reach the proposal and get pushed to the
+  console; and a hub that starts up with a mission already closed and
+  archived on disk archives its proposal.
+- `npx tsx test/hud-improve.shots.ts`: passes, with new fixtures (completed
+  and archived) and assertions for `DONE`, `is-mission`, OPEN MISSION with
+  neither IMPLEMENT nor REOPEN, and the archived one absent when expanded.
+- The two real cases: on a copy of `~/.orca/hub`, `syncMissions` leaves them
+  at `archived` with the note `Mission archived: it leaves the board with
+  it.` and a second sweep moves nothing. The operator's hub restarted at
+  17:52:33 (not because of this mission) already running this code, and its
+  startup sweep left the two real proposals at `archived` at 17:52:34 with
+  that same note; this matches the missions panel, where neither one is
+  visible.
 
-Queda fuera: una misión `failed` no cambia la propuesta (sigue `sent`), porque
-el encargo era completar y archivar; es un cambio de una línea en
-`linkedStatus` si se quiere.
+Out of scope: a `failed` mission does not change the proposal (it stays
+`sent`), because the assignment was to complete and archive; it's a
+one-line change in `linkedStatus` if wanted.
 
-Filtros de cobertura: `improve`, `forge`, `missions`.
+Coverage filters: `improve`, `forge`, `missions`.

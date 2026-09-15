@@ -1,99 +1,102 @@
-# El vuelo aterriza donde no hay ventana
+# The flight lands where there's no window
 
-Un `fly` —a un agente, a un squad, a un proyecto, a la flota entera— hacía una
-sola cosa: poner el destino en el centro del cristal. Con una terminal o un
-panel delante, el centro del cristal es a menudo justo lo que está tapado, y
-el operador volaba a un tile para encontrarlo detrás de la ventana desde la
-que había pulsado `F`.
+A `fly` — to an agent, a squad, a project, the whole fleet — used to do one
+thing: put the destination at the center of the glass. With a terminal or a
+panel in front, the center of the glass is often exactly what's covered, and
+the operator would fly to a tile only to find it behind the window they'd
+pressed `F` from.
 
-## Qué cambia
+## What changes
 
-El encuadre de un vuelo tiene ahora en cuenta las ventanas que están **en
-primer plano** —`front` y `pinned`, las que viven en píxeles de pantalla y no
-se mueven con la cámara— y elige un objetivo (centro + distancia) que deja el
-destino a la vista. La regla, en orden:
+A flight's framing now takes into account windows that are **in the
+foreground** — `front` and `pinned`, the ones that live in screen pixels and
+don't move with the camera — and picks a target (center + distance) that
+leaves the destination in view. The rule, in order:
 
-1. Sin ventanas, o con el centrado ya despejado: **el centro, como siempre**.
-   Ni una coordenada cambia respecto a antes.
-2. Si algún rectángulo libre del cristal cabe el destino a este zoom: el
-   destino se desliza al hueco más cercano al centro, moviendo la cámara lo
-   mínimo (se recorta dentro del hueco, no se centra en él).
-3. Si ningún hueco lo cabe pero uno lo cabría con la cámara más atrás: el
-   menor paso atrás que lo despeja, hasta `ZOOM_OUT_MAX` (2×).
-4. Si nada lo despeja (ventanas sobre casi todo el cristal): el destino se
-   sienta sobre el rectángulo libre **más grande**, donde más porción suya
-   se ve; empate, el que menos mueva la cámara.
+1. No windows, or the centering is already clear: **the center, as always**.
+   Not one coordinate changes from before.
+2. If some free rectangle of the glass fits the destination at this zoom:
+   the destination slides to the gap closest to the center, moving the
+   camera the minimum amount (it gets clipped inside the gap, not centered
+   on it).
+3. If no gap fits it but one would fit with the camera further back: the
+   smallest step back that clears it, up to `ZOOM_OUT_MAX` (2×).
+4. If nothing clears it (windows over almost all of the glass): the
+   destination sits on the **largest** free rectangle, where the biggest
+   portion of it is visible; on a tie, whichever moves the camera least.
 
-Las ventanas en modo `canvas` no cuentan: están en coordenadas de mundo y se
-mueven con el plano, así que ninguna cámara puede sacar un tile de debajo de
-una. Un margen de 16 px separa el destino del borde de cualquier ventana.
+Windows in `canvas` mode don't count: they're in world coordinates and move
+with the plane, so no camera move can get a tile out from under one. A
+16 px margin separates the destination from the edge of any window.
 
-## Dónde vive
+## Where it lives
 
-- `src/ui/field/framing.ts`, nuevo y **puro** (sin three, sin DOM): `aim(box,
-  z, view, obstacles)` devuelve `{x, y, z}`. Debajo, `freeRects` enumera los
-  rectángulos vacíos máximos del viewport (rejilla de bordes + suma prefija;
-  con la decena de ventanas de una consola es trivial) y `coveredArea` mide
-  exactamente qué parte de un rectángulo queda bajo la unión de las ventanas.
-  `projectBox` es la inversa, para las pruebas. `FOV` se mudó aquí y
-  `camera.ts` lo reexporta (`bookmarks.ts` lo importa de la cámara y sigue
-  igual).
-- `src/ui/field/camera.ts`: `show(box, z)` es el vuelo consciente de ventanas
-  y `frame(box, pad)` pasa por él, así que squads, proyectos, `frameAround` y
-  la flota entera se benefician sin tocar a quien los llama. `flyTo(x, y, z)`
-  sigue siendo el vuelo crudo. `setObstacles(fn)` recibe quién está delante,
-  leído en el momento de cada vuelo.
-- `src/ui/field/field.ts`: `flyTo(id)` y `frameAgents` con un solo tile
-  vuelan con `show` y la caja del tile (`tileBox`, el mismo extent que
-  `screenOf`). `FieldHandle.setObstacles` expone el gancho. `flyToPoint`
-  (marcadores, minimapa, colocar un artefacto) y `frameWindow` (localizar una
-  ventana del canvas) quedan crudos: significan un sitio, no una cosa que ver.
-- `src/ui/main.ts`: cablea `field.setObstacles` con `wm.stack()` filtrado a
-  `mode !== 'canvas'`, y añade el gancho de pruebas `__orca.fly(id)` (es
+- `src/ui/field/framing.ts`, new and **pure** (no three, no DOM): `aim(box,
+  z, view, obstacles)` returns `{x, y, z}`. Underneath, `freeRects`
+  enumerates the maximal empty rectangles of the viewport (edge grid +
+  prefix sum; trivial with the dozen or so windows of a console) and
+  `coveredArea` measures exactly what portion of a rectangle falls under
+  the union of the windows. `projectBox` is the inverse, for the tests.
+  `FOV` moved here and `camera.ts` re-exports it (`bookmarks.ts` imports it
+  from the camera and stays the same).
+- `src/ui/field/camera.ts`: `show(box, z)` is the window-aware flight and
+  `frame(box, pad)` goes through it, so squads, projects, `frameAround`,
+  and the whole fleet benefit without touching their callers. `flyTo(x, y,
+  z)` is still the raw flight. `setObstacles(fn)` receives who's in front,
+  read at the moment of each flight.
+- `src/ui/field/field.ts`: `flyTo(id)` and `frameAgents` with a single tile
+  fly with `show` and the tile's box (`tileBox`, the same extent as
+  `screenOf`). `FieldHandle.setObstacles` exposes the hook. `flyToPoint`
+  (markers, minimap, placing an artifact) and `frameWindow` (locating a
+  canvas window) stay raw: they mean a place, not a thing to see.
+- `src/ui/main.ts`: wires `field.setObstacles` with `wm.stack()` filtered
+  to `mode !== 'canvas'`, and adds the test hook `__orca.fly(id)` (it's
   `c.go`).
 
-Con el tilt puesto la aritmética es la del plano llano: el desplazamiento es
-aproximado, no exacto. No se ha visto un caso donde eso deje un tile detrás.
+With tilt applied, the arithmetic is that of the flat plane: the offset is
+approximate, not exact. No case has been found where that leaves a tile
+behind a window.
 
-## Verificación
+## Verification
 
-`npm run typecheck`: limpio.
+`npm run typecheck`: clean.
 
-`npm test -- framing` (`test/framing.test.ts`, nueva): 12/12. Cubre sin
-ventanas (tile y flota: el centro, coordenada por coordenada), una ventana
-que no tapa el centro (nada cambia), una ventana sobre el centro (el tile se
-desliza justo a su derecha, misma altura, mismo zoom, margen respetado),
-varias ventanas (encuentra el hueco entre ellas), hueco demasiado pequeño (la
-cámara retrocede el mínimo paso, 1.5× y no 2×, y despeja), nada despeja (se
-sienta sobre la banda libre mayor y enseña más que el centrado), una ventana
-sobre todo el cristal (el centro, no hay otro sitio), la flota con una ventana
-sobre media pantalla (retrocede y cabe en la otra media), y las dos primitivas
-(`freeRects` con una ventana en medio da cuatro bandas; `coveredArea` cuenta
-solapes una vez).
+`npm test -- framing` (`test/framing.test.ts`, new): 12/12. Covers no
+windows (tile and fleet: the center, coordinate by coordinate), a window
+that doesn't cover the center (nothing changes), a window over the center
+(the tile slides just to its right, same height, same zoom, margin
+respected), several windows (finds the gap between them), a gap too small
+(the camera backs off the minimum step, 1.5× and not 2×, and it clears),
+nothing clears it (it sits on the largest free band and shows more than
+centering would), a window over the whole glass (the center, there's
+nowhere else), the fleet with a window over half the screen (backs off and
+fits in the other half), and the two primitives (`freeRects` with a window
+in the middle gives four bands; `coveredArea` counts overlaps once).
 
-`npm test -- --changed` (80 suites, con las de otros cambios sin commitear del
-árbol): 956/956, corrido dos veces, la segunda con el estado final de todos
-los ficheros.
+`npm test -- --changed` (80 suites, including other uncommitted changes in
+the tree): 956/956, run twice, the second time with the final state of all
+the files.
 
-**A mano, contra la consola real** (`npx tsx test/framing.shots.ts
---isolated`, hub y flota sintética propios, Chromium 1440×900): vuelo a un
-agente sin ventanas → centrado a menos de 2 px; se abre la ventana de otro
-agente (sale en `front`, 632×688 sobre la izquierda, tapando el centro) y se
-vuelve a volar → el tile aterriza en x=664, y=294, entero, a la derecha de la
-ventana y a la altura del centro; con dos ventanas en la pila, lo mismo; y
-`FRAME` con las dos ventanas abiertas deja la flota entera (21 tiles) en la
-mitad derecha, ninguno bajo una ventana. Fotos en
-`test/shots/framing-{0,1,2,3}-*.png`. El script comprueba las dos promesas
-según lo que dejen las ventanas: si queda hueco para el tile, exige tile
-limpio; si no, exige que se vea más que centrado.
+**By hand, against the real console** (`npx tsx test/framing.shots.ts
+--isolated`, its own hub and synthetic fleet, Chromium 1440×900): flying to
+an agent with no windows → centered within 2 px; another agent's window
+opens (comes out `front`, 632×688 on the left, covering the center) and
+flying again → the tile lands at x=664, y=294, whole, to the right of the
+window and at the height of the center; with two windows in the stack, the
+same; and `FRAME` with both windows open leaves the whole fleet (21 tiles)
+in the right half, none under a window. Photos at
+`test/shots/framing-{0,1,2,3}-*.png`. The script checks the two promises
+depending on what the windows leave: if there's room for the tile, it
+requires a clean tile; if not, it requires more visible than centering
+would show.
 
-Una trampa del arnés que costó dos corridas: los tiles se deslizan a su sitio
-(`spot.x` hace easing hacia `spot.tx`) y la flota sintética los re-coloca sin
-avisar, así que `flyAndLand` espera a que el tile esté quieto, vuela, y repite
-si `tx/ty` cambió durante el vuelo.
+A harness trap that cost two runs: tiles slide into place (`spot.x` eases
+toward `spot.tx`) and the synthetic fleet repositions them without
+warning, so `flyAndLand` waits for the tile to settle, flies, and repeats
+if `tx/ty` changed during the flight.
 
-Sin suite que los cubra: el cableado en `main.ts` y el gancho `__orca.fly`
-sólo los ejercita el shot, que no forma parte de `npm test`.
+No suite covers: the wiring in `main.ts` and the `__orca.fly` hook are
+only exercised by the shot, which isn't part of `npm test`.
 
-Filtros que cubren esta entrega: `framing`.
-Arnés visual: `npx tsx test/framing.shots.ts --isolated`.
+Filters covering this delivery: `framing`.
+Visual harness: `npx tsx test/framing.shots.ts --isolated`.

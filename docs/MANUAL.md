@@ -32,8 +32,9 @@ npx vite                               # console → http://127.0.0.1:4478
 Or all three at once: `npm run dev`.
 
 The collector on the hub's machine also starts **CAPCOM**, the one voice that
-speaks to the fleet on your behalf. It is a Claude Code session like any other,
-so it runs on your subscription and commanding a fleet costs no API spend at
+speaks to the fleet on your behalf. It is an ordinary CLI session on whatever
+provider has an adapter, Claude Code or Codex today, so it runs on the
+subscription you already have and commanding a fleet costs no API spend at
 all. Exactly one machine carries it: the hub's by default, another one with
 `--capcom`, none with `--no-capcom`. See [CAPCOM](#capcom).
 
@@ -1068,4 +1069,4 @@ See `../DESIGN.md` for the visual contract.
 
 ### New CAPCOM
 
-La ventana de mando incluye **New CAPCOM** con dos modos: **Clean context** (sin pendientes ni historial heredados; espera instrucciones nuevas) y **With continuity** (checkpoint breve del hub). Ambos conservan proveedor/modelo, archivos, historial, reglas persistidas y workers. La barra ORCA ofrece `/capcom-new clean`, `/capcom-new continuity` y `/capcom-new` para abrir la elección. El UUID cambia mediante un traspaso coordinado; `/clear` sigue deseleccionando. Alcance, pruebas, límites y activación: [New CAPCOM](CAPCOM-NEW.md).
+The command window includes **New CAPCOM** with two modes: **Clean context** (no inherited pending work or history; it waits for fresh instructions) and **With continuity** (a short checkpoint from the hub). Both keep the provider and model, the files, the history, the persisted rules and the workers. The ORCA bar offers `/capcom-new clean`, `/capcom-new continuity` and `/capcom-new` to open the choice. The UUID changes through a coordinated handoff; `/clear` still deselects. Scope, tests, limits and activation: [New CAPCOM](CAPCOM-NEW.md).

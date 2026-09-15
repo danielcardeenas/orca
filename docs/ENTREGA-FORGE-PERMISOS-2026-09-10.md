@@ -1,89 +1,95 @@
-# FORGE · permisos rutinarios y elevados
+# FORGE · routine and elevated permissions
 
-Misión: `forge-permissions-01`.
+Mission: `forge-permissions-01`.
 
-FORGE lanza su líder y descendientes con `permissionMode: auto`. La política
-común autoriza lecturas, búsquedas locales, typecheck, tests y edición dentro
-del worktree/proyecto y alcance asignados. Antes de acciones elevadas o
-ambiguas, pausa la acción y pide revisión de CAPCOM: borrado, detención de
-procesos, recarga de servicios, deploy/publicación/push/merge, secretos, red
-externa, salir del proyecto (incluidos symlinks) o cambiar permisos.
+FORGE launches its lead and descendants with `permissionMode: auto`. The
+common policy authorizes reads, local searches, typecheck, tests, and
+editing within the assigned worktree/project and scope. Before elevated or
+ambiguous actions, it pauses the action and asks CAPCOM for review:
+deletion, stopping processes, reloading services, deploy/publish/push/merge,
+secrets, external network access, leaving the project (symlinks included),
+or changing permissions.
 
-Se inspeccionaron spawn, los argv de runtimes, los briefs, dispatchForge,
-publisher y el canal de escalaciones antes de editar. Una revisión independiente
-de solo lectura confirmó los contratos y el límite de la postura auto.
+Spawn, runtime argv, briefs, dispatchForge, publisher, and the escalation
+channel were all inspected before editing. An independent read-only review
+confirmed the contracts and the limits of the auto stance.
 
-## Cambios consolidados
+## Consolidated changes
 
-- `src/shared/forge.ts`: política de ejecución común, independiente de la
-  identificación de squads usada por publisher.
-- `src/shared/improve.ts`: brief inicial del líder con política rutinaria y
-  escalación elevada; reemplaza la instrucción anterior de usar manual.
-- `src/hub/improve.ts`: líder FORGE en auto; conserva la postura previa de
-  este árbol para implementadores ajenos a FORGE.
-- `src/collector/spawns.ts`: hijos en auto; conserva herencia de squad,
-  padre, límites y condición de miembro.
-- `src/collector/briefs.ts`: collector añade la política a líderes y miembros
-  FORGE, aunque el brief de tarea no la incluya.
-- `test/forge.test.ts`, `test/improve-agent.test.ts`: fronteras de permisos,
-  herencia en hijos/nietos, propagación del brief, publicación y control final.
-- `docs/FORGE.md`, `docs/AUTOMEJORA.md`: contrato actualizado y límites.
+- `src/shared/forge.ts`: the common execution policy, independent of the
+  squad identification publisher uses.
+- `src/shared/improve.ts`: the lead's initial brief carries the routine
+  policy and elevated escalation; it replaces the previous instruction to
+  use manual mode.
+- `src/hub/improve.ts`: the FORGE lead runs in auto; it keeps this tree's
+  previous stance for implementers outside FORGE.
+- `src/collector/spawns.ts`: children run in auto; squad, parent, limit, and
+  member-status inheritance is preserved.
+- `src/collector/briefs.ts`: the collector adds the policy to FORGE leads and
+  members even when the task brief does not include it.
+- `test/forge.test.ts`, `test/improve-agent.test.ts`: permission boundaries,
+  inheritance across children/grandchildren, brief propagation, publishing,
+  and final control.
+- `docs/FORGE.md`, `docs/AUTOMEJORA.md`: contract and limits updated.
 
-El miembro escala al líder mediante `orca-tell`; el líder usa `orca-ask` para
-CAPCOM. Si CAPCOM no está disponible, sigue el fallback existente a cola
-humana. El líder no puede concederse autoridad elevada. Puede continuar
-trabajo independiente mientras espera. No se añade otro canal ni se responden
-automáticamente prompts nativos.
+A member escalates to the lead through `orca-tell`; the lead uses
+`orca-ask` for CAPCOM. If CAPCOM is unavailable, the existing fallback to
+the human queue applies. The lead cannot grant itself elevated authority. It
+can keep doing independent work while it waits. No other channel is added,
+and native prompts are not answered automatically.
 
-La exclusión existente de `publisher.finishedOwnWork` sigue basándose en
-`forge-…`, independiente de permisos: ni lead ni miembro terminado dispara
-publicación. El informe no cierra automáticamente la misión. CAPCOM conserva
-revisión final, cierre y publicación.
+The existing exclusion in `publisher.finishedOwnWork` still keys off
+`forge-…`, independent of permissions: neither a finished lead nor a
+finished member triggers publication. The report does not automatically
+close the mission. CAPCOM keeps final review, closing, and publication.
 
-## Verificación
+## Verification
 
 - `npm test -- forge improve-agent spawns permissions publisher`: **50/50**.
-  Incluye herencia del squad frente a un intento de elegir otro, nietos auto,
-  política inyectada sin depender de la tarea, todas las categorías elevadas,
-  agentes ordinarios sin esa política, publisher excluyendo FORGE y misión
-  activa tras el informe del líder.
-- `npm run typecheck`: primera corrida bloqueada por TS2322 en
-  `test/capcom-feedback.fixture.ts:58`, cambio concurrente ajeno: `pane` string
-  donde se espera boolean. Avisado al proyecto sin editar su fixture. Tras
-  su corrección concurrente, la segunda corrida pasó sin diagnósticos.
-- `npm test -- --changed`: **873/873**, 69 suites seleccionadas por 57
-  archivos del árbol compartido, incluidos cambios ajenos a esta misión.
-- `git diff --check`: correcto al consolidar; el whitespace concurrente de
-  `src/ui/windows/kinds/ceo.ts` detectado inicialmente ya fue corregido.
+  Covers squad inheritance against an attempt to pick another one, auto
+  grandchildren, the policy being injected without depending on the task,
+  every elevated category, ordinary agents without that policy, publisher
+  excluding FORGE, and the mission staying active after the lead's report.
+- `npm run typecheck`: the first run was blocked by TS2322 in
+  `test/capcom-feedback.fixture.ts:58`, an unrelated concurrent change: a
+  `pane` string where a boolean was expected. Flagged to that project
+  without editing its fixture. After their concurrent fix, the second run
+  passed with no diagnostics.
+- `npm test -- --changed`: **873/873**, 69 suites selected across 57 files
+  from the shared tree, including changes unrelated to this mission.
+- `git diff --check`: clean at consolidation time; the concurrent whitespace
+  in `src/ui/windows/kinds/ceo.ts` flagged at first had already been fixed.
 
-## Riesgos y límites
+## Risks and limits
 
-Esta es una política operativa, no un clasificador de shell ni una sandbox.
-El nombre de un comando no acredita sus efectos: un test que borra datos,
-detiene procesos o usa red externa también debe escalar. Los tests de texto
-comprueban que se entrega la instrucción; no prueban obediencia de un modelo.
+This is an operating policy, not a shell classifier or a sandbox. A
+command's name does not vouch for its effects: a test that deletes data,
+stops processes, or uses external network access must also escalate. The
+text tests check that the instruction is delivered; they do not prove a
+model's obedience.
 
-En el launcher actual, Codex auto desactiva aprobaciones y sandbox por defecto;
-`ORCA_CODEX_APPROVALS=1` restaura `on-request`/`workspace-write`. Claude recibe
-su modo auto nativo. Esa traducción no cambia en esta misión. La exclusión
-de publisher sí es un control en código, pero no impide que un agente que
-incumpla el brief invoque publicación por shell.
+In the current launcher, Codex auto disables approvals and sandbox by
+default; `ORCA_CODEX_APPROVALS=1` restores `on-request`/`workspace-write`.
+Claude gets its native auto mode. That translation does not change in this
+mission. The publisher exclusion is an actual control in code, but it does
+not stop an agent that breaks the brief from invoking publication through
+the shell.
 
-Se preservaron los cambios preexistentes y concurrentes del árbol compartido.
-No se ejecutaron publicaciones, deploys, acciones destructivas ni pruebas
-contra sesiones reales. Las fixtures usan agentes sintéticos y stores
-temporales. No hay cambios visuales; no se ejecutó `npm run visual`.
-El selector avisó de falta de suites para 17 archivos del árbol compartido:
-`DESIGN.md`, `README.md`, `bin/orca.mjs`, `docs/AUTOMEJORA.md`,
+Preexisting, concurrent changes in the shared tree were preserved. No
+publications, deploys, destructive actions, or tests against real sessions
+were run. The fixtures use synthetic agents and temporary stores. There are
+no visual changes; `npm run visual` was not run. The selector warned of
+missing suites for 17 files in the shared tree: `DESIGN.md`, `README.md`,
+`bin/orca.mjs`, `docs/AUTOMEJORA.md`,
 `docs/ENTREGA-VENTANAS-CANVAS-2026-09-09.md`, `src/ui/hud/command.ts`,
 `src/ui/main.ts`, `src/ui/styles/hud.css`, `src/ui/styles/window.css`,
 `src/ui/windows/kinds/agent.ts`, `src/ui/windows/kinds/misc.ts`,
 `docs/ENTREGA-AGENT-CONTEXT-STOP-2026-09-10.md`,
 `docs/ENTREGA-APARCAR-OCIOSOS-2026-09-10.md`,
 `docs/ENTREGA-FORGE-CANVAS-2026-09-10.md`,
-`docs/ENTREGA-VENTANAS-CONTROL-2026-09-10.md`, `docs/FORGE.md` y
-`test/capcom-feedback.fixture.ts`. Este documento, creado durante la corrida,
-tampoco tiene suite de contenido. Todo el código modificado por esta misión
-sí está alcanzado por las suites seleccionadas.
+`docs/ENTREGA-VENTANAS-CONTROL-2026-09-10.md`, `docs/FORGE.md`, and
+`test/capcom-feedback.fixture.ts`. This document, created during the run,
+also has no content suite. All the code this mission modified is covered by
+the selected suites.
 
-Filtros de cobertura: `forge`, `improve-agent`, `spawns`, `permissions`, `publisher`, `squads`, `commands`, `codex`.
+Coverage filters: `forge`, `improve-agent`, `spawns`, `permissions`, `publisher`, `squads`, `commands`, `codex`.

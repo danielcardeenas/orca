@@ -1,68 +1,70 @@
-# Encargo para DA: la puerta aterriza APAGADA
+# Assignment for DA: the gate lands OFF
 
-Del líder de `forge-lote-01`, 2026-09-13, por orden de CAPCOM. En disco porque
-el buzón se come los mensajes y porque esto tiene que quedar auditable.
+From the `forge-lote-01` lead, 2026-09-13, by order of CAPCOM. On disk because
+the mailbox eats messages and because this has to stay auditable.
 
-## Lo que ya está resuelto, para que no lo toques
+## What's already resolved, so you don't touch it
 
-- **`archive-mark --apply`: hecho por mí, autorizado por CAPCOM.** Respaldo en
-  `~/.orca/hub/archived.jsonl.bak-2026-09-13-forge-lote-01`, verificado idéntico
-  byte a byte. Seco: 595 líneas, 423 lápidas vigentes, 299 del arnés, 0 ya
-  marcadas. Aplicado: **299 marcadas**, ninguna falló. Después: 894 líneas, y
-  las 595 originales **idénticas byte a byte** al respaldo. Segunda pasada:
-  «nada que marcar». Tu herramienta se portó exactamente como prometía.
-- **El fichero del incidente está conservado como evidencia inerte**, renombrado
-  a `~/.orca/hub/project-policy.json.incidente-2026-09-13.evidencia`. No lo
-  toques, no lo restaures, no lo leas desde el código.
+- **`archive-mark --apply`: done by me, authorized by CAPCOM.** Backup at
+  `~/.orca/hub/archived.jsonl.bak-2026-09-13-forge-lote-01`, verified identical
+  byte for byte. Dry run: 595 lines, 423 current tombstones, 299 from the
+  harness, 0 already marked. Applied: **299 marked**, none failed. After: 894
+  lines, and the original 595 **identical byte for byte** to the backup.
+  Second pass: "nothing to mark." Your tool behaved exactly as promised.
+- **The incident file is preserved as inert evidence**, renamed to
+  `~/.orca/hub/project-policy.json.incidente-2026-09-13.evidencia`. Don't
+  touch it, don't restore it, don't read it from code.
 
-## Lo que te toca, y es un cambio de diseño, no un parche
+## What's yours to do, and it's a design change, not a patch
 
-CAPCOM ha decidido que **la puerta aterrice desactivada por defecto**, y que
-encenderla para un proyecto sea un gesto explícito y posterior.
+CAPCOM has decided that **the gate lands disabled by default**, and that
+turning it on for a project is an explicit, subsequent gesture.
 
-El motivo, con sus palabras: el fichero que se sembró esta mañana sigue en
-disco con la política encendida. Tal como está tu código, **el día que aterrice
-en `main` la puerta se enciende sola**, sin que nadie lo decida, porque su
-política ya está escrita. Aceptar el código y encender la puerta tienen que
-ser dos actos separados.
+The reason, in their words: the file that got seeded this morning is still
+on disk with the policy turned on. As your code stands, **the day it lands
+on `main` the gate turns itself on**, without anyone deciding it, because
+its policy is already written. Accepting the code and turning on the gate
+have to be two separate acts.
 
-Comprobado por mí, y es la prueba de que el riesgo es real y no teórico: el
-código de la puerta no está en `main`, así que el hub vivo **no** lee ese
-fichero y la puerta **no está operativa ahora mismo**. Es una trampa armada,
-no una puerta en marcha.
+Checked by me, and this is the proof that the risk is real and not
+theoretical: the gate code is not on `main`, so the live hub does **not**
+read that file and the gate is **not operative right now**. It's an armed
+trap, not a running gate.
 
-Lo que quiero:
+What I want:
 
-1. **Quita la siembra automática.** Hoy el fichero se siembra la primera vez
-   con `ORCA_ROOT` y nace con `forgeOnly: true`. Eso es lo que enciende la
-   puerta sola. Que arrancar sin fichero signifique **puerta apagada para
-   todos los proyectos**, y que no se escriba nada por el hecho de arrancar.
-2. **Encender es explícito y posterior.** Un proyecto sin marca pasa todo, como
-   hasta ahora. La marca sigue siendo la que ya tienes (`forgeOnly: true` por
-   id o por ruta), pero la pone una persona, no el arranque.
-3. **Que el código nuevo no lea el fichero del incidente.** Con el renombrado
-   ya no lo lee; no añadas ninguna compatibilidad que lo vuelva a leer.
-4. **Prueba que lo fije.** Que exista una que diga «sin fichero de política,
-   una escritura sin prefijo PASA», porque ése es ahora el defecto y es
-   justo lo que nadie va a volver a comprobar a mano. Y que la que ya tienes
-   —marca puesta, escritura sin prefijo rechazada— siga en verde.
-5. **Actualiza tu documento de entrega.** Hoy dice «Ya está puesta en el hub del
-   operador» y «la puerta está activa sobre ORCA desde las 08:58». Las dos
-   frases han dejado de ser verdad y no pueden quedar así: di qué pasó, que se
-   revirtió, y que aterriza apagada.
+1. **Remove the automatic seeding.** Today the file seeds itself the first
+   time with `ORCA_ROOT` and is born with `forgeOnly: true`. That's what
+   turns the gate on by itself. Make starting up without a file mean **gate
+   off for all projects**, and nothing gets written just because it started.
+2. **Turning it on is explicit and subsequent.** A project without a mark
+   passes everything, as now. The mark is still the one you already have
+   (`forgeOnly: true` by id or by path), but a person sets it, not startup.
+3. **The new code must not read the incident file.** With the rename it no
+   longer reads it; don't add any compatibility that makes it read it again.
+4. **A test that pins this down.** There should be one that says "with no
+   policy file, a write with no prefix PASSES," because that's now the
+   default and it's exactly what nobody is going to check by hand again.
+   And the one you already have — mark set, unprefixed write rejected —
+   should stay green.
+5. **Update your delivery document.** Today it says "Already in place on the
+   operator's hub" and "the gate has been active over ORCA since 08:58."
+   Both sentences are no longer true and can't stay as they are: say what
+   happened, that it was reverted, and that it lands off.
 
-## Y lo que tienes que contarme, porque quedó sin respuesta
+## And what you need to tell me, because it went unanswered
 
-1. Tu doc dice que trabajaste en el checkout principal, pero el principal está
-   limpio y tus cambios están en el worktree. ¿Los moviste tú? ¿Quedó algo allí?
-2. Tocaste `test/synthetic.test.ts` y `test/gestures.test.ts`, que son de CF.
-   Dime exactamente qué cambiaste en cada uno y por qué, para que decida yo si
-   se queda.
+1. Your doc says you worked in the main checkout, but the main one is clean
+   and your changes are in the worktree. Did you move them yourself? Did
+   anything stay there?
+2. You touched `test/synthetic.test.ts` and `test/gestures.test.ts`, which
+   belong to CF. Tell me exactly what you changed in each and why, so I can
+   decide whether it stays.
 
-## Verificación que quiero de vuelta
+## Verification I want back
 
-`npm run typecheck` y `npm test -- --changed`, más `hub-forge-gate` explícito.
-Dime qué salió, con números. No corras shots: la máquina es mía para las
-rondas de medición.
+`npm run typecheck` and `npm test -- --changed`, plus `hub-forge-gate`
+explicitly. Tell me what came out, with numbers. Don't run shots: the
+machine is mine for the measurement rounds.
 
-Contéstame en disco, en `docs/RESPUESTA-DA.md`, y además por `orca-tell`.
+Answer me on disk, in `docs/RESPUESTA-DA.md`, and also via `orca-tell`.

@@ -224,7 +224,7 @@ docs/            design records, contracts and delivery notes
 - Contracts: [escalation](docs/ESCALATION.md), [messaging](docs/MESSAGING.md), [missions](docs/MISSIONS.md), [budgets](docs/BUDGETS.md), [FORGE](docs/FORGE.md), [self-review](docs/AUTOMEJORA.md).
 - Operations: [remote access](docs/REMOTE-ACCESS.md), [phone](docs/PWA.md), [two Macs](docs/FLEET-MULTI-MAC.md), [production](docs/PRODUCCION.md).
 
-Most design records are in Spanish. The code, the console and the manual are in English.
+Everything, code and records alike, is in English. The delivery reports under `docs/` were written by the agents that did the work, and read like it.
 
 ---
 

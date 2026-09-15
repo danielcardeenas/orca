@@ -106,9 +106,10 @@ It holds up. Measured at 3,000 synthetic agents with frame rate, draw calls and 
 
 One voice that speaks to the fleet on your behalf.
 
-CAPCOM is itself a Claude Code session, running on your subscription, with the hub as its only tool set over MCP. Tell it what you want in plain language. It spawns agents, forms squads, answers their questions, watches their budgets, stops the ones going in circles and reports back. Anything it cannot decide comes to you as an amber window.
+CAPCOM is not a model ORCA calls. It is an ordinary CLI session, on whatever provider and subscription you already have, with the hub as its only tool set over MCP. ORCA never speaks to a provider directly, and no provider's SDK lives outside its adapter. Tell CAPCOM what you want in plain language. It spawns agents, forms squads, answers their questions, watches their budgets, stops the ones going in circles and reports back. Anything it cannot decide comes to you as an amber window.
 
 - **46 tools, no `exec`.** Spawn, say, inspect, interrupt, stop, budget, archive, remember, recall, journal. A stolen hub token must never become code execution on your laptop, so there is no shell.
+- **Any provider, switched live.** Pick its provider and model from the console. Changing either is a handoff: the new session inherits the missions, the rules, the workers and the conversation, and the fleet does not notice.
 - **Recycled before it forgets.** After a set number of context compactions or turns, CAPCOM hands off to a fresh session with a briefing of what finished since. Missions, rules and workers survive the handoff.
 - **Works with a hand on the camera.** CAPCOM can fly you to an agent, frame a squad or open a window while it talks.
 - **Push to talk.** Hold `⌥V` and speak. Release, and the line goes in as text.

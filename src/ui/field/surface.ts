@@ -9,7 +9,7 @@
  * caracteres de reemplazo sobre el lienzo. Así que viven aquí, puras, con sus
  * pruebas.
  *
- * Ver `media.ts`, que las aplica, y `docs/CANVAS-ARTEFACTOS-2026-09-12.md`.
+ * Ver `media.ts`, que las aplica.
  */
 
 import type { ArtifactKind } from '../../shared/types.ts';

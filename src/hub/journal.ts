@@ -116,7 +116,7 @@ export interface JournalEntry {
    * escribiendo porque el transcript lo trae y borrarlo del modelo no haría
    * más cierto lo ya escrito, pero desde el 2026-09-12 NADA lo suma ni lo
    * presenta: esta flota va con plan plano y la cifra no corresponde a ningún
-   * cobro. Lo que se mide es `tokens`. Ver docs/INVENTARIO-DINERO-2026-09-12.md.
+   * cobro. Lo que se mide es `tokens`.
    */
   costUSD?: number;
   durationMs?: number;

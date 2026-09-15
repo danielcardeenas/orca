@@ -15,7 +15,7 @@
  * Este módulo es sólo la geometría y la cuenta, sin `three` y sin DOM, porque es
  * la parte que se puede equivocar en silencio: una ficha media unidad más ancha
  * no falla, tapa. `shelfHeight` es lo que el layout tiene que reservar para que
- * nada quede debajo; ver `docs/CANVAS-ARTEFACTOS-2026-09-12.md`.
+ * nada quede debajo.
  */
 
 import type { Artifact } from '../../shared/types.ts';
@@ -73,7 +73,7 @@ export interface ChipSpec {
  * Lo que un agente cuelga de su baldosa: lo que declaró, lo más nuevo primero.
  *
  * Sólo lo **declarado**. Ésa es la decisión del miembro 1 sobre la captura
- * (`docs/ENTREGA-CAPTURA-ARTEFACTOS-2026-09-12.md`), y es también la mejor
+ * y es también la mejor
  * respuesta que hay al caso difícil del operador: un agente que genera cuarenta
  * png no tiene cuarenta resultados, tiene uno, y sólo él sabe cuál. Lo observado
  * apareció sin que nadie lo eligiera y su título es un nombre de archivo; su

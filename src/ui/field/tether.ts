@@ -31,7 +31,7 @@
  * se equivoca en silencio: un tirante que entra por la mordida de la baldosa
  * no falla, sólo parece que sale de otro sitio.
  *
- * Sin `three` y sin DOM, como `shelf.ts`. Ver `docs/CANVAS-CONEXIONES-2026-09-12.md`.
+ * Sin `three` y sin DOM, como `shelf.ts`.
  */
 
 import type { ChipSpec } from './shelf.ts';

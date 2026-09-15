@@ -969,9 +969,7 @@ edit the brief, or tell CAPCOM the rule and let it `remember` it.
 
 ## Communication and usability review
 
-See [the September 2026 review](USABILITY-REVIEW.md) for the latency findings,
-implemented improvements, and remaining runtime/input limitations. CAPCOM now
-includes a **FLEET WORK** list with direct access to agents and terminals.
+CAPCOM includes a **FLEET WORK** list with direct access to agents and terminals.
 `orca-read --wait --timeout 60` waits for mail through filesystem events (timeout
 in seconds), so a worker can wait without repeated tool calls. This does not
 wake a session that has already stopped executing.
